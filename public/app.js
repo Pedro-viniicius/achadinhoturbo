@@ -75,7 +75,7 @@ function fonteAfiliados(c = {}) {
   return `Central de Afiliados${partes.length ? ' (' + partes.join(', ') + ')' : ''}`;
 }
 function paginaRegras() {
-  $('#pagina').innerHTML = `<div class="topo"><div><h1>Regras de envio</h1>
+  $('#pagina').innerHTML = `<div class="topo"><div><h1>Regras de envio ${q('regras')}</h1>
     <p class="sub">Cada regra escolhe uma etiqueta, os grupos, o template e o ritmo. Você pode ter quantas quiser, cada uma com a sua etiqueta.</p></div>
     <button class="pri" id="nova">Nova regra</button></div><div id="lista"></div>`;
   $('#nova').onclick = () => formRegra();
@@ -104,20 +104,20 @@ function opcoes(lista, sel, vazio) {
 function fonteHtml(f, i, total) {
   const sc = f.config || {}; const catsSel = new Set(categoriasDe(sc));
   return `<div class="fonte sub-campo" data-i="${i}" style="margin-bottom:10px"><legend>Fonte ${i + 1}${total > 1 ? '' : ''} ${total > 1 ? `<button type="button" data-rm-fonte class="leve perigo" style="float:right;padding:2px 8px">Remover</button>` : ''}</legend>
-    <div class="linha"><label><input type="radio" name="st${i}" value="afiliados" ${f.type === 'afiliados' ? 'checked' : ''} style="width:auto"> Central de Afiliados</label>
+    <div class="linha">${q('fonte.tipos')}<label><input type="radio" name="st${i}" value="afiliados" ${f.type === 'afiliados' ? 'checked' : ''} style="width:auto"> Central de Afiliados</label>
       <label><input type="radio" name="st${i}" value="list" ${f.type === 'list' ? 'checked' : ''} style="width:auto"> Lista de links</label>
       <label><input type="radio" name="st${i}" value="search" ${f.type === 'search' ? 'checked' : ''} style="width:auto"> Busca por palavra-chave (experimental)</label></div>
     <div class="f-afiliados"><div class="grade">
-      <label class="campo">Buscar por (opcional)<input name="af_busca" value="${esc(sc.busca || '')}" placeholder="Ex.: organizador, air fryer"></label>
+      <label class="campo"><span>Buscar por (opcional) ${q('fonte.busca')}</span><input name="af_busca" value="${esc(sc.busca || '')}" placeholder="Ex.: organizador, air fryer"></label>
       <label class="campo">Ordem<select name="af_ordem">${(S.st.afiliados?.ordens || []).map((o) => `<option value="${o.id}" ${o.id === sc.ordem ? 'selected' : ''}>${esc(o.name)}</option>`).join('')}</select></label>
-      <label class="campo">Páginas lidas por envio<input name="af_paginas" type="number" min="1" max="10" value="${sc.paginas ?? 3}"><small>Cada página traz ${S.st.afiliados?.por_pagina || 18} produtos.</small></label></div>
-      <fieldset class="sub-campo"><legend>Categorias <span class="dica af-cont"></span></legend>
+      <label class="campo"><span>Páginas lidas por envio ${q('fonte.paginas')}</span><input name="af_paginas" type="number" min="1" max="10" value="${sc.paginas ?? 3}"><small>Cada página traz ${S.st.afiliados?.por_pagina || 18} produtos.</small></label></div>
+      <fieldset class="sub-campo"><legend>Categorias ${q('fonte.categorias')} <span class="dica af-cont"></span></legend>
         <div class="grupos cats af-cats">${(S.st.afiliados?.categorias || []).map((c) => `<label><input type="checkbox" value="${c.id}" ${catsSel.has(c.id) ? 'checked' : ''}>${esc(c.name)}</label>`).join('')}</div>
         <small>Nenhuma marcada = todas. Com várias, as ofertas saem intercaladas (uma de cada categoria por vez).</small></fieldset>
-      <div class="linha"><label><input type="checkbox" name="af_mais_vendidos" ${sc.mais_vendidos ? 'checked' : ''} style="width:auto"> Só mais vendidos</label>
-        <label><input type="checkbox" name="af_ganhos_extras" ${sc.ganhos_extras ? 'checked' : ''} style="width:auto"> Só com ganhos extras</label></div>
+      <div class="linha"><label><input type="checkbox" name="af_mais_vendidos" ${sc.mais_vendidos ? 'checked' : ''} style="width:auto"> Só mais vendidos</label>${q('fonte.maisvendidos')}
+        <label><input type="checkbox" name="af_ganhos_extras" ${sc.ganhos_extras ? 'checked' : ''} style="width:auto"> Só com ganhos extras</label>${q('fonte.ganhos')}</div>
       <small class="dica">É a lista “Produtos selecionados para você” da sua Central de Afiliados. A extensão do Chrome busca a lista e gera cada link meli.la com a etiqueta desta regra.</small></div>
-    <div class="f-list"><label class="campo">Um produto por linha<textarea name="items" class="mono" rows="5" placeholder="https://produto.mercadolivre.com.br/MLB-123...&#10;https://produto.mercadolivre.com.br/MLB-456... | Fone Bluetooth | 89,90 | 149,90 | CUPOM10">${esc(sc.items || '')}</textarea>
+    <div class="f-list"><label class="campo"><span>Um produto por linha ${q('fonte.lista')}</span><textarea name="items" class="mono" rows="5" placeholder="https://produto.mercadolivre.com.br/MLB-123...&#10;https://produto.mercadolivre.com.br/MLB-456... | Fone Bluetooth | 89,90 | 149,90 | CUPOM10">${esc(sc.items || '')}</textarea>
       <small>Formato opcional: link | título | preço | preço antigo | cupom. Se o título e o preço não forem lidos sozinhos, escreva-os aqui.</small></label></div>
     <div class="f-search grade"><label class="campo">Palavra-chave<input name="query" value="${esc(sc.query || '')}" placeholder="Ex.: air fryer"></label>
       <label class="campo">Ordem<select name="sort"><option value="relevance">Relevância</option><option value="price_asc" ${sc.sort === 'price_asc' ? 'selected' : ''}>Menor preço</option><option value="price_desc" ${sc.sort === 'price_desc' ? 'selected' : ''}>Maior preço</option></select></label></div></div>`;
@@ -132,27 +132,27 @@ function formRegra(r) {
   dlg.innerHTML = `<form method="dialog" id="f"><h1>${nova ? 'Nova regra' : 'Editar regra'}</h1>
     <div class="grade">
       <label class="campo">Nome da regra<input name="name" value="${esc(r.name)}" placeholder="Ex.: Tecnologia" required></label>
-      <label class="campo">Etiqueta de afiliado<select name="tag_id">${opcoes(S.tags, r.tag_id, 'Escolha…')}</select>
+      <label class="campo"><span>Etiqueta de afiliado ${q('regras.etiqueta')}</span><select name="tag_id">${opcoes(S.tags, r.tag_id, 'Escolha…')}</select>
         ${S.tags.length ? '' : '<small>Cadastre uma etiqueta em “Etiquetas”.</small>'}</label>
-      <label class="campo">Template<select name="template_id">${opcoes(S.templates, r.template_id)}</select></label></div>
-    <fieldset><legend>De onde vêm as ofertas <span class="dica" id="f-cont"></span></legend>
+      <label class="campo"><span>Template ${q('regras.template')}</span><select name="template_id">${opcoes(S.templates, r.template_id)}</select></label></div>
+    <fieldset><legend>De onde vêm as ofertas ${q('regras.fontes')} <span class="dica" id="f-cont"></span></legend>
       <div id="fontes"></div>
       <div class="linha"><button type="button" id="add-fonte">+ Adicionar fonte</button><small class="dica">Até ${MAXF} fontes por regra. Com mais de uma, as ofertas saem intercaladas (uma de cada fonte por vez). Um grupo também pode estar em várias regras.</small></div></fieldset>
-    <fieldset><legend>Filtros</legend><div class="grade">
+    <fieldset><legend>Filtros ${q('regras.filtros')}</legend><div class="grade">
       <label class="campo">Preço mínimo (R$)<input name="min_price" type="number" step="0.01" min="0" value="${r.min_price ?? ''}" placeholder="Sem mínimo"></label>
       <label class="campo">Preço máximo (R$)<input name="max_price" type="number" step="0.01" min="0" value="${r.max_price ?? ''}" placeholder="Sem máximo"></label>
       <label class="campo">Desconto mínimo (%)<input name="min_discount" type="number" min="0" max="99" value="${r.min_discount ?? ''}" placeholder="Qualquer"></label></div></fieldset>
-    <fieldset><legend>Grupos que vão receber <span id="cont" class="dica"></span></legend>
+    <fieldset><legend>Grupos que vão receber ${q('regras.grupos')} <span id="cont" class="dica"></span></legend>
       ${S.groups.length ? `<div class="linha">${S.blocks?.length ? `<select id="bloco-atalho" style="width:auto"><option value="">Marcar um bloco…</option>${S.blocks.map((b) => `<option value="${b.id}">${esc(b.name)} (${b.group_jids.length})</option>`).join('')}</select>` : ''}<input id="busca" placeholder="Buscar grupo…" style="flex:1"><button type="button" id="todos">Marcar visíveis</button><button type="button" id="nenhum">Limpar</button></div>
       <div class="grupos" id="gr">${S.groups.map((g) => `<label data-n="${esc(g.name.toLowerCase())}"><input type="checkbox" value="${esc(g.jid)}" ${sel.has(g.jid) ? 'checked' : ''}>${esc(g.name)}<small>${g.size ?? ''}</small></label>`).join('')}</div>`
         : '<div class="dica">Nenhum grupo carregado. Conecte o WhatsApp na aba “WhatsApp e grupos”.</div>'}</fieldset>
     <fieldset><legend>Ritmo de envio</legend><div class="grade">
-      <label class="campo">Ofertas por envio<input name="per_run" type="number" min="1" max="20" value="${r.per_run}"><small>Cada oferta vai para todos os grupos, uma atrás da outra.</small></label>
-      <label class="campo">Intervalo entre envios (minutos)<input name="interval_min" type="number" min="1" value="${r.interval_min}"></label>
-      <label class="campo">Funciona das<input name="window_start" type="time" value="${esc(r.window_start)}"></label>
+      <label class="campo"><span>Ofertas por envio ${q('regras.por_envio')}</span><input name="per_run" type="number" min="1" max="20" value="${r.per_run}"><small>Cada oferta vai para todos os grupos, uma atrás da outra.</small></label>
+      <label class="campo"><span>Intervalo entre envios (minutos) ${q('regras.intervalo')}</span><input name="interval_min" type="number" min="1" value="${r.interval_min}"></label>
+      <label class="campo"><span>Funciona das ${q('regras.janela')}</span><input name="window_start" type="time" value="${esc(r.window_start)}"></label>
       <label class="campo">Até<input name="window_end" type="time" value="${esc(r.window_end)}"></label>
-      <label class="campo">Não repetir a mesma oferta por (dias)<input name="dedupe_days" type="number" min="0" value="${r.dedupe_days}"><small>0 = pode repetir.</small></label>
-      <label class="campo">Foto do produto<select name="send_image"><option value="1">Enviar com foto, quando houver</option><option value="0" ${r.send_image ? '' : 'selected'}>Só texto</option></select></label></div></fieldset>
+      <label class="campo"><span>Não repetir a mesma oferta por (dias) ${q('regras.dedupe')}</span><input name="dedupe_days" type="number" min="0" value="${r.dedupe_days}"><small>0 = pode repetir.</small></label>
+      <label class="campo"><span>Foto do produto ${q('regras.foto')}</span><select name="send_image"><option value="1">Enviar com foto, quando houver</option><option value="0" ${r.send_image ? '' : 'selected'}>Só texto</option></select></label></div></fieldset>
     <div class="rodape"><button type="button" id="cancelar">Cancelar</button><button class="pri" id="salvar">${nova ? 'Criar regra' : 'Salvar'}</button></div></form>`;
   const pintaFontes = () => {
     $('#fontes').innerHTML = fontes.map((f, i) => fonteHtml(f, i, fontes.length)).join('');
@@ -223,7 +223,7 @@ async function verOfertas(r) {
 
 // ---------- etiquetas ----------
 function paginaEtiquetas() {
-  $('#pagina').innerHTML = `<div class="topo"><div><h1>Etiquetas de afiliado</h1>
+  $('#pagina').innerHTML = `<div class="topo"><div><h1>Etiquetas de afiliado ${q('etiquetas')}</h1>
     <p class="sub">Cadastre aqui os nomes das suas etiquetas do programa de afiliados do Mercado Livre, escritos exatamente como aparecem lá. Depois escolha qual usar em cada regra.</p></div></div>
     <form class="card" id="nt"><div class="linha"><input name="name" placeholder="Ex.: achadosdesejo" required style="flex:1;min-width:200px" aria-label="Nome da etiqueta">
       <input name="note" placeholder="Anotação (opcional)" style="flex:1;min-width:200px" aria-label="Anotação"><button class="pri">Adicionar etiqueta</button></div></form>
@@ -240,7 +240,7 @@ function paginaEtiquetas() {
 // ---------- templates ----------
 function paginaTemplates(id) {
   const t = S.templates.find((x) => x.id === id) || S.templates[0]; editando = t?.id ?? null;
-  $('#pagina').innerHTML = `<div class="topo"><div><h1>Templates</h1><p class="sub">O texto da mensagem. Linha com campo vazio (por exemplo, sem cupom) some sozinha. O {LINK} é obrigatório.</p></div>
+  $('#pagina').innerHTML = `<div class="topo"><div><h1>Templates ${q('templates')}</h1><p class="sub">O texto da mensagem. Linha com campo vazio (por exemplo, sem cupom) some sozinha. O {LINK} é obrigatório.</p></div>
     <button id="novoT" class="pri">Novo template</button></div>
     <div class="modelos">${S.templates.map((x) => `<button data-id="${x.id}" class="${x.id === t.id ? 'on' : ''}">${esc(x.name)}</button>`).join('')}</div>
     <div class="editor"><div class="card" style="display:grid;gap:12px">
@@ -277,7 +277,7 @@ function paginaWhatsapp() {
     corpo = `<div class="card"><h2>Nenhum número conectado</h2><p class="sub">Você vai conectar o seu WhatsApp Business como “aparelho conectado”, igual ao WhatsApp Web. O celular continua funcionando normalmente.</p>
       ${w.error ? `<p style="color:var(--err)">${esc(w.error)}</p>` : ''}<button class="pri" id="conectar">Conectar WhatsApp</button></div>`;
   }
-  $('#pagina').innerHTML = `<div class="topo"><div><h1>WhatsApp e grupos</h1><p class="sub">Este número envia as ofertas. Para reduzir o risco de bloqueio, use as pausas em Ajustes e prefira um número que você não precise muito.</p></div></div>${corpo}`;
+  $('#pagina').innerHTML = `<div class="topo"><div><h1>WhatsApp e grupos ${q('whatsapp')}</h1><p class="sub">Este número envia as ofertas. Para reduzir o risco de bloqueio, use as pausas em Ajustes e prefira um número que você não precise muito.</p></div></div>${corpo}`;
   if ($('#conectar')) $('#conectar').onclick = tentar(async () => { await api('/wa/connect', 'POST'); await atualizarEstado(true); });
   if ($('#sync')) $('#sync').onclick = tentar(async () => { await api('/wa/sync-groups', 'POST'); S.groups = await api('/groups'); aviso('Grupos atualizados'); paginaWhatsapp(); });
   if ($('#sair')) $('#sair').onclick = tentar(async () => { if (!confirm('Desconectar o WhatsApp deste programa?')) return; await api('/wa/logout', 'POST'); S.groups = []; await atualizarEstado(true); });
@@ -286,7 +286,7 @@ function paginaWhatsapp() {
 // ---------- histórico ----------
 async function paginaHistorico(nivel = '') {
   const log = await api('/log' + (nivel ? `?nivel=${nivel}` : ''));
-  $('#pagina').innerHTML = `<div class="topo"><div><h1>Histórico</h1><p class="sub">Tudo que foi enviado e tudo que deu errado, com o motivo.</p></div>
+  $('#pagina').innerHTML = `<div class="topo"><div><h1>Histórico ${q('historico')}</h1><p class="sub">Tudo que foi enviado e tudo que deu errado, com o motivo.</p></div>
     <select id="nv" style="width:auto" aria-label="Filtrar"><option value="">Tudo</option><option value="ok" ${nivel === 'ok' ? 'selected' : ''}>Só enviados</option><option value="erro" ${nivel === 'erro' ? 'selected' : ''}>Só erros</option><option value="aviso" ${nivel === 'aviso' ? 'selected' : ''}>Só avisos</option></select></div>
     ${log.length ? `<div class="card tabela"><table><thead><tr><th>Quando</th><th>Regra</th><th>Grupo</th><th>Oferta</th><th>Resultado</th></tr></thead><tbody>
     ${log.map((l) => `<tr><td>${hora(l.ts)}</td><td>${esc(l.rule_name || '')}</td><td>${esc(l.group_name || '')}</td><td>${esc(l.offer_title || '')}</td><td><span class="nivel-${l.level}">${esc(l.message)}</span></td></tr>`).join('')}</tbody></table></div>`
@@ -299,18 +299,18 @@ async function paginaHistorico(nivel = '') {
 function paginaAjustes() {
   const a = S.st.ajustes; const url = S.st.endereco_publico || `http://127.0.0.1:${S.st.porta}`;
   $('#pagina').innerHTML = `<div class="topo"><div><h1>Ajustes</h1></div></div>
-    <div class="card" style="display:grid;gap:14px"><div><h2>Pausas entre mensagens</h2><p class="sub">Pausas curtas demais parecem robô. O programa varia o tempo para mais ou para menos, de forma aleatória.</p></div>
+    <div class="card" style="display:grid;gap:14px"><div><h2>Pausas entre mensagens ${q('ajustes.pausas')}</h2><p class="sub">Pausas curtas demais parecem robô. O programa varia o tempo para mais ou para menos, de forma aleatória.</p></div>
       <div class="grade"><label class="campo">Entre um grupo e outro (segundos)<input id="dg" type="number" min="2" value="${a.delay_group_s}"></label>
       <label class="campo">Entre uma oferta e a próxima (segundos)<input id="do" type="number" min="5" value="${a.delay_offer_s}"></label></div>
       <div><button class="pri" id="sa">Salvar pausas</button></div></div>
-    <div class="card" style="display:grid;gap:14px"><div><h2>Título do produto na mensagem</h2><p class="sub">Os títulos do Mercado Livre vêm cheios de palavras-chave. {TITULO_PRODUTO} sai abreviado: só o que identifica o produto, sem “Compatível com…”, “Premium”, “Alta Qualidade”. Para o nome inteiro, use {TITULO_COMPLETO} no template.</p></div>
+    <div class="card" style="display:grid;gap:14px"><div><h2>Título do produto na mensagem ${q('ajustes.titulo')}</h2><p class="sub">Os títulos do Mercado Livre vêm cheios de palavras-chave. {TITULO_PRODUTO} sai abreviado: só o que identifica o produto, sem “Compatível com…”, “Premium”, “Alta Qualidade”. Para o nome inteiro, use {TITULO_COMPLETO} no template.</p></div>
       <div class="grade"><label class="campo">Tamanho máximo (caracteres)<input id="tm" type="number" min="0" max="200" value="${a.titulo_max ?? 60}"><small>0 = não abreviar. Sugestão: 50 a 70.</small></label></div>
       <div class="linha"><button class="pri" id="st">Salvar</button><small class="dica" id="tm-ex"></small></div></div>
-    <div class="card" style="display:grid;gap:14px"><div><h2>Como gerar o link de afiliado</h2></div>
+    <div class="card" style="display:grid;gap:14px"><div><h2>Como gerar o link de afiliado ${q('ajustes.modo_link')}</h2></div>
       <label class="campo"><select id="lm"><option value="extension">Pela extensão do Chrome (com a etiqueta, gera comissão)</option>
         <option value="direct" ${a.link_mode === 'direct' ? 'selected' : ''}>Link direto, sem etiqueta (só para testar, não gera comissão)</option></select></label>
       <div><button id="sl">Salvar modo</button></div></div>
-    <div class="card" style="display:grid;gap:12px"><div><h2>Conectar a extensão do Chrome</h2><p class="sub">Na extensão, clique no ícone e cole estes dois valores.</p></div>
+    <div class="card" style="display:grid;gap:12px"><div><h2>Conectar a extensão do Chrome ${q('ajustes.extensao')}</h2><p class="sub">Na extensão, clique no ícone e cole estes dois valores.</p></div>
       <label class="campo">Endereço<div class="copia"><input readonly value="${url}" id="c1"><button data-c="c1">Copiar</button></div></label>
       <label class="campo">Token<div class="copia"><input readonly value="${esc(S.st.ext_token)}" id="c2"><button data-c="c2">Copiar</button></div></label>
       <p class="dica">Último link gerado: ${S.st.extensao.lastOkAt ? hora(S.st.extensao.lastOkAt) : 'nenhum ainda'}${S.st.extensao.lastError ? `. Último erro: ${esc(S.st.extensao.lastError)}` : ''}</p></div>`;
@@ -323,7 +323,7 @@ function paginaAjustes() {
 }
 
 // ---------- navegação e atualização ----------
-const ROTAS = { visao: () => paginaVisao(), blocos: () => paginaBlocos(), links: () => paginaLinks(), regras: paginaRegras, etiquetas: paginaEtiquetas, templates: () => paginaTemplates(), whatsapp: paginaWhatsapp, historico: () => paginaHistorico(), ajustes: paginaAjustes };
+const ROTAS = { ajuda: () => paginaAjuda(), visao: () => paginaVisao(), blocos: () => paginaBlocos(), links: () => paginaLinks(), regras: paginaRegras, etiquetas: paginaEtiquetas, templates: () => paginaTemplates(), whatsapp: paginaWhatsapp, historico: () => paginaHistorico(), ajustes: paginaAjustes };
 function ir() {
   const r = (location.hash || '#visao').slice(1); const f = ROTAS[r] || paginaVisao;
   $$('#nav a').forEach((a) => a.classList.toggle('on', a.getAttribute('href') === '#' + r));

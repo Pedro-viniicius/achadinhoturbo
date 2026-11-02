@@ -169,3 +169,19 @@ body.login { display:grid; place-items:center; min-height:100vh; padding:16px; }
 .badge-adm { font-size:11px; color:var(--ok); font-weight:600; margin-left:6px; }
 
 .fonte { background:var(--paper); } .fonte .sub-campo { background:var(--surface); }
+
+/* ---------- ajuda ---------- */
+.q { display:inline-flex; width:17px; height:17px; border-radius:50%; border:1.5px solid var(--line); color:var(--muted); font:700 11px/1 var(--sans); align-items:center; justify-content:center; margin-left:5px; vertical-align:middle; cursor:help; user-select:none; flex:none; }
+.q:hover, .q:focus-visible { border-color:var(--accent); color:var(--accent); background:var(--accent-soft); outline:none; }
+h1 .q { width:20px; height:20px; font-size:12px; vertical-align:6px; }
+.tip.tip-ajuda { background:var(--grafite); color:#fff; font-size:13px; line-height:1.4; padding:9px 12px; border-radius:10px; box-shadow:0 8px 24px rgba(23,20,43,.25); }
+@media (prefers-color-scheme: dark) { .tip.tip-ajuda { background:var(--lavanda); color:var(--grafite); } }
+.ajuda-grade { display:grid; grid-template-columns:repeat(auto-fill, minmax(300px, 1fr)); gap:12px; margin-bottom:12px; }
+.ajuda-card { margin:0; display:grid; gap:8px; align-content:start; }
+.ajuda-card .btn { justify-self:start; text-decoration:none; margin-top:4px; }
+.rotulo-ajuda { font-size:11px; letter-spacing:.06em; text-transform:uppercase; color:var(--muted); font-weight:600; margin:6px 0 0; }
+.ajuda-card .passos { margin:0; padding-left:18px; color:var(--ink); font-size:14px; } .ajuda-card .passos li { margin:3px 0; }
+.dica-ajuda { margin:4px 0 0; font-size:13px; color:var(--muted); background:var(--paper); padding:8px 10px; border-radius:8px; }
+.passos-ajuda { color:var(--ink); font-size:15px; } .passos-ajuda li { margin:6px 0; } .passos-ajuda code { font-family:var(--mono); font-size:13px; background:var(--paper); padding:1px 6px; border-radius:6px; }
+.glossario { display:grid; grid-template-columns:max-content 1fr; gap:6px 16px; margin:0; font-size:14px; } .glossario dt { font-weight:700; } .glossario dd { margin:0; color:var(--muted); }
+@media (max-width:600px) { .glossario { grid-template-columns:1fr; } .glossario dd { margin-bottom:6px; } }

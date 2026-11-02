@@ -21,27 +21,27 @@ async function paginaVisao() {
   const sem = (s) => `<div class="vazio" style="padding:20px">${s}</div>`;
   const semEventos = !o.entradas && !o.saidas && !o.cliques;
   $('#pagina').innerHTML = `
-    <div class="topo"><div><h1>Visão Geral</h1><p class="sub">${rotulo} · ${o.membros} membros em ${o.grupos} ${o.grupos === 1 ? 'grupo' : 'grupos'}.</p></div></div>
+    <div class="topo"><div><h1>Visão Geral ${q('visao')}</h1><p class="sub">${rotulo} · ${o.membros} membros em ${o.grupos} ${o.grupos === 1 ? 'grupo' : 'grupos'}.</p></div></div>
     <div class="filtros"><div class="seg" id="per">${PERIODOS.map(([k, n]) => `<button data-p="${k}" class="${k === V.periodo ? 'on' : ''}">${n}</button>`).join('')}</div></div>
-    <div class="filtros chips" id="blc"><button data-b="" class="${V.bloco ? '' : 'on'}">Todos os grupos</button>
+    <div class="filtros chips" id="blc">${q('visao.bloco')}<button data-b="" class="${V.bloco ? '' : 'on'}">Todos os grupos</button>
       ${blocos.map((b) => `<button data-b="${b.id}" class="${String(b.id) === String(V.bloco) ? 'on' : ''}">${esc(b.name)} <small>${b.group_jids.length}</small></button>`).join('')}
       <a href="#blocos" class="btn" style="text-decoration:none;border-radius:99px;padding:6px 12px">+ Novo bloco</a></div>
     <div class="grade-vg">
-      <div class="card"><h2>Funil do período</h2>
+      <div class="card"><h2>Funil do período ${q('visao.funil')}</h2>
         <div class="funil" style="margin-top:12px">
-          <div class="etapa"><div><div class="n">${o.cliques}</div><small>CLIQUES NOS LINKS · ${antRot}: ${ant.cliques}</small></div>${barra(o.cliques)}<small class="dica">${o.cliques ? fmtPct(Math.round((o.entradas_link / o.cliques) * 1000) / 10) + ' viraram entrada' : '— viraram entrada'}</small></div>
-          <div class="etapa"><div><div class="n">${o.entradas}</div><small>ENTRADAS · ${antRot}: ${ant.entradas}</small></div>${barra(o.entradas)}<small class="dica">pelo link <b>${o.entradas_link}</b> · adicionados <b>${o.entradas_add}</b></small></div>
-          <div class="etapa"><div><div class="n">${o.saidas}</div><small>SAÍDAS · ${antRot}: ${ant.saidas}</small></div>${barra(o.saidas)}<small class="dica">saldo <b>${o.saldo >= 0 ? '+' : ''}${o.saldo}</b></small></div>
+          <div class="etapa"><div><div class="n">${o.cliques}</div><small>CLIQUES NOS LINKS ${q('visao.cliques')} · ${antRot}: ${ant.cliques}</small></div>${barra(o.cliques)}<small class="dica">${o.cliques ? fmtPct(Math.round((o.entradas_link / o.cliques) * 1000) / 10) + ' viraram entrada' : '— viraram entrada'}</small></div>
+          <div class="etapa"><div><div class="n">${o.entradas}</div><small>ENTRADAS ${q('visao.entradas')} · ${antRot}: ${ant.entradas}</small></div>${barra(o.entradas)}<small class="dica">pelo link <b>${o.entradas_link}</b> · adicionados <b>${o.entradas_add}</b></small></div>
+          <div class="etapa"><div><div class="n">${o.saidas}</div><small>SAÍDAS ${q('visao.saidas')} · ${antRot}: ${ant.saidas}</small></div>${barra(o.saidas)}<small class="dica">saldo <b>${o.saldo >= 0 ? '+' : ''}${o.saldo}</b></small></div>
         </div></div>
       <div style="display:grid;gap:12px">
-        <div class="kpi destaque"><div class="rotulo">Tempo médio no grupo</div><div class="valor">${fmtMin(o.tempo_medio_min)}</div>
+        <div class="kpi destaque"><div class="rotulo">Tempo médio no grupo ${q('visao.tempo')}</div><div class="valor">${fmtMin(o.tempo_medio_min)}</div>
           <div class="nota">quanto tempo, em média, quem saiu ficou no grupo (${o.saidas_com_entrada} ${o.saidas_com_entrada === 1 ? 'saída' : 'saídas'} com entrada registrada)<br>
           quem ainda está: ${fmtMin(o.permanencia_atual_min)} em média até agora (${o.ativos} pessoas)${o.desde ? `<br>desde o início (${new Date(o.desde).toLocaleDateString('pt-BR')}) · não muda com o filtro de datas` : ''}</div></div>
-        <div class="kpi"><div class="rotulo">Abriram o grupo</div><div class="valor">${o.abriram}</div>
+        <div class="kpi"><div class="rotulo">Abriram o grupo ${q('visao.abriram')}</div><div class="valor">${o.abriram}</div>
           <div class="nota"><b>${fmtPct(o.abriram_pct)}</b> dos ${o.membros} membros · pessoas diferentes que leram alguma mensagem sua · ${antRot}: ${ant.abriram}</div></div>
       </div>
     </div>
-    <div class="card"><div class="topo" style="margin-bottom:8px"><div><h2>Entradas e saídas por ${o.periodo.por_hora ? 'horário' : 'dia'}</h2></div>
+    <div class="card"><div class="topo" style="margin-bottom:8px"><div><h2>Entradas e saídas por ${o.periodo.por_hora ? 'horário' : 'dia'} ${q('visao.grafico')}</h2></div>
       <div class="legenda"><span><i class="c1"></i>Entradas</span><span><i class="c2"></i>Saídas</span><span><i class="c3"></i>Parte escura: saíram no mesmo dia em que entraram</span></div></div>
       ${semEventos ? sem('Sem entradas ou saídas no período.') : graficoBarras(o.serie, o.periodo.por_hora)}
       <details style="margin-top:8px"><summary class="dica" style="cursor:pointer">Ver em tabela</summary>
@@ -49,12 +49,12 @@ async function paginaVisao() {
         <tbody>${o.serie.filter((p) => p.entradas || p.saidas).map((p) => `<tr><td>${o.periodo.por_hora ? String(p.k).padStart(2, '0') + 'h' : dataBR(p.k)}</td><td>${p.entradas}</td><td>${p.saidas}</td><td>${p.saidas_mesmo_dia}</td></tr>`).join('') || '<tr><td colspan="4">Nada no período.</td></tr>'}</tbody></table></details></div>
     <h2 style="margin:20px 0 10px">Evasão do tráfego</h2>
     <div class="kpis" style="margin-top:0">
-      ${kpiEvasao('Evasão de quem entrou no dia', o.evasao.entrou_dia, `De ${o.evasao.entrou_dia.de} que entraram, ${o.evasao.entrou_dia.n} saíram no mesmo dia`, 'Ninguém entrou no período ainda.')}
-      ${kpiEvasao('Evasão em 7 dias de quem entrou no dia', o.evasao.em_7d, `De ${o.evasao.em_7d.de} que entraram, ${o.evasao.em_7d.n} saíram em até 7 dias`, 'Ninguém entrou no período ainda.')}
-      ${kpiEvasao(`Evasão de ontem (${dataBR(o.evasao.ontem.dia)})`, { ...o.evasao.ontem, fechado: true }, `De ${o.evasao.ontem.de} que entraram, ${o.evasao.ontem.n} saíram no mesmo dia`, 'Ninguém entrou ontem.')}
-      ${kpiEvasao('Evasão total do período', { ...o.evasao.total_dia, fechado: true }, `${o.evasao.total_dia.n} saídas sobre ${o.evasao.total_dia.de} pessoas`, 'Nenhuma saída neste período.')}
+      ${kpiEvasao('Evasão de quem entrou no dia ' + q('visao.evasao_dia'), o.evasao.entrou_dia, `De ${o.evasao.entrou_dia.de} que entraram, ${o.evasao.entrou_dia.n} saíram no mesmo dia`, 'Ninguém entrou no período ainda.')}
+      ${kpiEvasao('Evasão em 7 dias de quem entrou no dia ' + q('visao.evasao_7d'), o.evasao.em_7d, `De ${o.evasao.em_7d.de} que entraram, ${o.evasao.em_7d.n} saíram em até 7 dias`, 'Ninguém entrou no período ainda.')}
+      ${kpiEvasao(`Evasão de ontem (${dataBR(o.evasao.ontem.dia)}) ` + q('visao.evasao_ontem'), { ...o.evasao.ontem, fechado: true }, `De ${o.evasao.ontem.de} que entraram, ${o.evasao.ontem.n} saíram no mesmo dia`, 'Ninguém entrou ontem.')}
+      ${kpiEvasao('Evasão total do período ' + q('visao.evasao_total'), { ...o.evasao.total_dia, fechado: true }, `${o.evasao.total_dia.n} saídas sobre ${o.evasao.total_dia.de} pessoas`, 'Nenhuma saída neste período.')}
     </div>
-    <h2 style="margin:20px 0 10px">Por grupo</h2>
+    <h2 style="margin:20px 0 10px">Por grupo ${q('visao.porgrupo')}</h2>
     <div class="card tabela"><table><thead><tr><th>Grupo</th><th>Membros</th><th>Abriram</th><th>Entradas</th><th>Pelo link</th><th>Adicionados</th><th>Saídas</th><th>Mesmo dia</th></tr></thead>
       <tbody>${o.por_grupo.sort((a, b) => b.entradas - a.entradas || b.membros - a.membros).map((g) => `<tr><td>${esc(g.name)}</td><td>${g.membros}</td><td>${g.abriram} <small class="dica">${fmtPct(g.abriram_pct)}</small></td><td><b>${g.entradas}</b></td><td>${g.pelo_link}</td><td>${g.adicionados}</td><td>${g.saidas}</td><td>${g.mesmo_dia}</td></tr>`).join('') || '<tr><td colspan="8">Nenhum grupo. Conecte o WhatsApp e sincronize os grupos.</td></tr>'}</tbody></table></div>
     <h2 style="margin:20px 0 10px">Eventos do período</h2>
@@ -101,7 +101,7 @@ function ligarTooltips() {
 // ---------- Blocos de análise ----------
 async function paginaBlocos() {
   S.blocks = await api('/blocks');
-  $('#pagina').innerHTML = `<div class="topo"><div><h1>Blocos de análise</h1><p class="sub">Agrupe os grupos por nicho para ver as métricas de cada um separadas na Visão Geral. Um bloco pode ter uma etiqueta do Mercado Livre: ao criar uma regra, escolha o bloco e ela já marca os grupos e a etiqueta.</p></div>
+  $('#pagina').innerHTML = `<div class="topo"><div><h1>Blocos de análise ${q('blocos')}</h1><p class="sub">Agrupe os grupos por nicho para ver as métricas de cada um separadas na Visão Geral. Um bloco pode ter uma etiqueta do Mercado Livre: ao criar uma regra, escolha o bloco e ela já marca os grupos e a etiqueta.</p></div>
     <button class="pri" id="novo">Novo bloco</button></div>
     ${S.blocks.length ? `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px">${S.blocks.map((b) => {
       const tag = S.tags.find((t) => t.id === b.tag_id);
@@ -124,7 +124,7 @@ function formBloco(b) {
   const novo = !b; b = b || { name: '', tag_id: null, group_jids: [] }; const sel = new Set(b.group_jids); const dlg = $('#dlg');
   dlg.innerHTML = `<form method="dialog" id="f"><h1>${novo ? 'Novo bloco' : 'Editar bloco'}</h1>
     <div class="grade"><label class="campo">Nome do bloco<input name="name" value="${esc(b.name)}" placeholder="Ex.: Casa e cozinha" required></label>
-      <label class="campo">Etiqueta do Mercado Livre (opcional)<select name="tag_id"><option value="">Nenhuma</option>${S.tags.map((t) => `<option value="${t.id}" ${t.id === b.tag_id ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}</select>
+      <label class="campo"><span>Etiqueta do Mercado Livre (opcional) ${q('blocos.etiqueta')}</span><select name="tag_id"><option value="">Nenhuma</option>${S.tags.map((t) => `<option value="${t.id}" ${t.id === b.tag_id ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}</select>
         <small>Para separar o ganho por nicho. Ao criar uma regra a partir deste bloco, a etiqueta já vem marcada.</small></label></div>
     <fieldset><legend>Grupos do bloco <span id="cont" class="dica"></span></legend>
       ${S.groups.length ? `<div class="linha"><input id="busca" placeholder="Buscar grupo…" style="flex:1"><button type="button" id="nenhum">Limpar</button></div>
@@ -145,7 +145,7 @@ function formBloco(b) {
 async function paginaLinks() {
   const [links, propostas] = await Promise.all([api('/links'), api('/proposals')]);
   const local = /^http:\/\/(127\.0\.0\.1|localhost)/.test(S.st.endereco_publico || '');
-  $('#pagina').innerHTML = `<div class="topo"><div><h1>Rotacionador de Links</h1><p class="sub">Cada link leva para o primeiro grupo da lista que ainda não atingiu o limite. Os cliques entram no funil da Visão Geral.</p></div>
+  $('#pagina').innerHTML = `<div class="topo"><div><h1>Rotacionador de Links ${q('links')}</h1><p class="sub">Cada link leva para o primeiro grupo da lista que ainda não atingiu o limite. Os cliques entram no funil da Visão Geral.</p></div>
     <button class="pri" id="novo">Novo link</button></div>
     ${propostas.length ? `<div class="card" id="props" style="border-color:var(--accent)"><h2>Próximo grupo</h2>${propostas.map((p) => `<div data-pid="${p.id}" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:10px 0;border-top:1px solid var(--line)">
         <div style="flex:1;min-width:240px">${p.status === 'pending' ? `<b>${esc(p.source_name || p.source_jid)}</b> chegou a ${p.source_size}/${p.limit_members} membros (link “${esc(p.link_name || '')}”).<br><small class="dica">Proposta: criar <b>${esc(p.name)}</b> igual a ele, logo depois na fila.</small>`
@@ -186,14 +186,14 @@ function formLink(l) {
   dlg.innerHTML = `<form method="dialog" id="f"><h1>${novo ? 'Novo link' : 'Editar link'}</h1>
     <p class="sub" style="margin:-8px 0 12px">As pessoas vão para o primeiro grupo da lista que ainda tem vaga.</p>
     <div class="grade"><label class="campo">Nome<input name="name" value="${esc(l.name)}" placeholder="Ex.: Achadinhos de casa" required></label>
-      <label class="campo">Endereço do link<div class="linha" style="align-items:center"><span class="dica" style="white-space:nowrap">${esc((S.st.endereco_publico || '').replace(/^https?:\/\//, ''))}/g/</span><input name="slug" value="${esc(l.slug)}" placeholder="achadinhos" style="flex:1"></div></label></div>
-    <label class="campo">URL reserva (quando todos lotarem)<input name="fallback_url" value="${esc(l.fallback_url || '')}" placeholder="Opcional: https://…"></label>
-    <fieldset><legend>Como distribuir os cliques</legend><div class="modos">${S.st.modos_link.map((m) => `<label><input type="radio" name="mode" value="${m.id}" ${m.id === l.mode ? 'checked' : ''} style="width:auto"><b>${esc(m.name)}</b><small>${esc(m.desc)}</small></label>`).join('')}</div></fieldset>
-    <label class="campo" style="border:1px solid var(--line);border-radius:10px;padding:12px;display:grid;grid-template-columns:auto 1fr;gap:10px;align-items:start"><input type="checkbox" name="auto_next" ${l.auto_next ? 'checked' : ''} style="width:auto;margin-top:4px"><span>Criar próximo grupo (com a sua confirmação)
+      <label class="campo"><span>Endereço do link ${q('links.endereco')}</span><div class="linha" style="align-items:center"><span class="dica" style="white-space:nowrap">${esc((S.st.endereco_publico || '').replace(/^https?:\/\//, ''))}/g/</span><input name="slug" value="${esc(l.slug)}" placeholder="achadinhos" style="flex:1"></div></label></div>
+    <label class="campo"><span>URL reserva (quando todos lotarem) ${q('links.reserva')}</span><input name="fallback_url" value="${esc(l.fallback_url || '')}" placeholder="Opcional: https://…"></label>
+    <fieldset><legend>Como distribuir os cliques ${q('links.modo')}</legend><div class="modos">${S.st.modos_link.map((m) => `<label><input type="radio" name="mode" value="${m.id}" ${m.id === l.mode ? 'checked' : ''} style="width:auto"><b>${esc(m.name)}</b><small>${esc(m.desc)}</small></label>`).join('')}</div></fieldset>
+    <label class="campo" style="border:1px solid var(--line);border-radius:10px;padding:12px;display:grid;grid-template-columns:auto 1fr;gap:10px;align-items:start"><input type="checkbox" name="auto_next" ${l.auto_next ? 'checked' : ''} style="width:auto;margin-top:4px"><span>Criar próximo grupo (com a sua confirmação) ${q('links.proximo')}
       <small style="display:block;font-weight:400;color:var(--muted)">Quando um grupo deste link chegar a ${S.st.lotacao_pct}% do limite, o painel propõe um grupo novo igual (nome com o próximo número, descrição, foto, permissões e admins). Nada é criado até você clicar em “Criar agora”. O grupo novo entra neste link logo depois do que lotou, nos mesmos blocos e nas mesmas regras.</small></span></label>
-    <div class="grade"><label class="campo">Limite de membros por grupo<input name="limit_members" type="number" min="2" max="${S.st.limite_max}" value="${l.limit_members}"><small>Padrão 1.000 (máximo ${S.st.limite_max.toLocaleString('pt-BR')}).</small></label>
+    <div class="grade"><label class="campo"><span>Limite de membros por grupo ${q('links.limite')}</span><input name="limit_members" type="number" min="2" max="${S.st.limite_max}" value="${l.limit_members}"><small>Padrão 1.000 (máximo ${S.st.limite_max.toLocaleString('pt-BR')}).</small></label>
       <label class="campo" id="f-reopen">Reabrir quando cair para (membros)<input name="reopen_below" type="number" min="1" value="${l.reopen_below}"></label></div>
-    <fieldset><legend>Grupos, em ordem <span class="dica">(o primeiro enche primeiro)</span></legend>
+    <fieldset><legend>Grupos, em ordem ${q('links.ordem')} <span class="dica">(o primeiro enche primeiro)</span></legend>
       <input id="busca-g" placeholder="Buscar grupo para adicionar…" style="width:100%;margin-bottom:8px">
       <div class="grupos" id="disp" style="max-height:150px"></div>
       <ul class="ordem" id="ordem" style="list-style:none;padding:0;margin:10px 0 0"></ul>
@@ -226,7 +226,7 @@ function formLink(l) {
 // ---------- tabela de grupos (página WhatsApp e grupos) ----------
 function tabelaGrupos(groups) {
   const blocoNome = (id) => S.blocks.find((b) => b.id === id)?.name;
-  return `<div class="card tabela"><table><thead><tr><th>Grupo</th><th>Membros</th><th>Convite</th></tr></thead><tbody>
+  return `<div class="card tabela"><table><thead><tr><th>Grupo</th><th>Membros</th><th>Convite ${q('grupos.convite')}</th></tr></thead><tbody>
     ${groups.map((g) => `<tr data-jid="${esc(g.jid)}"><td>${esc(g.name)}${g.is_admin ? '<span class="badge-adm">admin</span>' : ''}${g.blocks?.length ? `<br><small class="dica">${g.blocks.map(blocoNome).filter(Boolean).map(esc).join(' · ')}</small>` : ''}</td><td>${g.size ?? ''}</td>
       <td><div class="conv">${g.invite_code ? `<input readonly value="https://chat.whatsapp.com/${esc(g.invite_code)}">` : '<input data-colar placeholder="https://chat.whatsapp.com/…">'}
         <button data-inv="${g.invite_code ? 'colar' : 'colar'}" title="Salvar o link colado" ${g.invite_code ? 'hidden' : ''}>Salvar</button><button data-inv="buscar" title="Busca o link pelo WhatsApp (precisa ser admin)">${g.invite_code ? 'Atualizar' : 'Buscar convite'}</button></div></td></tr>`).join('')
