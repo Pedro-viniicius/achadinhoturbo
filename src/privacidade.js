@@ -25,20 +25,32 @@ export function pseudonimo(db, id) {
   return crypto.createHmac('sha256', chavePseudo(db)).update(s).digest('hex').slice(0, 32);
 }
 
-/** Converte, uma vez só, os números já gravados em pseudônimos. */
+/**
+ * Apaga o que não deveria mais estar no banco, de forma idempotente: roda a cada start.
+ * IPs de cliques (hoje gravados como NULL) e listas de telefones de admins em propostas antigas
+ * (fica só a contagem). Devolve quantas linhas mudou.
+ */
+export function limparResiduos(db) {
+  let n = db.prepare('UPDATE link_clicks SET ip_hash = NULL WHERE ip_hash IS NOT NULL').run().changes;
+  for (const p of db.prepare("SELECT id, detail FROM group_proposals WHERE detail LIKE '%admins_%'").all()) {
+    try {
+      const d = JSON.parse(p.detail);
+      if (!Array.isArray(d.admins_adicionados) && !Array.isArray(d.admins_nao_adicionados)) continue;
+      const conta = (x) => (Array.isArray(x) ? x.length : x);
+      db.prepare('UPDATE group_proposals SET detail = ? WHERE id = ?').run(JSON.stringify({ ...d, admins_adicionados: conta(d.admins_adicionados), admins_nao_adicionados: conta(d.admins_nao_adicionados) }), p.id);
+      n++;
+    } catch { /* detalhe não é JSON: deixa */ }
+  }
+  return n;
+}
+
+/** Converte, uma vez só, os números já gravados em pseudônimos; a limpeza de resíduos roda sempre. */
 export function migrarPseudonimos(db) {
-  if (getSetting(db, 'pseudo_migrated')) return 0;
-  let n = 0;
+  const residuos = limparResiduos(db);
+  if (getSetting(db, 'pseudo_migrated')) return residuos;
+  let n = residuos;
   db.exec('BEGIN');
   try {
-    db.exec('UPDATE link_clicks SET ip_hash = NULL');
-    // propostas antigas guardavam a lista de telefones dos admins: fica só a contagem
-    for (const p of db.prepare("SELECT id, detail FROM group_proposals WHERE detail LIKE '%admins_%'").all()) {
-      try {
-        const d = JSON.parse(p.detail); const conta = (x) => (Array.isArray(x) ? x.length : x);
-        db.prepare('UPDATE group_proposals SET detail = ? WHERE id = ?').run(JSON.stringify({ ...d, admins_adicionados: conta(d.admins_adicionados), admins_nao_adicionados: conta(d.admins_nao_adicionados) }), p.id);
-      } catch { /* detalhe não é JSON: deixa */ }
-    }
     const upd = db.prepare('UPDATE group_events SET participant = ?, actor = ? WHERE id = ?');
     for (const r of db.prepare('SELECT id, participant, actor FROM group_events').all()) {
       upd.run(pseudonimo(db, r.participant), r.actor ? pseudonimo(db, r.actor) : null, r.id); n++;

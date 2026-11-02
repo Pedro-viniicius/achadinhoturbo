@@ -34,6 +34,14 @@ test('pseudonimização: estável, não reversível, idempotente; migração con
   assert.equal(ev.participant, a); assert.equal(ev.actor, pseudonimo(db, '5511777777777@s.whatsapp.net'));
   assert.equal(db.prepare('SELECT participant FROM group_reads').get().participant, a);
   assert.equal(migrarPseudonimos(db), 0, 'roda uma vez só');
+  // banco já migrado (flag setada) ainda recebe a limpeza de resíduos: IP de clique e telefones em propostas antigas
+  db.prepare("INSERT INTO links (slug, name, mode, created_at) VALUES ('x', 'x', 'fill', 1)").run();
+  db.prepare("INSERT INTO link_clicks (link_id, ts, ip_hash) VALUES (1, 1, 'abc')").run();
+  db.prepare("INSERT INTO group_proposals (link_id, name, detail, created_at) VALUES (1, 'x', ?, 1)").run(JSON.stringify({ admins_adicionados: ['5511999999999@s.whatsapp.net'], admins_nao_adicionados: [] }));
+  assert.equal(migrarPseudonimos(db), 2, 'limpeza roda mesmo com a flag');
+  assert.equal(db.prepare('SELECT ip_hash FROM link_clicks').get().ip_hash, null);
+  assert.deepEqual(JSON.parse(db.prepare('SELECT detail FROM group_proposals').get().detail), { admins_adicionados: 1, admins_nao_adicionados: 0 });
+  assert.equal(migrarPseudonimos(db), 0, 'limpeza é idempotente');
   assert.equal(chaveIp('2001:db8:1:2:aaaa:bbbb:cccc:dddd'), '2001:db8:1:2::/64');
   assert.equal(chaveIp('::ffff:10.0.0.1'), '10.0.0.1');
 });
@@ -212,6 +220,13 @@ test('S12: rajada simultânea não atravessa o freio; teto de 2 logins em andame
     const c = rajada.reduce((m, r) => ((m[r.status] = (m[r.status] || 0) + 1), m), {});
     assert.ok((c[401] || 0) <= 5, `no máximo 5 palpites avaliados, veio ${JSON.stringify(c)}`);
     assert.equal((c[401] || 0) + (c[429] || 0), 20);
+    // em ondas de 2 (dentro do teto): só a contagem ANTES do scrypt limita a exatamente 5 palpites; depois seriam 6
+    let avaliados = 0;
+    for (let onda = 0; onda < 4; onda++) {
+      const rs = await Promise.all([0, 1].map(() => login(s.port, 'errada', { 'x-forwarded-for': '203.0.113.51' })));
+      avaliados += rs.filter((r) => r.status === 401).length;
+    }
+    assert.equal(avaliados, 5, 'tentativa contada antes de verificar a senha');
     // dono: entra certo de um IP; depois 50 erros de terceiros não o trancam
     assert.equal((await login(s.port, 'senha-de-teste-123', { 'x-forwarded-for': '198.51.100.1' })).status, 200);
     for (let i = 0; i < 60; i++) await login(s.port, 'errada', { 'x-forwarded-for': `203.0.113.${100 + (i % 50)}` });
@@ -226,7 +241,7 @@ test('S12: rajada simultânea não atravessa o freio; teto de 2 logins em andame
 test('extensão: corpo grande sem token é recusado antes de ser lido (401, não 413)', async () => {
   const s = await subir();
   try {
-    const r = await req(s.port, '/api/ext/result', { method: 'POST', raw: '{"a":"' + 'x'.repeat(3_000_000) + '"}', headers: { 'x-token': 'errado' } });
+    const r = await req(s.port, '/api/ext/result', { method: 'POST', raw: '{"a":"' + 'x'.repeat(6_000_000) + '"}' /* acima dos 5 MB: na ordem errada daria 413 */, headers: { 'x-token': 'errado' } });
     assert.equal(r.status, 401);
   } finally { await s.fechar(); }
 });

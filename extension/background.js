@@ -131,6 +131,17 @@ async function laco() {
 chrome.alarms.create('despertar', { periodInMinutes: 0.5 });
 chrome.alarms.onAlarm.addListener(() => laco());
 chrome.runtime.onStartup.addListener(laco);
-chrome.runtime.onInstalled.addListener(laco);
+chrome.runtime.onInstalled.addListener(async () => {
+  // versões antigas pediam todos os sites. Ao atualizar, devolve essa concessão quando o painel configurado
+  // não precisa dela (local ou nenhum). Com painel https remoto ela fica até o dono salvar de novo no popup,
+  // que então pede só aquele domínio (pedir permissão aqui não vale: precisa de gesto do usuário).
+  try {
+    const { conf } = await chrome.storage.local.get('conf');
+    const origem = conf?.servidor ? new URL(conf.servidor).origin : '';
+    const remoto = origem.startsWith('https://') && !/^https:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/.test(origem);
+    if (!remoto) await chrome.permissions.remove({ origins: ['https://*/*'] });
+  } catch { /* sem conf ou sem a concessão: nada a fazer */ }
+  laco();
+});
 chrome.storage.onChanged.addListener((m) => { if (m.conf) laco(); });
 laco();
