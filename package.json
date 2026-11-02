@@ -1,8 +1,8 @@
 {
-  "name": "disparador-ml",
+  "name": "achadinhoturbo",
   "version": "1.0.0",
   "private": true,
-  "description": "Disparador pessoal de ofertas do Mercado Livre para grupos de WhatsApp, com várias etiquetas de afiliado.",
+  "description": "achadinhoturbo: disparador pessoal de ofertas do Mercado Livre (Central de Afiliados) para grupos de WhatsApp, com várias etiquetas, análise de grupos e rotacionador de links.",
   "type": "module",
   "engines": {
     "node": ">=22.13"
