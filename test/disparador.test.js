@@ -232,3 +232,44 @@ test('serviço de links: pedido de ofertas vai para a extensão e volta como lis
   assert.equal(parseHubPages(data).length, 5);
   assert.equal(links.status().lastOffersAt > 0, true);
 });
+
+// ---------- várias categorias numa regra ----------
+import { hubCategorias } from '../src/afiliados.js';
+import { fazerBackup, restaurar } from '../scripts/backup.js';
+
+test('Central de Afiliados: várias categorias geram um pedido por categoria por página, intercalados no resultado', () => {
+  assert.deepEqual(hubCategorias({ categoria: 'MLB1' }), ['MLB1'], 'regra antiga com categoria única');
+  assert.deepEqual(hubCategorias({ categorias: ['MLB1', 'MLB2', 'MLB1', ''] }), ['MLB1', 'MLB2']);
+  assert.deepEqual(hubCategorias({}), [null]);
+  const b = hubBodies({ categorias: ['MLB1', 'MLB2'], paginas: 2, mais_vendidos: true });
+  assert.equal(b.length, 4);
+  assert.deepEqual(b.map((x) => [x.filters[0].value, x.offset]), [['MLB1', 0], ['MLB1', POR_PAGINA], ['MLB2', 0], ['MLB2', POR_PAGINA]]);
+  assert.ok(b.every((x) => x.filters.some((f) => f.id === 'best_seller')));
+
+  const pagina = (ids) => ({ polycard_client_model: { polycard_context: { url_prefix: 'https://' }, polycards: ids.map((id) => ({
+    metadata: { id, url: `www.mercadolivre.com.br/x/p/${id}` }, pictures: { pictures: [] },
+    components: [{ id: 'title', title: { text: 'Produto ' + id } }, { id: 'price', price: { current_price: { value: 10 } } }],
+  })) } });
+  // 2 categorias × 2 páginas, na ordem que hubBodies pede: A p0, A p1, B p0, B p1
+  const paginas = [pagina(['A1', 'A2']), pagina(['A3']), pagina(['B1', 'B2', 'B3']), pagina([])];
+  assert.deepEqual(parseHubPages(paginas, 2).map((o) => o.key), ['A1', 'B1', 'A2', 'B2', 'A3', 'B3'], 'intercalado');
+  assert.deepEqual(parseHubPages(paginas, 1).map((o) => o.key), ['A1', 'A2', 'A3', 'B1', 'B2', 'B3'], 'uma categoria: ordem original');
+  assert.deepEqual(parseHubPages([pagina(['X', 'Y']), pagina(['Y', 'Z'])], 2).map((o) => o.key), ['X', 'Y', 'Z'], 'repetido entre categorias sai uma vez');
+});
+
+test('backup: VACUUM INTO + wa_auth, rotação e restauração com integrity_check', () => {
+  const dir = tmp(); const db = openDb(dir);
+  db.prepare('INSERT INTO tags (name, created_at) VALUES (?,?)').run('etq', Date.now());
+  fs.mkdirSync(path.join(dir, 'wa_auth')); fs.writeFileSync(path.join(dir, 'wa_auth', 'creds.json'), '{}');
+  const dest = tmp();
+  const arquivos = [];
+  for (let i = 0; i < 9; i++) { fs.writeFileSync(path.join(dest, `disparador-2000-01-0${i}-00-00-00.tar.gz`), ''); }
+  arquivos.push(fazerBackup(dir, dest));
+  const restantes = fs.readdirSync(dest).filter((f) => f.endsWith('.tar.gz'));
+  assert.equal(restantes.length, 7, 'mantém só os 7 mais recentes');
+  assert.ok(restantes.includes(path.basename(arquivos[0])), 'o novo ficou');
+  assert.equal(fs.statSync(arquivos[0]).mode & 0o777, 0o600);
+  const r = restaurar(arquivos[0], tmp());
+  assert.deepEqual([r.integridade, r.etiquetas, r.waAuth], ['ok', 1, true]);
+  db.close();
+});

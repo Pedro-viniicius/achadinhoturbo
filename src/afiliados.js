@@ -23,17 +23,25 @@ export const CATEGORIAS = [
   ['MLB12404', 'Festas e Lembrancinhas'], ['MLB1499', 'Indústria e Comércio'], ['MLB271599', 'Agro'],
 ].map(([id, name]) => ({ id, name }));
 
-/** Configuração da regra -> corpos dos pedidos à Central, um por página. */
+/** Categorias da regra. Aceita `categorias: []` (novo) ou `categoria: 'MLB…'` (regras antigas). `[null]` = todas. */
+export function hubCategorias(cfg = {}) {
+  const lista = Array.isArray(cfg.categorias) ? cfg.categorias : cfg.categoria ? [cfg.categoria] : [];
+  const ids = [...new Set(lista.map((c) => String(c || '').trim()).filter(Boolean))];
+  return ids.length ? ids : [null];
+}
+
+/** Configuração da regra -> corpos dos pedidos à Central: para cada categoria, uma por página (na ordem categoria, página). */
 export function hubBodies(cfg = {}) {
-  const filters = [];
-  if (cfg.categoria) filters.push({ id: 'category', value: String(cfg.categoria) });
-  if (cfg.mais_vendidos) filters.push({ id: 'best_seller', value: true });
-  if (cfg.ganhos_extras) filters.push({ id: 'extra_commission', value: true });
+  const base = [];
+  if (cfg.mais_vendidos) base.push({ id: 'best_seller', value: true });
+  if (cfg.ganhos_extras) base.push({ id: 'extra_commission', value: true });
   const sort = ORDENS.some((o) => o.id === cfg.ordem) ? cfg.ordem : 'relevance';
   const paginas = Math.min(Math.max(Number(cfg.paginas) || 3, 1), 10);
-  return Array.from({ length: paginas }, (_, i) => ({
-    search: String(cfg.busca || '').trim(), sort, filters, offset: i * POR_PAGINA,
-  }));
+  const search = String(cfg.busca || '').trim();
+  return hubCategorias(cfg).flatMap((cat) => {
+    const filters = cat ? [{ id: 'category', value: cat }, ...base] : base;
+    return Array.from({ length: paginas }, (_, i) => ({ search, sort, filters, offset: i * POR_PAGINA }));
+  });
 }
 
 /** "| +10mil vendidos" -> 10000; "+500 vendidos" -> 500. */
@@ -78,14 +86,29 @@ export function cardToOffer(card, ctx = {}) {
   };
 }
 
-/** Páginas devolvidas pela extensão -> lista de ofertas, sem repetir. */
-export function parseHubPages(pages) {
+/**
+ * Páginas devolvidas pela extensão -> lista de ofertas, sem repetir.
+ * `grupos` = quantas categorias geraram as páginas (hubCategorias(cfg).length): as páginas vêm em blocos
+ * contíguos por categoria e o resultado é intercalado (1ª da cat. A, 1ª da B, 2ª da A, …), para a
+ * sequência de mensagens não sair agrupada por categoria.
+ */
+export function parseHubPages(pages, grupos = 1) {
+  const lista = [].concat(pages || []);
+  const g = Math.max(1, Math.min(Number(grupos) || 1, lista.length || 1));
+  const porGrupo = Math.ceil(lista.length / g);
+  const filas = Array.from({ length: g }, (_, i) => {
+    const fila = [];
+    for (const p of lista.slice(i * porGrupo, (i + 1) * porGrupo)) {
+      const model = p?.polycard_client_model || p || {};
+      const ctx = model.polycard_context || {};
+      for (const card of model.polycards || []) { const o = cardToOffer(card, ctx); if (o) fila.push(o); }
+    }
+    return fila;
+  });
   const out = []; const seen = new Set();
-  for (const p of [].concat(pages || [])) {
-    const model = p?.polycard_client_model || p || {};
-    const ctx = model.polycard_context || {};
-    for (const card of model.polycards || []) {
-      const o = cardToOffer(card, ctx);
+  for (let i = 0; filas.some((f) => i < f.length); i++) {
+    for (const f of filas) {
+      const o = f[i];
       if (!o || seen.has(o.key)) continue;
       seen.add(o.key); out.push(o);
     }

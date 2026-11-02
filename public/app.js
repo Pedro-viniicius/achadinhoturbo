@@ -9,6 +9,7 @@ let ultimoQr = null; let editando = null;
 async function api(path, method = 'GET', body) {
   const r = await fetch('/api' + path, { method, headers: body ? { 'content-type': 'application/json' } : {}, body: body ? JSON.stringify(body) : undefined });
   const j = await r.json().catch(() => ({}));
+  if (r.status === 401) { location.replace('/login.html'); throw new Error('Sessão expirada. Entre de novo.'); }
   if (!r.ok) throw new Error(j.erro || 'Erro ' + r.status);
   return j;
 }
@@ -63,9 +64,11 @@ function cartaoRegra(r) {
       <button data-act="zerar" class="leve" title="Permite que as ofertas já enviadas saiam de novo">Limpar “já enviadas”</button>
       <button data-act="excluir" class="perigo leve">Excluir</button></div></article>`;
 }
+const categoriasDe = (c = {}) => Array.isArray(c.categorias) ? c.categorias : c.categoria ? [c.categoria] : [];
 function fonteAfiliados(c = {}) {
-  const cat = S.st.afiliados?.categorias.find((x) => x.id === c.categoria);
-  const partes = [c.busca ? `“${esc(c.busca)}”` : '', cat ? esc(cat.name) : '', c.mais_vendidos ? 'mais vendidos' : '', c.ganhos_extras ? 'ganhos extras' : ''].filter(Boolean);
+  const nomes = categoriasDe(c).map((id) => S.st.afiliados?.categorias.find((x) => x.id === id)?.name).filter(Boolean);
+  const cats = nomes.length > 3 ? `${nomes.length} categorias` : nomes.map(esc).join(' + ');
+  const partes = [c.busca ? `“${esc(c.busca)}”` : '', cats, c.mais_vendidos ? 'mais vendidos' : '', c.ganhos_extras ? 'ganhos extras' : ''].filter(Boolean);
   return `Central de Afiliados${partes.length ? ' (' + partes.join(', ') + ')' : ''}`;
 }
 function paginaRegras() {
@@ -99,7 +102,7 @@ function formRegra(r) {
   const nova = !r;
   r = r || { name: '', enabled: true, tag_id: S.tags[0]?.id, template_id: S.templates[0]?.id, group_jids: [], source_type: 'afiliados', source_config: { paginas: 3 },
     per_run: 3, interval_min: 60, window_start: '08:00', window_end: '22:00', dedupe_days: 7, send_image: true };
-  const sel = new Set(r.group_jids); const dlg = $('#dlg'); const sc = r.source_config || {};
+  const sel = new Set(r.group_jids); const dlg = $('#dlg'); const sc = r.source_config || {}; const catsSel = new Set(categoriasDe(sc));
   dlg.innerHTML = `<form method="dialog" id="f"><h1>${nova ? 'Nova regra' : 'Editar regra'}</h1>
     <div class="grade">
       <label class="campo">Nome da regra<input name="name" value="${esc(r.name)}" placeholder="Ex.: Tecnologia" required></label>
@@ -112,9 +115,11 @@ function formRegra(r) {
         <label><input type="radio" name="source_type" value="search" ${r.source_type === 'search' ? 'checked' : ''} style="width:auto"> Busca por palavra-chave (experimental)</label></div>
       <div id="f-afiliados"><div class="grade">
         <label class="campo">Buscar por (opcional)<input name="af_busca" value="${esc(sc.busca || '')}" placeholder="Ex.: organizador, air fryer"></label>
-        <label class="campo">Categoria<select name="af_categoria"><option value="">Todas</option>${(S.st.afiliados?.categorias || []).map((c) => `<option value="${c.id}" ${c.id === sc.categoria ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></label>
         <label class="campo">Ordem<select name="af_ordem">${(S.st.afiliados?.ordens || []).map((o) => `<option value="${o.id}" ${o.id === sc.ordem ? 'selected' : ''}>${esc(o.name)}</option>`).join('')}</select></label>
         <label class="campo">Páginas lidas por envio<input name="af_paginas" type="number" min="1" max="10" value="${sc.paginas ?? 3}"><small>Cada página traz ${S.st.afiliados?.por_pagina || 18} produtos.</small></label></div>
+        <fieldset class="sub-campo"><legend>Categorias <span class="dica" id="af-cont"></span></legend>
+          <div class="grupos cats" id="af-cats">${(S.st.afiliados?.categorias || []).map((c) => `<label><input type="checkbox" name="af_categorias" value="${c.id}" ${catsSel.has(c.id) ? 'checked' : ''}>${esc(c.name)}</label>`).join('')}</div>
+          <small>Nenhuma marcada = todas. Com várias, as ofertas saem intercaladas (uma de cada categoria por vez), bom para grupos de achadinhos gerais.</small></fieldset>
         <div class="linha"><label><input type="checkbox" name="af_mais_vendidos" ${sc.mais_vendidos ? 'checked' : ''} style="width:auto"> Só mais vendidos</label>
           <label><input type="checkbox" name="af_ganhos_extras" ${sc.ganhos_extras ? 'checked' : ''} style="width:auto"> Só com ganhos extras</label></div>
         <small class="dica">É a lista “Produtos selecionados para você” da sua Central de Afiliados. A extensão do Chrome busca a lista e gera cada link meli.la com a etiqueta desta regra.</small></div>
@@ -140,6 +145,8 @@ function formRegra(r) {
     <div class="rodape"><button type="button" id="cancelar">Cancelar</button><button class="pri" id="salvar">${nova ? 'Criar regra' : 'Salvar'}</button></div></form>`;
   const ajustaFonte = () => { const t = $('input[name=source_type]:checked', dlg).value; $('#f-afiliados').hidden = t !== 'afiliados'; $('#f-list').hidden = t !== 'list'; $('#f-search').hidden = t !== 'search'; };
   $$('input[name=source_type]', dlg).forEach((i) => (i.onchange = ajustaFonte)); ajustaFonte();
+  const contaCats = () => { const n = $$('#af-cats input:checked', dlg).length; $('#af-cont').textContent = n ? `(${n} marcadas)` : '(todas)'; };
+  $('#af-cats').onchange = contaCats; contaCats();
   const conta = () => { const n = $$('#gr input:checked', dlg).length; const c = $('#cont'); if (c) c.textContent = `(${n} selecionados)`; };
   if ($('#gr')) {
     $('#gr').onchange = conta; conta();
@@ -155,7 +162,7 @@ function formRegra(r) {
       name: g('name'), tag_id: g('tag_id') || null, template_id: g('template_id') || null,
       group_jids: $$('#gr input:checked', dlg).map((i) => i.value), source_type: g('source_type'),
       source_config: g('source_type') === 'afiliados'
-        ? { busca: g('af_busca'), categoria: g('af_categoria'), ordem: g('af_ordem'), paginas: Number(g('af_paginas')) || 3, mais_vendidos: !!g('af_mais_vendidos'), ganhos_extras: !!g('af_ganhos_extras') }
+        ? { busca: g('af_busca'), categorias: $$('#af-cats input:checked', dlg).map((i) => i.value), ordem: g('af_ordem'), paginas: Number(g('af_paginas')) || 3, mais_vendidos: !!g('af_mais_vendidos'), ganhos_extras: !!g('af_ganhos_extras') }
         : g('source_type') === 'list' ? { items: g('items') } : { query: g('query'), sort: g('sort') },
       min_price: g('min_price'), max_price: g('max_price'), min_discount: g('min_discount'),
       per_run: g('per_run'), interval_min: g('interval_min'), window_start: g('window_start'), window_end: g('window_end'),
@@ -257,7 +264,7 @@ async function paginaHistorico(nivel = '') {
 
 // ---------- ajustes ----------
 function paginaAjustes() {
-  const a = S.st.ajustes; const url = `http://127.0.0.1:${S.st.porta}`;
+  const a = S.st.ajustes; const url = S.st.endereco_publico || `http://127.0.0.1:${S.st.porta}`;
   $('#pagina').innerHTML = `<div class="topo"><div><h1>Ajustes</h1></div></div>
     <div class="card" style="display:grid;gap:14px"><div><h2>Pausas entre mensagens</h2><p class="sub">Pausas curtas demais parecem robô. O programa varia o tempo para mais ou para menos, de forma aleatória.</p></div>
       <div class="grade"><label class="campo">Entre um grupo e outro (segundos)<input id="dg" type="number" min="2" value="${a.delay_group_s}"></label>
@@ -293,6 +300,9 @@ async function atualizarEstado(forcar) {
   }
 }
 window.addEventListener('hashchange', ir);
-carregar().then(() => { faixa(); ir(); }).catch((e) => aviso(e.message, true));
+carregar().then(() => {
+  faixa(); ir();
+  if (S.st.auth) { const b = $('#sair'); b.hidden = false; b.onclick = tentar(async () => { await api('/logout', 'POST'); location.replace('/login.html'); }); }
+}).catch((e) => aviso(e.message, true));
 setInterval(() => atualizarEstado().catch(() => {}), 3000);
 setInterval(() => { if ((location.hash || '#regras') === '#regras' && !$('#dlg').open) recarregarRegras().catch(() => {}); }, 10000);

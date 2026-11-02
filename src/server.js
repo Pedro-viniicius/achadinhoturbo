@@ -1,27 +1,105 @@
 import express from 'express';
 import path from 'node:path';
-import { DATA_DIR, PORT, DRY_RUN, FAST, ROOT } from './config.js';
-import { openDb, getSetting, setSetting, parseRule, nz, addLog } from './db.js';
+import { DATA_DIR, PORT, DRY_RUN, FAST, ROOT, PUBLIC_HOST, PANEL_PASSWORD } from './config.js';
+import { openDb, getSetting, setSetting, parseRule, nz } from './db.js';
+import { createAuth, createLimiter, parseCookies, safeEqual, SESSION_MS } from './auth.js';
 import { createWhatsApp } from './whatsapp.js';
 import { createLinkService } from './links.js';
 import { createScheduler } from './scheduler.js';
 import { renderTemplate, SAMPLE_OFFER, PLACEHOLDERS } from './template.js';
 import { CATEGORIAS, ORDENS, POR_PAGINA } from './afiliados.js';
 
-export function buildApp({ db, wa, links, scheduler }) {
+const LOCAL_HOST = /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i;
+// Páginas e rotas que funcionam sem login.
+const PUBLIC_PATHS = new Set(['/login.html', '/style.css', '/healthz', '/favicon.ico', '/api/login']);
+
+export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, panelPassword = PANEL_PASSWORD }) {
   const app = express();
   app.disable('x-powered-by');
+  app.set('trust proxy', 1); // Nginx na frente: req.ip e req.secure vêm do X-Forwarded-*
   app.use(express.json({ limit: '5mb' })); // a lista da Central de Afiliados vem pela extensão
 
-  // Proteção: o painel só atende o próprio computador, e só quem veio da própria página.
+  const auth = createAuth({ db, password: panelPassword });
+  const loginLimiter = createLimiter({ max: 5, windowMs: 15 * 60 * 1000 });
+  const extLimiter = createLimiter({ max: 20, windowMs: 15 * 60 * 1000 });
+  const enderecoPublico = publicHost ? `https://${publicHost}` : `http://127.0.0.1:${PORT}`;
+  app.locals.auth = auth;
+
+  // ---------- cabeçalhos de segurança ----------
+  app.use((req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    if (req.secure) res.setHeader('Strict-Transport-Security', 'max-age=15552000; includeSubDomains');
+    next();
+  });
+
+  // ---------- Host e Origin ----------
+  // O painel só atende o próprio computador ou o domínio público, e só quem veio da própria página.
   // (Evita que um site qualquer aberto no seu navegador mande comandos para cá.)
   app.use('/api', (req, res, next) => {
     if (req.path.startsWith('/ext/')) return next(); // a extensão usa token
-    const host = String(req.headers.host || '');
-    if (!/^(localhost|127\.0\.0\.1)(:\d+)?$/.test(host)) return res.status(403).json({ erro: 'Host não permitido' });
+    const host = String(req.headers.host || '').toLowerCase();
+    const local = LOCAL_HOST.test(host);
+    if (!local && !(publicHost && host === publicHost)) return res.status(403).json({ erro: 'Host não permitido' });
     const origin = req.headers.origin;
-    if (origin && origin !== `http://${host}`) return res.status(403).json({ erro: 'Origem não permitida' });
+    if (origin) {
+      const ok = new Set();
+      if (local) ok.add(`http://${host}`);
+      if (publicHost) ok.add(`https://${publicHost}`);
+      if (!ok.has(origin)) return res.status(403).json({ erro: 'Origem não permitida' });
+    }
     next();
+  });
+
+  app.get('/healthz', (req, res) => res.json({ ok: true }));
+
+  // ---------- extensão do Chrome (autenticada por token; fora do login) ----------
+  const extAuth = (req, res, next) => {
+    const ip = req.ip;
+    if (extLimiter.blocked(ip)) return res.status(429).json({ erro: 'Muitas tentativas com token inválido' });
+    if (!safeEqual(req.headers['x-token'], getSetting(db, 'ext_token'))) { extLimiter.fail(ip); return res.status(401).json({ erro: 'Token inválido' }); }
+    extLimiter.reset(ip);
+    next();
+  };
+  // Long-poll: manda os cabeçalhos na hora (a extensão já sabe que está conectada)
+  // e só depois o corpo, quando chegar um pedido ou der 20 s.
+  app.get('/api/ext/poll', extAuth, async (req, res) => {
+    res.status(200).type('application/json').flushHeaders();
+    res.end(JSON.stringify({ job: await links.poll(20000) }));
+  });
+  app.post('/api/ext/result', extAuth, (req, res) => {
+    const ok = links.submit(Number(req.body.id), { ok: !!req.body.ok, link: req.body.link, data: req.body.data, error: req.body.error });
+    res.json({ ok });
+  });
+
+  // ---------- login ----------
+  const cookieOpts = (req) => ({ httpOnly: true, sameSite: 'strict', secure: req.secure || !!publicHost, path: '/' });
+  app.post('/api/login', (req, res) => {
+    if (!auth.enabled()) return res.json({ ok: true });
+    const ip = req.ip;
+    if (loginLimiter.blocked(ip)) {
+      const s = loginLimiter.retryAfterS(ip);
+      return res.status(429).json({ erro: `Muitas tentativas. Tente de novo em ${Math.ceil(s / 60)} min.` });
+    }
+    const sid = auth.login(String(req.body?.senha ?? ''), ip);
+    if (!sid) { loginLimiter.fail(ip); return res.status(401).json({ erro: 'Senha incorreta' }); }
+    loginLimiter.reset(ip);
+    res.cookie('sid', sid, { ...cookieOpts(req), maxAge: SESSION_MS });
+    res.json({ ok: true });
+  });
+  app.post('/api/logout', (req, res) => {
+    auth.logout(parseCookies(req.headers.cookie).sid);
+    res.clearCookie('sid', cookieOpts(req));
+    res.json({ ok: true });
+  });
+
+  // ---------- exige sessão em tudo o que vem abaixo (painel e API) ----------
+  app.use((req, res, next) => {
+    if (!auth.enabled() || PUBLIC_PATHS.has(req.path)) return next();
+    if (auth.sessionFrom(parseCookies(req.headers.cookie).sid)) return next();
+    if (req.path.startsWith('/api/')) return res.status(401).json({ erro: 'Faça login para continuar' });
+    res.redirect(302, '/login.html');
   });
   app.use(express.static(path.join(ROOT, 'public')));
 
@@ -40,6 +118,7 @@ export function buildApp({ db, wa, links, scheduler }) {
       link_mode: getSetting(db, 'link_mode', 'extension'),
     },
     ext_token: getSetting(db, 'ext_token'), porta: PORT,
+    endereco_publico: enderecoPublico, auth: auth.enabled(),
     placeholders: PLACEHOLDERS,
     afiliados: { categorias: CATEGORIAS, ordens: ORDENS, por_pagina: POR_PAGINA },
   })));
@@ -142,22 +221,6 @@ export function buildApp({ db, wa, links, scheduler }) {
   }));
   app.get('/api/simulados', wrap(() => wa.simulated.slice(-50)));
 
-  // ---------- extensão do Chrome (autenticada por token) ----------
-  const extAuth = (req, res, next) => {
-    if (req.headers['x-token'] !== getSetting(db, 'ext_token')) return res.status(401).json({ erro: 'Token inválido' });
-    next();
-  };
-  // Long-poll: manda os cabeçalhos na hora (a extensão já sabe que está conectada)
-  // e só depois o corpo, quando chegar um pedido de link ou der 20 s.
-  app.get('/api/ext/poll', extAuth, async (req, res) => {
-    res.status(200).type('application/json').flushHeaders();
-    res.end(JSON.stringify({ job: await links.poll(20000) }));
-  });
-  app.post('/api/ext/result', extAuth, (req, res) => {
-    const ok = links.submit(Number(req.body.id), { ok: !!req.body.ok, link: req.body.link, data: req.body.data, error: req.body.error });
-    res.json({ ok });
-  });
-
   return app;
 }
 
@@ -168,10 +231,32 @@ if (import.meta.url === `file://${process.argv[1].replace(/\\/g, '/')}` || proce
   const links = createLinkService({ getMode: () => (DRY_RUN ? 'fake' : getSetting(db, 'link_mode', 'extension')) });
   const scheduler = createScheduler({ db, wa, links, fast: FAST });
   const app = buildApp({ db, wa, links, scheduler });
+
+  if (!app.locals.auth.enabled()) {
+    if (PUBLIC_HOST) {
+      console.error('ERRO: PUBLIC_HOST está definido mas o painel não tem senha. Defina PANEL_PASSWORD (ou rode npm run senha) antes de expor o painel.');
+      process.exit(1);
+    }
+    console.warn('AVISO: painel sem senha (só localhost). Para proteger, defina PANEL_PASSWORD ou rode: npm run senha');
+  }
+
   if (DRY_RUN) wa.connect();
-  app.listen(PORT, '127.0.0.1', () => {
-    console.log(`\nDisparador ML rodando em http://localhost:${PORT}${DRY_RUN ? '  (MODO SIMULAÇÃO: nada é enviado de verdade)' : ''}\n`);
+  const server = app.listen(PORT, '127.0.0.1', () => {
+    console.log(`\nDisparador ML rodando em http://localhost:${PORT}${PUBLIC_HOST ? ` (público: https://${PUBLIC_HOST})` : ''}${DRY_RUN ? '  (MODO SIMULAÇÃO: nada é enviado de verdade)' : ''}\n`);
     wa.autoStart();
     scheduler.start();
   });
+
+  // Encerramento limpo (systemd manda SIGTERM): para o agendador, fecha o servidor e o banco.
+  let encerrando = false;
+  const encerrar = (sinal) => {
+    if (encerrando) return; encerrando = true;
+    console.log(`\nRecebi ${sinal}: encerrando…`);
+    scheduler.stop();
+    server.close(() => { try { db.close(); } catch { /* já fechado */ } process.exit(0); });
+    server.closeAllConnections?.(); // derruba long-polls abertos
+    setTimeout(() => process.exit(0), 5000).unref();
+  };
+  process.on('SIGTERM', () => encerrar('SIGTERM'));
+  process.on('SIGINT', () => encerrar('SIGINT'));
 }

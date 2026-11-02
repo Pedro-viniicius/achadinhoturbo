@@ -28,6 +28,8 @@ CREATE TABLE IF NOT EXISTS log (
   id INTEGER PRIMARY KEY, ts INTEGER, rule_id INTEGER, rule_name TEXT, level TEXT,
   group_name TEXT, offer_title TEXT, message TEXT);
 CREATE INDEX IF NOT EXISTS idx_log_ts ON log (ts DESC);
+CREATE TABLE IF NOT EXISTS sessions (
+  id TEXT PRIMARY KEY, created_at INTEGER, expires_at INTEGER, ip TEXT);
 `;
 
 export const DEFAULT_TEMPLATE = [

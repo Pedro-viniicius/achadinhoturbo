@@ -90,8 +90,8 @@ async function buscarOfertas(job) {
     const j = await naCentral(API_LISTA, corpo);
     const model = j?.polycard_client_model;
     if (!model) throw new Error('a Central de Afiliados mudou o formato da lista');
+    // devolve uma entrada por pedido, na mesma ordem (o servidor intercala as categorias)
     paginas.push({ polycard_client_model: { polycard_context: { url_prefix: model.polycard_context?.url_prefix }, polycards: model.polycards || [] } });
-    if (!model.polycards?.length) break; // acabaram os produtos
   }
   return paginas;
 }

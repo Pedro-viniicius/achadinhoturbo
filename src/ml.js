@@ -6,7 +6,7 @@
 // leitura automática do produto falhar.
 
 import { discountPct } from './template.js';
-import { hubBodies, parseHubPages } from './afiliados.js';
+import { hubBodies, hubCategorias, parseHubPages } from './afiliados.js';
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36';
 
@@ -148,7 +148,7 @@ export async function candidates(rule, deps = {}) {
     try { pages = await deps.links.requestOffers({ paginas: hubBodies(cfg) }); } catch (e) {
       throw new Error(`a Central de Afiliados não devolveu a lista (${e.message})`);
     }
-    return parseHubPages(pages);
+    return parseHubPages(pages, hubCategorias(cfg).length);
   }
   if (rule.source_type === 'search') {
     if (!cfg.query) throw new Error('a regra de busca está sem a palavra-chave');

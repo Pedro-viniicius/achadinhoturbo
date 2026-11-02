@@ -93,3 +93,18 @@ legend { font-weight:700; padding:0 6px; }
 .modelos { display:flex; flex-wrap:wrap; gap:8px; }
 button.perigo.leve { color:var(--err); }
 .balao strong { font-weight:700; }
+
+/* ---------- tela de login ---------- */
+body.login { display:grid; place-items:center; min-height:100vh; padding:16px; }
+.login-caixa { width:min(400px, 100%); display:grid; gap:18px; justify-items:center; }
+.login-caixa .brand { margin:0; }
+.login-caixa .card { width:100%; display:grid; gap:14px; margin:0; }
+.login-caixa h1 { font-size:22px; }
+.login-caixa button { width:100%; padding:11px; }
+.login-erro { margin:0; color:var(--err); font-weight:600; }
+
+.sair { margin-top:16px; width:100%; text-align:left; }
+
+.sub-campo { border:1px solid var(--line); border-radius:10px; padding:10px 14px 12px; margin:0; display:grid; gap:8px; }
+.sub-campo legend { font-weight:600; font-size:14px; padding:0 6px; }
+.grupos.cats { max-height:180px; }

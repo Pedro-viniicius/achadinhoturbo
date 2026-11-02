@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Entrar · Disparador ML</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="login">
+<main class="login-caixa">
+  <div class="brand">Disparador <span>ML</span></div>
+  <form id="f" class="card" autocomplete="off">
+    <h1>Entrar</h1>
+    <p class="sub">Painel pessoal. Use a senha definida na instalação.</p>
+    <label class="campo">Senha<input id="senha" name="senha" type="password" autocomplete="current-password" required autofocus></label>
+    <p id="erro" class="login-erro" role="alert" hidden></p>
+    <button class="pri" id="entrar" type="submit">Entrar</button>
+  </form>
+</main>
+<script>
+  const $ = (s) => document.querySelector(s);
+  // Já logado? Vai direto para o painel.
+  fetch('/api/state').then((r) => { if (r.ok) location.replace('/'); }).catch(() => {});
+  $('#f').onsubmit = async (ev) => {
+    ev.preventDefault();
+    const b = $('#entrar'); const e = $('#erro'); b.disabled = true; e.hidden = true;
+    try {
+      const r = await fetch('/api/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ senha: $('#senha').value }) });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.erro || 'Não foi possível entrar (' + r.status + ')');
+      location.replace('/');
+    } catch (err) {
+      e.textContent = err.message; e.hidden = false; $('#senha').select();
+    } finally { b.disabled = false; }
+  };
+</script>
+</body>
+</html>
