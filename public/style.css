@@ -152,7 +152,8 @@ body.login { display:grid; place-items:center; min-height:100vh; padding:16px; }
 .legenda .c1 { background:var(--c1); } .legenda .c2 { background:var(--c2); } .legenda .c3 { background:var(--c3); }
 .viz .grid { stroke:var(--line); stroke-width:1; } .viz .tick { fill:var(--muted); font-size:11px; font-family:var(--sans); }
 .viz .hit { fill:transparent; } .viz .hit:hover { fill:rgba(127,127,127,.10); }
-.tip { position:fixed; z-index:50; background:var(--ink); color:var(--surface); font-size:12px; padding:6px 9px; border-radius:6px; pointer-events:none; max-width:260px; }
+.tip { position:fixed; inset:auto; margin:0; border:0; overflow:visible; z-index:50; background:var(--ink); color:var(--surface); font-size:12px; padding:6px 9px; border-radius:6px; pointer-events:none; max-width:260px; }
+.tip:popover-open { display:block; }
 .estado-pill { display:inline-block; font-size:11px; font-weight:600; padding:2px 8px; border-radius:99px; background:var(--paper); color:var(--muted); }
 .estado-pill.on { background:color-mix(in oklab, var(--warn) 18%, var(--paper)); color:var(--warn); }
 .eventos li { display:flex; gap:10px; padding:8px 0; border-bottom:1px solid var(--line); font-size:14px; }

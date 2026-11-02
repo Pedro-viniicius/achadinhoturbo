@@ -91,10 +91,9 @@ function graficoBarras(serie, porHora) {
   return s + '</svg>';
 }
 function ligarTooltips() {
-  const tip = $('#tip');
   $$('.hit').forEach((el) => {
-    el.onmousemove = (e) => { tip.textContent = el.dataset.tip; tip.hidden = false; tip.style.left = Math.min(e.clientX + 12, innerWidth - 280) + 'px'; tip.style.top = (e.clientY - 36) + 'px'; };
-    el.onmouseleave = () => (tip.hidden = true);
+    el.onmousemove = (e) => { const tip = tipShow(el.dataset.tip); if (tip) { tip.style.left = Math.min(e.clientX + 12, innerWidth - 280) + 'px'; tip.style.top = (e.clientY - 36) + 'px'; } };
+    el.onmouseleave = () => tipHide();
   });
 }
 

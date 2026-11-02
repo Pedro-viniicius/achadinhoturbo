@@ -67,20 +67,32 @@ function q(chave) {
   return `<span class="q" tabindex="0" role="img" aria-label="Ajuda: ${t.replace(/"/g, '&quot;')}" data-tip="${t.replace(/"/g, '&quot;')}">?</span>`;
 }
 
-// Tooltip global (um só elemento, #tip), por delegação: hover, foco e toque.
+// Caixinha de explicação (#tip). Usa a API de popover para ficar acima de qualquer diálogo aberto.
+function tipShow(texto) {
+  const t = document.getElementById('tip'); if (!t) return null;
+  t.textContent = texto; t.hidden = false;
+  if (t.showPopover && !t.matches(':popover-open')) t.showPopover();
+  return t;
+}
+function tipHide() {
+  const t = document.getElementById('tip'); if (!t) return;
+  if (t.hidePopover && t.matches(':popover-open')) t.hidePopover();
+  t.hidden = true; t.classList.remove('tip-ajuda');
+}
+
+// Ícones "?": por delegação, com hover, foco e toque.
 (() => {
   let atual = null;
-  const tip = () => document.getElementById('tip');
   function mostrar(el) {
-    const t = tip(); if (!t) return;
-    t.textContent = el.dataset.tip; t.hidden = false; t.classList.add('tip-ajuda');
+    const t = tipShow(el.dataset.tip); if (!t) return;
+    t.classList.add('tip-ajuda');
     const r = el.getBoundingClientRect(); const w = Math.min(320, innerWidth - 24);
     t.style.maxWidth = w + 'px';
     const left = Math.max(12, Math.min(r.left + r.width / 2 - t.offsetWidth / 2, innerWidth - t.offsetWidth - 12));
     const top = r.bottom + 8 + t.offsetHeight > innerHeight ? r.top - t.offsetHeight - 8 : r.bottom + 8;
     t.style.left = left + 'px'; t.style.top = top + 'px'; atual = el;
   }
-  function esconder() { const t = tip(); if (t && atual) { t.hidden = true; t.classList.remove('tip-ajuda'); atual = null; } }
+  function esconder() { if (atual) { tipHide(); atual = null; } }
   document.addEventListener('mouseover', (e) => { const el = e.target.closest?.('.q'); if (el) mostrar(el); });
   document.addEventListener('mouseout', (e) => { if (e.target.closest?.('.q') === atual) esconder(); });
   document.addEventListener('focusin', (e) => { const el = e.target.closest?.('.q'); if (el) mostrar(el); });
