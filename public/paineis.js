@@ -121,7 +121,7 @@ async function paginaBlocos() {
 }
 function formBloco(b) {
   const novo = !b; b = b || { name: '', tag_id: null, group_jids: [] }; const sel = new Set(b.group_jids); const dlg = $('#dlg');
-  dlg.innerHTML = `<form method="dialog" id="f"><h1>${novo ? 'Novo bloco' : 'Editar bloco'}</h1>
+  dlg.innerHTML = `<form method="dialog" id="f" novalidate><h1>${novo ? 'Novo bloco' : 'Editar bloco'}</h1>
     <div class="grade"><label class="campo"><span>Nome do bloco ${REQ}</span><input name="name" value="${esc(b.name)}" placeholder="Ex.: Casa e cozinha" required></label>
       <label class="campo"><span>Etiqueta do Mercado Livre (opcional) ${q('blocos.etiqueta')}</span><select name="tag_id"><option value="">Nenhuma</option>${S.tags.map((t) => `<option value="${t.id}" ${t.id === b.tag_id ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}</select>
         <small>Para separar o ganho por nicho. Ao criar uma regra a partir deste bloco, a etiqueta já vem marcada.</small></label></div>
@@ -186,7 +186,7 @@ function formLink(l) {
   const novo = !l; l = l || { name: '', slug: '', mode: 'fill', fallback_url: '', limit_members: 1000, reopen_below: 900, group_jids: [] };
   const dlg = $('#dlg'); let ordem = [...l.group_jids];
   const semConvite = (jid) => !S.groups.find((g) => g.jid === jid)?.invite_code;
-  dlg.innerHTML = `<form method="dialog" id="f"><h1>${novo ? 'Novo link' : 'Editar link'}</h1>
+  dlg.innerHTML = `<form method="dialog" id="f" novalidate><h1>${novo ? 'Novo link' : 'Editar link'}</h1>
     <p class="sub" style="margin:-8px 0 12px">As pessoas vão para o primeiro grupo da lista que ainda tem vaga.</p>
     <div class="grade"><label class="campo"><span>Nome ${REQ}</span><input name="name" value="${esc(l.name)}" placeholder="Ex.: Achadinhos de casa" required></label>
       <label class="campo"><span>Endereço do link ${q('links.endereco')}</span><div class="linha" style="align-items:center"><span class="dica" style="white-space:nowrap">${esc((S.st.endereco_publico || '').replace(/^https?:\/\//, ''))}/g/</span><input name="slug" value="${esc(l.slug)}" placeholder="achadinhos" style="flex:1"></div></label></div>

@@ -163,7 +163,7 @@ function formRegra(r) {
   const sel = new Set(r.group_jids); const dlg = $('#dlg');
   const fontes = (r.sources?.length ? r.sources : [{ type: r.source_type || 'afiliados', config: r.source_config || {} }]).map((f) => ({ type: f.type, tag_id: f.tag_id ?? null, config: { ...(f.config || {}) } }));
   const MAXF = S.st.max_fontes || 5;
-  dlg.innerHTML = `<form method="dialog" id="f"><h1>${nova ? 'Nova regra' : 'Editar regra'}</h1>
+  dlg.innerHTML = `<form method="dialog" id="f" novalidate><h1>${nova ? 'Nova regra' : 'Editar regra'}</h1>
     <div class="grade">
       <label class="campo"><span>Nome da regra ${REQ}</span><input name="name" value="${esc(r.name)}" placeholder="Ex.: Tecnologia" required></label>
       <label class="campo"><span>Etiqueta padrão da regra ${REQ} ${q('regras.etiqueta')}</span><select name="tag_id">${opcoes(S.tags, r.tag_id, 'Escolha…')}</select>
@@ -270,7 +270,7 @@ async function verOfertas(r) {
 function paginaEtiquetas() {
   $('#pagina').innerHTML = `<div class="topo"><div><h1>Etiquetas de afiliado ${q('etiquetas')}</h1>
     <p class="sub">Cadastre aqui os nomes das suas etiquetas do programa de afiliados do Mercado Livre, escritos exatamente como aparecem lá. Depois escolha qual usar em cada regra.</p></div></div>
-    <form class="card" id="nt"><div class="linha"><label class="campo" style="flex:1;min-width:200px"><span>Nome da etiqueta ${REQ}</span><input name="name" placeholder="Ex.: achadosdesejo" style="width:100%"></label>
+    <form class="card" id="nt" novalidate><div class="linha"><label class="campo" style="flex:1;min-width:200px"><span>Nome da etiqueta ${REQ}</span><input name="name" placeholder="Ex.: achadosdesejo" style="width:100%"></label>
       <label class="campo" style="flex:1;min-width:200px"><span>Anotação (opcional)</span><input name="note" placeholder="Ex.: grupo de casa"></label><button class="pri" style="align-self:end">Adicionar etiqueta</button></div></form>
     ${S.tags.length ? `<div class="card tabela"><table><thead><tr><th>Etiqueta</th><th>Anotação</th><th>Usada em</th><th></th></tr></thead><tbody>
       ${S.tags.map((t) => { const uso = S.rules.filter((r) => r.tag_id === t.id).length; return `<tr><td><span class="chip etq">${esc(t.name)}</span></td><td>${esc(t.note)}</td><td>${uso} ${uso === 1 ? 'regra' : 'regras'}</td><td style="text-align:right"><button class="perigo leve" data-del="${t.id}">Excluir</button></td></tr>`; }).join('')}
