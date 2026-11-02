@@ -8,6 +8,9 @@ import { createLinkService } from './links.js';
 import { createScheduler } from './scheduler.js';
 import { renderTemplate, SAMPLE_OFFER, PLACEHOLDERS } from './template.js';
 import { CATEGORIAS, ORDENS, POR_PAGINA } from './afiliados.js';
+import { overview, resumo, evasaoDoDia, periodRange, startOfDay } from './analytics.js';
+import { MODOS, LIMITE_MAX, slugify, parseLink, pickGroup, statusDosGrupos } from './rotador.js';
+import crypto from 'node:crypto';
 
 const LOCAL_HOST = /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i;
 // Páginas e rotas que funcionam sem login.
@@ -73,6 +76,25 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
     res.json({ ok });
   });
 
+  // ---------- rotacionador: link público /g/<slug> (sem login; é o que as pessoas clicam) ----------
+  const all = (sql, ...p) => db.prepare(sql).all(...p);
+  const one = (sql, ...p) => db.prepare(sql).get(...p);
+  const groupsByJid = () => Object.fromEntries(all('SELECT jid, name, size, invite_code FROM groups').map((g) => [g.jid, g]));
+  app.get('/g/:slug', (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    const link = parseLink(one('SELECT * FROM links WHERE slug = ?', String(req.params.slug).toLowerCase()));
+    if (!link || !link.enabled) return res.status(404).type('text/plain').send('Link não encontrado.');
+    const { group, state } = pickGroup(link, groupsByJid());
+    db.prepare('UPDATE links SET state = ? WHERE id = ?').run(JSON.stringify(state), link.id);
+    if (!group) {
+      if (link.fallback_url) return res.redirect(302, link.fallback_url);
+      return res.status(503).type('text/html').send('<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Grupos lotados</title><p style="font:16px system-ui;padding:32px;text-align:center">Todos os grupos estão lotados no momento. Tente de novo mais tarde.</p>');
+    }
+    const ipHash = crypto.createHash('sha256').update(`${req.ip}|${new Date().toDateString()}`).digest('hex').slice(0, 16);
+    db.prepare('INSERT INTO link_clicks (ts, link_id, jid, ip_hash) VALUES (?,?,?,?)').run(Date.now(), link.id, group.jid, ipHash);
+    res.redirect(302, `https://chat.whatsapp.com/${group.invite_code}`);
+  });
+
   // ---------- login ----------
   const cookieOpts = (req) => ({ httpOnly: true, sameSite: 'strict', secure: req.secure || !!publicHost, path: '/' });
   app.post('/api/login', (req, res) => {
@@ -96,7 +118,7 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
 
   // ---------- exige sessão em tudo o que vem abaixo (painel e API) ----------
   app.use((req, res, next) => {
-    if (!auth.enabled() || PUBLIC_PATHS.has(req.path)) return next();
+    if (!auth.enabled() || PUBLIC_PATHS.has(req.path) || req.path.startsWith('/g/')) return next();
     if (auth.sessionFrom(parseCookies(req.headers.cookie).sid)) return next();
     if (req.path.startsWith('/api/')) return res.status(401).json({ erro: 'Faça login para continuar' });
     res.redirect(302, '/login.html');
@@ -106,9 +128,6 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
   const wrap = (fn) => async (req, res) => {
     try { res.json(await fn(req, res) ?? { ok: true }); } catch (e) { res.status(400).json({ erro: e.message }); }
   };
-  const all = (sql, ...p) => db.prepare(sql).all(...p);
-  const one = (sql, ...p) => db.prepare(sql).get(...p);
-
   // ---------- estado geral ----------
   app.get('/api/state', wrap(() => ({
     whatsapp: wa.state(), extensao: links.status(), simulacao: DRY_RUN,
@@ -121,6 +140,7 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
     endereco_publico: enderecoPublico, auth: auth.enabled(),
     placeholders: PLACEHOLDERS,
     afiliados: { categorias: CATEGORIAS, ordens: ORDENS, por_pagina: POR_PAGINA },
+    modos_link: MODOS, limite_max: LIMITE_MAX,
   })));
 
   app.put('/api/ajustes', wrap((req) => {
@@ -137,7 +157,97 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
   app.post('/api/wa/connect', wrap(async () => { await wa.connect(); }));
   app.post('/api/wa/logout', wrap(async () => { await wa.logout(); }));
   app.post('/api/wa/sync-groups', wrap(async () => { await wa.syncGroups(); }));
-  app.get('/api/groups', wrap(() => all('SELECT * FROM groups ORDER BY name COLLATE NOCASE')));
+  app.get('/api/groups', wrap(() => all(`SELECT g.*, (SELECT json_group_array(block_id) FROM block_groups b WHERE b.jid = g.jid) AS blocks
+    FROM groups g ORDER BY name COLLATE NOCASE`).map((g) => ({ ...g, is_admin: g.is_admin == null ? null : !!g.is_admin, blocks: JSON.parse(g.blocks || '[]') }))));
+  app.post('/api/groups/:jid/invite', wrap(async (req) => ({ invite_code: await wa.fetchInvite(req.params.jid) })));
+  app.put('/api/groups/:jid/invite', wrap((req) => {
+    const m = String(req.body.url || '').trim().match(/(?:chat\.whatsapp\.com\/(?:invite\/)?)?([A-Za-z0-9_-]{10,})$/);
+    if (!m) throw new Error('Cole o link completo, como https://chat.whatsapp.com/XXXXXXXX');
+    if (!one('SELECT 1 FROM groups WHERE jid = ?', req.params.jid)) throw new Error('Grupo não encontrado.');
+    db.prepare('UPDATE groups SET invite_code = ? WHERE jid = ?').run(m[1], req.params.jid);
+    return { invite_code: m[1] };
+  }));
+
+  // ---------- blocos de análise ----------
+  const blockFromBody = (b) => {
+    const name = String(b.name || '').trim(); if (!name) throw new Error('Dê um nome ao bloco.');
+    return { name, tag_id: nz(b.tag_id), note: String(b.note || ''), jids: Array.isArray(b.group_jids) ? [...new Set(b.group_jids)] : [] };
+  };
+  const saveBlockGroups = (id, jids) => {
+    db.prepare('DELETE FROM block_groups WHERE block_id = ?').run(id);
+    const ins = db.prepare('INSERT OR IGNORE INTO block_groups (block_id, jid) VALUES (?,?)');
+    for (const j of jids) ins.run(id, j);
+  };
+  app.get('/api/blocks', wrap(() => {
+    const hoje = periodRange('hoje');
+    return all('SELECT * FROM blocks ORDER BY name COLLATE NOCASE').map((b) => {
+      const jids = all('SELECT jid FROM block_groups WHERE block_id = ?', b.id).map((r) => r.jid);
+      const grupos = jids.length ? all(`SELECT jid, name, size FROM groups WHERE jid IN (${jids.map(() => '?').join(',')})`, ...jids) : [];
+      return { ...b, group_jids: jids, grupos, membros: grupos.reduce((s, g) => s + (g.size || 0), 0), hoje: resumo(db, { ...hoje, jids }) };
+    });
+  }));
+  app.post('/api/blocks', wrap((req) => {
+    const b = blockFromBody(req.body);
+    const id = db.prepare('INSERT INTO blocks (name, tag_id, note, created_at) VALUES (?,?,?,?)').run(b.name, b.tag_id, b.note, Date.now()).lastInsertRowid;
+    saveBlockGroups(id, b.jids); return { id };
+  }));
+  app.put('/api/blocks/:id', wrap((req) => {
+    const b = blockFromBody(req.body);
+    db.prepare('UPDATE blocks SET name = ?, tag_id = ?, note = ? WHERE id = ?').run(b.name, b.tag_id, b.note, req.params.id);
+    saveBlockGroups(Number(req.params.id), b.jids);
+  }));
+  app.delete('/api/blocks/:id', wrap((req) => {
+    db.prepare('DELETE FROM blocks WHERE id = ?').run(req.params.id);
+    db.prepare('DELETE FROM block_groups WHERE block_id = ?').run(req.params.id);
+  }));
+
+  // ---------- visão geral ----------
+  app.get('/api/overview', wrap((req) => {
+    const q = req.query; const now = Date.now();
+    const range = periodRange(String(q.periodo || 'hoje'), now, { de: q.de, ate: q.ate });
+    const jids = q.bloco ? all('SELECT jid FROM block_groups WHERE block_id = ?', q.bloco).map((r) => r.jid) : null;
+    const o = overview(db, { ...range, jids, now });
+    o.anterior = { ...o.anterior, ...resumo(db, { ...o.anterior, jids }) };
+    o.evasao.ontem = evasaoDoDia(db, startOfDay(now) - 86400000, jids);
+    return o;
+  }));
+
+  // ---------- rotacionador: cadastro ----------
+  const linkFromBody = (b, id = null) => {
+    const name = String(b.name || '').trim(); if (!name) throw new Error('Dê um nome ao link.');
+    const slug = slugify(b.slug || name); if (!slug) throw new Error('Endereço inválido: use letras e números.');
+    if (one('SELECT id FROM links WHERE slug = ? AND id IS NOT ?', slug, id)) throw new Error('Já existe um link com esse endereço.');
+    const mode = MODOS.some((m) => m.id === b.mode) ? b.mode : 'fill';
+    const limit = Math.min(Math.max(Number(b.limit_members) || 1000, 2), LIMITE_MAX);
+    const reopen = Math.min(Math.max(Number(b.reopen_below) || Math.floor(limit * 0.9), 1), limit - 1);
+    const fallback = String(b.fallback_url || '').trim();
+    if (fallback && !/^https?:\/\//i.test(fallback)) throw new Error('A URL reserva precisa começar com http:// ou https://');
+    const jids = Array.isArray(b.group_jids) ? [...new Set(b.group_jids)] : [];
+    if (!jids.length) throw new Error('Escolha ao menos um grupo.');
+    return [name, slug, mode, fallback || null, limit, reopen, JSON.stringify(jids)];
+  };
+  const linkView = (row) => {
+    const l = parseLink(row); const hoje = periodRange('hoje');
+    return {
+      ...l, url: `${enderecoPublico}/g/${l.slug}`, grupos: statusDosGrupos(l, groupsByJid()),
+      cliques_total: one('SELECT COUNT(*) AS n FROM link_clicks WHERE link_id = ?', l.id).n,
+      cliques_hoje: one('SELECT COUNT(*) AS n FROM link_clicks WHERE link_id = ? AND ts BETWEEN ? AND ?', l.id, hoje.de, hoje.ate).n,
+    };
+  };
+  app.get('/api/links', wrap(() => all('SELECT * FROM links ORDER BY id').map(linkView)));
+  app.post('/api/links', wrap((req) => {
+    const v = linkFromBody(req.body);
+    return { id: db.prepare('INSERT INTO links (name, slug, mode, fallback_url, limit_members, reopen_below, group_jids, created_at) VALUES (?,?,?,?,?,?,?,?)').run(...v, Date.now()).lastInsertRowid };
+  }));
+  app.put('/api/links/:id', wrap((req) => {
+    const v = linkFromBody(req.body, Number(req.params.id));
+    db.prepare("UPDATE links SET name = ?, slug = ?, mode = ?, fallback_url = ?, limit_members = ?, reopen_below = ?, group_jids = ?, state = '{}' WHERE id = ?").run(...v, req.params.id);
+  }));
+  app.post('/api/links/:id/enabled', wrap((req) => { db.prepare('UPDATE links SET enabled = ? WHERE id = ?').run(req.body.enabled ? 1 : 0, req.params.id); }));
+  app.delete('/api/links/:id', wrap((req) => {
+    db.prepare('DELETE FROM links WHERE id = ?').run(req.params.id);
+    db.prepare('DELETE FROM link_clicks WHERE link_id = ?').run(req.params.id);
+  }));
 
   // ---------- etiquetas ----------
   app.get('/api/tags', wrap(() => all('SELECT * FROM tags ORDER BY name COLLATE NOCASE')));
@@ -150,6 +260,8 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
   app.delete('/api/tags/:id', wrap((req) => {
     const used = one('SELECT name FROM rules WHERE tag_id = ? LIMIT 1', req.params.id);
     if (used) throw new Error(`A regra "${used.name}" usa esta etiqueta. Troque a etiqueta dela antes.`);
+    const bloco = one('SELECT name FROM blocks WHERE tag_id = ? LIMIT 1', req.params.id);
+    if (bloco) throw new Error(`O bloco "${bloco.name}" usa esta etiqueta. Troque a etiqueta dele antes.`);
     db.prepare('DELETE FROM tags WHERE id = ?').run(req.params.id);
   }));
 

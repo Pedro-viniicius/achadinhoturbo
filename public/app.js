@@ -3,7 +3,7 @@ const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 // Imita a formatação do WhatsApp na prévia: *negrito*, ~riscado~, _itálico_
 const zap = (t) => esc(t).replace(/\*([^*\n]+)\*/g, '<strong>$1</strong>').replace(/~([^~\n]+)~/g, '<s>$1</s>').replace(/(^|[\s(])_([^_\n]+)_(?=[\s).,!?]|$)/g, '$1<em>$2</em>');
-const S = { st: null, tags: [], templates: [], groups: [], rules: [] };
+const S = { st: null, tags: [], templates: [], groups: [], rules: [], blocks: [] };
 let ultimoQr = null; let editando = null;
 
 async function api(path, method = 'GET', body) {
@@ -21,8 +21,8 @@ const tentar = (fn) => async (...a) => { try { await fn(...a); } catch (e) { avi
 const hora = (ms) => new Date(ms).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
 async function carregar() {
-  [S.st, S.tags, S.templates, S.groups, S.rules] = await Promise.all([
-    api('/state'), api('/tags'), api('/templates'), api('/groups'), api('/rules')]);
+  [S.st, S.tags, S.templates, S.groups, S.rules, S.blocks] = await Promise.all([
+    api('/state'), api('/tags'), api('/templates'), api('/groups'), api('/rules'), api('/blocks')]);
 }
 
 // ---------- faixa de status ----------
@@ -132,7 +132,7 @@ function formRegra(r) {
       <label class="campo">Preço máximo (R$)<input name="max_price" type="number" step="0.01" min="0" value="${r.max_price ?? ''}" placeholder="Sem máximo"></label>
       <label class="campo">Desconto mínimo (%)<input name="min_discount" type="number" min="0" max="99" value="${r.min_discount ?? ''}" placeholder="Qualquer"></label></div></fieldset>
     <fieldset><legend>Grupos que vão receber <span id="cont" class="dica"></span></legend>
-      ${S.groups.length ? `<div class="linha"><input id="busca" placeholder="Buscar grupo…" style="flex:1"><button type="button" id="todos">Marcar visíveis</button><button type="button" id="nenhum">Limpar</button></div>
+      ${S.groups.length ? `<div class="linha">${S.blocks?.length ? `<select id="bloco-atalho" style="width:auto"><option value="">Marcar um bloco…</option>${S.blocks.map((b) => `<option value="${b.id}">${esc(b.name)} (${b.group_jids.length})</option>`).join('')}</select>` : ''}<input id="busca" placeholder="Buscar grupo…" style="flex:1"><button type="button" id="todos">Marcar visíveis</button><button type="button" id="nenhum">Limpar</button></div>
       <div class="grupos" id="gr">${S.groups.map((g) => `<label data-n="${esc(g.name.toLowerCase())}"><input type="checkbox" value="${esc(g.jid)}" ${sel.has(g.jid) ? 'checked' : ''}>${esc(g.name)}<small>${g.size ?? ''}</small></label>`).join('')}</div>`
         : '<div class="dica">Nenhum grupo carregado. Conecte o WhatsApp na aba “WhatsApp e grupos”.</div>'}</fieldset>
     <fieldset><legend>Ritmo de envio</legend><div class="grade">
@@ -153,6 +153,12 @@ function formRegra(r) {
     $('#busca').oninput = (e) => $$('#gr label').forEach((l) => (l.hidden = !l.dataset.n.includes(e.target.value.toLowerCase())));
     $('#todos').onclick = () => { $$('#gr label:not([hidden]) input').forEach((i) => (i.checked = true)); conta(); };
     $('#nenhum').onclick = () => { $$('#gr input').forEach((i) => (i.checked = false)); conta(); };
+    if ($('#bloco-atalho')) $('#bloco-atalho').onchange = (e) => {
+      const b = S.blocks.find((x) => String(x.id) === e.target.value); if (!b) return;
+      $$('#gr input').forEach((i) => { if (b.group_jids.includes(i.value)) i.checked = true; });
+      if (b.tag_id) $('select[name=tag_id]', dlg).value = b.tag_id;
+      conta(); e.target.value = '';
+    };
   }
   $('#cancelar').onclick = () => dlg.close();
   $('#f').onsubmit = tentar(async (ev) => {
@@ -233,7 +239,7 @@ function paginaWhatsapp() {
   if (w.status === 'open') {
     corpo = `<div class="card"><h2>Conectado</h2><p class="sub">Número: ${esc(String(w.me || '').split(':')[0].split('@')[0])}. ${S.groups.length} grupos encontrados.</p>
       <div class="acoes" style="border:0;padding:0"><button id="sync">Atualizar lista de grupos</button><button id="sair" class="perigo">Desconectar</button></div></div>
-      <div class="card tabela"><table><thead><tr><th>Grupo</th><th>Participantes</th></tr></thead><tbody>${S.groups.map((g) => `<tr><td>${esc(g.name)}</td><td>${g.size ?? ''}</td></tr>`).join('') || '<tr><td colspan="2">Nenhum grupo. Toque em “Atualizar lista de grupos”.</td></tr>'}</tbody></table></div>`;
+      ${tabelaGrupos(S.groups)}`;
   } else if (w.status === 'qr') {
     corpo = `<div class="card qr"><h2>Leia o QR no celular</h2><img src="${w.qr}" alt="QR Code para conectar o WhatsApp">
       <ol class="passos"><li>Abra o WhatsApp Business no celular.</li><li>Toque nos três pontos e em “Aparelhos conectados”.</li><li>Toque em “Conectar um aparelho” e aponte para este QR.</li></ol>
@@ -284,9 +290,9 @@ function paginaAjustes() {
 }
 
 // ---------- navegação e atualização ----------
-const ROTAS = { regras: paginaRegras, etiquetas: paginaEtiquetas, templates: () => paginaTemplates(), whatsapp: paginaWhatsapp, historico: () => paginaHistorico(), ajustes: paginaAjustes };
+const ROTAS = { visao: () => paginaVisao(), blocos: () => paginaBlocos(), links: () => paginaLinks(), regras: paginaRegras, etiquetas: paginaEtiquetas, templates: () => paginaTemplates(), whatsapp: paginaWhatsapp, historico: () => paginaHistorico(), ajustes: paginaAjustes };
 function ir() {
-  const r = (location.hash || '#regras').slice(1); const f = ROTAS[r] || paginaRegras;
+  const r = (location.hash || '#visao').slice(1); const f = ROTAS[r] || paginaVisao;
   $$('#nav a').forEach((a) => a.classList.toggle('on', a.getAttribute('href') === '#' + r));
   f();
 }
@@ -295,7 +301,7 @@ async function atualizarEstado(forcar) {
   S.st = await api('/state'); faixa();
   const depois = JSON.stringify([S.st.whatsapp.status, S.st.whatsapp.qr]);
   if (location.hash === '#whatsapp' && (forcar || antes !== depois)) {
-    if (S.st.whatsapp.status === 'open') S.groups = await api('/groups');
+    if (S.st.whatsapp.status === 'open') [S.groups, S.blocks] = await Promise.all([api('/groups'), api('/blocks')]);
     paginaWhatsapp();
   }
 }

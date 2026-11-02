@@ -30,7 +30,29 @@ CREATE TABLE IF NOT EXISTS log (
 CREATE INDEX IF NOT EXISTS idx_log_ts ON log (ts DESC);
 CREATE TABLE IF NOT EXISTS sessions (
   id TEXT PRIMARY KEY, created_at INTEGER, expires_at INTEGER, ip TEXT);
+CREATE TABLE IF NOT EXISTS blocks (
+  id INTEGER PRIMARY KEY, name TEXT NOT NULL, tag_id INTEGER, note TEXT DEFAULT '', created_at INTEGER);
+CREATE TABLE IF NOT EXISTS block_groups (block_id INTEGER, jid TEXT, PRIMARY KEY (block_id, jid));
+CREATE TABLE IF NOT EXISTS group_events (
+  id INTEGER PRIMARY KEY, ts INTEGER, jid TEXT, participant TEXT, action TEXT, by_link INTEGER DEFAULT 0, actor TEXT);
+CREATE INDEX IF NOT EXISTS idx_gev ON group_events (jid, participant, ts);
+CREATE INDEX IF NOT EXISTS idx_gev_ts ON group_events (ts);
+CREATE TABLE IF NOT EXISTS group_reads (
+  jid TEXT, participant TEXT, day TEXT, ts INTEGER, PRIMARY KEY (jid, participant, day));
+CREATE TABLE IF NOT EXISTS links (
+  id INTEGER PRIMARY KEY, name TEXT NOT NULL, slug TEXT UNIQUE NOT NULL, mode TEXT DEFAULT 'fill',
+  fallback_url TEXT, limit_members INTEGER DEFAULT 1000, reopen_below INTEGER DEFAULT 900,
+  group_jids TEXT DEFAULT '[]', state TEXT DEFAULT '{}', enabled INTEGER DEFAULT 1, created_at INTEGER);
+CREATE TABLE IF NOT EXISTS link_clicks (id INTEGER PRIMARY KEY, ts INTEGER, link_id INTEGER, jid TEXT, ip_hash TEXT);
+CREATE INDEX IF NOT EXISTS idx_clicks ON link_clicks (link_id, ts);
 `;
+
+// Colunas acrescentadas depois da primeira versão (ALTER TABLE só se faltar).
+const EXTRA_COLUMNS = [
+  ['groups', 'invite_code', 'TEXT'],
+  ['groups', 'is_admin', 'INTEGER'],
+  ['groups', 'description', 'TEXT'],
+];
 
 export const DEFAULT_TEMPLATE = [
   '*{TITULO_PRODUTO}*',
@@ -56,6 +78,9 @@ export function openDb(dir) {
   const db = new DatabaseSync(path.join(dir, 'disparador.db'));
   db.exec('PRAGMA journal_mode = WAL;');
   db.exec(SCHEMA);
+  for (const [table, col, type] of EXTRA_COLUMNS) {
+    if (!db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === col)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${type}`);
+  }
   if (!db.prepare('SELECT 1 FROM templates LIMIT 1').get()) {
     db.prepare('INSERT INTO templates (name, body, created_at) VALUES (?, ?, ?)')
       .run('Padrão', DEFAULT_TEMPLATE, Date.now());
