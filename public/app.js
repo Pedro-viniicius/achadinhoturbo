@@ -102,6 +102,21 @@ async function recarregarRegras() { S.rules = await api('/rules'); listaRegras()
 function opcoes(lista, sel, vazio) {
   return (vazio ? `<option value="">${vazio}</option>` : '') + lista.map((o) => `<option value="${o.id}" ${o.id === sel ? 'selected' : ''}>${esc(o.name)}</option>`).join('');
 }
+/** Lista de grupos (#gr) com busca (#busca) e o botão "Só marcados" (#so-marcados). Devolve a função que reaplica o filtro. */
+function filtroGrupos(dlg, conta) {
+  const busca = $('#busca', dlg); const so = $('#so-marcados', dlg);
+  const aplica = () => {
+    const q = (busca?.value || '').toLowerCase(); const soMarcados = so?.getAttribute('aria-pressed') === 'true';
+    let n = 0;
+    $$('#gr label', dlg).forEach((l) => { const marcado = $('input', l).checked; if (marcado) n++; l.hidden = !l.dataset.n.includes(q) || (soMarcados && !marcado); });
+    if (so) { so.textContent = `Só marcados (${n})`; so.classList.toggle('on', soMarcados); }
+    conta();
+  };
+  if (busca) busca.oninput = aplica;
+  if (so) so.onclick = () => { so.setAttribute('aria-pressed', so.getAttribute('aria-pressed') === 'true' ? 'false' : 'true'); aplica(); };
+  $('#gr', dlg).onchange = aplica; aplica();
+  return aplica;
+}
 function fonteHtml(f, i, total) {
   const sc = f.config || {}; const catsSel = new Set(categoriasDe(sc));
   return `<div class="fonte sub-campo" data-i="${i}" style="margin-bottom:10px"><legend>Fonte ${i + 1}${total > 1 ? '' : ''} ${total > 1 ? `<button type="button" data-rm-fonte class="leve perigo" style="float:right;padding:2px 8px">Remover</button>` : ''}</legend>
@@ -145,7 +160,7 @@ function formRegra(r) {
       <label class="campo">Preço máximo (R$)<input name="max_price" type="number" step="0.01" min="0" value="${r.max_price ?? ''}" placeholder="Sem máximo"></label>
       <label class="campo">Desconto mínimo (%)<input name="min_discount" type="number" min="0" max="99" value="${r.min_discount ?? ''}" placeholder="Qualquer"></label></div></fieldset>
     <fieldset><legend>Grupos que vão receber ${q('regras.grupos')} <span id="cont" class="dica"></span></legend>
-      ${S.groups.length ? `<div class="linha">${S.blocks?.length ? `<select id="bloco-atalho" style="width:auto"><option value="">Marcar um bloco…</option>${S.blocks.map((b) => `<option value="${b.id}">${esc(b.name)} (${b.group_jids.length})</option>`).join('')}</select>` : ''}<input id="busca" placeholder="Buscar grupo…" style="flex:1"><button type="button" id="todos">Marcar visíveis</button><button type="button" id="nenhum">Limpar</button></div>
+      ${S.groups.length ? `<div class="linha">${S.blocks?.length ? `<select id="bloco-atalho" style="width:auto"><option value="">Marcar um bloco…</option>${S.blocks.map((b) => `<option value="${b.id}">${esc(b.name)} (${b.group_jids.length})</option>`).join('')}</select>` : ''}<input id="busca" placeholder="Buscar grupo…" style="flex:1"><button type="button" id="so-marcados" class="alt" aria-pressed="false" title="Mostrar só os grupos marcados, para conferir e desmarcar">Só marcados</button><button type="button" id="todos">Marcar visíveis</button><button type="button" id="nenhum">Limpar</button></div>
       <div class="grupos" id="gr">${S.groups.map((g) => `<label data-n="${esc(g.name.toLowerCase())}"><input type="checkbox" value="${esc(g.jid)}" ${sel.has(g.jid) ? 'checked' : ''}>${esc(g.name)}<small>${g.size ?? ''}</small></label>`).join('')}</div>`
         : '<div class="dica">Nenhum grupo carregado. Conecte o WhatsApp na aba “WhatsApp e grupos”.</div>'}</fieldset>
     <fieldset><legend>Ritmo de envio</legend><div class="grade">
@@ -181,15 +196,14 @@ function formRegra(r) {
   $('#add-fonte').onclick = () => { lerFontes(); if (fontes.length < MAXF) fontes.push({ type: 'afiliados', config: { paginas: 3 } }); pintaFontes(); };
   const conta = () => { const n = $$('#gr input:checked', dlg).length; const c = $('#cont'); if (c) c.textContent = `(${n} selecionados)`; };
   if ($('#gr')) {
-    $('#gr').onchange = conta; conta();
-    $('#busca').oninput = (e) => $$('#gr label').forEach((l) => (l.hidden = !l.dataset.n.includes(e.target.value.toLowerCase())));
-    $('#todos').onclick = () => { $$('#gr label:not([hidden]) input').forEach((i) => (i.checked = true)); conta(); };
-    $('#nenhum').onclick = () => { $$('#gr input').forEach((i) => (i.checked = false)); conta(); };
+    const filtro = filtroGrupos(dlg, conta);
+    $('#todos').onclick = () => { $$('#gr label:not([hidden]) input').forEach((i) => (i.checked = true)); filtro(); };
+    $('#nenhum').onclick = () => { $$('#gr input').forEach((i) => (i.checked = false)); filtro(); };
     if ($('#bloco-atalho')) $('#bloco-atalho').onchange = (e) => {
       const b = S.blocks.find((x) => String(x.id) === e.target.value); if (!b) return;
       $$('#gr input').forEach((i) => { if (b.group_jids.includes(i.value)) i.checked = true; });
       if (b.tag_id) $('select[name=tag_id]', dlg).value = b.tag_id;
-      conta(); e.target.value = '';
+      filtro(); e.target.value = '';
     };
   }
   $('#cancelar').onclick = () => dlg.close();

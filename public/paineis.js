@@ -126,11 +126,11 @@ function formBloco(b) {
       <label class="campo"><span>Etiqueta do Mercado Livre (opcional) ${q('blocos.etiqueta')}</span><select name="tag_id"><option value="">Nenhuma</option>${S.tags.map((t) => `<option value="${t.id}" ${t.id === b.tag_id ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}</select>
         <small>Para separar o ganho por nicho. Ao criar uma regra a partir deste bloco, a etiqueta já vem marcada.</small></label></div>
     <fieldset><legend>Grupos do bloco <span id="cont" class="dica"></span></legend>
-      ${S.groups.length ? `<div class="linha"><input id="busca" placeholder="Buscar grupo…" style="flex:1"><button type="button" id="nenhum">Limpar</button></div>
+      ${S.groups.length ? `<div class="linha"><input id="busca" placeholder="Buscar grupo…" style="flex:1"><button type="button" id="so-marcados" class="alt" aria-pressed="false" title="Mostrar só os grupos marcados, para conferir e desmarcar">Só marcados</button><button type="button" id="nenhum">Limpar</button></div>
       <div class="grupos" id="gr">${S.groups.map((g) => `<label data-n="${esc(g.name.toLowerCase())}"><input type="checkbox" value="${esc(g.jid)}" ${sel.has(g.jid) ? 'checked' : ''}>${esc(g.name)}<small>${g.size ?? ''}</small></label>`).join('')}</div>` : '<div class="dica">Nenhum grupo carregado. Conecte o WhatsApp e sincronize os grupos.</div>'}</fieldset>
     <div class="rodape"><button type="button" id="cancelar">Cancelar</button><button class="pri">${novo ? 'Salvar bloco' : 'Salvar'}</button></div></form>`;
   const conta = () => { $('#cont').textContent = `(${$$('#gr input:checked', dlg).length} selecionados)`; };
-  if ($('#gr')) { $('#gr').onchange = conta; conta(); $('#busca').oninput = (e) => $$('#gr label').forEach((l) => (l.hidden = !l.dataset.n.includes(e.target.value.toLowerCase()))); $('#nenhum').onclick = () => { $$('#gr input').forEach((i) => (i.checked = false)); conta(); }; }
+  if ($('#gr')) { const filtro = filtroGrupos(dlg, conta); $('#nenhum').onclick = () => { $$('#gr input').forEach((i) => (i.checked = false)); filtro(); }; }
   $('#cancelar').onclick = () => dlg.close();
   $('#f').onsubmit = tentar(async (ev) => {
     ev.preventDefault(); const f = new FormData($('#f'));
