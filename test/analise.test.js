@@ -184,3 +184,58 @@ test('API: convite (colar e buscar), blocos com métricas, links e /g/<slug> pú
     assert.equal((await req(s.port, '/g/achadinhos-de-casa')).status, 404);
   } finally { await s.fechar(); }
 });
+
+// ---------- próximo grupo (proposta com confirmação) ----------
+import { proximoNome, verificarLotacao, encaixarGrupoNovo } from '../src/rotador.js';
+
+test('próximo grupo: nome seguinte, proposta aos 95%, sem duplicar, encaixe no link, blocos e regras', () => {
+  assert.equal(proximoNome('Achadinhos #4'), 'Achadinhos #5');
+  assert.equal(proximoNome('Grupo 09'), 'Grupo 10');
+  assert.equal(proximoNome('Ofertas da Casa'), 'Ofertas da Casa #2');
+  const db = base();
+  db.prepare("INSERT INTO links (name, slug, group_jids, limit_members, auto_next, created_at) VALUES ('L', 'l', '[\"g1@g.us\",\"g2@g.us\"]', 100, 1, 1)").run();
+  db.prepare("INSERT INTO links (name, slug, group_jids, limit_members, auto_next, created_at) VALUES ('Sem auto', 's', '[\"g1@g.us\"]', 100, 0, 1)").run();
+  db.prepare("UPDATE groups SET size = 94 WHERE jid = 'g1@g.us'").run();
+  assert.deepEqual(verificarLotacao(db), [], '94 < 95%');
+  db.prepare("UPDATE groups SET size = 95 WHERE jid = 'g1@g.us'").run();
+  const novas = verificarLotacao(db);
+  assert.equal(novas.length, 1); assert.deepEqual([novas[0].source_jid, novas[0].name, novas[0].link_id], ['g1@g.us', 'Casa #2', 1]);
+  assert.deepEqual(verificarLotacao(db), [], 'não repete enquanto a proposta está pendente');
+  db.prepare("UPDATE group_proposals SET status = 'dismissed'").run();
+  assert.equal(verificarLotacao(db).length, 1, 'ignorada: pode propor de novo');
+  // encaixe
+  db.prepare("INSERT INTO blocks (name, created_at) VALUES ('B', 1)").run(); db.prepare("INSERT INTO block_groups (block_id, jid) VALUES (1, 'g1@g.us')").run();
+  db.prepare(`INSERT INTO rules (name, group_jids, created_at) VALUES ('R', '["g1@g.us","g3@g.us"]', 1)`).run();
+  db.prepare(`INSERT INTO rules (name, group_jids, created_at) VALUES ('Outra', '["g2@g.us"]', 1)`).run();
+  encaixarGrupoNovo(db, { linkId: 1, sourceJid: 'g1@g.us', newJid: 'novo@g.us' });
+  assert.deepEqual(JSON.parse(db.prepare('SELECT group_jids FROM links WHERE id = 1').get().group_jids), ['g1@g.us', 'novo@g.us', 'g2@g.us'], 'logo depois do que lotou');
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM block_groups WHERE jid = 'novo@g.us'").get().n, 1);
+  assert.deepEqual(db.prepare('SELECT group_jids FROM rules ORDER BY id').all().map((r) => JSON.parse(r.group_jids)), [['g1@g.us', 'g3@g.us', 'novo@g.us'], ['g2@g.us']]);
+  encaixarGrupoNovo(db, { linkId: 1, sourceJid: 'g1@g.us', newJid: 'novo@g.us' });
+  assert.equal(JSON.parse(db.prepare('SELECT group_jids FROM links WHERE id = 1').get().group_jids).length, 3, 'idempotente');
+});
+
+test('API: proposta aparece, pode ser ignorada ou criada (simulado) e o grupo novo entra no link', async () => {
+  const s = await subir();
+  try {
+    const sid = (await req(s.port, '/api/login', { method: 'POST', body: { senha: 'senha-de-teste-123' } })).headers['set-cookie'][0].split(';')[0];
+    const auth = { cookie: sid, origin: 'http://127.0.0.1:' + s.port };
+    s.db.prepare("UPDATE groups SET invite_code = 'XXXXXXXXXXXX', size = 980 WHERE jid = 'g2@g.us'").run();
+    const l = await req(s.port, '/api/links', { method: 'POST', headers: auth, body: { name: 'Fila', group_jids: ['g2@g.us', 'g1@g.us'], limit_members: 1000, auto_next: true } });
+    assert.equal(l.status, 200);
+    let props = (await req(s.port, '/api/proposals', { headers: auth })).json;
+    assert.equal(props.length, 1); assert.deepEqual([props[0].status, props[0].name, props[0].source_name], ['pending', 'Beleza #2', 'Beleza']);
+    assert.equal((await req(s.port, '/api/state', { headers: auth })).json.propostas_pendentes, 1);
+    await req(s.port, `/api/proposals/${props[0].id}/dismiss`, { method: 'POST', headers: auth });
+    props = (await req(s.port, '/api/proposals', { headers: auth })).json;
+    assert.equal(props.filter((p) => p.status === 'pending').length, 1, 'ignorada -> nova proposta surge, porque continua lotado');
+    const nova = props.find((p) => p.status === 'pending');
+    const c = await req(s.port, `/api/proposals/${nova.id}/create`, { method: 'POST', headers: auth, body: { name: 'Beleza 2' } });
+    assert.equal(c.status, 200, JSON.stringify(c.json)); assert.match(c.json.invite_code, /^SIMULADO/);
+    const link = (await req(s.port, '/api/links', { headers: auth })).json[0];
+    assert.deepEqual(link.group_jids, ['g2@g.us', c.json.jid, 'g1@g.us']);
+    assert.equal(link.grupos[1].name, 'Beleza 2'); assert.equal(link.grupos[1].situacao, 'aberto');
+    assert.equal((await req(s.port, `/api/proposals/${nova.id}/create`, { method: 'POST', headers: auth })).status, 400, 'não cria duas vezes');
+    assert.match(s.db.prepare('SELECT message FROM log ORDER BY id DESC LIMIT 1').get().message, /Grupo criado/);
+  } finally { await s.fechar(); }
+});

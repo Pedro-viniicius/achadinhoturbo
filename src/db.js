@@ -45,6 +45,9 @@ CREATE TABLE IF NOT EXISTS links (
   group_jids TEXT DEFAULT '[]', state TEXT DEFAULT '{}', enabled INTEGER DEFAULT 1, created_at INTEGER);
 CREATE TABLE IF NOT EXISTS link_clicks (id INTEGER PRIMARY KEY, ts INTEGER, link_id INTEGER, jid TEXT, ip_hash TEXT);
 CREATE INDEX IF NOT EXISTS idx_clicks ON link_clicks (link_id, ts);
+CREATE TABLE IF NOT EXISTS group_proposals (
+  id INTEGER PRIMARY KEY, link_id INTEGER, source_jid TEXT, name TEXT, status TEXT DEFAULT 'pending',
+  created_jid TEXT, detail TEXT, created_at INTEGER, decided_at INTEGER);
 `;
 
 // Colunas acrescentadas depois da primeira versão (ALTER TABLE só se faltar).
@@ -52,6 +55,7 @@ const EXTRA_COLUMNS = [
   ['groups', 'invite_code', 'TEXT'],
   ['groups', 'is_admin', 'INTEGER'],
   ['groups', 'description', 'TEXT'],
+  ['links', 'auto_next', 'INTEGER DEFAULT 0'],
 ];
 
 export const DEFAULT_TEMPLATE = [

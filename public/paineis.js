@@ -140,20 +140,34 @@ function formBloco(b) {
 
 // ---------- Rotacionador de Links ----------
 async function paginaLinks() {
-  const links = await api('/links');
+  const [links, propostas] = await Promise.all([api('/links'), api('/proposals')]);
   const local = /^http:\/\/(127\.0\.0\.1|localhost)/.test(S.st.endereco_publico || '');
   $('#pagina').innerHTML = `<div class="topo"><div><h1>Rotacionador de Links</h1><p class="sub">Cada link leva para o primeiro grupo da lista que ainda não atingiu o limite. Os cliques entram no funil da Visão Geral.</p></div>
     <button class="pri" id="novo">Novo link</button></div>
+    ${propostas.length ? `<div class="card" id="props" style="border-color:var(--accent)"><h2>Próximo grupo</h2>${propostas.map((p) => `<div data-pid="${p.id}" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:10px 0;border-top:1px solid var(--line)">
+        <div style="flex:1;min-width:240px">${p.status === 'pending' ? `<b>${esc(p.source_name || p.source_jid)}</b> chegou a ${p.source_size}/${p.limit_members} membros (link “${esc(p.link_name || '')}”).<br><small class="dica">Proposta: criar <b>${esc(p.name)}</b> igual a ele, logo depois na fila.</small>`
+          : p.status === 'created' ? `<b>${esc(p.name)}</b> criado a partir de ${esc(p.source_name || p.source_jid)} em ${dataHora(p.decided_at)}.${p.detail?.admins_nao_adicionados?.length ? `<br><small style="color:var(--warn)">Não consegui adicionar ${p.detail.admins_nao_adicionados.length} admin(s) (privacidade do WhatsApp): mande o convite a eles.</small>` : ''}${p.detail?.avisos?.length ? `<br><small class="dica">${esc(p.detail.avisos.join(' · '))}</small>` : ''}`
+          : p.status === 'failed' ? `<b>${esc(p.name)}</b>: falhou em ${dataHora(p.decided_at)}. <small style="color:var(--err)">${esc(p.detail?.erro || '')}</small>` : `<span class="dica">${esc(p.name)}: ignorado em ${dataHora(p.decided_at)}.</span>`}</div>
+        ${p.status === 'pending' ? `<input value="${esc(p.name)}" data-nome style="width:220px"><button class="pri" data-prop="criar">Criar agora</button><button data-prop="ignorar" class="leve">Ignorar</button>` : ''}</div>`).join('')}</div>` : ''}
     ${local ? '<div class="card" style="border-color:var(--warn)"><b>Atenção:</b> o programa está rodando só no seu computador, então estes endereços só abrem aqui. Para divulgar, publique o programa na internet (o link fica <code>https://seu-dominio/g/nome</code>).</div>' : ''}
     ${links.length ? links.map((l) => `<article class="card" data-id="${l.id}"><h2><label class="chave" title="Ligar ou pausar"><input type="checkbox" data-act="ligar" ${l.enabled ? 'checked' : ''}><span></span></label> ${esc(l.name)}
         <span class="chip">${esc(S.st.modos_link.find((m) => m.id === l.mode)?.name || l.mode)}</span></h2>
       <div class="copia" style="margin:8px 0"><input readonly value="${esc(l.url)}" id="u${l.id}"><button data-act="copiar" data-c="u${l.id}">Copiar</button></div>
-      <p class="res">${l.cliques_hoje} ${l.cliques_hoje === 1 ? 'clique' : 'cliques'} hoje · ${l.cliques_total} no total · limite ${l.limit_members} por grupo${l.mode === 'reopen' ? ` · reabre abaixo de ${l.reopen_below}` : ''}${l.fallback_url ? ` · reserva: ${esc(l.fallback_url)}` : ''}</p>
+      <p class="res">${l.auto_next ? '<span class="chip">propõe próximo grupo</span> ' : ''}${l.cliques_hoje} ${l.cliques_hoje === 1 ? 'clique' : 'cliques'} hoje · ${l.cliques_total} no total · limite ${l.limit_members} por grupo${l.mode === 'reopen' ? ` · reabre abaixo de ${l.reopen_below}` : ''}${l.fallback_url ? ` · reserva: ${esc(l.fallback_url)}` : ''}</p>
       <div style="display:grid;gap:6px;margin:10px 0">${l.grupos.map((g) => `<div style="display:grid;grid-template-columns:minmax(0,1fr) 110px 70px;gap:10px;align-items:center;font-size:14px"><span>${esc(g.name)}</span><div class="prog"><i style="width:${g.pct}%"></i></div><small class="dica">${g.size}/${g.limit} · ${g.situacao}</small></div>`).join('')}</div>
       <div class="acoes"><button data-act="editar">Editar</button><button data-act="excluir" class="perigo leve">Excluir</button></div></article>`).join('')
       : '<div class="vazio">Nenhum link ainda. Conecte o WhatsApp, busque o convite dos grupos em “WhatsApp e grupos” e crie um link escolhendo os grupos na ordem em que devem encher.</div>'}`;
   $('#novo').onclick = () => formLink();
   $('#pagina').onclick = tentar(async (ev) => {
+    const pb = ev.target.closest('[data-prop]');
+    if (pb) {
+      const row = pb.closest('[data-pid]'); const pid = row.dataset.pid;
+      if (pb.dataset.prop === 'ignorar') { await api(`/proposals/${pid}/dismiss`, 'POST'); aviso('Proposta ignorada'); return paginaLinks(); }
+      if (!confirm('Criar o grupo agora no seu WhatsApp? Esta ação é a que mais chama atenção do WhatsApp; evite repetir várias vezes no mesmo dia.')) return;
+      pb.disabled = true; pb.textContent = 'Criando…';
+      await api(`/proposals/${pid}/create`, 'POST', { name: $('[data-nome]', row).value });
+      aviso('Grupo criado e encaixado no link'); S.groups = await api('/groups'); return paginaLinks();
+    }
     const btn = ev.target.closest('[data-act]'); if (!btn) return;
     const id = Number(btn.closest('[data-id]').dataset.id); const l = links.find((x) => x.id === id);
     if (btn.dataset.act === 'copiar') { await navigator.clipboard.writeText($('#' + btn.dataset.c).value); aviso('Copiado'); }
@@ -172,6 +186,8 @@ function formLink(l) {
       <label class="campo">Endereço do link<div class="linha" style="align-items:center"><span class="dica" style="white-space:nowrap">${esc((S.st.endereco_publico || '').replace(/^https?:\/\//, ''))}/g/</span><input name="slug" value="${esc(l.slug)}" placeholder="achadinhos" style="flex:1"></div></label></div>
     <label class="campo">URL reserva (quando todos lotarem)<input name="fallback_url" value="${esc(l.fallback_url || '')}" placeholder="Opcional: https://…"></label>
     <fieldset><legend>Como distribuir os cliques</legend><div class="modos">${S.st.modos_link.map((m) => `<label><input type="radio" name="mode" value="${m.id}" ${m.id === l.mode ? 'checked' : ''} style="width:auto"><b>${esc(m.name)}</b><small>${esc(m.desc)}</small></label>`).join('')}</div></fieldset>
+    <label class="campo" style="border:1px solid var(--line);border-radius:10px;padding:12px;display:grid;grid-template-columns:auto 1fr;gap:10px;align-items:start"><input type="checkbox" name="auto_next" ${l.auto_next ? 'checked' : ''} style="width:auto;margin-top:4px"><span>Criar próximo grupo (com a sua confirmação)
+      <small style="display:block;font-weight:400;color:var(--muted)">Quando um grupo deste link chegar a ${S.st.lotacao_pct}% do limite, o painel propõe um grupo novo igual (nome com o próximo número, descrição, foto, permissões e admins). Nada é criado até você clicar em “Criar agora”. O grupo novo entra neste link logo depois do que lotou, nos mesmos blocos e nas mesmas regras.</small></span></label>
     <div class="grade"><label class="campo">Limite de membros por grupo<input name="limit_members" type="number" min="2" max="${S.st.limite_max}" value="${l.limit_members}"><small>Padrão 1.000 (máximo ${S.st.limite_max.toLocaleString('pt-BR')}).</small></label>
       <label class="campo" id="f-reopen">Reabrir quando cair para (membros)<input name="reopen_below" type="number" min="1" value="${l.reopen_below}"></label></div>
     <fieldset><legend>Grupos, em ordem <span class="dica">(o primeiro enche primeiro)</span></legend>
@@ -198,7 +214,7 @@ function formLink(l) {
   $('#cancelar').onclick = () => dlg.close();
   $('#f').onsubmit = tentar(async (ev) => {
     ev.preventDefault(); const f = new FormData($('#f')); const g = (k) => f.get(k);
-    await api(novo ? '/links' : `/links/${l.id}`, novo ? 'POST' : 'PUT', { name: g('name'), slug: g('slug'), mode: g('mode'), fallback_url: g('fallback_url'), limit_members: g('limit_members'), reopen_below: g('reopen_below'), group_jids: ordem });
+    await api(novo ? '/links' : `/links/${l.id}`, novo ? 'POST' : 'PUT', { name: g('name'), slug: g('slug'), mode: g('mode'), fallback_url: g('fallback_url'), limit_members: g('limit_members'), reopen_below: g('reopen_below'), group_jids: ordem, auto_next: !!g('auto_next') });
     dlg.close(); aviso(novo ? 'Link criado' : 'Link salvo'); paginaLinks();
   });
   dlg.showModal();

@@ -51,6 +51,55 @@ export function pickGroup(link, groupsByJid, now = Date.now()) {
   return { group: cands.find(comVaga) || null, state };
 }
 
+/** "Achadinhos #4" -> "Achadinhos #5"; "Grupo 12" -> "Grupo 13"; "Ofertas" -> "Ofertas #2". */
+export function proximoNome(nome) {
+  const m = String(nome || '').match(/^(.*?)(\d+)(\s*)$/);
+  if (m) return `${m[1]}${String(Number(m[2]) + 1).padStart(m[2].length, '0')}${m[3]}`.trim();
+  return `${String(nome || 'Grupo').trim()} #2`;
+}
+
+export const LOTACAO_PCT = 95;
+
+/**
+ * Para cada link com "criar próximo grupo" ligado, propõe um grupo novo quando algum grupo da lista
+ * chega a 95% do limite e ainda não há proposta para ele. Só registra a proposta: quem cria é você, no painel.
+ */
+export function verificarLotacao(db, now = Date.now()) {
+  const novas = [];
+  const links = db.prepare('SELECT * FROM links WHERE enabled = 1 AND auto_next = 1').all().map(parseLink);
+  for (const l of links) {
+    const limit = Math.min(Math.max(Number(l.limit_members) || 1000, 2), LIMITE_MAX);
+    for (const jid of l.group_jids) {
+      const g = db.prepare('SELECT jid, name, size FROM groups WHERE jid = ?').get(jid);
+      if (!g || (g.size || 0) < Math.ceil((limit * LOTACAO_PCT) / 100)) continue;
+      if (db.prepare("SELECT 1 FROM group_proposals WHERE link_id = ? AND source_jid = ? AND status IN ('pending', 'created')").get(l.id, jid)) continue;
+      const nome = proximoNome(g.name);
+      const id = db.prepare('INSERT INTO group_proposals (link_id, source_jid, name, status, created_at) VALUES (?,?,?,?,?)').run(l.id, jid, nome, 'pending', now).lastInsertRowid;
+      novas.push({ id, link_id: l.id, source_jid: jid, name: nome });
+    }
+  }
+  return novas;
+}
+
+/** Encaixa o grupo novo logo depois do que lotou: no link, nos blocos e nas regras do grupo de origem. */
+export function encaixarGrupoNovo(db, { linkId, sourceJid, newJid }) {
+  const l = parseLink(db.prepare('SELECT * FROM links WHERE id = ?').get(linkId));
+  if (l && !l.group_jids.includes(newJid)) {
+    const i = l.group_jids.indexOf(sourceJid);
+    l.group_jids.splice(i >= 0 ? i + 1 : l.group_jids.length, 0, newJid);
+    db.prepare('UPDATE links SET group_jids = ? WHERE id = ?').run(JSON.stringify(l.group_jids), linkId);
+  }
+  for (const b of db.prepare('SELECT block_id FROM block_groups WHERE jid = ?').all(sourceJid)) {
+    db.prepare('INSERT OR IGNORE INTO block_groups (block_id, jid) VALUES (?,?)').run(b.block_id, newJid);
+  }
+  for (const r of db.prepare('SELECT id, group_jids FROM rules').all()) {
+    let jids = []; try { jids = JSON.parse(r.group_jids || '[]'); } catch { /* vazio */ }
+    if (jids.includes(sourceJid) && !jids.includes(newJid)) {
+      jids.push(newJid); db.prepare('UPDATE rules SET group_jids = ? WHERE id = ?').run(JSON.stringify(jids), r.id);
+    }
+  }
+}
+
 /** Situação de cada grupo do link, para mostrar no painel. */
 export function statusDosGrupos(link, groupsByJid) {
   const limit = Math.min(Math.max(Number(link.limit_members) || 1000, 2), LIMITE_MAX);

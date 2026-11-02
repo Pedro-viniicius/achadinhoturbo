@@ -35,7 +35,8 @@ function faixa() {
     (S.st.simulacao ? '<span class="pilula sim">Modo simulação: nada é enviado de verdade</span>' : '') +
     `<span class="pilula ${wCls}"><i></i>${wTxt}</span>` +
     (modo === 'direct' ? '<span class="pilula espera"><i></i>Links sem etiqueta (modo direto)</span>'
-      : `<span class="pilula ${e.online ? 'ok' : ''}"><i></i>${e.online ? 'Extensão do Chrome conectada' : 'Extensão do Chrome desconectada'}</span>`);
+      : `<span class="pilula ${e.online ? 'ok' : ''}"><i></i>${e.online ? 'Extensão do Chrome conectada' : 'Extensão do Chrome desconectada'}</span>`) +
+    (S.st.propostas_pendentes ? `<a href="#links" class="pilula espera" style="text-decoration:none"><i></i>${S.st.propostas_pendentes} ${S.st.propostas_pendentes === 1 ? 'proposta de grupo novo' : 'propostas de grupo novo'}</a>` : '');
 }
 
 // ---------- regras ----------

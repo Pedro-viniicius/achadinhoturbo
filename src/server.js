@@ -9,7 +9,8 @@ import { createScheduler } from './scheduler.js';
 import { renderTemplate, SAMPLE_OFFER, PLACEHOLDERS } from './template.js';
 import { CATEGORIAS, ORDENS, POR_PAGINA } from './afiliados.js';
 import { overview, resumo, evasaoDoDia, periodRange, startOfDay } from './analytics.js';
-import { MODOS, LIMITE_MAX, slugify, parseLink, pickGroup, statusDosGrupos } from './rotador.js';
+import { MODOS, LIMITE_MAX, LOTACAO_PCT, slugify, parseLink, pickGroup, statusDosGrupos, verificarLotacao, encaixarGrupoNovo } from './rotador.js';
+import { addLog } from './db.js';
 import crypto from 'node:crypto';
 
 const LOCAL_HOST = /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i;
@@ -140,7 +141,8 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
     endereco_publico: enderecoPublico, auth: auth.enabled(),
     placeholders: PLACEHOLDERS,
     afiliados: { categorias: CATEGORIAS, ordens: ORDENS, por_pagina: POR_PAGINA },
-    modos_link: MODOS, limite_max: LIMITE_MAX,
+    modos_link: MODOS, limite_max: LIMITE_MAX, lotacao_pct: LOTACAO_PCT,
+    propostas_pendentes: one("SELECT COUNT(*) AS n FROM group_proposals WHERE status = 'pending'").n,
   })));
 
   app.put('/api/ajustes', wrap((req) => {
@@ -224,12 +226,12 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
     if (fallback && !/^https?:\/\//i.test(fallback)) throw new Error('A URL reserva precisa começar com http:// ou https://');
     const jids = Array.isArray(b.group_jids) ? [...new Set(b.group_jids)] : [];
     if (!jids.length) throw new Error('Escolha ao menos um grupo.');
-    return [name, slug, mode, fallback || null, limit, reopen, JSON.stringify(jids)];
+    return [name, slug, mode, fallback || null, limit, reopen, JSON.stringify(jids), b.auto_next ? 1 : 0];
   };
   const linkView = (row) => {
     const l = parseLink(row); const hoje = periodRange('hoje');
     return {
-      ...l, url: `${enderecoPublico}/g/${l.slug}`, grupos: statusDosGrupos(l, groupsByJid()),
+      ...l, auto_next: !!l.auto_next, url: `${enderecoPublico}/g/${l.slug}`, grupos: statusDosGrupos(l, groupsByJid()),
       cliques_total: one('SELECT COUNT(*) AS n FROM link_clicks WHERE link_id = ?', l.id).n,
       cliques_hoje: one('SELECT COUNT(*) AS n FROM link_clicks WHERE link_id = ? AND ts BETWEEN ? AND ?', l.id, hoje.de, hoje.ate).n,
     };
@@ -237,16 +239,44 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
   app.get('/api/links', wrap(() => all('SELECT * FROM links ORDER BY id').map(linkView)));
   app.post('/api/links', wrap((req) => {
     const v = linkFromBody(req.body);
-    return { id: db.prepare('INSERT INTO links (name, slug, mode, fallback_url, limit_members, reopen_below, group_jids, created_at) VALUES (?,?,?,?,?,?,?,?)').run(...v, Date.now()).lastInsertRowid };
+    return { id: db.prepare('INSERT INTO links (name, slug, mode, fallback_url, limit_members, reopen_below, group_jids, auto_next, created_at) VALUES (?,?,?,?,?,?,?,?,?)').run(...v, Date.now()).lastInsertRowid };
   }));
   app.put('/api/links/:id', wrap((req) => {
     const v = linkFromBody(req.body, Number(req.params.id));
-    db.prepare("UPDATE links SET name = ?, slug = ?, mode = ?, fallback_url = ?, limit_members = ?, reopen_below = ?, group_jids = ?, state = '{}' WHERE id = ?").run(...v, req.params.id);
+    db.prepare("UPDATE links SET name = ?, slug = ?, mode = ?, fallback_url = ?, limit_members = ?, reopen_below = ?, group_jids = ?, auto_next = ?, state = '{}' WHERE id = ?").run(...v, req.params.id);
   }));
   app.post('/api/links/:id/enabled', wrap((req) => { db.prepare('UPDATE links SET enabled = ? WHERE id = ?').run(req.body.enabled ? 1 : 0, req.params.id); }));
   app.delete('/api/links/:id', wrap((req) => {
     db.prepare('DELETE FROM links WHERE id = ?').run(req.params.id);
     db.prepare('DELETE FROM link_clicks WHERE link_id = ?').run(req.params.id);
+    db.prepare("DELETE FROM group_proposals WHERE link_id = ? AND status = 'pending'").run(req.params.id);
+  }));
+
+  // ---------- próximo grupo (proposta -> você confirma -> cria) ----------
+  app.get('/api/proposals', wrap(() => {
+    verificarLotacao(db);
+    return all(`SELECT p.*, g.name AS source_name, g.size AS source_size, l.name AS link_name, l.limit_members
+      FROM group_proposals p LEFT JOIN groups g ON g.jid = p.source_jid LEFT JOIN links l ON l.id = p.link_id
+      WHERE p.status = 'pending' OR p.decided_at > ? ORDER BY p.status = 'pending' DESC, p.created_at DESC LIMIT 30`, Date.now() - 7 * 86400000)
+      .map((p) => ({ ...p, detail: p.detail ? JSON.parse(p.detail) : null }));
+  }));
+  app.post('/api/proposals/:id/dismiss', wrap((req) => {
+    db.prepare("UPDATE group_proposals SET status = 'dismissed', decided_at = ? WHERE id = ? AND status = 'pending'").run(Date.now(), req.params.id);
+  }));
+  app.post('/api/proposals/:id/create', wrap(async (req) => {
+    const p = one("SELECT * FROM group_proposals WHERE id = ? AND status = 'pending'", req.params.id);
+    if (!p) throw new Error('Proposta não encontrada ou já decidida.');
+    const nome = String(req.body?.name || p.name).trim(); if (!nome) throw new Error('Dê um nome ao grupo.');
+    let r;
+    try { r = await wa.createNextGroup(p.source_jid, nome); } catch (e) {
+      db.prepare("UPDATE group_proposals SET status = 'failed', detail = ?, decided_at = ? WHERE id = ?").run(JSON.stringify({ erro: e.message }), Date.now(), p.id);
+      addLog(db, { level: 'erro', group_name: nome, message: 'Não consegui criar o próximo grupo: ' + e.message });
+      throw e;
+    }
+    encaixarGrupoNovo(db, { linkId: p.link_id, sourceJid: p.source_jid, newJid: r.jid });
+    db.prepare("UPDATE group_proposals SET status = 'created', created_jid = ?, name = ?, detail = ?, decided_at = ? WHERE id = ?").run(r.jid, nome, JSON.stringify(r), Date.now(), p.id);
+    addLog(db, { level: 'ok', group_name: nome, message: `Grupo criado a partir de "${one('SELECT name FROM groups WHERE jid = ?', p.source_jid)?.name || p.source_jid}" e encaixado no link, nos blocos e nas regras.` });
+    return r;
   }));
 
   // ---------- etiquetas ----------
@@ -357,6 +387,7 @@ if (import.meta.url === `file://${process.argv[1].replace(/\\/g, '/')}` || proce
     console.log(`\nDisparador ML rodando em http://localhost:${PORT}${PUBLIC_HOST ? ` (público: https://${PUBLIC_HOST})` : ''}${DRY_RUN ? '  (MODO SIMULAÇÃO: nada é enviado de verdade)' : ''}\n`);
     wa.autoStart();
     scheduler.start();
+    setInterval(() => { try { verificarLotacao(db); } catch (e) { console.error('[lotação]', e.message); } }, 60000);
   });
 
   // Encerramento limpo (systemd manda SIGTERM): para o agendador, fecha o servidor e o banco.

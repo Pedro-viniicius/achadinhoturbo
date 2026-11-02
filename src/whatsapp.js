@@ -167,8 +167,43 @@ export function createWhatsApp({ db, dir, dryRun = false }) {
     return code;
   }
 
+  /**
+   * Cria o próximo grupo a partir de um que lotou: mesmo nome (número seguinte), descrição, foto,
+   * permissões e admins. Devolve { jid, invite_code, admins_adicionados, admins_nao_adicionados }.
+   * É uma ação sensível para o número: só roda quando você confirma no painel.
+   */
+  async function createNextGroup(sourceJid, name) {
+    const now = Date.now();
+    if (dryRun) {
+      const jid = `${Date.now()}@g.us`; const code = 'SIMULADO' + String(now).slice(-6);
+      db.prepare('INSERT INTO groups (jid, name, size, updated_at, is_admin, invite_code) VALUES (?,?,?,?,?,?)').run(jid, name, 1, now, 1, code);
+      return { jid, invite_code: code, admins_adicionados: [], admins_nao_adicionados: [] };
+    }
+    if (!isReady()) throw new Error('WhatsApp desconectado');
+    const src = await sock.groupMetadata(sourceJid);
+    const me = meInfo();
+    const admins = (src.participants || []).filter((p) => (p.admin || p.isAdmin || p.isSuperAdmin) && !sameUser(p, me)).map((p) => p.phoneNumber || p.id);
+    const novo = await sock.groupCreate(name, admins);
+    const jid = novo.id;
+    const falhas = [];
+    const tentar = async (rotulo, fn) => { try { await fn(); } catch (e) { falhas.push(`${rotulo}: ${e.message}`); } };
+    if (src.desc) await tentar('descrição', () => sock.groupUpdateDescription(jid, src.desc));
+    await tentar('foto', async () => { const url = await sock.profilePictureUrl(sourceJid, 'image'); if (url) await sock.updateProfilePicture(jid, { url }); });
+    if (src.announce) await tentar('só admins enviam', () => sock.groupSettingUpdate(jid, 'announcement'));
+    if (src.restrict) await tentar('só admins editam', () => sock.groupSettingUpdate(jid, 'locked'));
+    const presentes = new Set((novo.participants || []).map((p) => bareJid(p.phoneNumber || p.id)));
+    const adicionados = admins.filter((a) => presentes.has(bareJid(a)));
+    if (adicionados.length) await tentar('promover admins', () => sock.groupParticipantsUpdate(jid, adicionados, 'promote'));
+    let code = null;
+    await tentar('convite', async () => { code = await sock.groupInviteCode(jid); });
+    db.prepare(`INSERT INTO groups (jid, name, size, updated_at, is_admin, invite_code, description) VALUES (?,?,?,?,?,?,?)
+      ON CONFLICT(jid) DO UPDATE SET name = excluded.name, size = excluded.size, updated_at = excluded.updated_at, is_admin = 1, invite_code = excluded.invite_code, description = excluded.description`)
+      .run(jid, name, novo.size ?? (novo.participants?.length || 1), now, 1, code, src.desc || null);
+    return { jid, invite_code: code, admins_adicionados: adicionados, admins_nao_adicionados: admins.filter((a) => !presentes.has(bareJid(a))), avisos: falhas };
+  }
+
   return {
-    state: () => ({ ...state }), isReady, connect, logout, syncGroups, sendText, sendImage, fetchInvite, simulated,
+    state: () => ({ ...state }), isReady, connect, logout, syncGroups, sendText, sendImage, fetchInvite, createNextGroup, simulated,
     // usados nos testes para simular eventos do WhatsApp
     _onParticipants: onParticipants, _onReceipts: onReceipts,
     // reconecta sozinho ao abrir o programa se já houver sessão salva
