@@ -1,0 +1,19 @@
+{
+  "name": "disparador-ml",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Disparador pessoal de ofertas do Mercado Livre para grupos de WhatsApp, com várias etiquetas de afiliado.",
+  "type": "module",
+  "engines": { "node": ">=22.13" },
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning src/server.js",
+    "simular": "node --disable-warning=ExperimentalWarning src/server.js --simular",
+    "test": "node --disable-warning=ExperimentalWarning --test test/disparador.test.js"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "7.0.0-rc14",
+    "express": "^5.1.0",
+    "pino": "^9.6.0",
+    "qrcode": "^1.5.4"
+  }
+}
