@@ -25,8 +25,11 @@ export function periodRange(periodo, now = Date.now(), custom = {}) {
       return { de: ini.getTime(), ate: endOfDay(fim.getTime()) };
     }
     case 'custom': {
-      const de = custom.de ? parseDay(custom.de) : sod; const ate = custom.ate ? endOfDay(parseDay(custom.ate)) : endOfDay(now);
-      return de <= ate ? { de, ate } : { de: ate - DAY + 1, ate };
+      let de = custom.de ? parseDay(custom.de) : sod; const ate = custom.ate ? endOfDay(parseDay(custom.ate)) : endOfDay(now);
+      if (!Number.isFinite(de) || !Number.isFinite(ate)) return { de: sod, ate: endOfDay(now) };
+      if (de > ate) de = ate - DAY + 1;
+      if (ate - de > 366 * DAY) de = ate - 366 * DAY; // no máximo um ano, para a série não explodir
+      return { de, ate };
     }
     default: return { de: sod, ate: endOfDay(now) };
   }

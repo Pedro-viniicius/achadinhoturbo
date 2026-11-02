@@ -144,7 +144,7 @@ function fonteHtml(f, i, total) {
     <div class="f-afiliados"><div class="grade">
       <label class="campo"><span>Buscar por (opcional) ${q('fonte.busca')}</span><input name="af_busca" value="${esc(sc.busca || '')}" placeholder="Ex.: organizador, air fryer"></label>
       <label class="campo">Ordem<select name="af_ordem">${(S.st.afiliados?.ordens || []).map((o) => `<option value="${o.id}" ${o.id === sc.ordem ? 'selected' : ''}>${esc(o.name)}</option>`).join('')}</select></label>
-      <label class="campo"><span>Páginas lidas por envio ${q('fonte.paginas')}</span><input name="af_paginas" type="number" min="1" max="10" value="${sc.paginas ?? 3}"><small>Cada página traz ${S.st.afiliados?.por_pagina || 18} produtos.</small></label></div>
+      <label class="campo"><span>Páginas lidas por envio ${q('fonte.paginas')}</span><input name="af_paginas" type="number" min="1" max="10" value="${esc(sc.paginas ?? 3)}"><small>Cada página traz ${S.st.afiliados?.por_pagina || 18} produtos.</small></label></div>
       <fieldset class="sub-campo"><legend>Categorias ${q('fonte.categorias')} <span class="dica af-cont"></span></legend>
         <div class="grupos cats af-cats">${(S.st.afiliados?.categorias || []).map((c) => `<label><input type="checkbox" value="${c.id}" ${catsSel.has(c.id) ? 'checked' : ''}>${esc(c.name)}</label>`).join('')}</div>
         <small>Nenhuma marcada = todas. Com várias, as ofertas saem intercaladas (uma de cada categoria por vez).</small></fieldset>
@@ -337,7 +337,11 @@ function paginaWhatsapp() {
   $('#pagina').innerHTML = `<div class="topo"><div><h1>WhatsApp e grupos ${q('whatsapp')}</h1><p class="sub">Este número envia as ofertas. Para reduzir o risco de bloqueio, use as pausas em Ajustes e prefira um número que você não precise muito.</p></div></div>${corpo}`;
   if ($('#conectar')) $('#conectar').onclick = tentar(async () => { await api('/wa/connect', 'POST'); await atualizarEstado(true); });
   if ($('#sync')) $('#sync').onclick = tentar(async () => { await api('/wa/sync-groups', 'POST'); S.groups = await api('/groups'); aviso('Grupos atualizados'); paginaWhatsapp(); });
-  if ($('#sair')) $('#sair').onclick = tentar(async () => { if (!confirm('Desconectar o WhatsApp deste programa?')) return; await api('/wa/logout', 'POST'); S.groups = []; await atualizarEstado(true); });
+  if ($('#sair')) $('#sair').onclick = tentar(async () => {
+    if (!confirm('Desconectar o WhatsApp deste programa?')) return;
+    const apagar = confirm('Apagar também o histórico de entradas, saídas, leituras e cliques dos grupos? (recomendado se não for usar mais este número aqui)');
+    await api('/wa/logout', 'POST', { apagar_eventos: apagar }); S.groups = []; await atualizarEstado(true);
+  });
 }
 
 // ---------- histórico ----------
@@ -368,9 +372,16 @@ function paginaAjustes() {
         <option value="direct" ${a.link_mode === 'direct' ? 'selected' : ''}>Link direto, sem etiqueta (só para testar, não gera comissão)</option></select></label>
       <div><button id="sl">Salvar modo</button></div></div>
     <div class="card" style="display:grid;gap:12px"><div><h2>Conectar a extensão do Chrome ${q('ajustes.extensao')}</h2><p class="sub">Na extensão, clique no ícone e cole estes dois valores.</p></div>
-      <label class="campo">Endereço<div class="copia"><input readonly value="${url}" id="c1"><button data-c="c1">Copiar</button></div></label>
+      <label class="campo">Endereço<div class="copia"><input readonly value="${esc(url)}" id="c1"><button data-c="c1">Copiar</button></div></label>
       <label class="campo">Token<div class="copia"><input readonly value="${esc(S.st.ext_token)}" id="c2"><button data-c="c2">Copiar</button></div></label>
-      <p class="dica">Último link gerado: ${S.st.extensao.lastOkAt ? hora(S.st.extensao.lastOkAt) : 'nenhum ainda'}${S.st.extensao.lastError ? `. Último erro: ${esc(S.st.extensao.lastError)}` : ''}</p></div>`;
+      <p class="dica">Último link gerado: ${S.st.extensao.lastOkAt ? hora(S.st.extensao.lastOkAt) : 'nenhum ainda'}${S.st.extensao.lastError ? `. Último erro: ${esc(S.st.extensao.lastError)}` : ''}</p>
+      <div class="linha"><button id="novo-token" class="leve perigo">Gerar novo token</button><small class="dica">Use se achar que o token vazou. A extensão para de funcionar até você colar o novo.</small></div></div>
+    <div class="card" style="display:grid;gap:14px"><div><h2>Privacidade dos grupos ${q('ajustes.privacidade')}</h2><p class="sub">Entradas, saídas e leituras são guardadas com um pseudônimo por pessoa (não o número) e apagadas depois do prazo abaixo. Cliques do rotacionador também.</p></div>
+      <div class="grade"><label class="campo">Guardar por (dias)<input id="ret" type="number" min="0" max="3650" value="${a.retencao_dias ?? 90}"><small>0 = guardar para sempre (não recomendado).</small></label></div>
+      <div class="linha"><button class="pri" id="sr">Salvar</button><button id="limpar-agora">Apagar o que já passou do prazo</button></div></div>`;
+  $('#novo-token').onclick = tentar(async () => { if (!confirm('Gerar um novo token? A extensão do Chrome vai parar até você colar o token novo nela.')) return; await api('/ext/token', 'POST'); await atualizarEstado(); aviso('Token novo gerado'); paginaAjustes(); });
+  $('#sr').onclick = tentar(async () => { await api('/ajustes', 'PUT', { retencao_dias: $('#ret').value }); await atualizarEstado(); aviso('Salvo'); });
+  $('#limpar-agora').onclick = tentar(async () => { const r = await api('/privacidade/limpar', 'POST'); aviso(`Apagados: ${r.eventos ?? 0} eventos, ${r.leituras ?? 0} leituras, ${r.cliques ?? 0} cliques`); });
   $('#sa').onclick = tentar(async () => { await api('/ajustes', 'PUT', { delay_group_s: $('#dg').value, delay_offer_s: $('#do').value }); await atualizarEstado(); aviso('Pausas salvas'); });
   const exemploTitulo = tentar(async () => { const r = await api('/templates/preview', 'POST', { body: '{TITULO_PRODUTO}', amostra: { title: 'Fones De Ouvido Usb-c Tipo C Com Microfone Integrado Som Estéreo Alta Qualidade Controle Chamadas Compatível Com iPhone 15 16 17 Android Samsung Premium' } }); $('#tm-ex').textContent = 'Exemplo: “' + r.texto + '”'; });
   exemploTitulo();

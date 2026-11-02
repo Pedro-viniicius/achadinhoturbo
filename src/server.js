@@ -3,6 +3,8 @@ import path from 'node:path';
 import { DATA_DIR, PORT, DRY_RUN, FAST, ROOT, PUBLIC_HOST, PANEL_PASSWORD } from './config.js';
 import { openDb, getSetting, setSetting, parseRule, nz, MAX_SOURCES } from './db.js';
 import { createAuth, createLimiter, parseCookies, safeEqual, SESSION_MS } from './auth.js';
+import * as privacidade from './privacidade.js';
+import { pseudonimo, migrarPseudonimos, limparAntigos, chaveIp, RETENCAO_PADRAO_DIAS } from './privacidade.js';
 import { createWhatsApp } from './whatsapp.js';
 import { createLinkService } from './links.js';
 import { createScheduler } from './scheduler.js';
@@ -15,17 +17,24 @@ import crypto from 'node:crypto';
 
 const LOCAL_HOST = /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i;
 // Páginas e rotas que funcionam sem login.
-const PUBLIC_PATHS = new Set(['/login.html', '/style.css', '/logo.svg', '/icon-192.png', '/healthz', '/favicon.ico', '/api/login']);
+const PUBLIC_PATHS = new Set(['/login.html', '/login.js', '/style.css', '/logo.svg', '/icon-192.png', '/healthz', '/favicon.ico', '/api/login']);
+// Política de conteúdo: só scripts do próprio painel; estilos inline e Google Fonts liberados; nada de frames.
+const CSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'";
 
 export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, panelPassword = PANEL_PASSWORD }) {
   const app = express();
   app.disable('x-powered-by');
   app.set('trust proxy', 1); // Nginx na frente: req.ip e req.secure vêm do X-Forwarded-*
-  app.use(express.json({ limit: '5mb' })); // a lista da Central de Afiliados vem pela extensão
+  const jsonPequeno = express.json({ limit: '100kb' });
+  const jsonGrande = express.json({ limit: '5mb' }); // só a lista da Central, que vem pela extensão
+  app.use((req, res, next) => (req.path === '/api/ext/result' ? jsonGrande : jsonPequeno)(req, res, next));
 
   const auth = createAuth({ db, password: panelPassword });
-  const loginLimiter = createLimiter({ max: 5, windowMs: 15 * 60 * 1000 });
+  const loginLimiter = createLimiter({ max: 5, windowMs: 15 * 60 * 1000 });       // por IP (/64 no IPv6)
+  const loginGlobal = createLimiter({ max: 50, windowMs: 15 * 60 * 1000 });        // todas as origens juntas
   const extLimiter = createLimiter({ max: 20, windowMs: 15 * 60 * 1000 });
+  const gLimiter = createLimiter({ max: 30, windowMs: 60 * 1000 });                 // /g/<slug>: 30 por minuto por IP
+  const cliquesRecentes = new Map();                                                // (link|ip|hora) -> ts: 1 clique por hora por IP
   const enderecoPublico = publicHost ? `https://${publicHost}` : `http://127.0.0.1:${PORT}`;
   app.locals.auth = auth;
 
@@ -34,6 +43,7 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('X-Frame-Options', 'DENY');
     res.setHeader('Referrer-Policy', 'no-referrer');
+    res.setHeader('Content-Security-Policy', CSP);
     if (req.secure) res.setHeader('Strict-Transport-Security', 'max-age=15552000; includeSubDomains');
     next();
   });
@@ -60,7 +70,7 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
 
   // ---------- extensão do Chrome (autenticada por token; fora do login) ----------
   const extAuth = (req, res, next) => {
-    const ip = req.ip;
+    const ip = chaveIp(req.ip);
     if (extLimiter.blocked(ip)) return res.status(429).json({ erro: 'Muitas tentativas com token inválido' });
     if (!safeEqual(req.headers['x-token'], getSetting(db, 'ext_token'))) { extLimiter.fail(ip); return res.status(401).json({ erro: 'Token inválido' }); }
     extLimiter.reset(ip);
@@ -83,6 +93,9 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
   const groupsByJid = () => Object.fromEntries(all('SELECT jid, name, size, invite_code FROM groups').map((g) => [g.jid, g]));
   app.get('/g/:slug', (req, res) => {
     res.setHeader('Cache-Control', 'no-store');
+    const ip = chaveIp(req.ip);
+    if (gLimiter.blocked(ip)) return res.status(429).type('text/plain').send('Muitas tentativas. Aguarde um minuto.');
+    gLimiter.fail(ip);
     const link = parseLink(one('SELECT * FROM links WHERE slug = ?', String(req.params.slug).toLowerCase()));
     if (!link || !link.enabled) return res.status(404).type('text/plain').send('Link não encontrado.');
     const { group, state } = pickGroup(link, groupsByJid());
@@ -91,36 +104,43 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
       if (link.fallback_url) return res.redirect(302, link.fallback_url);
       return res.status(503).type('text/html').send('<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Grupos lotados</title><p style="font:16px system-ui;padding:32px;text-align:center">Todos os grupos estão lotados no momento. Tente de novo mais tarde.</p>');
     }
-    const ipHash = crypto.createHash('sha256').update(`${req.ip}|${new Date().toDateString()}`).digest('hex').slice(0, 16);
-    db.prepare('INSERT INTO link_clicks (ts, link_id, jid, ip_hash) VALUES (?,?,?,?)').run(Date.now(), link.id, group.jid, ipHash);
+    // conta no máximo um clique por link, por IP, por hora; o IP fica só em memória, não no banco
+    const agora = Date.now(); const chave = `${link.id}|${ip}|${Math.floor(agora / 3600000)}`;
+    if (!cliquesRecentes.has(chave)) {
+      cliquesRecentes.set(chave, agora);
+      if (cliquesRecentes.size > 20000) for (const [k, t] of cliquesRecentes) if (agora - t > 3600000) cliquesRecentes.delete(k);
+      db.prepare('INSERT INTO link_clicks (ts, link_id, jid, ip_hash) VALUES (?,?,?,NULL)').run(agora, link.id, group.jid);
+    }
     res.redirect(302, `https://chat.whatsapp.com/${group.invite_code}`);
   });
 
   // ---------- login ----------
   const cookieOpts = (req) => ({ httpOnly: true, sameSite: 'strict', secure: req.secure || !!publicHost, path: '/' });
-  app.post('/api/login', (req, res) => {
+  const cookieName = (req) => (req.secure ? '__Host-sid' : 'sid'); // __Host-: só com HTTPS, sem Domain, Path=/
+  const sidDe = (req) => { const c = parseCookies(req.headers.cookie); return c['__Host-sid'] || c.sid; };
+  app.post('/api/login', async (req, res) => {
     if (!auth.enabled()) return res.json({ ok: true });
-    const ip = req.ip;
-    if (loginLimiter.blocked(ip)) {
-      const s = loginLimiter.retryAfterS(ip);
+    const ip = chaveIp(req.ip);
+    if (loginLimiter.blocked(ip) || loginGlobal.blocked('todos')) {
+      const s = Math.max(loginLimiter.retryAfterS(ip), loginGlobal.retryAfterS('todos'));
       return res.status(429).json({ erro: `Muitas tentativas. Tente de novo em ${Math.ceil(s / 60)} min.` });
     }
-    const sid = auth.login(String(req.body?.senha ?? ''), ip);
-    if (!sid) { loginLimiter.fail(ip); return res.status(401).json({ erro: 'Senha incorreta' }); }
+    const sid = await auth.login(String(req.body?.senha ?? '').slice(0, 200), ip);
+    if (!sid) { loginLimiter.fail(ip); loginGlobal.fail('todos'); return res.status(401).json({ erro: 'Senha incorreta' }); }
     loginLimiter.reset(ip);
-    res.cookie('sid', sid, { ...cookieOpts(req), maxAge: SESSION_MS });
+    res.cookie(cookieName(req), sid, { ...cookieOpts(req), maxAge: SESSION_MS });
     res.json({ ok: true });
   });
   app.post('/api/logout', (req, res) => {
-    auth.logout(parseCookies(req.headers.cookie).sid);
-    res.clearCookie('sid', cookieOpts(req));
+    auth.logout(sidDe(req));
+    res.clearCookie(cookieName(req), cookieOpts(req));
     res.json({ ok: true });
   });
 
   // ---------- exige sessão em tudo o que vem abaixo (painel e API) ----------
   app.use((req, res, next) => {
     if (!auth.enabled() || PUBLIC_PATHS.has(req.path) || req.path.startsWith('/g/')) return next();
-    if (auth.sessionFrom(parseCookies(req.headers.cookie).sid)) return next();
+    if (auth.sessionFrom(sidDe(req))) return next();
     if (req.path.startsWith('/api/')) return res.status(401).json({ erro: 'Faça login para continuar' });
     res.redirect(302, '/login.html');
   });
@@ -137,6 +157,7 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
       delay_offer_s: Number(getSetting(db, 'delay_offer_s', 30)),
       link_mode: getSetting(db, 'link_mode', 'extension'),
       titulo_max: Number(getSetting(db, 'titulo_max', 60)),
+      retencao_dias: Number(getSetting(db, 'retencao_dias', RETENCAO_PADRAO_DIAS)),
     },
     ext_token: getSetting(db, 'ext_token'), porta: PORT,
     endereco_publico: enderecoPublico, auth: auth.enabled(),
@@ -147,7 +168,8 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
   })));
 
   app.put('/api/ajustes', wrap((req) => {
-    const { delay_group_s, delay_offer_s, link_mode, titulo_max } = req.body;
+    const { delay_group_s, delay_offer_s, link_mode, titulo_max, retencao_dias } = req.body;
+    if (retencao_dias != null) { const n = Number(retencao_dias); if (!(n >= 0 && n <= 3650)) throw new Error('Retenção: de 0 (para sempre) a 3650 dias.'); setSetting(db, 'retencao_dias', Math.round(n)); }
     if (titulo_max != null) { const n = Number(titulo_max); if (!(n >= 0 && n <= 200)) throw new Error('Tamanho do título: de 0 (inteiro) a 200.'); setSetting(db, 'titulo_max', Math.round(n)); }
     if (delay_group_s != null) setSetting(db, 'delay_group_s', Math.max(2, Number(delay_group_s) || 6));
     if (delay_offer_s != null) setSetting(db, 'delay_offer_s', Math.max(5, Number(delay_offer_s) || 30));
@@ -159,13 +181,20 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
 
   // ---------- WhatsApp ----------
   app.post('/api/wa/connect', wrap(async () => { await wa.connect(); }));
-  app.post('/api/wa/logout', wrap(async () => { await wa.logout(); }));
+  app.post('/api/wa/logout', wrap(async (req) => { await wa.logout({ apagarEventos: !!req.body?.apagar_eventos }); }));
+  // ---------- privacidade: rotação do token da extensão, limpeza e exclusão por titular ----------
+  app.post('/api/ext/token', wrap(() => { setSetting(db, 'ext_token', crypto.randomBytes(24).toString('hex')); }));
+  app.post('/api/privacidade/limpar', wrap(() => limparAntigos(db, Number(getSetting(db, 'retencao_dias', RETENCAO_PADRAO_DIAS)))));
+  app.post('/api/privacidade/apagar-participante', wrap((req) => {
+    const id = String(req.body?.id || '').trim().slice(0, 80); if (!id) throw new Error('Informe o número (com DDI) ou o pseudônimo.');
+    return privacidade.apagarParticipante(db, id);
+  }));
   app.post('/api/wa/sync-groups', wrap(async () => { await wa.syncGroups(); }));
   app.get('/api/groups', wrap(() => all(`SELECT g.*, (SELECT json_group_array(block_id) FROM block_groups b WHERE b.jid = g.jid) AS blocks
     FROM groups g ORDER BY name COLLATE NOCASE`).map((g) => ({ ...g, is_admin: g.is_admin == null ? null : !!g.is_admin, blocks: JSON.parse(g.blocks || '[]') }))));
   app.post('/api/groups/:jid/invite', wrap(async (req) => ({ invite_code: await wa.fetchInvite(req.params.jid) })));
   app.put('/api/groups/:jid/invite', wrap((req) => {
-    const m = String(req.body.url || '').trim().match(/(?:chat\.whatsapp\.com\/(?:invite\/)?)?([A-Za-z0-9_-]{10,})$/);
+    const m = String(req.body.url || '').trim().slice(0, 300).match(/(?:chat\.whatsapp\.com\/(?:invite\/)?)?([A-Za-z0-9_-]{10,})$/);
     if (!m) throw new Error('Cole o link completo, como https://chat.whatsapp.com/XXXXXXXX');
     if (!one('SELECT 1 FROM groups WHERE jid = ?', req.params.jid)) throw new Error('Grupo não encontrado.');
     db.prepare('UPDATE groups SET invite_code = ? WHERE jid = ?').run(m[1], req.params.jid);
@@ -276,7 +305,8 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
       throw e;
     }
     encaixarGrupoNovo(db, { linkId: p.link_id, sourceJid: p.source_jid, newJid: r.jid });
-    db.prepare("UPDATE group_proposals SET status = 'created', created_jid = ?, name = ?, detail = ?, decided_at = ? WHERE id = ?").run(r.jid, nome, JSON.stringify(r), Date.now(), p.id);
+    const detalhe = { jid: r.jid, invite_code: r.invite_code, admins_adicionados: r.admins_adicionados.length, admins_nao_adicionados: r.admins_nao_adicionados.length, avisos: r.avisos || [] }; // sem telefones
+    db.prepare("UPDATE group_proposals SET status = 'created', created_jid = ?, name = ?, detail = ?, decided_at = ? WHERE id = ?").run(r.jid, nome, JSON.stringify(detalhe), Date.now(), p.id);
     addLog(db, { level: 'ok', group_name: nome, message: `Grupo criado a partir de "${one('SELECT name FROM groups WHERE jid = ?', p.source_jid)?.name || p.source_jid}" e encaixado no link, nos blocos e nas regras.` });
     return r;
   }));
@@ -331,9 +361,20 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
     if (!(perRun >= 1 && perRun <= 20)) throw new Error('Ofertas por envio: de 1 a 20.');
     // fontes: lista nova (até 5) ou, nas regras antigas, source_type + source_config
     const tipo = (t) => (['afiliados', 'search'].includes(t) ? t : 'list');
+    const str = (v, max) => String(v ?? '').slice(0, max);
+    const limpaConfig = (t, c) => {
+      c = c && typeof c === 'object' ? c : {};
+      if (t === 'afiliados') {
+        const ids = new Set(CATEGORIAS.map((x) => x.id));
+        return { busca: str(c.busca, 80).trim(), categorias: (Array.isArray(c.categorias) ? c.categorias : (c.categoria ? [c.categoria] : [])).map(String).filter((x) => ids.has(x)).slice(0, 23),
+          ordem: ORDENS.some((o) => o.id === c.ordem) ? c.ordem : 'relevance', paginas: Math.min(Math.max(parseInt(c.paginas, 10) || 3, 1), 10), mais_vendidos: !!c.mais_vendidos, ganhos_extras: !!c.ganhos_extras };
+      }
+      if (t === 'search') return { query: str(c.query, 80).trim(), sort: ['relevance', 'price_asc', 'price_desc'].includes(c.sort) ? c.sort : 'relevance' };
+      return { items: str(c.items, 20000) };
+    };
     let sources = Array.isArray(b.sources) && b.sources.length
-      ? b.sources.map((s) => ({ type: tipo(s?.type), config: s?.config && typeof s.config === 'object' ? s.config : {}, tag_id: nz(s?.tag_id) == null ? null : Number(s.tag_id) }))
-      : [{ type: tipo(b.source_type), config: b.source_config && typeof b.source_config === 'object' ? b.source_config : {} }];
+      ? b.sources.map((s) => { const t = tipo(s?.type); return { type: t, config: limpaConfig(t, s?.config), tag_id: nz(s?.tag_id) == null ? null : Number(s.tag_id) }; })
+      : [{ type: tipo(b.source_type), config: limpaConfig(tipo(b.source_type), b.source_config) }];
     if (sources.length > MAX_SOURCES) throw new Error(`Uma regra aceita no máximo ${MAX_SOURCES} fontes.`);
     for (const [i, s] of sources.entries()) {
       if (s.type === 'search' && !String(s.config.query || '').trim()) throw new Error(`Fonte ${i + 1}: a busca está sem a palavra-chave.`);
@@ -377,16 +418,29 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
   }));
   app.get('/api/simulados', wrap(() => wa.simulated.slice(-50)));
 
+  // Erros de parsing (JSON inválido, corpo grande demais) e inesperados: resposta curta, sem stack nem caminhos.
+  // eslint-disable-next-line no-unused-vars
+  app.use((err, req, res, next) => {
+    const status = err?.status || err?.statusCode || 500;
+    if (status >= 500) console.error('[erro]', err?.message || err);
+    res.status(status).json({ erro: status === 413 ? 'Corpo grande demais' : status < 500 ? 'Requisição inválida' : 'Erro interno' });
+  });
+
   return app;
 }
 
 // ---------- inicialização ----------
 if (import.meta.url === `file://${process.argv[1].replace(/\\/g, '/')}` || process.argv[1]?.endsWith('server.js')) {
   const db = openDb(DATA_DIR);
-  const wa = createWhatsApp({ db, dir: DATA_DIR, dryRun: DRY_RUN });
+  const migrados = migrarPseudonimos(db);
+  if (migrados) console.log(`Privacidade: ${migrados} registros de participantes convertidos em pseudônimos.`);
+  const wa = createWhatsApp({ db, dir: DATA_DIR, dryRun: DRY_RUN, pseudo: (id) => pseudonimo(db, id) });
   const links = createLinkService({ getMode: () => (DRY_RUN ? 'fake' : getSetting(db, 'link_mode', 'extension')) });
   const scheduler = createScheduler({ db, wa, links, fast: FAST });
-  const app = buildApp({ db, wa, links, scheduler });
+  let app;
+  try { app = buildApp({ db, wa, links, scheduler }); } catch (e) { console.error('ERRO:', e.message); process.exit(1); }
+  const retencao = () => { try { const r = limparAntigos(db, Number(getSetting(db, 'retencao_dias', RETENCAO_PADRAO_DIAS))); if (r.eventos || r.leituras || r.cliques) console.log(`Retenção: apagados ${r.eventos} eventos, ${r.leituras} leituras, ${r.cliques} cliques antigos.`); } catch (e) { console.error('[retenção]', e.message); } };
+  retencao(); setInterval(retencao, 6 * 60 * 60 * 1000);
 
   if (!app.locals.auth.enabled()) {
     if (PUBLIC_HOST) {

@@ -39,26 +39,26 @@ https://www.mercadolivre.com.br/p/MLB555555
 lixo sem url`);
   assert.equal(l.length, 2);
   assert.deepEqual([l[0].key, l[0].price, l[0].oldPrice, l[0].coupon], ['MLB1234567890', 89.9, 149.9, 'CUPOM10']);
-  assert.equal(extractItemId('https://x/MLB-987654321-a'), 'MLB987654321');
+  assert.equal(extractItemId('https://produto.mercadolivre.com.br/MLB-987654321-a'), 'MLB987654321');
   assert.equal(offerKey('https://www.mercadolivre.com.br/p/MLB555555?a=b'), 'MLB555555');
 });
 
 test('leitura do produto pelo JSON-LD da página', () => {
-  const html = `<html><script type="application/ld+json">{"@context":"https://schema.org","@type":"Product","name":"Cafeteira X","image":["https://img/1.jpg"],"offers":{"@type":"Offer","price":199.9,"priceCurrency":"BRL"}}</script>"original_price":299.9</html>`;
+  const html = `<html><script type="application/ld+json">{"@context":"https://schema.org","@type":"Product","name":"Cafeteira X","image":["https://http2.mlstatic.com/D_1-O.jpg"],"offers":{"@type":"Offer","price":199.9,"priceCurrency":"BRL"}}</script>"original_price":299.9</html>`;
   const p = parseProductHtml(html);
-  assert.deepEqual([p.title, p.price, p.oldPrice, p.image], ['Cafeteira X', 199.9, 299.9, 'https://img/1.jpg']);
+  assert.deepEqual([p.title, p.price, p.oldPrice, p.image], ['Cafeteira X', 199.9, 299.9, 'https://http2.mlstatic.com/D_1-O.jpg']);
 });
 
 test('resolveOffer: usa API, cai para HTML e explica a falha', async () => {
-  const api = await resolveOffer({ key: 'MLB1', url: 'https://x/MLB-1234567-a' }, {
-    fetchJson: async () => ({ id: 'MLB1234567', title: 'Item', price: 50, original_price: 100, permalink: 'https://x/p', sold_quantity: 1500, shipping: { free_shipping: true }, pictures: [{ secure_url: 'https://i/1.jpg' }] }),
+  const api = await resolveOffer({ key: 'MLB1', url: 'https://produto.mercadolivre.com.br/MLB-1234567-a' }, {
+    fetchJson: async () => ({ id: 'MLB1234567', title: 'Item', price: 50, original_price: 100, permalink: 'https://produto.mercadolivre.com.br/p', sold_quantity: 1500, shipping: { free_shipping: true }, pictures: [{ secure_url: 'https://i/1.jpg' }] }),
   });
   assert.deepEqual([api.price, api.discountPct, api.sold, api.freeShipping], [50, 50, 1500, true]);
   const html = await resolveOffer({ key: 'k', url: 'https://www.mercadolivre.com.br/p/MLB777' }, {
     fetchText: async () => '<script type="application/ld+json">{"@type":"Product","name":"Cat","offers":{"price":10}}</script>',
   });
   assert.equal(html.title, 'Cat');
-  await assert.rejects(resolveOffer({ key: 'k', url: 'https://x/MLB-1234567-a' }, {
+  await assert.rejects(resolveOffer({ key: 'k', url: 'https://produto.mercadolivre.com.br/MLB-1234567-a' }, {
     fetchJson: async () => { throw new Error('HTTP 403'); }, fetchText: async () => { throw new Error('HTTP 403'); },
   }), /não consegui ler o produto/);
 });
@@ -82,11 +82,11 @@ const addRule = (db, o) => db.prepare(`INSERT INTO rules (name, enabled, tag_id,
   VALUES (?,1,?,1,?,'list',?,?,?,?,?,?,?,?,?,1,?)`).run(o.name, o.tag, JSON.stringify(o.groups), JSON.stringify({ items: o.items }),
   o.min ?? null, o.max ?? null, o.desc ?? null, o.per ?? 3, o.interval ?? 60, '00:00', '23:59', o.dedupe ?? 7, Date.now()).lastInsertRowid;
 const ITEMS = [
-  'https://x/MLB-1000001-a | Fone A | 50 | 100',
-  'https://x/MLB-1000002-b | Mouse B | 30 | 40',
-  'https://x/MLB-1000003-c | Teclado C | 200 | 400',
-  'https://x/MLB-1000004-d | Cabo D | 10',
-  'https://x/MLB-1000005-e | Monitor E | 900 | 1000',
+  'https://produto.mercadolivre.com.br/MLB-1000001-a | Fone A | 50 | 100',
+  'https://produto.mercadolivre.com.br/MLB-1000002-b | Mouse B | 30 | 40',
+  'https://produto.mercadolivre.com.br/MLB-1000003-c | Teclado C | 200 | 400',
+  'https://produto.mercadolivre.com.br/MLB-1000004-d | Cabo D | 10',
+  'https://produto.mercadolivre.com.br/MLB-1000005-e | Monitor E | 900 | 1000',
 ].join('\n');
 
 test('envia N ofertas para cada grupo selecionado, com a etiqueta da regra', async () => {
@@ -162,11 +162,11 @@ test('serviço de links: extensão busca o trabalho, devolve o link; sem extens�
   await assert.rejects(links.requestLink({ url: 'u', tag: 't' }), /extensão do Chrome não está conectada/);
   const extension = (async () => {
     const job = await links.poll(1000);
-    assert.deepEqual([job.url, job.tag], ['https://x/MLB-1-a', 'minhaTag']);
+    assert.deepEqual([job.url, job.tag], ['https://produto.mercadolivre.com.br/MLB-1-a', 'minhaTag']);
     links.submit(job.id, { ok: true, link: 'https://meli.la/ABC' });
   })();
   await new Promise((r) => setTimeout(r, 20));
-  const link = await links.requestLink({ url: 'https://x/MLB-1-a', tag: 'minhaTag' });
+  const link = await links.requestLink({ url: 'https://produto.mercadolivre.com.br/MLB-1-a', tag: 'minhaTag' });
   await extension;
   assert.equal(link, 'https://meli.la/ABC');
   const p = links.requestLink({ url: 'u2', tag: 't' });
@@ -282,27 +282,27 @@ test('regra com várias fontes: intercala, não repete, fonte que falha vira avi
   const links = createLinkService({ getMode: () => 'fake' });
   const avisos = [];
   const rule = { sources: [
-    { type: 'list', config: { items: 'https://x/MLB-1-a | A1 | 10\nhttps://x/MLB-2-b | A2 | 10\nhttps://x/MLB-3-c | A3 | 10' } },
+    { type: 'list', config: { items: 'https://produto.mercadolivre.com.br/MLB-1-a | A1 | 10\nhttps://produto.mercadolivre.com.br/MLB-2-b | A2 | 10\nhttps://produto.mercadolivre.com.br/MLB-3-c | A3 | 10' } },
     { type: 'afiliados', config: { paginas: 1 } },
     { type: 'search', config: { query: '' } }, // falha: sem palavra-chave
-    { type: 'list', config: { items: 'https://x/MLB-1-a | repetido | 10\nhttps://x/MLB-9-z | C1 | 10' } },
+    { type: 'list', config: { items: 'https://produto.mercadolivre.com.br/MLB-1-a | repetido | 10\nhttps://produto.mercadolivre.com.br/MLB-9-z | C1 | 10' } },
   ] };
   const c = await candidates(rule, { links, onWarn: (m) => avisos.push(m) });
   // rodada 0: A1, B1 (o 1º da fonte 4 repete A1 e sai); rodada 1: A2, B2, C1; rodada 2: A3…
-  assert.deepEqual(c.slice(0, 6).map((o) => o.key), ['https://x/MLB-1-a', 'MLB9000001', 'https://x/MLB-2-b', 'MLB9000002', 'https://x/MLB-9-z', 'https://x/MLB-3-c']);
+  assert.deepEqual(c.slice(0, 6).map((o) => o.key), ['https://produto.mercadolivre.com.br/MLB-1-a', 'MLB9000001', 'https://produto.mercadolivre.com.br/MLB-2-b', 'MLB9000002', 'https://produto.mercadolivre.com.br/MLB-9-z', 'https://produto.mercadolivre.com.br/MLB-3-c']);
   assert.equal(c.length, 3 + 5 + 1);
   assert.equal(avisos.length, 1); assert.match(avisos[0], /fonte 3 \(busca\).*palavra-chave/);
   await assert.rejects(candidates({ sources: [{ type: 'search', config: {} }, { type: 'search', config: {} }] }, { links }), /fonte 1.*fonte 2/);
   // regra antiga (sem coluna sources preenchida) -> uma fonte
-  const antiga = parseRule({ id: 1, group_jids: '[]', source_type: 'list', source_config: '{"items":"https://x/MLB-5-e | E | 5"}', sources: null });
-  assert.deepEqual(antiga.sources, [{ type: 'list', config: { items: 'https://x/MLB-5-e | E | 5' }, tag_id: null }]);
+  const antiga = parseRule({ id: 1, group_jids: '[]', source_type: 'list', source_config: '{"items":"https://produto.mercadolivre.com.br/MLB-5-e | E | 5"}', sources: null });
+  assert.deepEqual(antiga.sources, [{ type: 'list', config: { items: 'https://produto.mercadolivre.com.br/MLB-5-e | E | 5' }, tag_id: null }]);
   assert.equal((await candidates(antiga, { links })).length, 1);
   assert.equal(parseRule({ id: 1, group_jids: '[]', source_type: 'list', source_config: '{}', sources: 'lixo' }).sources.length, 1, 'JSON inválido não quebra');
 });
 
 test('envio com duas fontes alterna entre elas e grava sources no banco', async () => {
   const { db, wa, scheduler } = setup();
-  const sources = [{ type: 'list', config: { items: 'https://x/MLB-1-a | Fone A | 50 | 100\nhttps://x/MLB-2-b | Mouse B | 30 | 40' } }, { type: 'afiliados', config: { paginas: 1 } }];
+  const sources = [{ type: 'list', config: { items: 'https://produto.mercadolivre.com.br/MLB-1-a | Fone A | 50 | 100\nhttps://produto.mercadolivre.com.br/MLB-2-b | Mouse B | 30 | 40' } }, { type: 'afiliados', config: { paginas: 1 } }];
   const id = db.prepare(`INSERT INTO rules (name, enabled, tag_id, template_id, group_jids, source_type, source_config, sources, per_run, interval_min, window_start, window_end, dedupe_days, send_image, created_at)
     VALUES ('Mista', 1, 1, 1, ?, 'list', '{}', ?, 4, 60, '00:00', '23:59', 7, 1, ?)`).run(JSON.stringify(['111@g.us']), JSON.stringify(sources), Date.now()).lastInsertRowid;
   const r = await scheduler.runRule(id);
@@ -333,8 +333,8 @@ test('título abreviado: corta compatibilidade e enfeites, respeita o limite sem
 test('etiqueta por fonte: cada oferta sai com a etiqueta da fonte de origem; sem etiqueta própria usa a da regra', async () => {
   const { db, wa, scheduler } = setup(); // etiquetas: 1 = etiquetaA, 2 = etiquetaB
   const sources = [
-    { type: 'list', tag_id: 2, config: { items: 'https://x/MLB-1-a | Fone A | 50 | 100\nhttps://x/MLB-2-b | Mouse B | 30 | 40' } },
-    { type: 'list', tag_id: null, config: { items: 'https://x/MLB-3-c | Teclado C | 200 | 400\nhttps://x/MLB-4-d | Cabo D | 10' } },
+    { type: 'list', tag_id: 2, config: { items: 'https://produto.mercadolivre.com.br/MLB-1-a | Fone A | 50 | 100\nhttps://produto.mercadolivre.com.br/MLB-2-b | Mouse B | 30 | 40' } },
+    { type: 'list', tag_id: null, config: { items: 'https://produto.mercadolivre.com.br/MLB-3-c | Teclado C | 200 | 400\nhttps://produto.mercadolivre.com.br/MLB-4-d | Cabo D | 10' } },
   ];
   const id = db.prepare(`INSERT INTO rules (name, enabled, tag_id, template_id, group_jids, source_type, source_config, sources, per_run, interval_min, window_start, window_end, dedupe_days, send_image, created_at)
     VALUES ('Duas etiquetas', 1, 1, 1, ?, 'list', '{}', ?, 4, 60, '00:00', '23:59', 7, 1, ?)`).run(JSON.stringify(['111@g.us']), JSON.stringify(sources), Date.now()).lastInsertRowid;

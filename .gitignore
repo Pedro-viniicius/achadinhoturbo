@@ -1,2 +1,12 @@
 node_modules/
 data/
+# memória dos agentes (local, não versionar)
+.claude/agent-memory/
+
+# backups: carregam a sessão do WhatsApp e dados pessoais
+backups/
+*.tar.gz
+# segredos
+.env
+.env.*
+!.env.example

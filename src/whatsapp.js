@@ -20,7 +20,7 @@ export const sameUser = (a, b) => { const A = idsOf(a); return idsOf(b).some((x)
 export const participantId = (p) => bareJid(typeof p === 'string' ? p : (p?.phoneNumber || p?.id || ''));
 const dayOf = (ts) => { const d = new Date(ts); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
 
-export function createWhatsApp({ db, dir, dryRun = false }) {
+export function createWhatsApp({ db, dir, dryRun = false, pseudo = (id) => id }) {
   const authDir = path.join(dir, 'wa_auth');
   const state = { status: 'idle', qr: null, me: null, error: null };
   let sock = null; let starting = false; let stopped = false; let syncTimer = null;
@@ -63,7 +63,8 @@ export function createWhatsApp({ db, dir, dryRun = false }) {
       const pid = participantId(p);
       if (!pid) continue;
       const self = !author || sameUser(autor, p);
-      insEvent.run(now, id, pid, action, action === 'add' && self ? 1 : 0, self ? null : participantId(autor));
+      // guarda pseudônimos, não números (LGPD): ver src/privacidade.js
+      insEvent.run(now, id, pseudo(pid), action, action === 'add' && self ? 1 : 0, self ? null : pseudo(participantId(autor)));
     }
     bumpSize.run(action === 'add' ? participants.length : -participants.length, now, id);
   }
@@ -76,7 +77,7 @@ export function createWhatsApp({ db, dir, dryRun = false }) {
       if (!jid || !jid.endsWith('@g.us') || !u.key?.fromMe || !who) continue;
       if (!(u.receipt.readTimestamp || u.receipt.playedTimestamp)) continue;
       const ts = Number(u.receipt.readTimestamp || u.receipt.playedTimestamp) * 1000 || now;
-      insRead.run(jid, bareJid(who), dayOf(ts), ts);
+      insRead.run(jid, pseudo(bareJid(who)), dayOf(ts), ts);
     }
   }
 
@@ -131,13 +132,14 @@ export function createWhatsApp({ db, dir, dryRun = false }) {
     } finally { starting = false; }
   }
 
-  async function logout() {
+  async function logout({ apagarEventos = false } = {}) {
     stopped = true; clearInterval(syncTimer); syncTimer = null;
     try { await sock?.logout(); } catch { /* já caiu */ }
     sock = null;
     fs.rmSync(authDir, { recursive: true, force: true });
     state.status = 'idle'; state.qr = null; state.me = null;
     db.exec('DELETE FROM groups');
+    if (apagarEventos) db.exec('DELETE FROM group_events; DELETE FROM group_reads; DELETE FROM link_clicks;');
   }
 
   const isReady = () => state.status === 'open' && (dryRun || !!sock);

@@ -6,13 +6,13 @@
   "permissions": [
     "storage",
     "alarms",
-    "scripting",
-    "tabs"
+    "scripting"
   ],
   "host_permissions": [
-    "*://*.mercadolivre.com.br/*",
+    "https://*.mercadolivre.com.br/*",
     "http://127.0.0.1/*",
-    "http://localhost/*"
+    "http://localhost/*",
+    "https://*/*"
   ],
   "background": {
     "service_worker": "background.js"

@@ -41,7 +41,7 @@ function esperarCarregar(tabId) {
 
 /** Usa uma aba da Central já aberta ou abre uma fixada, em segundo plano. */
 async function abaDaCentral() {
-  const abertas = await chrome.tabs.query({ url: `${ML}/afiliados*` });
+  const abertas = await chrome.tabs.query({ url: 'https://*.mercadolivre.com.br/afiliados*' });
   const pronta = abertas.find((t) => t.status === 'complete') || abertas[0];
   if (pronta) return pronta.id;
   const nova = await chrome.tabs.create({ url: CENTRAL, active: false, pinned: true });

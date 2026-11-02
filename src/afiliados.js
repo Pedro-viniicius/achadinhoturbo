@@ -86,6 +86,34 @@ export function cardToOffer(card, ctx = {}) {
   };
 }
 
+const HOST_ML = /^([\w-]+\.)*(mercadolivre\.com\.br|mercadolibre\.com)$/i;
+const hostDe = (u) => { try { return new URL(/^https?:\/\//i.test(u) ? u : 'https://' + u).hostname; } catch { return ''; } };
+
+/**
+ * Valida (e limpa) as páginas que a extensão devolveu: só mercadolivre.com.br, tamanhos limitados,
+ * tipos certos. Cartão fora do padrão é descartado; a resposta inteira só é recusada se não for uma lista.
+ */
+export function validarPaginas(data) {
+  if (!Array.isArray(data)) return { ok: false, erro: 'a extensão devolveu algo que não é uma lista' };
+  if (data.length > 30) return { ok: false, erro: 'a extensão devolveu páginas demais' };
+  const paginas = data.map((p) => {
+    const model = p?.polycard_client_model || {};
+    const prefix = typeof model.polycard_context?.url_prefix === 'string' && /^https?:\/\/$/.test(model.polycard_context.url_prefix) ? model.polycard_context.url_prefix : 'https://';
+    const cards = (Array.isArray(model.polycards) ? model.polycards : []).slice(0, 60).filter((c) => {
+      const m = c?.metadata; if (!m || typeof m.url !== 'string' || m.url.length > 500) return false;
+      if (!HOST_ML.test(hostDe(m.url))) return false;
+      if (m.id != null && !/^[A-Z]{3}\d{6,15}$/.test(String(m.id))) return false;
+      const t = (c.components || []).find((x) => x?.id === 'title')?.title?.text;
+      if (t != null && (typeof t !== 'string' || t.length > 300)) return false;
+      const pic = c.pictures?.pictures?.[0]?.id;
+      if (pic != null && !/^[\w-]{1,80}$/.test(String(pic))) return false;
+      return true;
+    });
+    return { polycard_client_model: { polycard_context: { url_prefix: prefix }, polycards: cards } };
+  });
+  return { ok: true, paginas };
+}
+
 /**
  * Páginas devolvidas pela extensão -> lista de ofertas, sem repetir.
  * `grupos` = quantas categorias geraram as páginas (hubCategorias(cfg).length): as páginas vêm em blocos

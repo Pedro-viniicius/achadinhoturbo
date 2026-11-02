@@ -30,11 +30,11 @@ Em casa, só no `localhost`, o painel abre sem senha (aparece um aviso no termin
 
 ### Publicar num servidor (VPS)
 
-Variáveis de ambiente: `PUBLIC_HOST` (ex.: `disparador.meudominio.com`; exigido para aceitar o domínio e a origem `https://`), `PORT` (padrão 3737), `DATA_DIR` (pasta dos dados), `TZ` (ex.: `America/Sao_Paulo`; o horário de funcionamento das regras usa a hora local) e `PANEL_PASSWORD`. Com `PUBLIC_HOST` definido, o programa se recusa a subir sem senha. Ele continua ouvindo só em `127.0.0.1`: coloque um Nginx com HTTPS na frente. No `/api/ext/poll` (long-poll de 20 s) use `proxy_buffering off` e `proxy_read_timeout 60s`; no `/api/ext/result` aceite corpos de até 8 MB. Encerra limpo com SIGTERM.
+**Nginx:** além do proxy, defina `proxy_set_header X-Forwarded-For $remote_addr;` e `proxy_set_header X-Forwarded-Proto $scheme;` (o programa confia nesses cabeçalhos para o limite de tentativas de login e para o HSTS; sem reescrevê-los, um cliente pode falsificá-los) e `server_name` só com o seu domínio. Variáveis de ambiente: `PUBLIC_HOST` (ex.: `disparador.meudominio.com`; exigido para aceitar o domínio e a origem `https://`), `PORT` (padrão 3737), `DATA_DIR` (pasta dos dados), `TZ` (ex.: `America/Sao_Paulo`; o horário de funcionamento das regras usa a hora local) e `PANEL_PASSWORD`. Com `PUBLIC_HOST` definido, o programa se recusa a subir sem senha. Ele continua ouvindo só em `127.0.0.1`: coloque um Nginx com HTTPS na frente. No `/api/ext/poll` (long-poll de 20 s) use `proxy_buffering off` e `proxy_read_timeout 60s`; no `/api/ext/result` aceite corpos de até 8 MB. Encerra limpo com SIGTERM.
 
 ### Backup
 
-`npm run backup [pasta]` copia o banco com `VACUUM INTO` (seguro com o programa rodando) e a sessão do WhatsApp num `.tar.gz`, mantendo os 7 mais recentes. Para conferir um backup: `npm run backup -- restaurar arquivo.tar.gz pasta-vazia` (extrai e roda `PRAGMA integrity_check`). **O pacote contém a sessão do seu WhatsApp**: trate como senha.
+`npm run backup [pasta]` copia o banco com `VACUUM INTO` (seguro com o programa rodando) e a sessão do WhatsApp num `.tar.gz`, mantendo os 7 mais recentes. O destino padrão é `data/backups/`, que o `.gitignore` já exclui; se você apontar para dentro de um repositório git não ignorado, o script avisa. **Nunca faça commit de um backup.** Para conferir um backup: `npm run backup -- restaurar arquivo.tar.gz pasta-vazia` (extrai e roda `PRAGMA integrity_check`). **O pacote contém a sessão do seu WhatsApp**: trate como senha.
 
 ## Visão Geral, blocos e rotacionador
 
@@ -67,6 +67,16 @@ Conferido uma vez contra a Central de Afiliados real (02/11/2026): a lista de pr
 
 - Na fonte *Lista de links*, se o título e o preço não forem lidos sozinhos, escreva-os na linha: `link | título | preço | preço antigo | cupom`.
 - A *Busca por palavra-chave* é experimental: a API pública do Mercado Livre pode recusar o acesso sem login.
+
+## Privacidade (LGPD)
+
+- Quem entra, sai ou lê mensagens nos grupos é guardado com um **pseudônimo** (HMAC-SHA256 do número com uma chave local que fica só no banco), nunca com o número. O painel mostra só os primeiros caracteres do pseudônimo.
+- **Retenção:** eventos, leituras e cliques são apagados depois do prazo de *Ajustes → Privacidade dos grupos* (padrão 90 dias; a limpeza roda ao iniciar e a cada 6 h). Sessões vencidas também.
+- **Exclusão por titular:** `POST /api/privacidade/apagar-participante` com `{ "id": "5511999999999" }` apaga tudo daquela pessoa.
+- Ao desconectar o WhatsApp, o painel oferece apagar o histórico dos grupos.
+- Avise os membros dos grupos (na descrição, por exemplo) que entradas, saídas e leituras são contadas para medir o alcance.
+- Cliques no rotacionador: o IP só é usado em memória para contar um clique por hora; não vai para o banco.
+- **Token da extensão:** em *Ajustes → Gerar novo token* se suspeitar de vazamento. A extensão só aceita `https://` fora do seu computador e o servidor só aceita links `meli.la` vindos dela.
 
 ## Cuidados
 

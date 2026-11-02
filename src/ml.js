@@ -27,6 +27,10 @@ export function offerKey(url) {
   try { const u = new URL(url); return u.origin + u.pathname; } catch { return String(url).trim(); }
 }
 
+const HOST_PERMITIDO = /^([\w-]+\.)*(mercadolivre\.com\.br|mercadolibre\.com|meli\.la)$/i;
+export const IMAGEM_PERMITIDA = /^https:\/\/([\w-]+\.)*mlstatic\.com\//i;
+export function hostPermitido(url) { try { return HOST_PERMITIDO.test(new URL(url).hostname); } catch { return false; } }
+
 function num(v) {
   if (v == null || v === '') return null;
   const n = Number(String(v).replace(/[^\d,.-]/g, '').replace(/\.(?=\d{3}\b)/g, '').replace(',', '.'));
@@ -40,7 +44,7 @@ export function parseListLines(text) {
     const line = raw.trim();
     if (!line || line.startsWith('#')) continue;
     const [url, title, price, oldPrice, coupon] = line.split('|').map((s) => s.trim());
-    if (!/^https?:\/\//i.test(url)) continue;
+    if (!/^https?:\/\//i.test(url) || !hostPermitido(url)) continue; // só links do Mercado Livre
     const key = offerKey(url);
     if (seen.has(key)) continue;
     seen.add(key);
@@ -62,10 +66,11 @@ export function parseProductHtml(html) {
     if (!prod.name || !price) continue;
     const img = [].concat(prod.image || [])[0];
     const old = num((String(html).match(/"original_price"\s*:\s*([\d.]+)/) || [])[1]);
+    const imagem = typeof img === 'string' ? img : img?.url || null;
     return {
       title: prod.name, price,
       oldPrice: old && old > price ? old : null,
-      image: typeof img === 'string' ? img : img?.url || null,
+      image: IMAGEM_PERMITIDA.test(imagem || '') ? imagem : null, // imagem só do CDN do Mercado Livre
     };
   }
   return null;
@@ -92,9 +97,15 @@ function fromApiItem(it) {
 /** Completa os dados de um candidato da lista (API pública -> HTML da página). */
 export async function resolveOffer(cand, { fetchJson = getJson, fetchText } = {}) {
   const getText = fetchText || (async (u) => {
-    const r = await fetch(u, { headers: { 'user-agent': UA, 'accept-language': 'pt-BR,pt;q=0.9' }, redirect: 'follow', signal: AbortSignal.timeout(15000) });
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    return r.text();
+    // segue no máximo 3 redirecionamentos, e só para hosts do Mercado Livre
+    for (let salto = 0; salto < 4; salto++) {
+      if (!hostPermitido(u)) throw new Error('endereço fora do Mercado Livre');
+      const r = await fetch(u, { headers: { 'user-agent': UA, 'accept-language': 'pt-BR,pt;q=0.9' }, redirect: 'manual', signal: AbortSignal.timeout(15000) });
+      if (r.status >= 300 && r.status < 400 && r.headers.get('location')) { u = new URL(r.headers.get('location'), u).toString(); continue; }
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return r.text();
+    }
+    throw new Error('redirecionamentos demais');
   });
   // já veio completo (busca) ou com dados digitados à mão
   if (cand.title && cand.price) {

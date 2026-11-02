@@ -2,7 +2,11 @@
 // Dois tipos de pedido: gerar o link de afiliado (meli.la) e buscar a lista de ofertas da
 // Central de Afiliados. Nenhum cookie sai do navegador: só o link pronto ou a lista voltam.
 
-import { amostraHub } from './afiliados.js';
+import { amostraHub, validarPaginas } from './afiliados.js';
+
+// No modo extensão só aceitamos o link curto do Mercado Livre: quem tiver o token não consegue
+// fazer o programa publicar uma URL qualquer nos grupos.
+export const LINK_MELI = /^https:\/\/meli\.la\/[A-Za-z0-9_-]{3,40}$/;
 
 const ONLINE_MS = 45000;
 
@@ -71,11 +75,14 @@ export function createLinkService({ getMode }) {
     clearTimeout(e.timer); jobs.delete(id);
     if (!ok) { lastError = error || 'a extensão não conseguiu'; e.reject(new Error(lastError)); return true; }
     if (e.type === 'ofertas') {
-      if (!Array.isArray(data)) { lastError = 'a extensão devolveu a lista vazia'; e.reject(new Error(lastError)); return true; }
-      lastOffersAt = Date.now(); e.resolve({ data }); return true;
+      const v = validarPaginas(data);
+      if (!v.ok) { lastError = v.erro; e.reject(new Error(lastError)); return true; }
+      lastOffersAt = Date.now(); e.resolve({ data: v.paginas }); return true;
     }
-    if (/^https?:\/\//i.test(link || '')) { lastOkAt = Date.now(); lastError = ''; e.resolve({ link }); }
-    else { lastError = error || 'resposta sem link'; e.reject(new Error(lastError)); }
+    const l = String(link || '').trim();
+    const valido = getMode() === 'extension' ? LINK_MELI.test(l) : /^https?:\/\//i.test(l);
+    if (valido) { lastOkAt = Date.now(); lastError = ''; e.resolve({ link: l }); }
+    else { lastError = error || (l ? 'a extensão devolveu um link que não é meli.la; recusado' : 'resposta sem link'); e.reject(new Error(lastError)); }
     return true;
   }
 

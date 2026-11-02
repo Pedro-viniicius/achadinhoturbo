@@ -51,7 +51,13 @@ if (process.argv[1]?.endsWith('backup.js')) {
       console.log(`Restaurado em ${path.resolve(b)}: integridade=${r.integridade}, regras=${r.regras}, etiquetas=${r.etiquetas}, sessão WhatsApp=${r.waAuth ? 'sim' : 'não'}`);
       if (r.integridade !== 'ok') process.exit(2);
     } else {
-      const dest = path.resolve(cmd || process.env.BACKUP_DIR || path.join(DATA_DIR, '..', 'backups'));
+      // padrão: dentro de data/ (que o .gitignore já exclui). Nunca grave backup dentro de um repositório git.
+      const dest = path.resolve(cmd || process.env.BACKUP_DIR || path.join(DATA_DIR, 'backups'));
+      try {
+        const topo = execFileSync('git', ['-C', path.dirname(dest), 'rev-parse', '--show-toplevel'], { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+        const ignorado = (() => { try { execFileSync('git', ['-C', topo, 'check-ignore', '-q', dest], { stdio: 'ignore' }); return true; } catch { return false; } })();
+        if (topo && !ignorado) console.error(`AVISO: ${dest} está dentro do repositório git ${topo} e não está no .gitignore. O backup contém a sessão do WhatsApp e dados pessoais: não faça commit dele.`);
+      } catch { /* fora de um repositório git: ok */ }
       const out = fazerBackup(DATA_DIR, dest);
       console.log(`Backup gravado: ${out} (${(fs.statSync(out).size / 1024).toFixed(0)} KB)`);
     }

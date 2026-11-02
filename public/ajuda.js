@@ -55,6 +55,7 @@ const TIPS = {
   'ajustes.pausas': 'Espera entre mensagens. O programa varia o tempo ao acaso para parecer humano. Mais curto = mais risco de bloqueio.',
   'ajustes.titulo': 'Tamanho máximo de {TITULO_PRODUTO}: tira “Compatível com…”, “Premium”, “Alta Qualidade” e corta sem partir palavra. 0 = nome inteiro.',
   'ajustes.modo_link': 'Pela extensão: link meli.la com a sua etiqueta (gera comissão). Link direto: sem etiqueta, só para testar o fluxo.',
+  'ajustes.privacidade': 'Quem entra, sai ou lê é guardado com um pseudônimo (código derivado do número com uma chave local), não com o número. Depois do prazo, os registros são apagados de vez. É o que a LGPD chama de minimização e retenção.',
   'ajustes.extensao': 'A extensão fica no seu Chrome, logada no Mercado Livre, e é quem gera os links e busca a lista da Central. Cookies nunca saem do navegador.',
   // etiquetas, templates, histórico
   'etiquetas': 'Etiquetas são os nomes criados em “Administrar etiquetas” na Central de Afiliados. Cada regra usa uma; é o que diz de quem é a comissão. Escreva exatamente igual.',

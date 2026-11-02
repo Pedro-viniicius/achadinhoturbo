@@ -1,6 +1,7 @@
 import { addLog, parseRule, getSetting } from './db.js';
 import { renderTemplate } from './template.js';
 import * as mlDefault from './ml.js';
+import { IMAGEM_PERMITIDA } from './ml.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const jitter = (s) => Math.round(s * 1000 * (0.7 + Math.random() * 0.6));
@@ -99,7 +100,7 @@ export function createScheduler({ db, wa, links, ml = mlDefault, fast = false })
         summary.offers++; let okCount = 0;
         for (let g = 0; g < groups.length; g++) {
           try {
-            if (rule.send_image && offer.image) {
+            if (rule.send_image && IMAGEM_PERMITIDA.test(offer.image || '')) {
               try { await wa.sendImage(groups[g].jid, offer.image, text); } catch { await wa.sendText(groups[g].jid, text); }
             } else await wa.sendText(groups[g].jid, text);
             okCount++; summary.messages++;

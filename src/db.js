@@ -57,6 +57,7 @@ const EXTRA_COLUMNS = [
   ['groups', 'description', 'TEXT'],
   ['links', 'auto_next', 'INTEGER DEFAULT 0'],
   ['rules', 'sources', 'TEXT'],
+  ['sessions', 'last_seen', 'INTEGER'],
 ];
 
 export const DEFAULT_TEMPLATE = [
