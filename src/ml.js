@@ -139,10 +139,10 @@ export async function searchOffers({ query, sort = 'relevance', limit = 50 }, { 
   });
 }
 
-/** Candidatos de uma regra, sem baixar detalhes ainda. */
-export async function candidates(rule, deps = {}) {
-  const cfg = rule.source_config || {};
-  if (rule.source_type === 'afiliados') {
+/** Candidatos de uma fonte ({ type, config }), sem baixar detalhes ainda. */
+export async function candidatesFor({ type, config }, deps = {}) {
+  const cfg = config || {};
+  if (type === 'afiliados') {
     if (!deps.links) throw new Error('serviço de links indisponível');
     let pages;
     try { pages = await deps.links.requestOffers({ paginas: hubBodies(cfg) }); } catch (e) {
@@ -150,11 +150,36 @@ export async function candidates(rule, deps = {}) {
     }
     return parseHubPages(pages, hubCategorias(cfg).length);
   }
-  if (rule.source_type === 'search') {
-    if (!cfg.query) throw new Error('a regra de busca está sem a palavra-chave');
+  if (type === 'search') {
+    if (!cfg.query) throw new Error('a busca está sem a palavra-chave');
     return searchOffers({ query: cfg.query, sort: cfg.sort || 'relevance', limit: cfg.limit || 50 }, deps);
   }
   return parseListLines(cfg.items);
+}
+
+export const NOME_FONTE = { afiliados: 'Central de Afiliados', list: 'lista de links', search: 'busca' };
+
+/**
+ * Candidatos de uma regra. Com várias fontes (até 5), busca cada uma e intercala (1ª da fonte A,
+ * 1ª da B, 2ª da A, …), sem repetir. Uma fonte que falha vira aviso (deps.onWarn) e as outras seguem;
+ * só dá erro se todas falharem.
+ */
+export async function candidates(rule, deps = {}) {
+  const fontes = rule.sources?.length ? rule.sources : [{ type: rule.source_type, config: rule.source_config }];
+  if (fontes.length === 1) return candidatesFor(fontes[0], deps);
+  const filas = []; const erros = [];
+  for (const [i, f] of fontes.entries()) {
+    try { filas.push(await candidatesFor(f, deps)); } catch (e) {
+      erros.push(`fonte ${i + 1} (${NOME_FONTE[f.type] || f.type}): ${e.message}`);
+    }
+  }
+  if (!filas.length) throw new Error(erros.join('; '));
+  for (const e of erros) deps.onWarn?.(`Fonte ignorada neste envio: ${e}`);
+  const out = []; const seen = new Set();
+  for (let i = 0; filas.some((f) => i < f.length); i++) {
+    for (const f of filas) { const c = f[i]; if (c && !seen.has(c.key)) { seen.add(c.key); out.push(c); } }
+  }
+  return out;
 }
 
 export function rejectReason(o, rule) {

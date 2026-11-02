@@ -273,3 +273,39 @@ test('backup: VACUUM INTO + wa_auth, rotação e restauração com integrity_che
   assert.deepEqual([r.integridade, r.etiquetas, r.waAuth], ['ok', 1, true]);
   db.close();
 });
+
+// ---------- várias fontes numa regra ----------
+import { candidates } from '../src/ml.js';
+import { parseRule } from '../src/db.js';
+
+test('regra com várias fontes: intercala, não repete, fonte que falha vira aviso; regra antiga continua com uma fonte', async () => {
+  const links = createLinkService({ getMode: () => 'fake' });
+  const avisos = [];
+  const rule = { sources: [
+    { type: 'list', config: { items: 'https://x/MLB-1-a | A1 | 10\nhttps://x/MLB-2-b | A2 | 10\nhttps://x/MLB-3-c | A3 | 10' } },
+    { type: 'afiliados', config: { paginas: 1 } },
+    { type: 'search', config: { query: '' } }, // falha: sem palavra-chave
+    { type: 'list', config: { items: 'https://x/MLB-1-a | repetido | 10\nhttps://x/MLB-9-z | C1 | 10' } },
+  ] };
+  const c = await candidates(rule, { links, onWarn: (m) => avisos.push(m) });
+  // rodada 0: A1, B1 (o 1º da fonte 4 repete A1 e sai); rodada 1: A2, B2, C1; rodada 2: A3…
+  assert.deepEqual(c.slice(0, 6).map((o) => o.key), ['https://x/MLB-1-a', 'MLB9000001', 'https://x/MLB-2-b', 'MLB9000002', 'https://x/MLB-9-z', 'https://x/MLB-3-c']);
+  assert.equal(c.length, 3 + 5 + 1);
+  assert.equal(avisos.length, 1); assert.match(avisos[0], /fonte 3 \(busca\).*palavra-chave/);
+  await assert.rejects(candidates({ sources: [{ type: 'search', config: {} }, { type: 'search', config: {} }] }, { links }), /fonte 1.*fonte 2/);
+  // regra antiga (sem coluna sources preenchida) -> uma fonte
+  const antiga = parseRule({ id: 1, group_jids: '[]', source_type: 'list', source_config: '{"items":"https://x/MLB-5-e | E | 5"}', sources: null });
+  assert.deepEqual(antiga.sources, [{ type: 'list', config: { items: 'https://x/MLB-5-e | E | 5' } }]);
+  assert.equal((await candidates(antiga, { links })).length, 1);
+  assert.equal(parseRule({ id: 1, group_jids: '[]', source_type: 'list', source_config: '{}', sources: 'lixo' }).sources.length, 1, 'JSON inválido não quebra');
+});
+
+test('envio com duas fontes alterna entre elas e grava sources no banco', async () => {
+  const { db, wa, scheduler } = setup();
+  const sources = [{ type: 'list', config: { items: 'https://x/MLB-1-a | Fone A | 50 | 100\nhttps://x/MLB-2-b | Mouse B | 30 | 40' } }, { type: 'afiliados', config: { paginas: 1 } }];
+  const id = db.prepare(`INSERT INTO rules (name, enabled, tag_id, template_id, group_jids, source_type, source_config, sources, per_run, interval_min, window_start, window_end, dedupe_days, send_image, created_at)
+    VALUES ('Mista', 1, 1, 1, ?, 'list', '{}', ?, 4, 60, '00:00', '23:59', 7, 1, ?)`).run(JSON.stringify(['111@g.us']), JSON.stringify(sources), Date.now()).lastInsertRowid;
+  const r = await scheduler.runRule(id);
+  assert.deepEqual([r.offers, r.errors], [4, 0]);
+  assert.deepEqual(wa.simulated.map((m) => m.text.split('\n')[0]), ['*Fone A*', '*Kit 10 Potes Herméticos de Vidro*', '*Mouse B*', '*Organizador de Gaveta Dobrável*']);
+});

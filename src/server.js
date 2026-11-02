@@ -1,7 +1,7 @@
 import express from 'express';
 import path from 'node:path';
 import { DATA_DIR, PORT, DRY_RUN, FAST, ROOT, PUBLIC_HOST, PANEL_PASSWORD } from './config.js';
-import { openDb, getSetting, setSetting, parseRule, nz } from './db.js';
+import { openDb, getSetting, setSetting, parseRule, nz, MAX_SOURCES } from './db.js';
 import { createAuth, createLimiter, parseCookies, safeEqual, SESSION_MS } from './auth.js';
 import { createWhatsApp } from './whatsapp.js';
 import { createLinkService } from './links.js';
@@ -140,7 +140,7 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
     ext_token: getSetting(db, 'ext_token'), porta: PORT,
     endereco_publico: enderecoPublico, auth: auth.enabled(),
     placeholders: PLACEHOLDERS,
-    afiliados: { categorias: CATEGORIAS, ordens: ORDENS, por_pagina: POR_PAGINA },
+    afiliados: { categorias: CATEGORIAS, ordens: ORDENS, por_pagina: POR_PAGINA }, max_fontes: MAX_SOURCES,
     modos_link: MODOS, limite_max: LIMITE_MAX, lotacao_pct: LOTACAO_PCT,
     propostas_pendentes: one("SELECT COUNT(*) AS n FROM group_proposals WHERE status = 'pending'").n,
   })));
@@ -325,16 +325,26 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
     const interval = n(b.interval_min, 60); const perRun = n(b.per_run, 3);
     if (!(interval >= 1)) throw new Error('O intervalo mínimo é 1 minuto.');
     if (!(perRun >= 1 && perRun <= 20)) throw new Error('Ofertas por envio: de 1 a 20.');
+    // fontes: lista nova (até 5) ou, nas regras antigas, source_type + source_config
+    const tipo = (t) => (['afiliados', 'search'].includes(t) ? t : 'list');
+    let sources = Array.isArray(b.sources) && b.sources.length
+      ? b.sources.map((s) => ({ type: tipo(s?.type), config: s?.config && typeof s.config === 'object' ? s.config : {} }))
+      : [{ type: tipo(b.source_type), config: b.source_config && typeof b.source_config === 'object' ? b.source_config : {} }];
+    if (sources.length > MAX_SOURCES) throw new Error(`Uma regra aceita no máximo ${MAX_SOURCES} fontes.`);
+    for (const [i, s] of sources.entries()) {
+      if (s.type === 'search' && !String(s.config.query || '').trim()) throw new Error(`Fonte ${i + 1}: a busca está sem a palavra-chave.`);
+      if (s.type === 'list' && !String(s.config.items || '').split('\n').some((l) => /^https?:/i.test(l.trim()))) throw new Error(`Fonte ${i + 1}: a lista de links está vazia.`);
+    }
     return [
       b.name.trim(), b.enabled === false ? 0 : 1, nz(b.tag_id), nz(b.template_id),
       JSON.stringify(Array.isArray(b.group_jids) ? b.group_jids : []),
-      ['afiliados', 'search'].includes(b.source_type) ? b.source_type : 'list', JSON.stringify(b.source_config || {}),
+      sources[0].type, JSON.stringify(sources[0].config), JSON.stringify(sources),
       nz(n(b.min_price, null)), nz(n(b.max_price, null)), nz(n(b.min_discount, null)),
       perRun, interval, hhmm(b.window_start, '08:00'), hhmm(b.window_end, '22:00'),
       n(b.dedupe_days, 7), b.send_image === false ? 0 : 1,
     ];
   };
-  const COLS = 'name, enabled, tag_id, template_id, group_jids, source_type, source_config, min_price, max_price, min_discount, per_run, interval_min, window_start, window_end, dedupe_days, send_image';
+  const COLS = 'name, enabled, tag_id, template_id, group_jids, source_type, source_config, sources, min_price, max_price, min_discount, per_run, interval_min, window_start, window_end, dedupe_days, send_image';
   app.get('/api/rules', wrap(() => all('SELECT * FROM rules ORDER BY id').map((r) => ({ ...parseRule(r), em_andamento: scheduler.isRunning(r.id) }))));
   app.post('/api/rules', wrap((req) => {
     const v = ruleFromBody(req.body);

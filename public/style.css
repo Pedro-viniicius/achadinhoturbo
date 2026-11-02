@@ -156,3 +156,5 @@ body.login { display:grid; place-items:center; min-height:100vh; padding:16px; }
 .prog { height:6px; background:var(--paper); border-radius:3px; overflow:hidden; } .prog i { display:block; height:100%; background:var(--accent); }
 .conv { display:flex; gap:6px; align-items:center; } .conv input { font:12px var(--mono); padding:5px 8px; min-width:0; flex:1; }
 .badge-adm { font-size:11px; color:var(--ok); font-weight:600; margin-left:6px; }
+
+.fonte { background:var(--paper); } .fonte .sub-campo { background:var(--surface); }

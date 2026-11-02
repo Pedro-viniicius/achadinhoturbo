@@ -56,6 +56,7 @@ const EXTRA_COLUMNS = [
   ['groups', 'is_admin', 'INTEGER'],
   ['groups', 'description', 'TEXT'],
   ['links', 'auto_next', 'INTEGER DEFAULT 0'],
+  ['rules', 'sources', 'TEXT'],
 ];
 
 export const DEFAULT_TEMPLATE = [
@@ -103,6 +104,15 @@ export function setSetting(db, key, value) {
     .run(key, String(value));
 }
 
+export const MAX_SOURCES = 5;
+/** Fontes da regra (até 5). Regras antigas, com uma fonte só, viram uma lista de um item. */
+function parseSources(r) {
+  let list = null;
+  try { list = JSON.parse(r.sources || 'null'); } catch { /* inválido: usa a fonte única */ }
+  if (Array.isArray(list) && list.length) return list.slice(0, MAX_SOURCES).map((s) => ({ type: s.type || 'list', config: s.config || {} }));
+  return [{ type: r.source_type || 'list', config: JSON.parse(r.source_config || '{}') }];
+}
+
 /** Linha do banco -> objeto de regra com os campos JSON já lidos. */
 export function parseRule(r) {
   if (!r) return null;
@@ -112,6 +122,7 @@ export function parseRule(r) {
     send_image: !!r.send_image,
     group_jids: JSON.parse(r.group_jids || '[]'),
     source_config: JSON.parse(r.source_config || '{}'),
+    sources: parseSources(r),
   };
 }
 

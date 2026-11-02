@@ -51,8 +51,8 @@ function proximo(r) {
 }
 function cartaoRegra(r) {
   const tag = S.tags.find((t) => t.id === r.tag_id); const tpl = S.templates.find((t) => t.id === r.template_id);
-  const fonte = r.source_type === 'afiliados' ? fonteAfiliados(r.source_config)
-    : r.source_type === 'search' ? `busca por “${esc(r.source_config.query || '')}”` : `${(r.source_config.items || '').split('\n').filter((l) => /^https?:/i.test(l.trim())).length} links na lista`;
+  const fontes = (r.sources?.length ? r.sources : [{ type: r.source_type, config: r.source_config }]).map(resumoFonte);
+  const fonte = fontes.length === 1 ? fontes[0] : `${fontes.length} fontes intercaladas (${fontes.join('; ')})`;
   return `<article class="card regra" data-id="${r.id}">
     <h2><label class="chave" title="Ligar ou pausar"><input type="checkbox" data-act="ligar" ${r.enabled ? 'checked' : ''} aria-label="Regra ativa"><span></span></label>
       ${esc(r.name)} ${tag ? `<span class="chip etq">${esc(tag.name)}</span>` : '<span class="chip">sem etiqueta</span>'}</h2>
@@ -65,6 +65,8 @@ function cartaoRegra(r) {
       <button data-act="zerar" class="leve" title="Permite que as ofertas já enviadas saiam de novo">Limpar “já enviadas”</button>
       <button data-act="excluir" class="perigo leve">Excluir</button></div></article>`;
 }
+const resumoFonte = (f) => f.type === 'afiliados' ? fonteAfiliados(f.config)
+  : f.type === 'search' ? `busca por “${esc(f.config?.query || '')}”` : `${String(f.config?.items || '').split('\n').filter((l) => /^https?:/i.test(l.trim())).length} links na lista`;
 const categoriasDe = (c = {}) => Array.isArray(c.categorias) ? c.categorias : c.categoria ? [c.categoria] : [];
 function fonteAfiliados(c = {}) {
   const nomes = categoriasDe(c).map((id) => S.st.afiliados?.categorias.find((x) => x.id === id)?.name).filter(Boolean);
@@ -99,35 +101,43 @@ async function recarregarRegras() { S.rules = await api('/rules'); listaRegras()
 function opcoes(lista, sel, vazio) {
   return (vazio ? `<option value="">${vazio}</option>` : '') + lista.map((o) => `<option value="${o.id}" ${o.id === sel ? 'selected' : ''}>${esc(o.name)}</option>`).join('');
 }
+function fonteHtml(f, i, total) {
+  const sc = f.config || {}; const catsSel = new Set(categoriasDe(sc));
+  return `<div class="fonte sub-campo" data-i="${i}" style="margin-bottom:10px"><legend>Fonte ${i + 1}${total > 1 ? '' : ''} ${total > 1 ? `<button type="button" data-rm-fonte class="leve perigo" style="float:right;padding:2px 8px">Remover</button>` : ''}</legend>
+    <div class="linha"><label><input type="radio" name="st${i}" value="afiliados" ${f.type === 'afiliados' ? 'checked' : ''} style="width:auto"> Central de Afiliados</label>
+      <label><input type="radio" name="st${i}" value="list" ${f.type === 'list' ? 'checked' : ''} style="width:auto"> Lista de links</label>
+      <label><input type="radio" name="st${i}" value="search" ${f.type === 'search' ? 'checked' : ''} style="width:auto"> Busca por palavra-chave (experimental)</label></div>
+    <div class="f-afiliados"><div class="grade">
+      <label class="campo">Buscar por (opcional)<input name="af_busca" value="${esc(sc.busca || '')}" placeholder="Ex.: organizador, air fryer"></label>
+      <label class="campo">Ordem<select name="af_ordem">${(S.st.afiliados?.ordens || []).map((o) => `<option value="${o.id}" ${o.id === sc.ordem ? 'selected' : ''}>${esc(o.name)}</option>`).join('')}</select></label>
+      <label class="campo">Páginas lidas por envio<input name="af_paginas" type="number" min="1" max="10" value="${sc.paginas ?? 3}"><small>Cada página traz ${S.st.afiliados?.por_pagina || 18} produtos.</small></label></div>
+      <fieldset class="sub-campo"><legend>Categorias <span class="dica af-cont"></span></legend>
+        <div class="grupos cats af-cats">${(S.st.afiliados?.categorias || []).map((c) => `<label><input type="checkbox" value="${c.id}" ${catsSel.has(c.id) ? 'checked' : ''}>${esc(c.name)}</label>`).join('')}</div>
+        <small>Nenhuma marcada = todas. Com várias, as ofertas saem intercaladas (uma de cada categoria por vez).</small></fieldset>
+      <div class="linha"><label><input type="checkbox" name="af_mais_vendidos" ${sc.mais_vendidos ? 'checked' : ''} style="width:auto"> Só mais vendidos</label>
+        <label><input type="checkbox" name="af_ganhos_extras" ${sc.ganhos_extras ? 'checked' : ''} style="width:auto"> Só com ganhos extras</label></div>
+      <small class="dica">É a lista “Produtos selecionados para você” da sua Central de Afiliados. A extensão do Chrome busca a lista e gera cada link meli.la com a etiqueta desta regra.</small></div>
+    <div class="f-list"><label class="campo">Um produto por linha<textarea name="items" class="mono" rows="5" placeholder="https://produto.mercadolivre.com.br/MLB-123...&#10;https://produto.mercadolivre.com.br/MLB-456... | Fone Bluetooth | 89,90 | 149,90 | CUPOM10">${esc(sc.items || '')}</textarea>
+      <small>Formato opcional: link | título | preço | preço antigo | cupom. Se o título e o preço não forem lidos sozinhos, escreva-os aqui.</small></label></div>
+    <div class="f-search grade"><label class="campo">Palavra-chave<input name="query" value="${esc(sc.query || '')}" placeholder="Ex.: air fryer"></label>
+      <label class="campo">Ordem<select name="sort"><option value="relevance">Relevância</option><option value="price_asc" ${sc.sort === 'price_asc' ? 'selected' : ''}>Menor preço</option><option value="price_desc" ${sc.sort === 'price_desc' ? 'selected' : ''}>Maior preço</option></select></label></div></div>`;
+}
 function formRegra(r) {
   const nova = !r;
-  r = r || { name: '', enabled: true, tag_id: S.tags[0]?.id, template_id: S.templates[0]?.id, group_jids: [], source_type: 'afiliados', source_config: { paginas: 3 },
+  r = r || { name: '', enabled: true, tag_id: S.tags[0]?.id, template_id: S.templates[0]?.id, group_jids: [], sources: [{ type: 'afiliados', config: { paginas: 3 } }],
     per_run: 3, interval_min: 60, window_start: '08:00', window_end: '22:00', dedupe_days: 7, send_image: true };
-  const sel = new Set(r.group_jids); const dlg = $('#dlg'); const sc = r.source_config || {}; const catsSel = new Set(categoriasDe(sc));
+  const sel = new Set(r.group_jids); const dlg = $('#dlg');
+  const fontes = (r.sources?.length ? r.sources : [{ type: r.source_type || 'afiliados', config: r.source_config || {} }]).map((f) => ({ type: f.type, config: { ...(f.config || {}) } }));
+  const MAXF = S.st.max_fontes || 5;
   dlg.innerHTML = `<form method="dialog" id="f"><h1>${nova ? 'Nova regra' : 'Editar regra'}</h1>
     <div class="grade">
       <label class="campo">Nome da regra<input name="name" value="${esc(r.name)}" placeholder="Ex.: Tecnologia" required></label>
       <label class="campo">Etiqueta de afiliado<select name="tag_id">${opcoes(S.tags, r.tag_id, 'Escolha…')}</select>
         ${S.tags.length ? '' : '<small>Cadastre uma etiqueta em “Etiquetas”.</small>'}</label>
       <label class="campo">Template<select name="template_id">${opcoes(S.templates, r.template_id)}</select></label></div>
-    <fieldset><legend>De onde vêm as ofertas</legend>
-      <div class="linha"><label><input type="radio" name="source_type" value="afiliados" ${r.source_type === 'afiliados' ? 'checked' : ''} style="width:auto"> Central de Afiliados</label>
-        <label><input type="radio" name="source_type" value="list" ${r.source_type === 'list' ? 'checked' : ''} style="width:auto"> Lista de links</label>
-        <label><input type="radio" name="source_type" value="search" ${r.source_type === 'search' ? 'checked' : ''} style="width:auto"> Busca por palavra-chave (experimental)</label></div>
-      <div id="f-afiliados"><div class="grade">
-        <label class="campo">Buscar por (opcional)<input name="af_busca" value="${esc(sc.busca || '')}" placeholder="Ex.: organizador, air fryer"></label>
-        <label class="campo">Ordem<select name="af_ordem">${(S.st.afiliados?.ordens || []).map((o) => `<option value="${o.id}" ${o.id === sc.ordem ? 'selected' : ''}>${esc(o.name)}</option>`).join('')}</select></label>
-        <label class="campo">Páginas lidas por envio<input name="af_paginas" type="number" min="1" max="10" value="${sc.paginas ?? 3}"><small>Cada página traz ${S.st.afiliados?.por_pagina || 18} produtos.</small></label></div>
-        <fieldset class="sub-campo"><legend>Categorias <span class="dica" id="af-cont"></span></legend>
-          <div class="grupos cats" id="af-cats">${(S.st.afiliados?.categorias || []).map((c) => `<label><input type="checkbox" name="af_categorias" value="${c.id}" ${catsSel.has(c.id) ? 'checked' : ''}>${esc(c.name)}</label>`).join('')}</div>
-          <small>Nenhuma marcada = todas. Com várias, as ofertas saem intercaladas (uma de cada categoria por vez), bom para grupos de achadinhos gerais.</small></fieldset>
-        <div class="linha"><label><input type="checkbox" name="af_mais_vendidos" ${sc.mais_vendidos ? 'checked' : ''} style="width:auto"> Só mais vendidos</label>
-          <label><input type="checkbox" name="af_ganhos_extras" ${sc.ganhos_extras ? 'checked' : ''} style="width:auto"> Só com ganhos extras</label></div>
-        <small class="dica">É a lista “Produtos selecionados para você” da sua Central de Afiliados. A extensão do Chrome busca a lista e gera cada link meli.la com a etiqueta desta regra.</small></div>
-      <div id="f-list"><label class="campo">Um produto por linha<textarea name="items" class="mono" rows="6" placeholder="https://produto.mercadolivre.com.br/MLB-123...&#10;https://produto.mercadolivre.com.br/MLB-456... | Fone Bluetooth | 89,90 | 149,90 | CUPOM10">${esc(r.source_config.items || '')}</textarea>
-        <small>Formato opcional: link | título | preço | preço antigo | cupom. Se o título e o preço não forem lidos sozinhos, escreva-os aqui.</small></label></div>
-      <div id="f-search" class="grade"><label class="campo">Palavra-chave<input name="query" value="${esc(r.source_config.query || '')}" placeholder="Ex.: air fryer"></label>
-        <label class="campo">Ordem<select name="sort"><option value="relevance">Relevância</option><option value="price_asc" ${r.source_config.sort === 'price_asc' ? 'selected' : ''}>Menor preço</option><option value="price_desc" ${r.source_config.sort === 'price_desc' ? 'selected' : ''}>Maior preço</option></select></label></div></fieldset>
+    <fieldset><legend>De onde vêm as ofertas <span class="dica" id="f-cont"></span></legend>
+      <div id="fontes"></div>
+      <div class="linha"><button type="button" id="add-fonte">+ Adicionar fonte</button><small class="dica">Até ${MAXF} fontes por regra. Com mais de uma, as ofertas saem intercaladas (uma de cada fonte por vez). Um grupo também pode estar em várias regras.</small></div></fieldset>
     <fieldset><legend>Filtros</legend><div class="grade">
       <label class="campo">Preço mínimo (R$)<input name="min_price" type="number" step="0.01" min="0" value="${r.min_price ?? ''}" placeholder="Sem mínimo"></label>
       <label class="campo">Preço máximo (R$)<input name="max_price" type="number" step="0.01" min="0" value="${r.max_price ?? ''}" placeholder="Sem máximo"></label>
@@ -144,10 +154,29 @@ function formRegra(r) {
       <label class="campo">Não repetir a mesma oferta por (dias)<input name="dedupe_days" type="number" min="0" value="${r.dedupe_days}"><small>0 = pode repetir.</small></label>
       <label class="campo">Foto do produto<select name="send_image"><option value="1">Enviar com foto, quando houver</option><option value="0" ${r.send_image ? '' : 'selected'}>Só texto</option></select></label></div></fieldset>
     <div class="rodape"><button type="button" id="cancelar">Cancelar</button><button class="pri" id="salvar">${nova ? 'Criar regra' : 'Salvar'}</button></div></form>`;
-  const ajustaFonte = () => { const t = $('input[name=source_type]:checked', dlg).value; $('#f-afiliados').hidden = t !== 'afiliados'; $('#f-list').hidden = t !== 'list'; $('#f-search').hidden = t !== 'search'; };
-  $$('input[name=source_type]', dlg).forEach((i) => (i.onchange = ajustaFonte)); ajustaFonte();
-  const contaCats = () => { const n = $$('#af-cats input:checked', dlg).length; $('#af-cont').textContent = n ? `(${n} marcadas)` : '(todas)'; };
-  $('#af-cats').onchange = contaCats; contaCats();
+  const pintaFontes = () => {
+    $('#fontes').innerHTML = fontes.map((f, i) => fonteHtml(f, i, fontes.length)).join('');
+    $('#f-cont').textContent = fontes.length > 1 ? `(${fontes.length} fontes)` : '';
+    $('#add-fonte').hidden = fontes.length >= MAXF;
+    $$('.fonte', dlg).forEach((el) => {
+      const i = Number(el.dataset.i);
+      const ajusta = () => { const t = $(`input[name=st${i}]:checked`, el).value; $('.f-afiliados', el).hidden = t !== 'afiliados'; $('.f-list', el).hidden = t !== 'list'; $('.f-search', el).hidden = t !== 'search'; };
+      $$(`input[name=st${i}]`, el).forEach((r) => (r.onchange = ajusta)); ajusta();
+      const conta = () => { const n = $$('.af-cats input:checked', el).length; $('.af-cont', el).textContent = n ? `(${n} marcadas)` : '(todas)'; };
+      $('.af-cats', el).onchange = conta; conta();
+      $('[data-rm-fonte]', el).onclick = () => { lerFontes(); fontes.splice(i, 1); pintaFontes(); };
+    });
+  };
+  const lerFontes = () => {
+    $$('.fonte', dlg).forEach((el) => {
+      const i = Number(el.dataset.i); const v = (n) => $(`[name=${n}]`, el)?.value ?? ''; const t = $(`input[name=st${i}]:checked`, el).value;
+      fontes[i] = { type: t, config: t === 'afiliados'
+        ? { busca: v('af_busca'), categorias: $$('.af-cats input:checked', el).map((c) => c.value), ordem: v('af_ordem'), paginas: Number(v('af_paginas')) || 3, mais_vendidos: !!$('[name=af_mais_vendidos]', el).checked, ganhos_extras: !!$('[name=af_ganhos_extras]', el).checked }
+        : t === 'list' ? { items: v('items') } : { query: v('query'), sort: v('sort') } };
+    });
+  };
+  pintaFontes();
+  $('#add-fonte').onclick = () => { lerFontes(); if (fontes.length < MAXF) fontes.push({ type: 'afiliados', config: { paginas: 3 } }); pintaFontes(); };
   const conta = () => { const n = $$('#gr input:checked', dlg).length; const c = $('#cont'); if (c) c.textContent = `(${n} selecionados)`; };
   if ($('#gr')) {
     $('#gr').onchange = conta; conta();
@@ -167,10 +196,7 @@ function formRegra(r) {
     const g = (k) => f.get(k);
     const corpo = {
       name: g('name'), tag_id: g('tag_id') || null, template_id: g('template_id') || null,
-      group_jids: $$('#gr input:checked', dlg).map((i) => i.value), source_type: g('source_type'),
-      source_config: g('source_type') === 'afiliados'
-        ? { busca: g('af_busca'), categorias: $$('#af-cats input:checked', dlg).map((i) => i.value), ordem: g('af_ordem'), paginas: Number(g('af_paginas')) || 3, mais_vendidos: !!g('af_mais_vendidos'), ganhos_extras: !!g('af_ganhos_extras') }
-        : g('source_type') === 'list' ? { items: g('items') } : { query: g('query'), sort: g('sort') },
+      group_jids: $$('#gr input:checked', dlg).map((i) => i.value), sources: (lerFontes(), fontes),
       min_price: g('min_price'), max_price: g('max_price'), min_discount: g('min_discount'),
       per_run: g('per_run'), interval_min: g('interval_min'), window_start: g('window_start'), window_end: g('window_end'),
       dedupe_days: g('dedupe_days'), send_image: g('send_image') === '1', enabled: nova ? true : r.enabled,

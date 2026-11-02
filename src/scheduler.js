@@ -42,7 +42,7 @@ export function createScheduler({ db, wa, links, ml = mlDefault, fast = false })
 
   /** Escolhe as próximas ofertas da regra (sem enviar nada). */
   async function pickOffers(rule, want) {
-    const cands = await ml.candidates(rule, { links });
+    const cands = await ml.candidates(rule, { links, onWarn: (m) => log(rule, { level: 'aviso', message: m }) });
     const picked = []; let tried = 0; const maxTries = Math.max(want * 8, 10);
     for (const c of cands) {
       if (picked.length >= want || tried >= maxTries) break;
