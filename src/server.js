@@ -15,7 +15,7 @@ import crypto from 'node:crypto';
 
 const LOCAL_HOST = /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i;
 // Páginas e rotas que funcionam sem login.
-const PUBLIC_PATHS = new Set(['/login.html', '/style.css', '/healthz', '/favicon.ico', '/api/login']);
+const PUBLIC_PATHS = new Set(['/login.html', '/style.css', '/logo.svg', '/icon-192.png', '/healthz', '/favicon.ico', '/api/login']);
 
 export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, panelPassword = PANEL_PASSWORD }) {
   const app = express();
@@ -394,7 +394,7 @@ if (import.meta.url === `file://${process.argv[1].replace(/\\/g, '/')}` || proce
 
   if (DRY_RUN) wa.connect();
   const server = app.listen(PORT, '127.0.0.1', () => {
-    console.log(`\nDisparador ML rodando em http://localhost:${PORT}${PUBLIC_HOST ? ` (público: https://${PUBLIC_HOST})` : ''}${DRY_RUN ? '  (MODO SIMULAÇÃO: nada é enviado de verdade)' : ''}\n`);
+    console.log(`\nachadinhoturbo rodando em http://localhost:${PORT}${PUBLIC_HOST ? ` (público: https://${PUBLIC_HOST})` : ''}${DRY_RUN ? '  (MODO SIMULAÇÃO: nada é enviado de verdade)' : ''}\n`);
     wa.autoStart();
     scheduler.start();
     setInterval(() => { try { verificarLotacao(db); } catch (e) { console.error('[lotação]', e.message); } }, 60000);

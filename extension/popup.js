@@ -5,7 +5,7 @@ async function pintar() {
   if (conf.servidor) $('servidor').value = conf.servidor;
   if (conf.token && !$('token').value) $('token').value = conf.token;
   $('estado').className = 'estado' + (st.ok ? ' ok' : '');
-  $('msg').textContent = st.ok ? 'Conectado ao Disparador' : (st.erro || 'Desconectado');
+  $('msg').textContent = st.ok ? 'Conectado ao achadinhoturbo' : (st.erro || 'Desconectado');
   $('erro').textContent = st.ultimoErro ? 'Último erro ao gerar link: ' + st.ultimoErro : '';
 }
 

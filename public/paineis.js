@@ -42,7 +42,7 @@ async function paginaVisao() {
       </div>
     </div>
     <div class="card"><div class="topo" style="margin-bottom:8px"><div><h2>Entradas e saídas por ${o.periodo.por_hora ? 'horário' : 'dia'}</h2></div>
-      <div class="legenda"><span><i class="c1"></i>Entradas</span><span><i class="c2"></i>Saídas</span><span><i class="c3"></i>Dessas, saíram no mesmo dia</span></div></div>
+      <div class="legenda"><span><i class="c1"></i>Entradas</span><span><i class="c2"></i>Saídas</span><span><i class="c3"></i>Parte escura: saíram no mesmo dia em que entraram</span></div></div>
       ${semEventos ? sem('Sem entradas ou saídas no período.') : graficoBarras(o.serie, o.periodo.por_hora)}
       <details style="margin-top:8px"><summary class="dica" style="cursor:pointer">Ver em tabela</summary>
         <table style="margin-top:8px"><thead><tr><th>${o.periodo.por_hora ? 'Hora' : 'Dia'}</th><th>Entradas</th><th>Saídas</th><th>Mesmo dia</th></tr></thead>
@@ -71,17 +71,20 @@ function kpiEvasao(titulo, ev, texto, vazio) {
 function graficoBarras(serie, porHora) {
   const W = 920, H = 220, padL = 36, padB = 28, padT = 10;
   const max = Math.max(1, ...serie.flatMap((s) => [s.entradas, s.saidas]));
-  const n = serie.length; const gw = (W - padL) / n; const bw = Math.max(2, Math.min(14, (gw - 8) / 3));
+  const n = serie.length; const gw = (W - padL) / n; const bw = Math.max(3, Math.min(18, (gw - 8) / 2));
   const y = (v) => padT + (H - padT - padB) * (1 - v / max);
   const rot = (p) => (porHora ? String(p.k).padStart(2, '0') + 'h' : dataBR(p.k));
   let s = `<svg class="viz" viewBox="0 0 ${W} ${H}" role="img" aria-label="Entradas e saídas por ${porHora ? 'hora' : 'dia'}">`;
   for (const t of [...new Set([0, Math.ceil(max / 2), max])]) s += `<line class="grid" x1="${padL}" x2="${W}" y1="${y(t)}" y2="${y(t)}"/><text class="tick" x="${padL - 6}" y="${y(t) + 4}" text-anchor="end">${t}</text>`;
   const passo = porHora ? 3 : Math.max(1, Math.ceil(n / 10));
   serie.forEach((p, i) => {
-    const x0 = padL + i * gw + (gw - 3 * bw - 4) / 2;
-    [['s1', p.entradas], ['s2', p.saidas], ['s3', p.saidas_mesmo_dia]].forEach(([cls, v], k) => {
-      if (v > 0) s += `<rect class="${cls}" x="${x0 + k * (bw + 2)}" y="${y(v)}" width="${bw}" height="${H - padB - y(v)}" rx="2"/>`;
-    });
+    const x0 = padL + i * gw + (gw - 2 * bw - 2) / 2;
+    if (p.entradas > 0) s += `<rect class="s1" x="${x0}" y="${y(p.entradas)}" width="${bw}" height="${H - padB - y(p.entradas)}" rx="3"/>`;
+    if (p.saidas > 0) {
+      s += `<rect class="s2" x="${x0 + bw + 2}" y="${y(p.saidas)}" width="${bw}" height="${H - padB - y(p.saidas)}" rx="3"/>`;
+      // parte de quem entrou e saiu no mesmo dia: segmento escuro na base da barra de saídas
+      if (p.saidas_mesmo_dia > 0) s += `<rect class="s3" x="${x0 + bw + 2}" y="${y(p.saidas_mesmo_dia)}" width="${bw}" height="${H - padB - y(p.saidas_mesmo_dia)}" rx="3"/>`;
+    }
     s += `<rect class="hit" x="${padL + i * gw}" y="${padT}" width="${gw}" height="${H - padT - padB}" data-tip="${esc(`${rot(p)}: ${p.entradas} entradas, ${p.saidas} saídas (${p.saidas_mesmo_dia} no mesmo dia)`)}"/>`;
     if (i % passo === 0) s += `<text class="tick" x="${padL + i * gw + gw / 2}" y="${H - 8}" text-anchor="middle">${rot(p)}</text>`;
   });

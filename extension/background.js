@@ -1,7 +1,7 @@
-// Conector da Central de Afiliados: busca pedidos no Disparador (que roda no seu computador) e
+// Conector da Central de Afiliados (achadinhoturbo): busca pedidos no painel (que roda no seu computador) e
 // os executa de dentro de uma aba da Central de Afiliados do Mercado Livre, com a sua sessão.
 // Dois pedidos: gerar link meli.la com a etiqueta e buscar a lista "Produtos selecionados para você".
-// Só o link e a lista voltam para o Disparador. Cookies e tokens ficam no navegador.
+// Só o link e a lista voltam para o painel. Cookies e tokens ficam no navegador.
 
 const PADRAO = { servidor: 'http://127.0.0.1:3737', token: '' };
 const ML = 'https://www.mercadolivre.com.br';
@@ -105,7 +105,7 @@ async function laco() {
       let resp;
       try {
         resp = await fetch(`${c.servidor}/api/ext/poll`, { headers: { 'x-token': c.token } });
-      } catch { await status({ ok: false, erro: 'Disparador fechado ou endereço errado.' }); return; }
+      } catch { await status({ ok: false, erro: 'Painel fechado ou endereço errado.' }); return; }
       if (resp.status === 401) { await status({ ok: false, erro: 'Token recusado. Copie de novo em Ajustes.' }); return; }
       await status({ ok: true, erro: null, em: Date.now() });
       let job;

@@ -1,4 +1,4 @@
-# Disparador ML
+# achadinhoturbo (Disparador ML)
 
 Programa **pessoal** que roda no seu computador e envia ofertas da sua **Central de Afiliados** do Mercado Livre para os seus grupos de WhatsApp, com link `meli.la` e **várias etiquetas** (cada regra usa a sua).
 
