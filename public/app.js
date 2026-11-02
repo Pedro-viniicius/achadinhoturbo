@@ -18,6 +18,23 @@ function aviso(msg, erro = false) {
   clearTimeout(aviso.t); aviso.t = setTimeout(() => (t.className = ''), erro ? 6000 : 2500);
 }
 const tentar = (fn) => async (...a) => { try { await fn(...a); } catch (e) { aviso(e.message, true); } };
+// Campo obrigatório: asterisco vermelho ao lado do rótulo.
+const REQ = '<b class="req" title="Obrigatório">*</b>';
+/**
+ * Mostra, antes do rodapé do formulário (ou no fim do contêiner), um card com o que falta e marca os campos.
+ * erros = [{ msg, el? }]. Devolve true se havia erros (então não salve).
+ */
+function mostrarErros(container, erros) {
+  $$('.invalido', container).forEach((e) => e.classList.remove('invalido'));
+  let box = $('.erros', container);
+  if (!erros.length) { box?.remove(); return false; }
+  if (!box) { box = document.createElement('div'); box.className = 'erros'; box.setAttribute('role', 'alert'); const rod = $('.rodape', container); rod ? rod.parentNode.insertBefore(box, rod) : container.appendChild(box); }
+  box.innerHTML = `<b>Antes de salvar, falta:</b><ul>${erros.map((e) => `<li>${esc(e.msg)}</li>`).join('')}</ul>`;
+  erros.forEach((e) => e.el?.classList.add('invalido'));
+  (erros.find((e) => e.el)?.el || box).scrollIntoView({ block: 'center', behavior: 'smooth' });
+  erros.find((e) => e.el)?.el?.focus?.();
+  return true;
+}
 const hora = (ms) => new Date(ms).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
 async function carregar() {
@@ -134,9 +151,9 @@ function fonteHtml(f, i, total) {
       <div class="linha"><label><input type="checkbox" name="af_mais_vendidos" ${sc.mais_vendidos ? 'checked' : ''} style="width:auto"> Só mais vendidos</label>${q('fonte.maisvendidos')}
         <label><input type="checkbox" name="af_ganhos_extras" ${sc.ganhos_extras ? 'checked' : ''} style="width:auto"> Só com ganhos extras</label>${q('fonte.ganhos')}</div>
       <small class="dica">É a lista “Produtos selecionados para você” da sua Central de Afiliados. A extensão do Chrome busca a lista e gera cada link meli.la com a etiqueta desta regra.</small></div>
-    <div class="f-list"><label class="campo"><span>Um produto por linha ${q('fonte.lista')}</span><textarea name="items" class="mono" rows="5" placeholder="https://produto.mercadolivre.com.br/MLB-123...&#10;https://produto.mercadolivre.com.br/MLB-456... | Fone Bluetooth | 89,90 | 149,90 | CUPOM10">${esc(sc.items || '')}</textarea>
+    <div class="f-list"><label class="campo"><span>Um produto por linha ${REQ} ${q('fonte.lista')}</span><textarea name="items" class="mono" rows="5" placeholder="https://produto.mercadolivre.com.br/MLB-123...&#10;https://produto.mercadolivre.com.br/MLB-456... | Fone Bluetooth | 89,90 | 149,90 | CUPOM10">${esc(sc.items || '')}</textarea>
       <small>Formato opcional: link | título | preço | preço antigo | cupom. Se o título e o preço não forem lidos sozinhos, escreva-os aqui.</small></label></div>
-    <div class="f-search grade"><label class="campo">Palavra-chave<input name="query" value="${esc(sc.query || '')}" placeholder="Ex.: air fryer"></label>
+    <div class="f-search grade"><label class="campo"><span>Palavra-chave ${REQ}</span><input name="query" value="${esc(sc.query || '')}" placeholder="Ex.: air fryer"></label>
       <label class="campo">Ordem<select name="sort"><option value="relevance">Relevância</option><option value="price_asc" ${sc.sort === 'price_asc' ? 'selected' : ''}>Menor preço</option><option value="price_desc" ${sc.sort === 'price_desc' ? 'selected' : ''}>Maior preço</option></select></label></div></div>`;
 }
 function formRegra(r) {
@@ -148,24 +165,24 @@ function formRegra(r) {
   const MAXF = S.st.max_fontes || 5;
   dlg.innerHTML = `<form method="dialog" id="f"><h1>${nova ? 'Nova regra' : 'Editar regra'}</h1>
     <div class="grade">
-      <label class="campo">Nome da regra<input name="name" value="${esc(r.name)}" placeholder="Ex.: Tecnologia" required></label>
-      <label class="campo"><span>Etiqueta padrão da regra ${q('regras.etiqueta')}</span><select name="tag_id">${opcoes(S.tags, r.tag_id, 'Escolha…')}</select>
+      <label class="campo"><span>Nome da regra ${REQ}</span><input name="name" value="${esc(r.name)}" placeholder="Ex.: Tecnologia" required></label>
+      <label class="campo"><span>Etiqueta padrão da regra ${REQ} ${q('regras.etiqueta')}</span><select name="tag_id">${opcoes(S.tags, r.tag_id, 'Escolha…')}</select>
         ${S.tags.length ? '' : '<small>Cadastre uma etiqueta em “Etiquetas”.</small>'}</label>
-      <label class="campo"><span>Template ${q('regras.template')}</span><select name="template_id">${opcoes(S.templates, r.template_id)}</select></label></div>
-    <fieldset><legend>De onde vêm as ofertas ${q('regras.fontes')} <span class="dica" id="f-cont"></span></legend>
+      <label class="campo"><span>Template ${REQ} ${q('regras.template')}</span><select name="template_id">${opcoes(S.templates, r.template_id)}</select></label></div>
+    <fieldset><legend>De onde vêm as ofertas ${REQ} ${q('regras.fontes')} <span class="dica" id="f-cont"></span></legend>
       <div id="fontes"></div>
       <div class="linha"><button type="button" id="add-fonte">+ Adicionar fonte</button><small class="dica">Até ${MAXF} fontes por regra. Com mais de uma, as ofertas saem intercaladas (uma de cada fonte por vez). Um grupo também pode estar em várias regras.</small></div></fieldset>
     <fieldset><legend>Filtros ${q('regras.filtros')}</legend><div class="grade">
       <label class="campo">Preço mínimo (R$)<input name="min_price" type="number" step="0.01" min="0" value="${r.min_price ?? ''}" placeholder="Sem mínimo"></label>
       <label class="campo">Preço máximo (R$)<input name="max_price" type="number" step="0.01" min="0" value="${r.max_price ?? ''}" placeholder="Sem máximo"></label>
       <label class="campo">Desconto mínimo (%)<input name="min_discount" type="number" min="0" max="99" value="${r.min_discount ?? ''}" placeholder="Qualquer"></label></div></fieldset>
-    <fieldset><legend>Grupos que vão receber ${q('regras.grupos')} <span id="cont" class="dica"></span></legend>
+    <fieldset><legend>Grupos que vão receber ${REQ} ${q('regras.grupos')} <span id="cont" class="dica"></span></legend>
       ${S.groups.length ? `<div class="linha">${S.blocks?.length ? `<select id="bloco-atalho" style="width:auto"><option value="">Marcar um bloco…</option>${S.blocks.map((b) => `<option value="${b.id}">${esc(b.name)} (${b.group_jids.length})</option>`).join('')}</select>` : ''}<input id="busca" placeholder="Buscar grupo…" style="flex:1"><button type="button" id="so-marcados" class="alt" aria-pressed="false" title="Mostrar só os grupos marcados, para conferir e desmarcar">Só marcados</button><button type="button" id="todos">Marcar visíveis</button><button type="button" id="nenhum">Limpar</button></div>
       <div class="grupos" id="gr">${S.groups.map((g) => `<label data-n="${esc(g.name.toLowerCase())}"><input type="checkbox" value="${esc(g.jid)}" ${sel.has(g.jid) ? 'checked' : ''}>${esc(g.name)}<small>${g.size ?? ''}</small></label>`).join('')}</div>`
         : '<div class="dica">Nenhum grupo carregado. Conecte o WhatsApp na aba “WhatsApp e grupos”.</div>'}</fieldset>
     <fieldset><legend>Ritmo de envio</legend><div class="grade">
-      <label class="campo"><span>Ofertas por envio ${q('regras.por_envio')}</span><input name="per_run" type="number" min="1" max="20" value="${r.per_run}"><small>Cada oferta vai para todos os grupos, uma atrás da outra.</small></label>
-      <label class="campo"><span>Intervalo entre envios (minutos) ${q('regras.intervalo')}</span><input name="interval_min" type="number" min="1" value="${r.interval_min}"></label>
+      <label class="campo"><span>Ofertas por envio ${REQ} ${q('regras.por_envio')}</span><input name="per_run" type="number" min="1" max="20" value="${r.per_run}"><small>Cada oferta vai para todos os grupos, uma atrás da outra.</small></label>
+      <label class="campo"><span>Intervalo entre envios (minutos) ${REQ} ${q('regras.intervalo')}</span><input name="interval_min" type="number" min="1" value="${r.interval_min}"></label>
       <label class="campo"><span>Funciona das ${q('regras.janela')}</span><input name="window_start" type="time" value="${esc(r.window_start)}"></label>
       <label class="campo">Até<input name="window_end" type="time" value="${esc(r.window_end)}"></label>
       <label class="campo"><span>Não repetir a mesma oferta por (dias) ${q('regras.dedupe')}</span><input name="dedupe_days" type="number" min="0" value="${r.dedupe_days}"><small>0 = pode repetir.</small></label>
@@ -217,8 +234,20 @@ function formRegra(r) {
       per_run: g('per_run'), interval_min: g('interval_min'), window_start: g('window_start'), window_end: g('window_end'),
       dedupe_days: g('dedupe_days'), send_image: g('send_image') === '1', enabled: nova ? true : r.enabled,
     };
-    if (!corpo.tag_id) throw new Error('Escolha uma etiqueta.');
-    await api(nova ? '/rules' : `/rules/${r.id}`, nova ? 'POST' : 'PUT', corpo);
+    const erros = [];
+    if (!String(corpo.name || '').trim()) erros.push({ msg: 'Dê um nome à regra.', el: $('[name=name]', dlg) });
+    if (!corpo.tag_id) erros.push({ msg: 'Escolha a etiqueta padrão da regra (cadastre em Etiquetas se ainda não tiver).', el: $('[name=tag_id]', dlg) });
+    if (!corpo.template_id) erros.push({ msg: 'Escolha um template.', el: $('[name=template_id]', dlg) });
+    fontes.forEach((f, i) => {
+      const el = $(`.fonte[data-i="${i}"]`, dlg);
+      if (f.type === 'list' && !String(f.config.items || '').split('\n').some((l) => /^https?:/i.test(l.trim()))) erros.push({ msg: `Fonte ${i + 1}: cole ao menos um link de produto.`, el: $('textarea[name=items]', el) });
+      if (f.type === 'search' && !String(f.config.query || '').trim()) erros.push({ msg: `Fonte ${i + 1}: digite a palavra-chave da busca.`, el: $('input[name=query]', el) });
+    });
+    if (!corpo.group_jids.length) erros.push({ msg: 'Marque ao menos um grupo que vai receber as ofertas.', el: $('#gr', dlg) });
+    if (!(Number(corpo.per_run) >= 1 && Number(corpo.per_run) <= 20)) erros.push({ msg: 'Ofertas por envio: de 1 a 20.', el: $('[name=per_run]', dlg) });
+    if (!(Number(corpo.interval_min) >= 1)) erros.push({ msg: 'Intervalo entre envios: ao menos 1 minuto.', el: $('[name=interval_min]', dlg) });
+    if (mostrarErros(dlg, erros)) return;
+    try { await api(nova ? '/rules' : `/rules/${r.id}`, nova ? 'POST' : 'PUT', corpo); } catch (e) { mostrarErros(dlg, [{ msg: e.message }]); return; }
     dlg.close(); aviso(nova ? 'Regra criada' : 'Regra salva'); await recarregarRegras();
   });
   dlg.showModal();
@@ -241,14 +270,19 @@ async function verOfertas(r) {
 function paginaEtiquetas() {
   $('#pagina').innerHTML = `<div class="topo"><div><h1>Etiquetas de afiliado ${q('etiquetas')}</h1>
     <p class="sub">Cadastre aqui os nomes das suas etiquetas do programa de afiliados do Mercado Livre, escritos exatamente como aparecem lá. Depois escolha qual usar em cada regra.</p></div></div>
-    <form class="card" id="nt"><div class="linha"><input name="name" placeholder="Ex.: achadosdesejo" required style="flex:1;min-width:200px" aria-label="Nome da etiqueta">
-      <input name="note" placeholder="Anotação (opcional)" style="flex:1;min-width:200px" aria-label="Anotação"><button class="pri">Adicionar etiqueta</button></div></form>
+    <form class="card" id="nt"><div class="linha"><label class="campo" style="flex:1;min-width:200px"><span>Nome da etiqueta ${REQ}</span><input name="name" placeholder="Ex.: achadosdesejo" style="width:100%"></label>
+      <label class="campo" style="flex:1;min-width:200px"><span>Anotação (opcional)</span><input name="note" placeholder="Ex.: grupo de casa"></label><button class="pri" style="align-self:end">Adicionar etiqueta</button></div></form>
     ${S.tags.length ? `<div class="card tabela"><table><thead><tr><th>Etiqueta</th><th>Anotação</th><th>Usada em</th><th></th></tr></thead><tbody>
       ${S.tags.map((t) => { const uso = S.rules.filter((r) => r.tag_id === t.id).length; return `<tr><td><span class="chip etq">${esc(t.name)}</span></td><td>${esc(t.note)}</td><td>${uso} ${uso === 1 ? 'regra' : 'regras'}</td><td style="text-align:right"><button class="perigo leve" data-del="${t.id}">Excluir</button></td></tr>`; }).join('')}
       </tbody></table></div>` : '<div class="vazio">Nenhuma etiqueta cadastrada.</div>'}`;
   $('#nt').onsubmit = tentar(async (ev) => {
-    ev.preventDefault(); const f = new FormData(ev.target);
-    await api('/tags', 'POST', { name: f.get('name'), note: f.get('note') }); S.tags = await api('/tags'); aviso('Etiqueta adicionada'); paginaEtiquetas();
+    ev.preventDefault(); const f = new FormData(ev.target); const nome = String(f.get('name') || '').trim();
+    const erros = [];
+    if (!nome) erros.push({ msg: 'Digite o nome da etiqueta, igual ao cadastrado na Central de Afiliados.', el: $('[name=name]', ev.target) });
+    else if (!/^[\w.-]{2,60}$/.test(nome)) erros.push({ msg: 'A etiqueta deve ter 2 a 60 caracteres: letras, números, ponto, hífen ou _ (sem espaços).', el: $('[name=name]', ev.target) });
+    if (mostrarErros(ev.target, erros)) return;
+    try { await api('/tags', 'POST', { name: nome, note: f.get('note') }); } catch (e) { mostrarErros(ev.target, [{ msg: e.message }]); return; }
+    S.tags = await api('/tags'); aviso('Etiqueta adicionada'); paginaEtiquetas();
   });
   $$('[data-del]').forEach((b) => (b.onclick = tentar(async () => { await api('/tags/' + b.dataset.del, 'DELETE'); S.tags = await api('/tags'); paginaEtiquetas(); })));
 }
@@ -260,8 +294,8 @@ function paginaTemplates(id) {
     <button id="novoT" class="pri">Novo template</button></div>
     <div class="modelos">${S.templates.map((x) => `<button data-id="${x.id}" class="${x.id === t.id ? 'on' : ''}">${esc(x.name)}</button>`).join('')}</div>
     <div class="editor"><div class="card" style="display:grid;gap:12px">
-      <label class="campo">Nome<input id="tn" value="${esc(t.name)}"></label>
-      <label class="campo">Mensagem<textarea id="tb" class="mono" rows="12">${esc(t.body)}</textarea></label>
+      <label class="campo"><span>Nome ${REQ}</span><input id="tn" value="${esc(t.name)}"></label>
+      <label class="campo"><span>Mensagem ${REQ} <small class="dica">(precisa ter {LINK})</small></span><textarea id="tb" class="mono" rows="12">${esc(t.body)}</textarea></label>
       <div class="linha" id="chips">${S.st.placeholders.map((p) => `<button type="button" class="chip mono" data-p="${p}">{${p}}</button>`).join('')}</div>
       <small class="dica">Dica do WhatsApp: *negrito*, _itálico_, ~riscado~.</small>
       <div class="linha"><button class="pri" id="sv">Salvar template</button><button class="perigo leve" id="dl">Excluir</button></div></div>
@@ -272,7 +306,14 @@ function paginaTemplates(id) {
   $('#chips').onclick = (e) => { const p = e.target.dataset.p; if (!p) return; const a = tb.selectionStart; tb.setRangeText(`{${p}}`, a, tb.selectionEnd, 'end'); tb.focus(); prever(); };
   $$('.modelos button').forEach((b) => (b.onclick = () => paginaTemplates(Number(b.dataset.id))));
   $('#novoT').onclick = tentar(async () => { const r = await api('/templates', 'POST', { name: 'Novo template', body: S.templates[0].body }); S.templates = await api('/templates'); paginaTemplates(r.id); });
-  $('#sv').onclick = tentar(async () => { await api('/templates/' + t.id, 'PUT', { name: $('#tn').value, body: tb.value }); S.templates = await api('/templates'); aviso('Template salvo'); paginaTemplates(t.id); });
+  $('#sv').onclick = tentar(async () => {
+    const card = $('#sv').closest('.card'); const erros = [];
+    if (!$('#tn').value.trim()) erros.push({ msg: 'Dê um nome ao template.', el: $('#tn') });
+    if (!tb.value.includes('{LINK}')) erros.push({ msg: 'A mensagem precisa ter {LINK}, senão sai sem o link de afiliado.', el: tb });
+    if (mostrarErros(card, erros)) return;
+    try { await api('/templates/' + t.id, 'PUT', { name: $('#tn').value, body: tb.value }); } catch (e) { mostrarErros(card, [{ msg: e.message }]); return; }
+    S.templates = await api('/templates'); aviso('Template salvo'); paginaTemplates(t.id);
+  });
   $('#dl').onclick = tentar(async () => { if (!confirm('Excluir este template?')) return; await api('/templates/' + t.id, 'DELETE'); S.templates = await api('/templates'); paginaTemplates(); });
 }
 

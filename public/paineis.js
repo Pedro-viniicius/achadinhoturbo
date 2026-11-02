@@ -122,10 +122,10 @@ async function paginaBlocos() {
 function formBloco(b) {
   const novo = !b; b = b || { name: '', tag_id: null, group_jids: [] }; const sel = new Set(b.group_jids); const dlg = $('#dlg');
   dlg.innerHTML = `<form method="dialog" id="f"><h1>${novo ? 'Novo bloco' : 'Editar bloco'}</h1>
-    <div class="grade"><label class="campo">Nome do bloco<input name="name" value="${esc(b.name)}" placeholder="Ex.: Casa e cozinha" required></label>
+    <div class="grade"><label class="campo"><span>Nome do bloco ${REQ}</span><input name="name" value="${esc(b.name)}" placeholder="Ex.: Casa e cozinha" required></label>
       <label class="campo"><span>Etiqueta do Mercado Livre (opcional) ${q('blocos.etiqueta')}</span><select name="tag_id"><option value="">Nenhuma</option>${S.tags.map((t) => `<option value="${t.id}" ${t.id === b.tag_id ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}</select>
         <small>Para separar o ganho por nicho. Ao criar uma regra a partir deste bloco, a etiqueta já vem marcada.</small></label></div>
-    <fieldset><legend>Grupos do bloco <span id="cont" class="dica"></span></legend>
+    <fieldset><legend>Grupos do bloco ${REQ} <span id="cont" class="dica"></span></legend>
       ${S.groups.length ? `<div class="linha"><input id="busca" placeholder="Buscar grupo…" style="flex:1"><button type="button" id="so-marcados" class="alt" aria-pressed="false" title="Mostrar só os grupos marcados, para conferir e desmarcar">Só marcados</button><button type="button" id="nenhum">Limpar</button></div>
       <div class="grupos" id="gr">${S.groups.map((g) => `<label data-n="${esc(g.name.toLowerCase())}"><input type="checkbox" value="${esc(g.jid)}" ${sel.has(g.jid) ? 'checked' : ''}>${esc(g.name)}<small>${g.size ?? ''}</small></label>`).join('')}</div>` : '<div class="dica">Nenhum grupo carregado. Conecte o WhatsApp e sincronize os grupos.</div>'}</fieldset>
     <div class="rodape"><button type="button" id="cancelar">Cancelar</button><button class="pri">${novo ? 'Salvar bloco' : 'Salvar'}</button></div></form>`;
@@ -134,7 +134,11 @@ function formBloco(b) {
   $('#cancelar').onclick = () => dlg.close();
   $('#f').onsubmit = tentar(async (ev) => {
     ev.preventDefault(); const f = new FormData($('#f'));
-    await api(novo ? '/blocks' : `/blocks/${b.id}`, novo ? 'POST' : 'PUT', { name: f.get('name'), tag_id: f.get('tag_id') || null, group_jids: $$('#gr input:checked', dlg).map((i) => i.value) });
+    const jids = $$('#gr input:checked', dlg).map((i) => i.value); const erros = [];
+    if (!String(f.get('name') || '').trim()) erros.push({ msg: 'Dê um nome ao bloco.', el: $('[name=name]', dlg) });
+    if (!jids.length) erros.push({ msg: 'Marque ao menos um grupo para o bloco.', el: $('#gr', dlg) });
+    if (mostrarErros(dlg, erros)) return;
+    try { await api(novo ? '/blocks' : `/blocks/${b.id}`, novo ? 'POST' : 'PUT', { name: f.get('name'), tag_id: f.get('tag_id') || null, group_jids: jids }); } catch (e) { mostrarErros(dlg, [{ msg: e.message }]); return; }
     dlg.close(); aviso(novo ? 'Bloco criado' : 'Bloco salvo'); paginaBlocos();
   });
   dlg.showModal();
@@ -184,7 +188,7 @@ function formLink(l) {
   const semConvite = (jid) => !S.groups.find((g) => g.jid === jid)?.invite_code;
   dlg.innerHTML = `<form method="dialog" id="f"><h1>${novo ? 'Novo link' : 'Editar link'}</h1>
     <p class="sub" style="margin:-8px 0 12px">As pessoas vão para o primeiro grupo da lista que ainda tem vaga.</p>
-    <div class="grade"><label class="campo">Nome<input name="name" value="${esc(l.name)}" placeholder="Ex.: Achadinhos de casa" required></label>
+    <div class="grade"><label class="campo"><span>Nome ${REQ}</span><input name="name" value="${esc(l.name)}" placeholder="Ex.: Achadinhos de casa" required></label>
       <label class="campo"><span>Endereço do link ${q('links.endereco')}</span><div class="linha" style="align-items:center"><span class="dica" style="white-space:nowrap">${esc((S.st.endereco_publico || '').replace(/^https?:\/\//, ''))}/g/</span><input name="slug" value="${esc(l.slug)}" placeholder="achadinhos" style="flex:1"></div></label></div>
     <label class="campo"><span>URL reserva (quando todos lotarem) ${q('links.reserva')}</span><input name="fallback_url" value="${esc(l.fallback_url || '')}" placeholder="Opcional: https://…"></label>
     <fieldset><legend>Como distribuir os cliques ${q('links.modo')}</legend><div class="modos">${S.st.modos_link.map((m) => `<label><input type="radio" name="mode" value="${m.id}" ${m.id === l.mode ? 'checked' : ''} style="width:auto"><b>${esc(m.name)}</b><small>${esc(m.desc)}</small></label>`).join('')}</div></fieldset>
@@ -192,7 +196,7 @@ function formLink(l) {
       <small style="display:block;font-weight:400;color:var(--muted)">Quando um grupo deste link chegar a ${S.st.lotacao_pct}% do limite, o painel propõe um grupo novo igual (nome com o próximo número, descrição, foto, permissões e admins). Nada é criado até você clicar em “Criar agora”. O grupo novo entra neste link logo depois do que lotou, nos mesmos blocos e nas mesmas regras.</small></span></label>
     <div class="grade"><label class="campo"><span>Limite de membros por grupo ${q('links.limite')}</span><input name="limit_members" type="number" min="2" max="${S.st.limite_max}" value="${l.limit_members}"><small>Padrão 1.000 (máximo ${S.st.limite_max.toLocaleString('pt-BR')}).</small></label>
       <label class="campo" id="f-reopen">Reabrir quando cair para (membros)<input name="reopen_below" type="number" min="1" value="${l.reopen_below}"></label></div>
-    <fieldset><legend>Grupos, em ordem ${q('links.ordem')} <span class="dica">(o primeiro enche primeiro)</span></legend>
+    <fieldset><legend>Grupos, em ordem ${REQ} ${q('links.ordem')} <span class="dica">(o primeiro enche primeiro)</span></legend>
       <input id="busca-g" placeholder="Buscar grupo para adicionar…" style="width:100%;margin-bottom:8px">
       <div class="grupos" id="disp" style="max-height:150px"></div>
       <ul class="ordem" id="ordem" style="list-style:none;padding:0;margin:10px 0 0"></ul>
@@ -215,8 +219,13 @@ function formLink(l) {
   };
   $('#cancelar').onclick = () => dlg.close();
   $('#f').onsubmit = tentar(async (ev) => {
-    ev.preventDefault(); const f = new FormData($('#f')); const g = (k) => f.get(k);
-    await api(novo ? '/links' : `/links/${l.id}`, novo ? 'POST' : 'PUT', { name: g('name'), slug: g('slug'), mode: g('mode'), fallback_url: g('fallback_url'), limit_members: g('limit_members'), reopen_below: g('reopen_below'), group_jids: ordem, auto_next: !!g('auto_next') });
+    ev.preventDefault(); const f = new FormData($('#f')); const g = (k) => f.get(k); const erros = [];
+    if (!String(g('name') || '').trim()) erros.push({ msg: 'Dê um nome ao link.', el: $('[name=name]', dlg) });
+    if (!ordem.length) erros.push({ msg: 'Adicione ao menos um grupo à ordem (clique nos grupos da lista).', el: $('#ordem', dlg) });
+    if (ordem.length && ordem.every(semConvite)) erros.push({ msg: 'Nenhum grupo escolhido tem convite. Busque ou cole o convite em “WhatsApp e grupos”.', el: $('#ordem', dlg) });
+    if (g('fallback_url') && !/^https?:\/\//i.test(g('fallback_url').trim())) erros.push({ msg: 'A URL reserva precisa começar com http:// ou https://', el: $('[name=fallback_url]', dlg) });
+    if (mostrarErros(dlg, erros)) return;
+    try { await api(novo ? '/links' : `/links/${l.id}`, novo ? 'POST' : 'PUT', { name: g('name'), slug: g('slug'), mode: g('mode'), fallback_url: g('fallback_url'), limit_members: g('limit_members'), reopen_below: g('reopen_below'), group_jids: ordem, auto_next: !!g('auto_next') }); } catch (e) { mostrarErros(dlg, [{ msg: e.message }]); return; }
     dlg.close(); aviso(novo ? 'Link criado' : 'Link salvo'); paginaLinks();
   });
   dlg.showModal();

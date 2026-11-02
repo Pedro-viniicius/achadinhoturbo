@@ -202,3 +202,9 @@ h1 .q { width:20px; height:20px; font-size:12px; vertical-align:6px; }
 @media (max-width:600px) { .glossario { grid-template-columns:1fr; } .glossario dd { margin-bottom:6px; } }
 
 button.alt.on { background:var(--primary-tint); border-color:var(--primary-text); color:var(--primary-text); }
+
+/* ---------- obrigatórios e erros de formulário ---------- */
+.req { color:var(--err); font-weight:800; margin-left:2px; }
+.erros { background:color-mix(in oklab, var(--err) 12%, var(--surface)); border:1px solid var(--err); border-radius:10px; padding:10px 14px; color:var(--ink); font-size:14px; }
+.erros ul { margin:6px 0 0; padding-left:18px; } .erros li { margin:2px 0; }
+.invalido, .invalido:focus { border-color:var(--err) !important; box-shadow:0 0 0 3px color-mix(in oklab, var(--err) 25%, transparent) !important; }
