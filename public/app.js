@@ -327,6 +327,8 @@ const ROTAS = { ajuda: () => paginaAjuda(), visao: () => paginaVisao(), blocos: 
 function ir() {
   const r = (location.hash || '#visao').slice(1); const f = ROTAS[r] || paginaVisao;
   $$('#nav a').forEach((a) => a.classList.toggle('on', a.getAttribute('href') === '#' + r));
+  const pg = $('#pagina'); pg.onclick = null; pg.innerHTML = ''; // tratadores da tela anterior não podem vazar para a próxima
+  if ($('#dlg').open) $('#dlg').close();
   f();
 }
 async function atualizarEstado(forcar) {
