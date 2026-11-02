@@ -9,6 +9,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import QRCode from 'qrcode';
 import pino from 'pino';
+import { IMAGEM_PERMITIDA } from './ml.js';
 
 const SYNC_MS = 10 * 60 * 1000;
 /** 5511999999999:12@s.whatsapp.net -> 5511999999999@s.whatsapp.net */
@@ -18,9 +19,96 @@ const idsOf = (p) => [p?.id, p?.lid, p?.phoneNumber, p?.jid].filter(Boolean).map
 export const sameUser = (a, b) => { const A = idsOf(a); return idsOf(b).some((x) => A.includes(x)); };
 /** Identificador estável para guardar: prefere o número, senão o id (LID). */
 export const participantId = (p) => bareJid(typeof p === 'string' ? p : (p?.phoneNumber || p?.id || ''));
-const dayOf = (ts) => { const d = new Date(ts); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
+/** Dia do calendário local (YYYY-MM-DD): o padrão de `diaDe` quando ninguém passa a virada do dia. */
+const diaDoCalendario = (ts) => { const d = new Date(ts); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
 
-export function createWhatsApp({ db, dir, dryRun = false, pseudo = (id) => id }) {
+/**
+ * Valida uma enquete e devolve no formato do Baileys ({ name, values, selectableCount }).
+ * 2 a 12 opções, sem repetir (ignora maiúsculas e espaços nas pontas). Uma escolha = 1; múltipla = 0.
+ * Exportada para quem cria o envio validar com a mesma regra de quem envia.
+ */
+export function montarEnquete({ pergunta, opcoes, multipla } = {}) {
+  const name = String(pergunta ?? '').trim();
+  if (!name) throw new Error('A enquete precisa de uma pergunta.');
+  if (!Array.isArray(opcoes) || opcoes.length < 2 || opcoes.length > 12) throw new Error('A enquete precisa de 2 a 12 opções.');
+  const values = opcoes.map((o) => String(o ?? '').trim());
+  if (values.some((v) => !v)) throw new Error('A enquete tem opção vazia.');
+  if (new Set(values.map((v) => v.toLocaleLowerCase('pt-BR'))).size !== values.length) throw new Error('A enquete tem opções repetidas.');
+  return { name, values, selectableCount: multipla ? 0 : 1 };
+}
+
+/** Só dígitos, sem zeros à esquerda e com o 55 quando vier só DDD + número (10 ou 11 dígitos). */
+export function normalizarNumero(digitos) {
+  let d = String(digitos ?? '').replace(/\D/g, '').replace(/^0+/, '');
+  if (d.length === 10 || d.length === 11) d = '55' + d;
+  // a mensagem não repete o número: pode acabar num log
+  if (d.length < 12 || d.length > 15) throw new Error('Número inválido: informe DDD e número.');
+  return d;
+}
+
+const LARGURA_MINIATURA = 192; // a mesma da prévia do Baileys (linkPreviewImageThumbnailWidth)
+const MAX_IMAGEM_PREVIA = 5 * 1024 * 1024;
+const hostDe = (url) => { try { return new URL(url).hostname; } catch { return ''; } };
+
+/**
+ * Prévia do link: aceita uma URL ou { url, title, description, image }, com image em Buffer ou URL https.
+ * Sem URL (nem na prévia nem no texto), não há prévia.
+ */
+function normalizarPrevia(text, previa) {
+  const p = typeof previa === 'string' ? { url: previa } : (previa && typeof previa === 'object' ? previa : {});
+  const noTexto = String(text ?? '').match(/https?:\/\/\S+/i)?.[0] || '';
+  const url = String(p.url || '').trim() || noTexto;
+  if (!url) return null;
+  return {
+    url, noTexto: noTexto || url,
+    title: String(p.title || '').trim() || hostDe(url) || url,
+    description: p.description ? String(p.description) : undefined,
+    image: p.image || undefined,
+  };
+}
+
+/** Baixa a imagem da prévia: só https do CDN do Mercado Livre (mlstatic), sem seguir redirecionamento, até 5 MB e 5 s. */
+async function baixarImagem(url) {
+  const u = new URL(url);
+  if (u.protocol !== 'https:') throw new Error('a imagem da prévia precisa ser https');
+  // a regra mora aqui, não só em quem chama: nenhum caminho baixa imagem de outro host (SSRF)
+  if (!IMAGEM_PERMITIDA.test(u.href)) throw new Error('a imagem da prévia só pode vir do Mercado Livre (mlstatic)');
+  const r = await fetch(u, { redirect: 'error', signal: AbortSignal.timeout(5000) });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  if (!/^image\//i.test(r.headers.get('content-type') || '')) throw new Error('o endereço não é uma imagem');
+  const partes = []; let total = 0;
+  for await (const parte of r.body) {
+    total += parte.length;
+    if (total > MAX_IMAGEM_PREVIA) throw new Error('imagem grande demais');
+    partes.push(parte);
+  }
+  return Buffer.concat(partes);
+}
+
+/**
+ * Monta o linkPreview do Baileys sem o link-preview-js (que não está instalado e buscaria páginas de terceiros).
+ * A miniatura sai do extractImageThumb do Baileys (precisa do sharp ou do jimp); se falhar, a prévia vai sem imagem.
+ */
+async function montarLinkPreview(previa) {
+  const info = { 'canonical-url': previa.url, 'matched-text': previa.noTexto, title: previa.title };
+  if (previa.description) info.description = previa.description;
+  if (previa.image) {
+    try {
+      const bytes = Buffer.isBuffer(previa.image) ? previa.image : await baixarImagem(String(previa.image));
+      const { extractImageThumb } = await import('@whiskeysockets/baileys');
+      info.jpegThumbnail = (await extractImageThumb(bytes, LARGURA_MINIATURA)).buffer;
+    } catch (e) {
+      console.warn('[prévia] enviando sem miniatura:', e.message);
+    }
+  }
+  return info;
+}
+
+/**
+ * `diaDe(ts)` → 'YYYY-MM-DD': o dia em que uma leitura conta (uma por pessoa por dia). O servidor passa o dia de negócio
+ * (com a virada do dia de Relatórios e avisos); sem ele, vale o dia do calendário.
+ */
+export function createWhatsApp({ db, dir, dryRun = false, pseudo = (id) => id, diaDe = diaDoCalendario }) {
   const authDir = path.join(dir, 'wa_auth');
   const state = { status: 'idle', qr: null, me: null, error: null };
   let sock = null; let starting = false; let stopped = false; let syncTimer = null;
@@ -77,7 +165,7 @@ export function createWhatsApp({ db, dir, dryRun = false, pseudo = (id) => id })
       if (!jid || !jid.endsWith('@g.us') || !u.key?.fromMe || !who) continue;
       if (!(u.receipt.readTimestamp || u.receipt.playedTimestamp)) continue;
       const ts = Number(u.receipt.readTimestamp || u.receipt.playedTimestamp) * 1000 || now;
-      insRead.run(jid, pseudo(bareJid(who)), dayOf(ts), ts);
+      insRead.run(jid, pseudo(bareJid(who)), diaDe(ts), ts);
     }
   }
 
@@ -144,16 +232,54 @@ export function createWhatsApp({ db, dir, dryRun = false, pseudo = (id) => id })
 
   const isReady = () => state.status === 'open' && (dryRun || !!sock);
 
-  async function sendText(jid, text) {
-    if (dryRun) { simulated.push({ jid, text }); return; }
+  /**
+   * Texto, com prévia do link opcional ({ previa }: URL ou { url, title, description, image }).
+   * Sem prévia vai `linkPreview: null`, para o Baileys não tentar carregar o link-preview-js.
+   */
+  async function sendText(jid, text, { previa } = {}) {
+    const p = previa ? normalizarPrevia(text, previa) : null;
+    if (dryRun) {
+      const registro = { tipo: 'text', jid, text };
+      if (p) registro.previa = { url: p.url, title: p.title, description: p.description, image: Buffer.isBuffer(p.image) ? { bytes: p.image.length } : p.image };
+      simulated.push(registro); return;
+    }
     if (!isReady()) throw new Error('WhatsApp desconectado');
-    await sock.sendMessage(jid, { text });
+    await sock.sendMessage(jid, { text, linkPreview: p ? await montarLinkPreview(p) : null });
   }
 
-  async function sendImage(jid, url, caption) {
-    if (dryRun) { simulated.push({ jid, text: caption, image: url }); return; }
+  /** Foto por URL (o Baileys baixa) ou por Buffer (upload), com legenda. */
+  async function sendImage(jid, urlOuBuffer, caption, { mimetype } = {}) {
+    const ehBuffer = Buffer.isBuffer(urlOuBuffer);
+    if (ehBuffer ? !urlOuBuffer.length : !(typeof urlOuBuffer === 'string' && urlOuBuffer)) throw new Error('Imagem inválida.');
+    if (mimetype != null && !/^image\/[\w.+-]+$/i.test(String(mimetype))) throw new Error('Tipo de imagem inválido.');
+    if (dryRun) {
+      const registro = { tipo: 'image', jid, text: caption, image: ehBuffer ? { bytes: urlOuBuffer.length } : urlOuBuffer };
+      if (mimetype) registro.mimetype = mimetype;
+      simulated.push(registro); return;
+    }
     if (!isReady()) throw new Error('WhatsApp desconectado');
-    await sock.sendMessage(jid, { image: { url }, caption });
+    await sock.sendMessage(jid, { image: ehBuffer ? urlOuBuffer : { url: urlOuBuffer }, caption, ...(mimetype ? { mimetype } : {}) });
+  }
+
+  /** Enquete ({ pergunta, opcoes, multipla }). Valida antes de tudo, também no modo simulado. */
+  async function sendPoll(jid, enquete) {
+    const poll = montarEnquete(enquete);
+    if (dryRun) { simulated.push({ tipo: 'poll', jid, text: poll.name, poll }); return; }
+    if (!isReady()) throw new Error('WhatsApp desconectado');
+    await sock.sendMessage(jid, { poll });
+  }
+
+  /**
+   * Acha o JID canônico de um número (no Brasil, resolve o 9º dígito): { jid, existe }.
+   * Se o WhatsApp não conhece o número, devolve o JID montado com existe: false.
+   */
+  async function resolverNumero(digitos) {
+    const d = normalizarNumero(digitos);
+    const montado = `${d}@s.whatsapp.net`;
+    if (dryRun) return { jid: montado, existe: true };
+    if (!isReady()) throw new Error('WhatsApp desconectado');
+    const [achado] = (await sock.onWhatsApp(d)) || [];
+    return achado?.exists && achado.jid ? { jid: bareJid(achado.jid), existe: true } : { jid: montado, existe: false };
   }
 
   /** Busca o link de convite do grupo (exige ser admin) e guarda. */
@@ -205,9 +331,11 @@ export function createWhatsApp({ db, dir, dryRun = false, pseudo = (id) => id })
   }
 
   return {
-    state: () => ({ ...state }), isReady, connect, logout, syncGroups, sendText, sendImage, fetchInvite, createNextGroup, simulated,
-    // usados nos testes para simular eventos do WhatsApp
+    state: () => ({ ...state }), isReady, connect, logout, syncGroups, sendText, sendImage, sendPoll, resolverNumero,
+    fetchInvite, createNextGroup, simulated,
+    // usados nos testes para simular eventos do WhatsApp e conferir o que vai ao Baileys
     _onParticipants: onParticipants, _onReceipts: onReceipts,
+    _usarSocket: (falso) => { sock = falso; state.status = 'open'; },
     // reconecta sozinho ao abrir o programa se já houver sessão salva
     autoStart: () => { if (!dryRun && fs.existsSync(path.join(authDir, 'creds.json'))) connect(); },
   };

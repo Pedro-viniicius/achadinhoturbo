@@ -1,0 +1,912 @@
+// Envios avulsos (plano disparos-comunicacao-conta, etapa 8): disparo manual de oferta (F1), mensagem e enquete (F2),
+// agora, agendados e repetidos, pelo servidor HTTP em porta aleatória. WhatsApp simulado, links meli.la/fake-… e um
+// `ml` falso: nenhum teste acessa a rede (o fetch global é trocado por um que falha e conta).
+import test, { after } from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import http from 'node:http';
+import zlib from 'node:zlib';
+import { openDb, setSetting } from '../src/db.js';
+import { buildApp } from '../src/server.js';
+import { createWhatsApp } from '../src/whatsapp.js';
+import { createLinkService } from '../src/links.js';
+import { createScheduler } from '../src/scheduler.js';
+import { createEnvios, proximaOcorrencia, limparErro, semMetadados } from '../src/envios.js';
+
+let acessosRede = 0;
+globalThis.fetch = async () => { acessosRede++; throw new Error('rede proibida no teste'); };
+
+const pastas = [];
+after(() => { for (const p of pastas) fs.rmSync(p, { recursive: true, force: true }); });
+const tmp = () => { const p = fs.mkdtempSync(path.join(os.tmpdir(), 'disp-env-')); pastas.push(p); return p; };
+
+const SENHA = 'senha-de-teste-123';
+const DIA = 86400000;
+const IMG = 'https://http2.mlstatic.com/D_NQ_NP_123-O.jpg';
+const URL_ML = 'https://produto.mercadolivre.com.br/MLB-1234567890-fone-bom-_JM';
+const URL_AMAZON = 'https://www.amazon.com.br/dp/B0ABC12345';
+const MSG_AMAZON = 'Amazon identificada, mas ainda não está conectada. Configure em Conexões.';
+// PNG 1×1 como o sharp grava (o upload regrava a foto: este volta igual, byte a byte) e um JPEG 1×1 de verdade
+// (o upload decodifica a foto: um começo de JPEG não passa mais)
+const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACXBIWXMAAAsSAAALEgHS3X78AAAADUlEQVQImWNgYPhfDwACggF/NGwuCgAAAABJRU5ErkJggg==', 'base64');
+const JPG = Buffer.from('/9j/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYWICwgIyYnKSopGR8tMC0oMCUoKSj/2wBDAQcHBwoIChMKChMoGhYaKCgoKCgo'
+  + 'KCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCj/wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAb/xAAUEAEAAAAAAAAAAAAA'
+  + 'AAAAAAAA/8QAFQEBAQAAAAAAAAAAAAAAAAAABgf/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIRAxEAPwCXAUUYf//Z', 'base64');
+const TODOS = [0, 1, 2, 3, 4, 5, 6];
+
+const pad = (n) => String(n).padStart(2, '0');
+const dataDe = (ts) => { const d = new Date(ts); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; };
+const hhmmDe = (ts) => { const d = new Date(ts); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+const amanha = (h, m = 0) => { const d = new Date(); return new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1, h, m).getTime(); };
+const statusDe = (db, id) => db.prepare('SELECT status FROM envios WHERE id = ?').get(id)?.status;
+const linhas = (db, sql, ...a) => db.prepare(sql).all(...a).map((r) => ({ ...r }));
+const contar = (db, sql, ...a) => db.prepare(sql).get(...a).n;
+
+/** Stub do módulo ml: devolve uma oferta pronta, sem rede, e guarda as URLs lidas. */
+function mlFalso() {
+  const chamadas = [];
+  return {
+    chamadas,
+    async resolveOffer(c) {
+      chamadas.push(c.url);
+      return { key: c.key, url: c.url, title: 'Fone Bom', price: 89.9, oldPrice: 149.9, discountPct: 40, sold: 1200, freeShipping: true, image: IMG };
+    },
+  };
+}
+
+/** Banco, WhatsApp simulado, links falsos e agendador; dois grupos e duas etiquetas na primeira vez. `fast: false` liga as pausas. */
+function montar({ dir = tmp(), fast = true } = {}) {
+  const db = openDb(dir);
+  const wa = createWhatsApp({ db, dir, dryRun: true }); wa.connect();
+  const links = createLinkService({ getMode: () => 'fake' });
+  const ml = mlFalso();
+  const scheduler = createScheduler({ db, wa, links, fast, dir, ml });
+  if (!db.prepare('SELECT 1 FROM groups LIMIT 1').get()) {
+    for (const [jid, nome] of [['111@g.us', 'Achadinhos'], ['222@g.us', 'Tech']]) {
+      db.prepare('INSERT INTO groups (jid, name, size, updated_at) VALUES (?,?,?,?)').run(jid, nome, 10, Date.now());
+    }
+    for (const nome of ['etiquetaA', 'etiquetaB']) db.prepare('INSERT INTO tags (name, created_at) VALUES (?, 1)').run(nome);
+  }
+  return { dir, db, wa, links, ml, scheduler, envios: scheduler.envios };
+}
+
+/** Requisição crua; `raw` manda um Buffer com o Content-Type dos headers. */
+function req(port, caminho, { method = 'GET', headers = {}, body, raw } = {}) {
+  return new Promise((ok, err) => {
+    const data = raw ?? (body != null ? Buffer.from(JSON.stringify(body)) : null);
+    const h = { ...(body != null && raw == null ? { 'content-type': 'application/json' } : {}), ...(data ? { 'content-length': data.length } : {}), ...headers };
+    const r = http.request({ host: '127.0.0.1', port, path: caminho, method, headers: h }, (res) => {
+      const partes = []; res.on('data', (c) => partes.push(c));
+      res.on('end', () => {
+        const buf = Buffer.concat(partes); const txt = buf.toString('utf8');
+        let json = null; try { json = JSON.parse(txt); } catch { /* binário ou html */ }
+        ok({ status: res.statusCode, headers: res.headers, json, txt, buf });
+      });
+    });
+    r.on('error', err); if (data) r.write(data); r.end();
+  });
+}
+
+/** Servidor com login, em porta aleatória, já com a sessão aberta. `dataDir` só para provar que as fotos não usam ele. */
+async function subir({ dataDir, ...opcoes } = {}) {
+  const m = montar(opcoes);
+  const app = buildApp({ db: m.db, wa: m.wa, links: m.links, scheduler: m.scheduler, publicHost: '', panelPassword: SENHA, dataDir: dataDir ?? m.dir, ml: m.ml });
+  const server = await new Promise((ok) => { const s = app.listen(0, '127.0.0.1', () => ok(s)); });
+  const { port } = server.address();
+  const entrou = await req(port, '/api/login', { method: 'POST', body: { senha: SENHA } });
+  const h = { cookie: String(entrou.headers['set-cookie']?.[0] || '').split(';')[0], origin: `http://127.0.0.1:${port}` };
+  return {
+    ...m, port,
+    req: (c, o = {}) => req(port, c, { ...o, headers: { ...h, ...(o.headers || {}) } }),
+    get: (c) => req(port, c, { headers: h }),
+    post: (c, body = {}) => req(port, c, { method: 'POST', body, headers: h }),
+    upload: (raw, tipo) => req(port, '/api/uploads', { method: 'POST', raw, headers: { ...h, 'content-type': tipo } }),
+    fechar: () => new Promise((r) => { server.closeAllConnections?.(); server.close(() => { m.db.close(); r(); }); }),
+  };
+}
+
+/** Espera o "agora" (fire-and-forget) terminar. */
+async function terminar(db, id, ms = 3000) {
+  const t0 = Date.now();
+  while (['pendente', 'enviando'].includes(statusDe(db, id))) {
+    if (Date.now() - t0 > ms) throw new Error(`o envio ${id} não terminou`);
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  return statusDe(db, id);
+}
+
+test('CA1: disparo manual com link do ML, agora: foto + legenda com o meli.la da etiqueta escolhida, "enviado" no painel e no log', async () => {
+  const s = await subir();
+  try {
+    s.links.poll(0); // extensão conectada (o modo de link padrão é a extensão)
+    const r = await s.post('/api/envios', {
+      tipo: 'oferta', url: URL_ML, tag_id: 2, template_id: 1, group_jids: ['111@g.us'], quando: 'agora',
+      offer: { title: 'Produto falso do navegador', price: 1, image: 'https://evil.example/x.jpg' }, // ignorado: o servidor lê o produto
+    });
+    assert.equal(r.status, 200, r.txt);
+    // S14: o "agora" não envia por conta própria; fica pendente (vencido) e o agendador, acordado na hora, o manda
+    assert.deepEqual([r.json.status, r.json.next_run_at <= Date.now()], ['pendente', true]);
+    assert.equal(await terminar(s.db, r.json.id), 'concluido');
+    assert.deepEqual(s.ml.chamadas, [URL_ML], 'o produto foi lido no servidor');
+    assert.equal(s.wa.simulated.length, 1);
+    const [msg] = s.wa.simulated;
+    assert.deepEqual([msg.tipo, msg.jid, msg.image], ['image', '111@g.us', IMG]);
+    assert.match(msg.text, /https:\/\/meli\.la\/fake-etiquetaB-\d+/);
+    assert.match(msg.text, /Fone Bom/); assert.match(msg.text, /R\$ 89,90/);
+    assert.doesNotMatch(msg.text, /falso/i);
+
+    const p = await s.get('/api/envios?tipo=oferta');
+    assert.equal(p.status, 200);
+    assert.deepEqual(p.json.contadores, { enviados: 1, na_fila: 0, com_erro: 0 });
+    assert.deepEqual(p.json.agendadas, []);
+    assert.equal(p.json.linhas.length, 1);
+    const { quando, ...linha } = p.json.linhas[0];
+    assert.deepEqual(linha, { envio_id: r.json.id, tipo: 'oferta', titulo: 'Fone Bom', loja: 'Mercado Livre', grupo: 'Achadinhos', grupos: 1, status: 'enviado', erro: null });
+    assert.ok(Math.abs(quando - Date.now()) < 10000);
+    assert.deepEqual(linhas(s.db, "SELECT rule_id, rule_name, level, group_name, offer_title, message FROM log WHERE rule_name = 'Disparo manual'"),
+      [{ rule_id: null, rule_name: 'Disparo manual', level: 'ok', group_name: 'Achadinhos', offer_title: 'Fone Bom', message: 'Enviado com a etiqueta etiquetaB' }]);
+    const payload = JSON.parse(s.db.prepare('SELECT payload FROM envios WHERE id = ?').get(r.json.id).payload);
+    assert.deepEqual([payload.loja, payload.tag_id, payload.template_id, payload.offer.title, payload.offer.image], ['mercadolivre', 2, 1, 'Fone Bom', IMG]);
+  } finally { await s.fechar(); }
+});
+
+test('F1: "agora" é recusado com o WhatsApp desconectado e com a extensão offline, sem gravar nada', async () => {
+  const s = await subir();
+  try {
+    const corpo = { tipo: 'oferta', url: URL_ML, group_jids: ['111@g.us'], template_id: 1, quando: 'agora' };
+    // R8: quem diz se a extensão é necessária é o serviço de links (links.modo()), o mesmo que vai gerar o link.
+    // Aqui ele está em 'fake' (como na simulação: não precisa da extensão); em 'extension' e offline, recusa.
+    const modo = s.links.modo; s.links.modo = () => 'extension';
+    const r = await s.post('/api/envios', corpo);
+    assert.equal(r.status, 400); assert.match(r.json.erro, /extensão do Chrome não está conectada/);
+    s.links.modo = modo;
+    s.links.poll(0);
+    const pronto = s.wa.isReady; s.wa.isReady = () => false;
+    for (const c of [corpo, { tipo: 'mensagem', texto: 'oi', group_jids: ['111@g.us'] }, { tipo: 'enquete', pergunta: 'P?', opcoes: ['A', 'B'], group_jids: ['111@g.us'] }]) {
+      const r = await s.post('/api/envios', c);
+      assert.equal(r.status, 400, c.tipo); assert.match(r.json.erro, /WhatsApp está desconectado/);
+    }
+    s.wa.isReady = pronto;
+    assert.equal(contar(s.db, 'SELECT COUNT(*) AS n FROM envios'), 0);
+    assert.deepEqual(s.ml.chamadas, [], 'recusado antes de ler o produto');
+    assert.equal(s.wa.simulated.length, 0);
+  } finally { await s.fechar(); }
+});
+
+test('CA2: link de loja não conectada (Amazon) é recusado pelo nome, sem enviar nem gravar nada; identificar mostra o aviso', async () => {
+  const s = await subir();
+  try {
+    s.links.poll(0);
+    const r = await s.post('/api/envios', { tipo: 'oferta', url: URL_AMAZON, group_jids: ['111@g.us'], template_id: 1, quando: 'agora' });
+    assert.equal(r.status, 400);
+    assert.equal(r.json.erro, MSG_AMAZON);
+    const ag = await s.post('/api/envios', { tipo: 'oferta', url: 'https://amzn.to/3xYz', group_jids: ['111@g.us'], quando: 'agendado', agendar_hhmm: '23:59' });
+    assert.equal(ag.status, 400); assert.match(ag.json.erro, /^Amazon identificada/);
+    const shopee = await s.post('/api/envios', { tipo: 'oferta', url: 'https://s.shopee.com.br/abc', group_jids: ['111@g.us'] });
+    assert.equal(shopee.status, 400); assert.match(shopee.json.erro, /^Shopee identificada/);
+
+    assert.equal(s.wa.simulated.length, 0, 'nada enviado');
+    assert.equal(contar(s.db, 'SELECT COUNT(*) AS n FROM envios'), 0, 'nada gravado');
+    assert.equal(contar(s.db, 'SELECT COUNT(*) AS n FROM envio_resultados'), 0);
+    assert.equal(contar(s.db, 'SELECT COUNT(*) AS n FROM log'), 0);
+    assert.deepEqual(s.ml.chamadas, []);
+    const p = (await s.get('/api/envios?tipo=oferta')).json;
+    assert.deepEqual(p, { agendadas: [], contadores: { enviados: 0, na_fila: 0, com_erro: 0 }, linhas: [] });
+
+    const id = await s.post('/api/disparo/identificar', { url: URL_AMAZON, template_id: 1 });
+    assert.equal(id.status, 200, 'a tela mostra o aviso da loja');
+    assert.deepEqual(id.json, { loja: { id: 'amazon', nome: 'Amazon', implementada: false }, motivo: MSG_AMAZON, produto: null, texto: null, template_id: null, etiqueta: null });
+  } finally { await s.fechar(); }
+});
+
+test('identificar: loja, produto lido no servidor e texto do template; link desconhecido dá 400', async () => {
+  const s = await subir();
+  try {
+    const r = await s.post('/api/disparo/identificar', { url: `  ${URL_ML}  `, template_id: 1, tag_id: 2 });
+    assert.equal(r.status, 200, r.txt);
+    assert.deepEqual(r.json.loja, { id: 'mercadolivre', nome: 'Mercado Livre', implementada: true });
+    assert.equal(r.json.motivo, null);
+    assert.deepEqual(r.json.produto, { key: 'MLB1234567890', title: 'Fone Bom', price: 89.9, oldPrice: 149.9, discountPct: 40, sold: 1200, freeShipping: true, coupon: null, image: IMG });
+    assert.match(r.json.texto, /^\*Fone Bom\*/); assert.match(r.json.texto, /https:\/\/meli\.la\/\(gerado no envio\)/);
+    assert.deepEqual([r.json.template_id, r.json.etiqueta], [1, { id: 2, name: 'etiquetaB' }]);
+    const padrao = await s.post('/api/disparo/identificar', { url: URL_ML });
+    assert.deepEqual([padrao.json.template_id, padrao.json.etiqueta], [1, { id: 1, name: 'etiquetaA' }], 'sem escolha: o primeiro template e a primeira etiqueta');
+    for (const [corpo, erro] of [
+      [{ url: 'https://exemplo.com/produto' }, /Não reconheci este link/],
+      [{ url: 'javascript:alert(1)' }, /Não reconheci este link/],
+      [{ url: 'https://mercadolivre.com.br.evil.com/x' }, /Não reconheci este link/],
+      [{}, /Cole o link do produto/],
+      [{ url: URL_ML, template_id: 999 }, /Template não encontrado/],
+      [{ url: URL_ML, tag_id: 'x' }, /Etiqueta não encontrada/],
+    ]) {
+      const e = await s.post('/api/disparo/identificar', corpo);
+      assert.equal(e.status, 400, JSON.stringify(corpo)); assert.match(e.json.erro, erro);
+    }
+  } finally { await s.fechar(); }
+});
+
+test('CA3: disparo manual agendado para hoje fica pendente e sai no horário depois de um reinício, uma vez só', async (t) => {
+  const alvo = Date.now() + 3 * 60000;
+  if (new Date(alvo).toDateString() !== new Date().toDateString()) { t.skip('perto da meia-noite: o disparo manual só agenda para hoje'); return; }
+  const T = new Date(alvo).setSeconds(0, 0);
+  const s = await subir();
+  let id;
+  try {
+    // agendado não exige a extensão conectada agora: ela só gera o link na hora do envio
+    const r = await s.post('/api/envios', { tipo: 'oferta', url: URL_ML, group_jids: ['111@g.us', '222@g.us'], template_id: 1, quando: 'agendado', agendar_hhmm: hhmmDe(alvo) });
+    assert.equal(r.status, 200, r.txt);
+    ({ id } = r.json);
+    assert.deepEqual(r.json, { id, status: 'pendente', next_run_at: T });
+    await s.scheduler.tick(); // o tick de agora não envia o que é para daqui a pouco
+    assert.equal(s.wa.simulated.length, 0);
+    const p = (await s.get('/api/envios?tipo=oferta')).json;
+    assert.equal(p.contadores.na_fila, 2);
+    assert.deepEqual(p.agendadas.map((a) => [a.id, a.quando, a.status, a.next_run_at, a.titulo, a.loja, a.grupos]), [[id, 'agendado', 'pendente', T, 'Fone Bom', 'Mercado Livre', 2]]);
+    assert.deepEqual([p.linhas[0].status, p.linhas[0].quando, p.linhas[0].grupo], ['pendente', T, '2 grupos']);
+  } finally { await s.fechar(); }
+
+  const r = montar({ dir: s.dir }); // reinício: banco reaberto, WhatsApp e agendador novos
+  try {
+    assert.equal(await r.envios.recuperar(), 0);
+    assert.equal(await r.envios.processarPendentes(T - 1000), 0, 'um segundo antes: nada');
+    assert.equal(await r.envios.processarPendentes(T + 1000), 1);
+    assert.equal(r.wa.simulated.length, 2);
+    assert.ok(r.wa.simulated.every((x) => x.tipo === 'image' && /meli\.la\/fake-etiquetaA-/.test(x.text)), 'foto com o link da primeira etiqueta');
+    assert.equal(await r.envios.processarPendentes(T + 60000), 0);
+    assert.equal(r.wa.simulated.length, 2, 'não sai de novo');
+    assert.equal(statusDe(r.db, id), 'concluido');
+    const p = await r.envios.painel('oferta');
+    assert.deepEqual(p.linhas.map((l) => [l.status, l.grupo]).sort(), [['enviado', 'Achadinhos'], ['enviado', 'Tech']]);
+    assert.deepEqual(p.contadores, { enviados: 2, na_fila: 0, com_erro: 0 });
+  } finally { r.db.close(); }
+});
+
+test('CA3: envio que ficou "enviando" com um grupo ok é retomado depois do reinício sem repetir esse grupo', async () => {
+  const m = montar();
+  const T = amanha(10);
+  const { id } = await m.envios.criar({ tipo: 'mensagem', texto: 'Retomada', group_jids: ['111@g.us', '222@g.us'], quando: 'agendado', agendar_data: dataDe(T), agendar_hhmm: '10:00' });
+  // o serviço caiu no meio: 111 já recebeu nesta ocorrência; 222 só numa ocorrência anterior (não conta)
+  m.db.prepare("UPDATE envios SET status = 'enviando' WHERE id = ?").run(id);
+  const ins = m.db.prepare('INSERT INTO envio_resultados (envio_id, ocorrencia, ts, jid, group_name, ok) VALUES (?,?,?,?,?,1)');
+  ins.run(id, T, T, '111@g.us', 'Achadinhos');
+  ins.run(id, T - DIA, T - DIA, '222@g.us', 'Tech');
+  m.db.close();
+
+  const r = montar({ dir: m.dir });
+  try {
+    assert.equal(await r.envios.recuperar(), 1);
+    assert.equal(statusDe(r.db, id), 'pendente');
+    assert.equal((await r.envios.painel('mensagem')).contadores.na_fila, 1, 'na fila só o que falta');
+    assert.equal(await r.envios.processarPendentes(T + 1000), 1);
+    assert.deepEqual(r.wa.simulated.map((x) => [x.jid, x.text]), [['222@g.us', 'Retomada']]);
+    assert.equal(statusDe(r.db, id), 'concluido');
+    assert.deepEqual(JSON.parse(r.db.prepare('SELECT resultado FROM envios WHERE id = ?').get(id).resultado), { ok: 2, erro: 0 });
+    assert.equal(contar(r.db, 'SELECT COUNT(*) AS n FROM envio_resultados WHERE envio_id = ? AND ocorrencia = ? AND ok = 1', id, T), 2);
+    assert.equal(await r.envios.processarPendentes(T + 2000), 0);
+    assert.equal(r.wa.simulated.length, 1);
+  } finally { r.db.close(); }
+});
+
+test('trava: dois processarPendentes ao mesmo tempo, dois runEnvio ao mesmo tempo e o "agora" com o tick enviam uma vez só', async () => {
+  const m = montar();
+  try {
+    const agendado = (texto, T) => ({ tipo: 'mensagem', texto, group_jids: ['111@g.us', '222@g.us'], quando: 'agendado', agendar_data: dataDe(T), agendar_hhmm: hhmmDe(T) });
+    const TA = amanha(9);
+    const a = await m.envios.criar(agendado('A', TA));
+    const rodaram = await Promise.all([m.envios.processarPendentes(TA + 1000), m.envios.processarPendentes(TA + 1000)]);
+    assert.deepEqual(rodaram.sort(), [0, 1]);
+    assert.deepEqual(m.wa.simulated.map((x) => x.jid), ['111@g.us', '222@g.us']);
+    assert.equal(statusDe(m.db, a.id), 'concluido');
+    assert.equal(contar(m.db, 'SELECT COUNT(*) AS n FROM envio_resultados WHERE envio_id = ?', a.id), 2);
+
+    const b = await m.envios.criar(agendado('B', amanha(9, 30)));
+    const r = await Promise.all([m.envios.runEnvio(b.id), m.envios.runEnvio(b.id)]);
+    assert.deepEqual(r.map((x) => !!x.pulado).sort(), [false, true], 'só um pega a trava');
+    assert.equal(m.wa.simulated.filter((x) => x.text === 'B').length, 2);
+
+    const c = await m.envios.criar({ tipo: 'mensagem', texto: 'C', group_jids: ['111@g.us', '222@g.us'], quando: 'agora' });
+    await m.envios.processarPendentes();
+    assert.equal(await terminar(m.db, c.id), 'concluido');
+    assert.equal(m.wa.simulated.filter((x) => x.text === 'C').length, 2);
+  } finally { m.db.close(); }
+});
+
+test('cancelar no meio da rodada: os grupos que faltam não recebem', async () => {
+  const m = montar();
+  try {
+    const T = amanha(8);
+    const e = await m.envios.criar({ tipo: 'mensagem', texto: 'X', group_jids: ['111@g.us', '222@g.us'], quando: 'agendado', agendar_data: dataDe(T), agendar_hhmm: '08:00' });
+    const rodada = m.envios.runEnvio(e.id); // pega a trava na hora; o primeiro grupo só sai depois de um await
+    assert.equal(statusDe(m.db, e.id), 'enviando');
+    assert.deepEqual(await m.envios.cancelar(e.id), { ok: true, status: 'cancelado' });
+    await rodada;
+    assert.equal(m.wa.simulated.length, 0);
+    assert.equal(statusDe(m.db, e.id), 'cancelado', 'o fim da rodada não desfaz o cancelamento');
+  } finally { m.db.close(); }
+});
+
+test('CA4: mensagem agora (texto, foto enviada, prévia do link) e enquete agora', async () => {
+  const s = await subir();
+  try {
+    const t1 = await s.post('/api/envios', { tipo: 'mensagem', texto: '  Bom dia, *grupo*!\r\n', imagem: 'nenhuma', group_jids: ['111@g.us', '222@g.us'], quando: 'agora' });
+    assert.equal(t1.status, 200, t1.txt);
+    assert.equal(await terminar(s.db, t1.json.id), 'concluido');
+    assert.deepEqual(s.wa.simulated.map((x) => ({ ...x })), [
+      { tipo: 'text', jid: '111@g.us', text: 'Bom dia, *grupo*!' }, { tipo: 'text', jid: '222@g.us', text: 'Bom dia, *grupo*!' }]);
+
+    const up = await s.upload(PNG, 'image/png');
+    assert.equal(up.status, 200, up.txt);
+    const t2 = await s.post('/api/envios', { tipo: 'mensagem', texto: 'Olha a foto', imagem: 'upload', upload: up.json.id, group_jids: ['111@g.us'] });
+    assert.equal(t2.status, 200, t2.txt);
+    assert.equal(await terminar(s.db, t2.json.id), 'concluido');
+    assert.deepEqual({ ...s.wa.simulated.at(-1) }, { tipo: 'image', jid: '111@g.us', text: 'Olha a foto', image: { bytes: PNG.length }, mimetype: 'image/png' });
+    const t3 = await s.post('/api/envios', { tipo: 'mensagem', texto: '', imagem: 'upload', upload: up.json.id, group_jids: ['222@g.us'] });
+    assert.equal(t3.status, 200, 'foto sem legenda vale');
+    await terminar(s.db, t3.json.id);
+    assert.deepEqual([s.wa.simulated.at(-1).tipo, s.wa.simulated.at(-1).text], ['image', '']);
+
+    const t4 = await s.post('/api/envios', { tipo: 'mensagem', texto: 'Corre que acaba!', imagem: 'previa', previa_url: URL_ML, group_jids: ['222@g.us'] });
+    assert.equal(t4.status, 200, t4.txt);
+    await terminar(s.db, t4.json.id);
+    assert.deepEqual({ ...s.wa.simulated.at(-1) }, {
+      tipo: 'text', jid: '222@g.us', text: `Corre que acaba!\n\n${URL_ML}`,
+      previa: { url: URL_ML, title: 'Fone Bom', description: 'R$ 89,90', image: IMG },
+    }, 'o link da prévia vai no fim do texto');
+
+    const e1 = await s.post('/api/envios', { tipo: 'enquete', pergunta: ' Qual o melhor achado? ', opcoes: ['Fone', 'Mouse', 'Teclado'], multipla: true, group_jids: ['111@g.us', '222@g.us'] });
+    assert.equal(e1.status, 200, e1.txt);
+    await terminar(s.db, e1.json.id);
+    const polls = s.wa.simulated.filter((x) => x.tipo === 'poll');
+    assert.deepEqual(polls.map((x) => x.jid), ['111@g.us', '222@g.us']);
+    assert.deepEqual(polls[0].poll, { name: 'Qual o melhor achado?', values: ['Fone', 'Mouse', 'Teclado'], selectableCount: 0 });
+    const e2 = await s.post('/api/envios', { tipo: 'enquete', pergunta: 'Uma só?', opcoes: ['Sim', 'Não'], group_jids: ['111@g.us'] });
+    await terminar(s.db, e2.json.id);
+    assert.equal(s.wa.simulated.at(-1).poll.selectableCount, 1, 'sem multipla: uma escolha');
+
+    assert.deepEqual(linhas(s.db, "SELECT rule_name, level, COUNT(*) AS n FROM log GROUP BY rule_name, level ORDER BY rule_name"),
+      [{ rule_name: 'Enquete', level: 'ok', n: 3 }, { rule_name: 'Mensagem', level: 'ok', n: 5 }]);
+    const titulos = [...new Set(linhas(s.db, "SELECT offer_title FROM log WHERE rule_name = 'Mensagem' ORDER BY id").map((l) => l.offer_title))];
+    assert.deepEqual(titulos.slice(0, 3), ['Bom dia, *grupo*!', 'Olha a foto', '(foto sem legenda)']);
+    assert.ok(titulos[3].startsWith('Corre que acaba! https://produto.mercadolivre'), titulos[3]);
+    assert.equal(contar(s.db, "SELECT COUNT(*) AS n FROM log WHERE group_name LIKE '%@%' OR message LIKE '%@%'"), 0, 'log sem JID');
+
+    const p = (await s.get('/api/envios?tipo=mensagem')).json;
+    assert.deepEqual(p.contadores, { enviados: 8, na_fila: 0, com_erro: 0 });
+    assert.ok(p.linhas.every((l) => l.status === 'enviado' && l.loja === null));
+    assert.deepEqual([...new Set(p.linhas.map((l) => l.tipo))].sort(), ['enquete', 'mensagem']);
+    assert.deepEqual((await s.get('/api/envios?tipo=oferta')).json.contadores, { enviados: 0, na_fila: 0, com_erro: 0 }, 'oferta conta só oferta');
+  } finally { await s.fechar(); }
+});
+
+test('CA4: agendado entra na lista e na fila e pode ser cancelado; o que perdeu o horário vira erro; contadores', async () => {
+  const s = await subir();
+  try {
+    const TA = amanha(10); const TB = amanha(11);
+    const a = await s.post('/api/envios', { tipo: 'mensagem', texto: 'Promoção amanhã às 10h', group_jids: ['111@g.us', '222@g.us'], quando: 'agendado', agendar_data: dataDe(TA), agendar_hhmm: '10:00' });
+    assert.equal(a.status, 200, a.txt);
+    assert.deepEqual([a.json.status, a.json.next_run_at], ['pendente', TA]);
+    const b = await s.post('/api/envios', { tipo: 'enquete', pergunta: 'Vem amanhã?', opcoes: ['Sim', 'Não'], group_jids: ['111@g.us'], quando: 'agendado', agendar_data: dataDe(TB), agendar_hhmm: '11:00' });
+    assert.equal(b.status, 200, b.txt);
+    // falha num grupo: a linha mostra o erro sem o número que a biblioteca citou
+    const enviarTexto = s.wa.sendText;
+    s.wa.sendText = async (jid, ...resto) => {
+      if (jid === '222@g.us') throw new Error('not-authorized para 5511999998888@s.whatsapp.net');
+      return enviarTexto(jid, ...resto);
+    };
+    const c = await s.post('/api/envios', { tipo: 'mensagem', texto: 'Agora', group_jids: ['111@g.us', '222@g.us'] });
+    assert.equal(await terminar(s.db, c.json.id), 'erro', 'envio parcial termina como erro');
+    s.wa.sendText = enviarTexto;
+
+    let p = (await s.get('/api/envios?tipo=mensagem')).json;
+    assert.deepEqual(p.contadores, { enviados: 1, na_fila: 3, com_erro: 1 });
+    assert.deepEqual(p.agendadas.map((x) => [x.id, x.tipo, x.quando, x.status, x.next_run_at, x.grupos, x.titulo]),
+      [[a.json.id, 'mensagem', 'agendado', 'pendente', TA, 2, 'Promoção amanhã às 10h'], [b.json.id, 'enquete', 'agendado', 'pendente', TB, 1, 'Vem amanhã?']]);
+    assert.deepEqual([p.agendadas[0].grupos_nomes, p.agendadas[0].imagem, p.agendadas[0].repetir, p.agendadas[1].imagem], [['Achadinhos', 'Tech'], 'nenhuma', null, null]);
+    assert.deepEqual(p.linhas.slice(0, 2).map((l) => [l.envio_id, l.status, l.quando, l.grupo]), [[b.json.id, 'pendente', TB, 'Achadinhos'], [a.json.id, 'pendente', TA, '2 grupos']]);
+    const falha = p.linhas.find((l) => l.status === 'erro');
+    assert.equal(falha.grupo, 'Tech');
+    assert.match(falha.erro, /not-authorized/); assert.doesNotMatch(falha.erro, /5511999998888|whatsapp\.net/);
+    assert.equal(contar(s.db, "SELECT COUNT(*) AS n FROM log WHERE message LIKE '%5511999998888%' OR message LIKE '%@%'"), 0);
+
+    const pa = await s.post(`/api/envios/${a.json.id}/pausar`);
+    assert.equal(pa.status, 400); assert.match(pa.json.erro, /Só envios repetidos podem ser pausados/);
+    const ca = await s.post(`/api/envios/${a.json.id}/cancelar`);
+    assert.equal(ca.status, 200); assert.deepEqual(ca.json, { ok: true, status: 'cancelado' });
+    assert.equal((await s.post(`/api/envios/${a.json.id}/cancelar`)).status, 400, 'cancelar de novo');
+    for (const id of ['999', 'abc']) assert.match((await s.post(`/api/envios/${id}/cancelar`)).json.erro, /Envio não encontrado/);
+    p = (await s.get('/api/envios?tipo=mensagem')).json;
+    assert.deepEqual(p.agendadas.map((x) => x.id), [b.json.id]);
+    assert.equal(p.contadores.na_fila, 1);
+    const antes = s.wa.simulated.length;
+    assert.equal(await s.envios.processarPendentes(TA + 1000), 0);
+    assert.equal(s.wa.simulated.length, antes, 'o cancelado não sai');
+
+    // B passou mais de 2 h do horário (WhatsApp fora): vira erro sem enviar
+    await s.envios.processarPendentes(TB + 2 * 3600000 + 1000);
+    assert.equal(s.wa.simulated.length, antes);
+    assert.equal(statusDe(s.db, b.json.id), 'erro');
+    p = (await s.get('/api/envios?tipo=mensagem')).json;
+    assert.deepEqual(p.contadores, { enviados: 1, na_fila: 0, com_erro: 2 });
+    assert.deepEqual(p.agendadas, []);
+    const perdida = p.linhas.find((l) => l.envio_id === b.json.id);
+    assert.deepEqual([perdida.status, perdida.quando, perdida.titulo, perdida.grupo], ['erro', TB, 'Vem amanhã?', 'Achadinhos']);
+    assert.match(perdida.erro, /perdeu o horário/);
+    assert.match(s.db.prepare("SELECT message FROM log WHERE rule_name = 'Enquete' AND level = 'erro'").get().message, /perdeu o horário/);
+
+    assert.deepEqual((await s.get('/api/envios?tipo=oferta')).json.contadores, { enviados: 0, na_fila: 0, com_erro: 0 });
+    assert.equal((await s.get('/api/envios?tipo=outro')).status, 400);
+  } finally { await s.fechar(); }
+});
+
+test('CA4: repetido gera a próxima ocorrência, aparece em agendadas, pausa, retoma, pula horário perdido e cancela', async () => {
+  const s = await subir();
+  try {
+    const rep = { dias: TODOS, horarios: ['18:30', '9:00'] };
+    const antes = Date.now();
+    const r = await s.post('/api/envios', { tipo: 'enquete', pergunta: 'Achado do dia?', opcoes: ['A', 'B'], group_jids: ['111@g.us'], quando: 'repetir', repetir: rep });
+    assert.equal(r.status, 200, r.txt);
+    const { id } = r.json; const T1 = r.json.next_run_at;
+    assert.equal(T1, proximaOcorrencia(rep, antes));
+    let p = (await s.get('/api/envios?tipo=mensagem')).json;
+    assert.deepEqual(p.agendadas.map((x) => [x.id, x.quando, x.status, x.next_run_at, x.repetir]), [[id, 'repetir', 'pendente', T1, { dias: TODOS, horarios: ['09:00', '18:30'] }]]);
+
+    assert.equal(await s.envios.processarPendentes(T1 + 1000), 1);
+    assert.equal(s.wa.simulated.length, 1);
+    const T2 = s.db.prepare('SELECT next_run_at FROM envios WHERE id = ?').get(id).next_run_at;
+    assert.equal(T2, proximaOcorrencia(rep, T1), 'próxima ocorrência depois da que saiu');
+    assert.equal(statusDe(s.db, id), 'pendente');
+    assert.deepEqual(JSON.parse(s.db.prepare('SELECT resultado FROM envios WHERE id = ?').get(id).resultado), { ok: 1, erro: 0 });
+    assert.equal(await s.envios.processarPendentes(T2 + 1000), 1);
+    assert.equal(s.wa.simulated.length, 2, 'a ocorrência seguinte manda de novo para o mesmo grupo');
+    const T3 = s.db.prepare('SELECT next_run_at FROM envios WHERE id = ?').get(id).next_run_at;
+    p = (await s.get('/api/envios?tipo=mensagem')).json;
+    assert.deepEqual(p.agendadas.map((x) => [x.id, x.next_run_at]), [[id, T3]], 'continua na lista');
+    assert.equal(p.contadores.enviados, 2);
+
+    const pa = await s.post(`/api/envios/${id}/pausar`);
+    assert.deepEqual([pa.status, pa.json], [200, { ok: true, status: 'pausado' }]);
+    assert.equal((await s.post(`/api/envios/${id}/pausar`)).status, 400, 'já pausado');
+    p = (await s.get('/api/envios?tipo=mensagem')).json;
+    assert.deepEqual(p.agendadas.map((x) => [x.status, x.next_run_at]), [['pausado', null]]);
+    assert.equal(p.contadores.na_fila, 0, 'pausado não está na fila');
+    assert.equal(await s.envios.processarPendentes(T3 + 1000), 0);
+    assert.equal(s.wa.simulated.length, 2, 'pausado não sai');
+
+    const antesRet = Date.now();
+    const re = await s.post(`/api/envios/${id}/retomar`);
+    assert.equal(re.status, 200, re.txt);
+    assert.deepEqual(re.json, { ok: true, status: 'pendente', next_run_at: proximaOcorrencia(rep, antesRet) });
+    assert.equal((await s.post(`/api/envios/${id}/retomar`)).status, 400, 'só retoma pausado');
+
+    // a ocorrência passou mais de 2 h sem WhatsApp: pula para a próxima, sem enviar
+    const N = re.json.next_run_at;
+    assert.equal(await s.envios.processarPendentes(N + 3 * 3600000), 0);
+    assert.equal(s.wa.simulated.length, 2);
+    assert.deepEqual([statusDe(s.db, id), s.db.prepare('SELECT next_run_at FROM envios WHERE id = ?').get(id).next_run_at], ['pendente', proximaOcorrencia(rep, N + 3 * 3600000)]);
+    assert.match(s.db.prepare("SELECT message FROM log WHERE level = 'aviso'").get().message, /pulado: perdeu o horário/);
+
+    const ca = await s.post(`/api/envios/${id}/cancelar`);
+    assert.deepEqual([ca.status, ca.json.status], [200, 'cancelado']);
+    assert.deepEqual((await s.get('/api/envios?tipo=mensagem')).json.agendadas, []);
+    assert.equal(await s.envios.processarPendentes(N + 30 * DIA), 0);
+    assert.equal(s.wa.simulated.length, 2);
+    assert.equal((await s.post(`/api/envios/${id}/retomar`)).status, 400);
+  } finally { await s.fechar(); }
+});
+
+test('CA4: upload só JPG/PNG (pelos bytes), até 5 MB, id aleatório validado; servido com tipo fixo e nosniff', async () => {
+  const s = await subir();
+  try {
+    const pasta = path.join(s.dir, 'uploads');
+    assert.equal(fs.existsSync(pasta), false, 'montar as rotas não cria a pasta');
+    const png = await s.upload(PNG, 'image/png');
+    assert.equal(png.status, 200, png.txt);
+    assert.match(png.json.id, /^[a-f0-9]{32}\.png$/);
+    assert.deepEqual(fs.readFileSync(path.join(pasta, png.json.id)), PNG);
+    const jpg = await s.upload(JPG, 'image/jpeg');
+    assert.equal(jpg.status, 200, jpg.txt);
+    assert.match(jpg.json.id, /^[a-f0-9]{32}\.jpg$/);
+
+    const g = await s.get(`/api/uploads/${png.json.id}`);
+    assert.equal(g.status, 200);
+    assert.equal(g.headers['content-type'], 'image/png');
+    assert.equal(g.headers['x-content-type-options'], 'nosniff');
+    assert.deepEqual(g.buf, PNG);
+    assert.equal((await s.get(`/api/uploads/${jpg.json.id}`)).headers['content-type'], 'image/jpeg');
+
+    for (const [corpo, tipo, nome] of [
+      [Buffer.from('isto não é um jpeg de verdade'), 'image/jpeg', 'jpeg falso'],
+      [JPG, 'image/png', 'bytes de jpeg dizendo png'],
+      [PNG, 'image/jpeg', 'bytes de png dizendo jpeg'],
+      [Buffer.from(`GIF89a${'x'.repeat(20)}`), 'image/gif', 'gif'],
+      [Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"/>'), 'image/svg+xml', 'svg'],
+      [PNG.subarray(0, 4), 'image/png', 'png cortado'],
+    ]) {
+      const r = await s.upload(corpo, tipo);
+      assert.equal(r.status, 415, nome); assert.match(r.json.erro, /JPG ou PNG/, nome);
+    }
+    assert.equal((await s.post('/api/uploads', { foto: 'iVBORw0KGgo' })).status, 415, 'JSON não é foto');
+    const grande = Buffer.alloc(5 * 1024 * 1024 + 1); JPG.copy(grande);
+    const g413 = await s.upload(grande, 'image/jpeg');
+    assert.equal(g413.status, 413); assert.match(g413.json.erro, /5 MB/);
+    assert.equal(fs.readdirSync(pasta).length, 2, 'só as duas fotos válidas foram gravadas');
+
+    for (const c of ['/api/uploads/../x', '/api/uploads/..%2F..%2Fdisparador.db', '/api/uploads/%2e%2e', `/api/uploads/${'a'.repeat(32)}.gif`,
+      `/api/uploads/${'A'.repeat(32)}.png`, `/api/uploads/${'a'.repeat(32)}.png`, `/api/uploads/${png.json.id}.png`]) {
+      const r = await s.get(c);
+      assert.ok([400, 404].includes(r.status), `${c}: ${r.status}`);
+      assert.doesNotMatch(r.headers['content-type'] || '', /image|octet/, c);
+    }
+  } finally { await s.fechar(); }
+});
+
+test('criar: validação por tipo e por quando; nada é gravado nem lido', async () => {
+  const m = montar();
+  try {
+    const g = ['111@g.us'];
+    const casos = [
+      [{}, /Tipo de envio inválido/],
+      [{ tipo: 'mensagem', texto: 'oi', group_jids: g, quando: 'depois' }, /Quando enviar/],
+      [{ tipo: 'mensagem', texto: '   ', group_jids: g }, /Escreva a mensagem/],
+      [{ tipo: 'mensagem', texto: 'x'.repeat(4097), group_jids: g }, /4096/],
+      [{ tipo: 'mensagem', texto: 'oi', imagem: 'gif', group_jids: g }, /Imagem/],
+      [{ tipo: 'mensagem', texto: 'oi', imagem: 'upload', upload: '../../disparador.db', group_jids: g }, /Escolha a foto de novo/],
+      [{ tipo: 'mensagem', texto: 'oi', imagem: 'upload', upload: `${'a'.repeat(32)}.png`, group_jids: g }, /não foi encontrada/],
+      [{ tipo: 'mensagem', texto: 'oi', imagem: 'previa', previa_url: '', group_jids: g }, /link da prévia/],
+      [{ tipo: 'mensagem', texto: 'oi', imagem: 'previa', previa_url: URL_AMAZON, group_jids: g }, /Amazon identificada, mas ainda não está conectada/],
+      [{ tipo: 'mensagem', texto: 'oi', imagem: 'previa', previa_url: 'https://exemplo.com/x', group_jids: g }, /só funciona com links do Mercado Livre/],
+      [{ tipo: 'mensagem', texto: 'oi', group_jids: [] }, /ao menos um grupo/],
+      [{ tipo: 'mensagem', texto: 'oi', group_jids: 'x' }, /ao menos um grupo/],
+      [{ tipo: 'mensagem', texto: 'oi', group_jids: [1] }, /grupos inválida/],
+      [{ tipo: 'mensagem', texto: 'oi', group_jids: ['999@g.us'] }, /não existe mais/],
+      [{ tipo: 'enquete', pergunta: 'P?', opcoes: ['só uma'], group_jids: g }, /2 a 12/],
+      [{ tipo: 'enquete', pergunta: 'P?', opcoes: ['A', ' a '], group_jids: g }, /repetidas/],
+      [{ tipo: 'enquete', pergunta: 'P?', opcoes: Array.from({ length: 13 }, (_, i) => `o${i}`), group_jids: g }, /2 a 12/],
+      [{ tipo: 'enquete', pergunta: 'p'.repeat(256), opcoes: ['A', 'B'], group_jids: g }, /255/],
+      [{ tipo: 'enquete', pergunta: 'P?', opcoes: ['A', 'b'.repeat(101)], group_jids: g }, /100 caracteres/],
+      [{ tipo: 'enquete', pergunta: '  ', opcoes: ['A', 'B'], group_jids: g }, /pergunta/],
+      [{ tipo: 'enquete', pergunta: 'P?', opcoes: ['A', { x: 1 }], group_jids: g }, /2 a 12/],
+      [{ tipo: 'oferta', url: URL_ML, group_jids: g, quando: 'repetir', repetir: { dias: TODOS, horarios: ['09:00'] } }, /agora ou agendado para hoje/],
+      [{ tipo: 'oferta', url: URL_ML, group_jids: g, quando: 'agendado', agendar_data: dataDe(amanha(10)), agendar_hhmm: '10:00' }, /só pode ser agendado para hoje/],
+      [{ tipo: 'oferta', url: 'https://exemplo.com/p', group_jids: g }, /Não reconheci este link/],
+      [{ tipo: 'oferta', group_jids: g }, /Cole o link do produto/],
+      [{ tipo: 'oferta', url: URL_ML, tag_id: 99, group_jids: g }, /Etiqueta não encontrada/],
+      [{ tipo: 'oferta', url: URL_ML, template_id: 99, group_jids: g }, /Template não encontrado/],
+      [{ tipo: 'mensagem', texto: 'oi', group_jids: g, quando: 'agendado', agendar_data: '2020-01-01', agendar_hhmm: '10:00' }, /já passou/],
+      [{ tipo: 'mensagem', texto: 'oi', group_jids: g, quando: 'agendado', agendar_data: '2030-02-31', agendar_hhmm: '10:00' }, /Data inválida/],
+      [{ tipo: 'mensagem', texto: 'oi', group_jids: g, quando: 'agendado', agendar_data: '02/11/2030', agendar_hhmm: '10:00' }, /Data inválida/],
+      [{ tipo: 'mensagem', texto: 'oi', group_jids: g, quando: 'agendado', agendar_hhmm: '25:00' }, /horário/],
+      [{ tipo: 'mensagem', texto: 'oi', group_jids: g, quando: 'repetir' }, /dias e os horários/],
+      [{ tipo: 'mensagem', texto: 'oi', group_jids: g, quando: 'repetir', repetir: { dias: [], horarios: ['09:00'] } }, /dia da semana/],
+      [{ tipo: 'mensagem', texto: 'oi', group_jids: g, quando: 'repetir', repetir: { dias: [7], horarios: ['09:00'] } }, /dia da semana/],
+      [{ tipo: 'mensagem', texto: 'oi', group_jids: g, quando: 'repetir', repetir: { dias: [1], horarios: [] } }, /1 a 6/],
+      [{ tipo: 'mensagem', texto: 'oi', group_jids: g, quando: 'repetir', repetir: { dias: [1], horarios: ['01:00', '02:00', '03:00', '04:00', '05:00', '06:00', '07:00'] } }, /1 a 6/],
+      [{ tipo: 'mensagem', texto: 'oi', group_jids: g, quando: 'repetir', repetir: { dias: [1], horarios: ['9h'] } }, /HH:MM/],
+    ];
+    for (const [corpo, erro] of casos) await assert.rejects(m.envios.criar(corpo), erro, JSON.stringify(corpo).slice(0, 100));
+    assert.equal(contar(m.db, 'SELECT COUNT(*) AS n FROM envios'), 0);
+    assert.equal(m.wa.simulated.length, 0);
+    assert.deepEqual(m.ml.chamadas, [], 'nenhum produto lido para corpo inválido');
+  } finally { m.db.close(); }
+});
+
+test('limpar: envios encerrados antigos e seus resultados; fotos sem envio ativo depois de 7 dias sem uso', async () => {
+  const m = montar();
+  try {
+    const agora = Date.now();
+    const pasta = path.join(m.dir, 'uploads'); fs.mkdirSync(pasta);
+    const envelhecer = (f, dias) => { const t = (agora - dias * DIA) / 1000; fs.utimesSync(f, t, t); };
+    const foto = (letra, ext, dias) => { const nome = `${letra.repeat(32)}.${ext}`; fs.writeFileSync(path.join(pasta, nome), PNG); envelhecer(path.join(pasta, nome), dias); return nome; };
+    foto('a', 'png', 8);                     // ninguém usa há 8 dias: apaga
+    const nova = foto('b', 'jpg', 1);        // ninguém usa, 1 dia: fica
+    const ativa = foto('c', 'png', 30);      // usada por envio pendente: fica
+    const recente = foto('d', 'png', 30);    // o envio que a usou rodou há 2 dias: fica
+    const velha = foto('e', 'png', 30);      // o envio que a usou rodou há 10 dias: apaga
+    fs.writeFileSync(path.join(pasta, 'leia-me.txt'), 'x'); envelhecer(path.join(pasta, 'leia-me.txt'), 30); // não é nosso: fica
+
+    const ins = m.db.prepare('INSERT INTO envios (tipo, payload, group_jids, quando, status, next_run_at, last_run_at, created_at) VALUES (?,?,?,?,?,?,?,?)');
+    const comFoto = (up) => JSON.stringify({ texto: '', imagem: 'upload', upload: up });
+    const novo = (...v) => Number(ins.run(...v).lastInsertRowid);
+    const e1 = novo('oferta', '{}', '[]', 'agora', 'concluido', null, agora - 40 * DIA, agora - 40 * DIA);  // apaga
+    novo('mensagem', '{}', '[]', 'agendado', 'cancelado', agora - 39 * DIA, null, agora - 40 * DIA);        // apaga (nunca rodou)
+    const e3 = novo('enquete', '{}', '[]', 'agora', 'erro', null, agora - DIA, agora - 40 * DIA);          // recente: fica
+    novo('mensagem', comFoto(ativa), '[]', 'repetir', 'pendente', agora + DIA, agora - 40 * DIA, agora - 40 * DIA); // ativo: fica
+    novo('mensagem', comFoto(recente), '[]', 'agora', 'concluido', null, agora - 2 * DIA, agora - 30 * DIA);
+    novo('mensagem', comFoto(velha), '[]', 'agora', 'concluido', null, agora - 10 * DIA, agora - 30 * DIA);
+    const res = m.db.prepare('INSERT INTO envio_resultados (envio_id, ocorrencia, ts, jid, group_name, ok) VALUES (?,?,?,?,?,1)');
+    res.run(e1, 1, 1, '111@g.us', 'Achadinhos'); res.run(e3, 1, 1, '111@g.us', 'Achadinhos');
+
+    assert.deepEqual(await m.envios.limpar(30, agora), { envios: 2, fotos: 2 });
+    assert.equal(contar(m.db, 'SELECT COUNT(*) AS n FROM envios'), 4);
+    assert.deepEqual(linhas(m.db, 'SELECT envio_id FROM envio_resultados'), [{ envio_id: e3 }], 'resultados do envio apagado somem junto');
+    assert.deepEqual(fs.readdirSync(pasta).sort(), [ativa, recente, nova, 'leia-me.txt'].sort());
+
+    assert.deepEqual(await m.envios.limpar(0, agora), { envios: 0, fotos: 0 }, '0 dias: não apaga envio');
+    foto('f', 'png', 9);
+    assert.deepEqual(await m.envios.limpar(0, agora), { envios: 0, fotos: 1 }, 'as fotos seguem a regra dos 7 dias mesmo com retenção 0');
+    const semPasta = createEnvios({ db: m.db, wa: m.wa, links: m.links, ml: m.ml, fast: true });
+    assert.deepEqual(await semPasta.limpar(30, agora), { envios: 0, fotos: 0 });
+  } finally { m.db.close(); }
+});
+
+// ---------- rodada 1 de correções (servidor): S13, S14, S15, R8, R9, Q6 (template) e a regressão do upload ----------
+test('S14: três "agora" seguidos saem um de cada vez pelo agendador, com a pausa entre uma mensagem e outra', async () => {
+  const s = await subir({ fast: false });
+  try {
+    setSetting(s.db, 'delay_group_s', 0.5); // jitter: de 0,35 s a 0,65 s
+    const ids = [];
+    for (const texto of ['um', 'dois', 'três']) {
+      const r = await s.post('/api/envios', { tipo: 'mensagem', texto, group_jids: ['111@g.us'] });
+      assert.equal(r.status, 200, r.txt);
+      assert.equal(r.json.status, 'pendente', 'a resposta sai antes do envio: quem manda é o agendador');
+      ids.push(r.json.id);
+    }
+    for (const id of ids) assert.equal(await terminar(s.db, id, 5000), 'concluido');
+    assert.deepEqual(s.wa.simulated.map((x) => x.text), ['um', 'dois', 'três'], 'na ordem, uma vez cada');
+    const ts = linhas(s.db, 'SELECT ts FROM envio_resultados ORDER BY ts, id').map((l) => l.ts);
+    assert.equal(ts.length, 3);
+    // 340 e não 350: o timer do Node pode disparar 1 ms antes do Date.now(); em paralelo, o intervalo seria ~0
+    for (let i = 1; i < ts.length; i++) assert.ok(ts[i] - ts[i - 1] >= 340, `intervalo entre mensagens: ${ts[i] - ts[i - 1]} ms`);
+  } finally { await s.fechar(); }
+});
+
+test('S14: "agora" criado com o tick em andamento sai no mesmo tick, sem esperar o próximo', async () => {
+  const m = montar();
+  try {
+    const processar = m.envios.processarPendentes;
+    let chamadas = 0; let criado = null;
+    // o primeiro passo do tick já leu a fila quando o "agora" chega
+    m.envios.processarPendentes = async (...a) => {
+      chamadas++;
+      const r = await processar(...a);
+      if (chamadas === 1) criado = await m.envios.criar({ tipo: 'mensagem', texto: 'no meio do tick', group_jids: ['111@g.us'] });
+      return r;
+    };
+    await m.scheduler.tick();
+    assert.equal(statusDe(m.db, criado.id), 'concluido', 'saiu antes de o tick terminar');
+    assert.deepEqual(m.wa.simulated.map((x) => x.text), ['no meio do tick']);
+  } finally { m.db.close(); }
+});
+
+test('S13: limparErro corta antes das regex (texto enorme em menos de 50 ms) e o corte não solta pedaço de número', () => {
+  for (const n of [1e5, 1e6]) {
+    const t0 = performance.now(); const r = limparErro('a'.repeat(n)); const ms = performance.now() - t0;
+    assert.ok(ms < 50, `limparErro(${n} letras): ${ms.toFixed(1)} ms`); assert.ok(r.length <= 200);
+  }
+  // 16 JIDs (480 letras) e uma palavra com número que o corte em 500 partiria em 6 dígitos (a regex só pega 8+)
+  const texto = `${'5511999998888@s.whatsapp.net '.repeat(16)}${'n'.repeat(14)}5511987654321 fim`;
+  const limpo = limparErro(texto);
+  assert.doesNotMatch(limpo, /551198|whatsapp/, limpo);
+});
+
+test('S13: o erro que a extensão devolve fica com até 300 letras (no pedido rejeitado e no estado)', async () => {
+  const links = createLinkService({ getMode: () => 'extension' });
+  const pegar = async () => { const job = links.poll(1000); const pedido = links.requestLink({ url: URL_ML, tag: 'x', timeoutMs: 2000 }); return { job: await job, pedido }; };
+  let { job, pedido } = await pegar();
+  links.submit(job.id, { ok: false, error: 'e'.repeat(1024 * 1024) });
+  await assert.rejects(pedido, (e) => e.message.length <= 300);
+  assert.ok(links.status().lastError.length <= 300);
+  ({ job, pedido } = await pegar());
+  links.submit(job.id, { ok: true, link: 'https://evil.example/x', error: 'z'.repeat(1024 * 1024) });
+  await assert.rejects(pedido, (e) => e.message.length <= 300);
+  assert.ok(links.status().lastError.length <= 300);
+  assert.equal(links.modo(), 'extension', 'R8: o serviço diz o modo em que vai gerar o link');
+});
+
+/** Segmento JPEG: FF, marcador, tamanho (2 bytes, conta ele mesmo) e o corpo. */
+const segJpeg = (marcador, corpo) => { const c = Buffer.from(corpo, 'latin1'); return Buffer.concat([Buffer.from([0xff, marcador, (c.length + 2) >> 8, (c.length + 2) & 0xff]), c]); };
+/** Bloco PNG com o CRC certo. */
+const blocoPng = (tipo, dados) => {
+  const td = Buffer.concat([Buffer.from(tipo, 'latin1'), Buffer.from(dados, 'latin1')]);
+  const tam = Buffer.alloc(4); tam.writeUInt32BE(td.length - 4); const crc = Buffer.alloc(4); crc.writeUInt32BE(zlib.crc32(td));
+  return Buffer.concat([tam, td, crc]);
+};
+
+test('S15: a foto é gravada sem metadados (JPEG sem APP1–APP15 nem o que vem depois do fim; PNG sem eXIf/tEXt/zTXt/iTXt)', async (t) => {
+  const s = await subir();
+  try {
+    const gravado = async (buf, tipo) => {
+      const r = await s.upload(buf, tipo); assert.equal(r.status, 200, r.txt);
+      const g = await s.get(`/api/uploads/${r.json.id}`); assert.equal(g.status, 200);
+      assert.deepEqual(fs.readFileSync(path.join(s.dir, 'uploads', r.json.id)), g.buf, 'servido = gravado');
+      return g.buf;
+    };
+    // JPEG progressivo de mentira, mas com a estrutura de verdade: dois scans, bytes 0xFF00 e RSTn nos dados.
+    // R16: o upload regrava a foto pelo sharp, que não decodifica dados de mentira; este vai direto ao percurso manual
+    // (o de quando o sharp não carrega)
+    const app0 = segJpeg(0xe0, 'JFIF\0\x01\x01\0\0\x01\0\x01\0\0');
+    const dqt = segJpeg(0xdb, `\0${'\x01'.repeat(64)}`);
+    const sof = segJpeg(0xc2, '\x08\0\x01\0\x01\x01\x01\x11\0');
+    const dht = segJpeg(0xc4, `\0${'\0'.repeat(15)}\x01\x05`);
+    const sos = segJpeg(0xda, '\x01\x01\0\0\x3f\0');
+    const dados1 = Buffer.from([0x12, 0x34, 0xff, 0x00, 0x56, 0xff, 0xd0, 0x78, 0x9a]);
+    const dados2 = Buffer.from([0xab, 0xff, 0x00, 0xcd, 0xff, 0xd7, 0xef]);
+    const eoi = Buffer.from([0xff, 0xd9]); const soi = Buffer.from([0xff, 0xd8]);
+    const exif = segJpeg(0xe1, 'Exif\0\0GPS -22.9068 -43.1729 iPhone de Pedro');
+    const xmp = segJpeg(0xe1, 'http://ns.adobe.com/xap/1.0/\0<x:xmpmeta>Pedro</x:xmpmeta>');
+    const icc = segJpeg(0xe2, 'ICC_PROFILE\0\x01\x01perfil');
+    const app15 = segJpeg(0xef, 'fabricante: segredo');
+    const entreScans = segJpeg(0xe1, 'Exif\0\0entre scans');
+    const segundaImagem = Buffer.concat([soi, segJpeg(0xe1, 'Exif\0\0GPS da imagem anexa'), eoi]); // MPF/trailer depois do EOI
+    const original = Buffer.concat([soi, app0, exif, xmp, icc, app15, dqt, sof, dht, sos, dados1, entreScans, dht, sos, dados2, eoi, segundaImagem]);
+    const jpg = semMetadados(original, 'jpg');
+    assert.deepEqual(jpg, Buffer.concat([soi, app0, dqt, sof, dht, sos, dados1, dht, sos, dados2, eoi]), 'só os metadados saíram, o resto byte a byte');
+    for (const marca of ['Exif', 'GPS', 'Pedro', 'ICC_PROFILE', 'segredo']) assert.ok(!jpg.includes(marca), marca);
+
+    // PNG 1×1 com os quatro blocos de metadados logo depois do IHDR
+    const meta = [blocoPng('tEXt', 'Comment\0Pedro'), blocoPng('zTXt', 'Author\0\0x'), blocoPng('iTXt', 'GPS\0\0\0\0\0-22.9'), blocoPng('eXIf', 'MM\0*segredo')];
+    const comMeta = Buffer.concat([PNG.subarray(0, 33), ...meta, PNG.subarray(33)]);
+    assert.deepEqual(await gravado(comMeta, 'image/png'), PNG, 'o PNG volta a ser o original');
+
+    // fotos de verdade (sharp, dependência do projeto): o Exif some e a imagem continua a mesma
+    let sharp;
+    try { sharp = (await import('sharp')).default; } catch { t.diagnostic('sharp ausente: pulei as fotos de verdade'); return; }
+    const base = () => sharp({ create: { width: 8, height: 6, channels: 3, background: '#3366cc' } });
+    for (const [buf, tipo] of [[await base().jpeg().withExif({ IFD0: { Copyright: 'Pedro', ImageDescription: 'GPS -22.9' } }).toBuffer(), 'image/jpeg'],
+      [await base().png().withExif({ IFD0: { Copyright: 'Pedro' } }).toBuffer(), 'image/png']]) {
+      assert.ok(buf.includes('Pedro') && (await sharp(buf).metadata()).exif, `${tipo}: a foto de teste tem Exif`);
+      const limpo = await gravado(buf, tipo);
+      assert.ok(!limpo.includes('Pedro'), tipo);
+      const info = await sharp(limpo).metadata();
+      assert.deepEqual([info.exif, info.width, info.height], [undefined, 8, 6], tipo);
+      assert.deepEqual(await sharp(limpo).raw().toBuffer(), await sharp(buf).raw().toBuffer(), `${tipo}: mesmos pixels`);
+    }
+  } finally { await s.fechar(); }
+});
+
+// ---------- rodada 3 (R16/Q9): o upload regrava a foto pelo sharp (gira pelo Exif, sai sem metadados); ilegível → 415 ----------
+async function sharpOuPula(t) {
+  try { return (await import('sharp')).default; } catch { t.skip('sharp ausente: o upload usa o percurso manual'); return null; }
+}
+/** APP1 Exif (TIFF big-endian) com Orientation e ImageDescription no IFD0, como o da câmera de um celular. */
+function app1Exif(orientacao, descricao) {
+  const texto = Buffer.from(`${descricao}\0`, 'latin1');
+  const tiff = Buffer.alloc(8 + 2 + 2 * 12 + 4);
+  tiff.write('MM', 0, 'latin1'); tiff.writeUInt16BE(42, 2); tiff.writeUInt32BE(8, 4); tiff.writeUInt16BE(2, 8);
+  tiff.writeUInt16BE(0x010e, 10); tiff.writeUInt16BE(2, 12); tiff.writeUInt32BE(texto.length, 14); tiff.writeUInt32BE(tiff.length, 18);
+  tiff.writeUInt16BE(0x0112, 22); tiff.writeUInt16BE(3, 24); tiff.writeUInt32BE(1, 26); tiff.writeUInt16BE(orientacao, 30);
+  return segJpeg(0xe1, Buffer.concat([Buffer.from('Exif\0\0', 'latin1'), tiff, texto]).toString('latin1'));
+}
+
+test('R16/Q9: foto de celular com orientação 6 é gravada já girada (em pé) e sem Exif; PNG com tEXt perde o bloco', async (t) => {
+  const sharp = await sharpOuPula(t); if (!sharp) return;
+  const s = await subir();
+  try {
+    const gravada = async (buf, tipo) => {
+      const r = await s.upload(buf, tipo); assert.equal(r.status, 200, r.txt);
+      return fs.readFileSync(path.join(s.dir, 'uploads', r.json.id));
+    };
+    // 16×12 "deitada" (metade esquerda vermelha, direita azul) com orientação 6: quem respeita o Exif gira 90° no horário
+    const raw = Buffer.alloc(16 * 12 * 3);
+    for (let y = 0; y < 12; y++) for (let x = 0; x < 16; x++) raw[(y * 16 + x) * 3 + (x < 8 ? 0 : 2)] = 255;
+    const foto = await sharp(raw, { raw: { width: 16, height: 12, channels: 3 } }).jpeg()
+      .withMetadata({ orientation: 6, exif: { IFD0: { Copyright: 'Pedro' } } }).toBuffer();
+    const antes = await sharp(foto).metadata();
+    assert.deepEqual([antes.width, antes.height, antes.orientation, foto.includes('Pedro')], [16, 12, 6, true], 'a foto de teste');
+    const jpg = await gravada(foto, 'image/jpeg');
+    assert.ok(!jpg.includes('Pedro') && !jpg.includes('Exif'), 'o Exif saiu');
+    const info = await sharp(jpg).metadata();
+    assert.deepEqual([info.format, info.width, info.height, info.orientation, info.exif, info.icc, info.xmp],
+      ['jpeg', 12, 16, undefined, undefined, undefined, undefined], 'pixels girados: 12×16, sem orientação nem metadados');
+    // girar 90° no horário leva a coluna da esquerda para o alto: em pé, vermelho em cima e azul embaixo
+    const { data, info: d } = await sharp(jpg).raw().toBuffer({ resolveWithObject: true });
+    const cor = (x, y) => [...data.subarray((y * d.width + x) * 3, (y * d.width + x) * 3 + 3)].map((v) => (v > 128 ? 1 : 0));
+    assert.deepEqual([cor(6, 3), cor(6, 12)], [[1, 0, 0], [0, 0, 1]], 'girou para o lado certo');
+
+    const png = await sharp({ create: { width: 5, height: 4, channels: 4, background: '#ff8800cc' } }).png().toBuffer();
+    const comTexto = Buffer.concat([png.subarray(0, 33), blocoPng('tEXt', 'Author\0Pedro da Silva'), png.subarray(33)]);
+    const limpo = await gravada(comTexto, 'image/png');
+    assert.ok(!limpo.includes('tEXt') && !limpo.includes('Pedro'), 'o tEXt saiu');
+    assert.deepEqual(await sharp(limpo).raw().toBuffer(), await sharp(png).raw().toBuffer(), 'mesmos pixels');
+  } finally { await s.fechar(); }
+});
+
+test('R16: foto que não dá para ler (JPEG com lixo antes do APP1 e sem EOI, começo de JPEG, PNG cortado) → 415 e nada gravado', async () => {
+  const s = await subir();
+  try {
+    // começa com FF D8 FF (passa na conferência dos bytes iniciais), mas o que vem depois não é JPEG
+    const lixo = Buffer.concat([JPG.subarray(0, 3), Buffer.from('lixo lixo'), app1Exif(6, 'iPhone de Pedro'), JPG.subarray(2, -2)]);
+    for (const [corpo, tipo, nome] of [
+      [lixo, 'image/jpeg', 'lixo antes do APP1, sem EOI'],
+      [JPG.subarray(0, -2), 'image/jpeg', 'JPEG sem EOI'],
+      [Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(60, 1)]), 'image/jpeg', 'começo de JPEG'],
+      [PNG.subarray(0, 70), 'image/png', 'PNG cortado no IDAT'],
+    ]) {
+      const r = await s.upload(corpo, tipo);
+      assert.deepEqual([r.status, r.json?.erro], [415, 'Não consegui ler esta foto.'], nome);
+    }
+    assert.equal(fs.existsSync(path.join(s.dir, 'uploads')), false, 'nada foi gravado (nem a pasta)');
+  } finally { await s.fechar(); }
+});
+
+test('R16: PNG de 7000×7000 (49 megapixels em 6 KB) passa do limite de pixels → 415 sem decodificar', async (t) => {
+  if (!(await sharpOuPula(t))) return; // sem o sharp nada é decodificado: não há bomba
+  const ihdr = Buffer.alloc(13); ihdr.writeUInt32BE(7000, 0); ihdr.writeUInt32BE(7000, 4); ihdr[8] = 1; // cinza de 1 bit
+  const pixels = zlib.deflateSync(Buffer.alloc(7000 * (1 + 875)), { level: 9 }); // por linha: filtro + 7000 bits, tudo zero
+  const bomba = Buffer.concat([PNG.subarray(0, 8), blocoPng('IHDR', ihdr.toString('latin1')), blocoPng('IDAT', pixels.toString('latin1')), blocoPng('IEND', '')]);
+  assert.ok(bomba.length < 10000, `${bomba.length} bytes`);
+  const s = await subir();
+  try {
+    const t0 = Date.now();
+    const r = await s.upload(bomba, 'image/png');
+    assert.deepEqual([r.status, r.json?.erro], [415, 'Não consegui ler esta foto.']);
+    assert.ok(Date.now() - t0 < 1000, 'recusou pelo cabeçalho');
+    assert.equal(fs.existsSync(path.join(s.dir, 'uploads')), false);
+  } finally { await s.fechar(); }
+});
+
+test('R16 (sem o sharp): o percurso manual recusa arquivo fora do formato, tira COM e o que vem depois do fim e mantém só a orientação', async () => {
+  // JPEG com Exif (orientação 6 + texto), comentário e lixo depois do EOI: sai com um APP1 mínimo só com a orientação
+  const comMeta = Buffer.concat([JPG.subarray(0, 2), app1Exif(6, 'iPhone de Pedro GPS -22.9'), segJpeg(0xfe, 'Pedro'), JPG.subarray(2), Buffer.from('Pedro')]);
+  const minimo = Buffer.from('ffe10022457869660000' + '4d4d002a00000008' + '0001' + '011200030000000100060000' + '00000000', 'hex');
+  assert.deepEqual(semMetadados(comMeta, 'jpg'), Buffer.concat([JPG.subarray(0, 2), minimo, JPG.subarray(2)]));
+  assert.deepEqual(semMetadados(Buffer.concat([JPG.subarray(0, 2), app1Exif(1, 'Pedro'), JPG.subarray(2)]), 'jpg'), JPG, 'orientação 1: sem APP1');
+  // falha fechada: lixo no lugar de um marcador, sem EOI, tamanho impossível, PNG sem IEND
+  for (const [buf, ext, nome] of [
+    [Buffer.concat([JPG.subarray(0, 2), Buffer.from('lixo'), JPG.subarray(2)]), 'jpg', 'lixo antes do primeiro segmento'],
+    [JPG.subarray(0, -2), 'jpg', 'sem EOI'],
+    [Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x01, 0x01, 0, 0]), 'jpg', 'segmento maior que o arquivo'],
+    [PNG.subarray(0, -12), 'png', 'PNG sem IEND'],
+    [PNG.subarray(0, 70), 'png', 'PNG cortado no IDAT'],
+  ]) assert.throws(() => semMetadados(buf, ext), /fora do formato/, nome);
+  assert.deepEqual(semMetadados(Buffer.concat([PNG, Buffer.from('Pedro')]), 'png'), PNG, 'lixo depois do IEND sai');
+});
+
+test('R9: as fotos ficam na pasta da fila de envios (a que o envio lê), não no dataDir que o servidor recebeu', async () => {
+  const outro = tmp();
+  const s = await subir({ dataDir: outro });
+  try {
+    const up = await s.upload(PNG, 'image/png');
+    assert.equal(up.status, 200, up.txt);
+    assert.ok(fs.existsSync(path.join(s.dir, 'uploads', up.json.id)));
+    assert.equal(fs.existsSync(path.join(outro, 'uploads')), false);
+    assert.deepEqual((await s.get(`/api/uploads/${up.json.id}`)).buf, PNG);
+    const e = await s.post('/api/envios', { tipo: 'mensagem', texto: 'Foto', imagem: 'upload', upload: up.json.id, group_jids: ['111@g.us'] });
+    assert.equal(e.status, 200, e.txt);
+    assert.equal(await terminar(s.db, e.json.id), 'concluido');
+    assert.deepEqual(s.wa.simulated.at(-1).image, { bytes: PNG.length });
+  } finally { await s.fechar(); }
+});
+
+test('upload sem sessão: corpo de mais de 5 MB dá 401 (o parser da foto só roda depois do login) e nada é gravado', async () => {
+  const s = await subir();
+  try {
+    const grande = Buffer.alloc(6 * 1024 * 1024); JPG.copy(grande);
+    const r = await req(s.port, '/api/uploads', { method: 'POST', raw: grande, headers: { 'content-type': 'image/jpeg', origin: `http://127.0.0.1:${s.port}` } });
+    assert.equal(r.status, 401); assert.match(r.json.erro, /login/);
+    assert.equal(fs.existsSync(path.join(s.dir, 'uploads')), false);
+  } finally { await s.fechar(); }
+});
+
+test('Q6 (template): apagado e recriado com o mesmo id não sai com o template novo; editado e renomeado continua valendo', async (t) => {
+  const s = await subir();
+  try {
+    const seg = (h, m = 0) => new Date(2026, 10, 2, h, m).getTime();
+    const novo = async (name, body) => { const r = await s.post('/api/templates', { name, body }); assert.equal(r.status, 200, r.txt); return r.json.id; };
+    const agendar = async (templateId) => {
+      t.mock.timers.enable({ apis: ['Date'], now: seg(10, 0) });
+      try { return await s.envios.criar({ tipo: 'oferta', url: URL_ML, tag_id: 1, template_id: templateId, group_jids: ['111@g.us'], quando: 'agendado', agendar_hhmm: '10:30' }); } finally { t.mock.timers.reset(); }
+    };
+    const velho = await novo('Velho', 'VELHO {TITULO_PRODUTO} {LINK}');
+    const a = await agendar(velho);
+    assert.equal((await s.req(`/api/templates/${velho}`, { method: 'DELETE' })).status, 200);
+    assert.equal(await novo('Novo', 'NOVO {TITULO_PRODUTO} {LINK}'), velho, 'o SQLite reaproveitou o id');
+    const editado = await novo('Antes', 'ANTES {TITULO_PRODUTO} {LINK}');
+    const b = await agendar(editado);
+    assert.equal((await s.req(`/api/templates/${editado}`, { method: 'PUT', body: { name: 'Depois', body: 'DEPOIS {TITULO_PRODUTO} {LINK}' } })).status, 200);
+
+    await s.envios.processarPendentes(seg(10, 30) + 1000);
+    assert.equal(statusDe(s.db, a.id), 'erro');
+    assert.equal(s.db.prepare('SELECT erro FROM envio_resultados WHERE envio_id = ?').get(a.id).erro, 'o template foi apagado');
+    assert.equal(statusDe(s.db, b.id), 'concluido');
+    assert.equal(s.wa.simulated.length, 1);
+    assert.match(s.wa.simulated[0].text, /^DEPOIS Fone Bom/, 'o envio usa o template como ele está agora');
+    assert.ok(s.wa.simulated.every((x) => !/NOVO/.test(x.text)));
+  } finally { await s.fechar(); }
+});
+
+test('nenhum teste deste arquivo acessou a rede', () => {
+  assert.equal(acessosRede, 0);
+});

@@ -1,4 +1,4 @@
-import test from 'node:test';
+import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -10,7 +10,10 @@ import { createLinkService } from '../src/links.js';
 import { createWhatsApp } from '../src/whatsapp.js';
 import { parseListLines, parseProductHtml, extractItemId, offerKey, resolveOffer } from '../src/ml.js';
 
-const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'disp-'));
+// pastas temporárias apagadas no fim do arquivo
+const pastas = [];
+after(() => { for (const p of pastas) fs.rmSync(p, { recursive: true, force: true }); });
+const tmp = () => { const p = fs.mkdtempSync(path.join(os.tmpdir(), 'disp-')); pastas.push(p); return p; };
 const at = (h, m = 0) => new Date(2026, 10, 2, h, m).getTime(); // 02/11/2026, horário local
 
 test('template: remove linhas de campos vazios e formata preço', () => {

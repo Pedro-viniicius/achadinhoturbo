@@ -2,9 +2,12 @@ import { addLog, parseRule, getSetting } from './db.js';
 import { renderTemplate } from './template.js';
 import * as mlDefault from './ml.js';
 import { IMAGEM_PERMITIDA } from './ml.js';
+import { createEnvios } from './envios.js';
+import { createAvisos } from './avisos.js';
+import { sleep, jitter } from './util.js';
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const jitter = (s) => Math.round(s * 1000 * (0.7 + Math.random() * 0.6));
+// Pausas entre mensagens: moram em ./util.js (src/envios.js usa o mesmo ritmo anti-bloqueio); reexportadas aqui.
+export { sleep, jitter };
 const toMin = (hhmm) => { const [h, m] = String(hhmm).split(':').map(Number); return h * 60 + (m || 0); };
 
 /** O horário de funcionamento pode virar a noite (ex.: 20:00 até 02:00). */
@@ -24,9 +27,17 @@ export function alignToWindow(ts, start, end) {
   return d.getTime();
 }
 
-export function createScheduler({ db, wa, links, ml = mlDefault, fast = false }) {
+/**
+ * Agendador único: regras, envios avulsos (F1/F2) e avisos (F3) passam pelo mesmo tick, para não dobrar
+ * a taxa de mensagens. `dir` é a pasta de dados (fotos dos envios).
+ */
+export function createScheduler({ db, wa, links, ml = mlDefault, fast = false, dir = null }) {
   const running = new Set();
-  let timer = null; let ticking = false;
+  let timer = null; let primeiro = null; let ticking = false; let recuperacao = null;
+  let acordado = false; // um "agora" chegou com o tick em andamento: ele passa nos envios de novo antes de terminar
+  // O "agora" não envia por conta própria: grava pendente e acorda o tick, que manda um envio de cada vez (S14)
+  const envios = createEnvios({ db, wa, links, ml, fast, dir, acordar });
+  const avisos = createAvisos({ db, wa });
 
   const getRule = (id) => parseRule(db.prepare('SELECT * FROM rules WHERE id = ?').get(id));
   const delays = () => fast ? { group: 0, offer: 0 } : {
@@ -132,9 +143,25 @@ export function createScheduler({ db, wa, links, ml = mlDefault, fast = false })
     return picked.map((o) => ({ ...o, etiqueta: nome(o.tag_id) || nome(rule.tag_id) || null, fonte: (o.source_index ?? 0) + 1, text: tpl ? renderTemplate(tpl.body, { ...o, link: 'https://meli.la/(gerado no envio)' }, tplOpts()) : '' }));
   }
 
+  /** Envios e avisos chamados pelo tick: se falharem, registra e segue, para nunca travar as regras. */
+  async function passo(nome, fn) {
+    try { await fn(); } catch (e) { console.error(`[agendador] ${nome}:`, e?.message || e); }
+  }
+
+  /** Pede um tick já, sem esperar. Se um tick está rodando, ele mesmo passa nos envios antes de terminar. */
+  function acordar() {
+    acordado = true;
+    tick().catch((e) => console.error('[agendador]', e?.message || e));
+  }
+
+  // Ordem: envios vencidos → avisos → regras, com os envios de novo depois de cada regra
+  // (um agendado espera no máximo a regra em andamento, não todas).
   async function tick() {
-    if (ticking) return; ticking = true;
+    if (ticking) return; ticking = true; acordado = false;
     try {
+      await recuperacao; // o primeiro tick espera o recuperar() do start()
+      await passo('envios', () => envios.processarPendentes());
+      await passo('avisos', () => avisos.tick());
       const rules = db.prepare('SELECT * FROM rules WHERE enabled = 1').all().map(parseRule);
       for (const r of rules) {
         const now = Date.now();
@@ -145,14 +172,22 @@ export function createScheduler({ db, wa, links, ml = mlDefault, fast = false })
         }
         if (!wa.isReady()) continue;
         await runRule(r.id);
+        await passo('envios', () => envios.processarPendentes());
       }
+      // "agora" criado depois da última passada nos envios: sai neste tick, não no próximo (até 15 s depois)
+      while (acordado) { acordado = false; await passo('envios', () => envios.processarPendentes()); }
     } catch (e) { console.error('[agendador]', e); } finally { ticking = false; }
   }
 
   return {
-    runRule, previewOffers, tick,
-    start() { if (!timer) { timer = setInterval(tick, 15000); setTimeout(tick, 2000); } },
-    stop() { clearInterval(timer); timer = null; },
+    runRule, previewOffers, tick, envios, avisos,
+    start() {
+      if (timer) return;
+      // o que ficou 'enviando' quando o serviço caiu volta para a fila antes do primeiro tick
+      recuperacao = passo('recuperar', () => envios.recuperar());
+      timer = setInterval(tick, 15000); primeiro = setTimeout(tick, 2000);
+    },
+    stop() { clearInterval(timer); clearTimeout(primeiro); timer = null; primeiro = null; },
     isRunning: (id) => running.has(id),
   };
 }

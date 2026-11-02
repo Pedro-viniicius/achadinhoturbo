@@ -48,6 +48,33 @@ CREATE INDEX IF NOT EXISTS idx_clicks ON link_clicks (link_id, ts);
 CREATE TABLE IF NOT EXISTS group_proposals (
   id INTEGER PRIMARY KEY, link_id INTEGER, source_jid TEXT, name TEXT, status TEXT DEFAULT 'pending',
   created_jid TEXT, detail TEXT, created_at INTEGER, decided_at INTEGER);
+-- Disparo manual, mensagem e enquete. status: pendente|enviando|concluido|erro|pausado|cancelado
+CREATE TABLE IF NOT EXISTS envios (
+  id INTEGER PRIMARY KEY, tipo TEXT NOT NULL, payload TEXT NOT NULL DEFAULT '{}',
+  group_jids TEXT NOT NULL DEFAULT '[]', quando TEXT NOT NULL DEFAULT 'agora', repetir TEXT,
+  status TEXT NOT NULL DEFAULT 'pendente',
+  next_run_at INTEGER, last_run_at INTEGER, resultado TEXT, user_id INTEGER, created_at INTEGER);
+CREATE INDEX IF NOT EXISTS idx_envios_fila ON envios (status, next_run_at);
+CREATE TABLE IF NOT EXISTS envio_resultados (
+  id INTEGER PRIMARY KEY, envio_id INTEGER NOT NULL, ocorrencia INTEGER NOT NULL,
+  ts INTEGER, jid TEXT, group_name TEXT, ok INTEGER NOT NULL, erro TEXT);
+CREATE INDEX IF NOT EXISTS idx_envio_res ON envio_resultados (envio_id, ocorrencia);
+-- Destinos dos avisos. jid é o telefone (dado pessoal). resumo_blocos: NULL = não recebe resumo,
+-- '[]' = todos os grupos, '[ids]' = esses blocos. avisos: lista com 'lotacao' e/ou 'erro'.
+CREATE TABLE IF NOT EXISTS aviso_destinos (
+  id INTEGER PRIMARY KEY, nome TEXT NOT NULL, jid TEXT NOT NULL UNIQUE,
+  resumo_blocos TEXT, avisos TEXT NOT NULL DEFAULT '[]', ativo INTEGER NOT NULL DEFAULT 1, created_at INTEGER);
+-- Conexões por loja. segredos nunca sai em SELECT de listagem.
+CREATE TABLE IF NOT EXISTS conexoes (
+  plataforma TEXT PRIMARY KEY, config TEXT NOT NULL DEFAULT '{}', segredos TEXT NOT NULL DEFAULT '{}', updated_at INTEGER);
+-- Equipe. email é dado pessoal; o convite guarda só o sha256 do token.
+CREATE TABLE IF NOT EXISTS users (
+  id INTEGER PRIMARY KEY, nome TEXT NOT NULL, email TEXT COLLATE NOCASE UNIQUE,
+  senha_hash TEXT NOT NULL, papel TEXT NOT NULL CHECK (papel IN ('dono','operador')), created_at INTEGER, last_login_at INTEGER);
+CREATE TABLE IF NOT EXISTS invites (
+  id INTEGER PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE, email TEXT NOT NULL COLLATE NOCASE,
+  papel TEXT NOT NULL CHECK (papel IN ('dono','operador')), expires_at INTEGER NOT NULL, created_by INTEGER,
+  created_at INTEGER, used_at INTEGER, canceled_at INTEGER);
 `;
 
 // Colunas acrescentadas depois da primeira versão (ALTER TABLE só se faltar).
@@ -58,6 +85,7 @@ const EXTRA_COLUMNS = [
   ['links', 'auto_next', 'INTEGER DEFAULT 0'],
   ['rules', 'sources', 'TEXT'],
   ['sessions', 'last_seen', 'INTEGER'],
+  ['sessions', 'user_id', 'INTEGER'],
 ];
 
 export const DEFAULT_TEMPLATE = [
@@ -127,9 +155,12 @@ export function parseRule(r) {
   };
 }
 
+const MAX_MENSAGEM_LOG = 1000; // erro de biblioteca ou da extensão pode vir enorme: o histórico guarda só o começo
+
 export function addLog(db, { rule, level = 'info', group_name = null, offer_title = null, message }) {
+  const msg = message == null ? null : String(message).slice(0, MAX_MENSAGEM_LOG);
   db.prepare('INSERT INTO log (ts, rule_id, rule_name, level, group_name, offer_title, message) VALUES (?,?,?,?,?,?,?)')
-    .run(Date.now(), rule?.id ?? null, rule?.name ?? null, level, group_name, offer_title, message);
+    .run(Date.now(), rule?.id ?? null, rule?.name ?? null, level, group_name, offer_title, msg);
   // mantém o histórico enxuto
   db.prepare('DELETE FROM log WHERE id < (SELECT MAX(id) FROM log) - 5000').run();
 }

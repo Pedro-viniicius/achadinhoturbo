@@ -14,21 +14,45 @@
 </head>
 <body>
 <div class="app">
-  <aside class="rail">
+  <aside class="rail" id="rail">
     <a class="brand" href="#visao"><img src="logo.svg" alt="" width="30" height="30">achadinho<span>turbo</span></a>
-    <nav id="nav">
+    <!-- Em telas estreitas (≤ 900 px) o menu vira barra superior e abre por este botão. -->
+    <button type="button" class="menu-btn" id="menu-btn" aria-expanded="false" aria-controls="nav rail-rodape">Menu <span class="menu-atual" id="menu-atual"></span></button>
+    <nav id="nav" aria-label="Principal">
       <a href="#visao">Visão Geral</a>
-      <a href="#regras">Regras</a>
-      <a href="#blocos">Blocos de análise</a>
-      <a href="#links">Rotacionador de Links</a>
-      <a href="#etiquetas">Etiquetas</a>
-      <a href="#templates">Templates</a>
-      <a href="#whatsapp">WhatsApp e grupos</a>
-      <a href="#historico">Histórico</a>
-      <a href="#ajustes">Ajustes</a>
-      <a href="#ajuda">Ajuda</a>
+      <div role="group" aria-labelledby="ng-principal">
+        <p class="nav-grupo" id="ng-principal">Principal</p>
+        <a href="#links">Rotacionador de Links</a>
+        <a href="#grupos">Grupos</a>
+        <a href="#blocos">Blocos de análise</a>
+      </div>
+      <div role="group" aria-labelledby="ng-disparos">
+        <p class="nav-grupo" id="ng-disparos">Disparos</p>
+        <a href="#disparo-manual">Disparo manual</a>
+        <a href="#disparo-automatico">Disparo automático</a>
+        <a href="#disparar-mensagem">Disparar mensagem</a>
+        <a href="#templates">Templates</a>
+      </div>
+      <div role="group" aria-labelledby="ng-comunicacao">
+        <p class="nav-grupo" id="ng-comunicacao">Comunicação</p>
+        <a href="#relatorios">Relatórios e avisos</a>
+      </div>
+      <div role="group" aria-labelledby="ng-conta">
+        <p class="nav-grupo" id="ng-conta">Conta</p>
+        <a href="#conexoes">Conexões</a>
+        <a href="#numeros">Números de WhatsApp</a>
+        <!-- "Equipe" entra por app.js (pintarConta) só para o Dono: para o Operador o item não existe no DOM. -->
+      </div>
     </nav>
-    <button id="sair" class="leve sair" hidden>Sair</button>
+    <div class="rail-rodape" id="rail-rodape">
+      <nav aria-label="Apoio">
+        <a href="#historico">Histórico</a>
+        <a href="#ajustes">Ajustes</a>
+        <a href="#ajuda">Ajuda</a>
+      </nav>
+      <p class="pessoa" id="pessoa" hidden></p>
+      <button type="button" id="sair" class="leve sair" hidden>Sair</button>
+    </div>
   </aside>
   <main>
     <div id="faixa" class="faixa" aria-live="polite"></div>
@@ -39,6 +63,10 @@
 <div id="toast" role="status"></div>
 <div id="tip" class="tip" popover="manual" hidden></div>
 <script src="ajuda.js"></script>
+<script src="disparos.js"></script>
+<script src="relatorios.js"></script>
+<script src="conexoes.js"></script>
+<script src="equipe.js"></script>
 <script src="app.js"></script>
 <script src="paineis.js"></script>
 </body>

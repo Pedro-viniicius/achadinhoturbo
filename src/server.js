@@ -8,9 +8,14 @@ import { pseudonimo, migrarPseudonimos, limparAntigos, chaveIp, RETENCAO_PADRAO_
 import { createWhatsApp } from './whatsapp.js';
 import { createLinkService } from './links.js';
 import { createScheduler } from './scheduler.js';
+import * as mlPadrao from './ml.js';
+import { montarRotas as rotasEnvios } from './envios.js';
+import { montarRotas as rotasAvisos, lerConfig as configAvisos, viradaMin, limitePadrao, mascararNumero } from './avisos.js';
+import { montarRotas as rotasConexoes } from './conexoes.js';
+import { montarRotas as rotasEquipe } from './equipe.js';
 import { renderTemplate, SAMPLE_OFFER, PLACEHOLDERS } from './template.js';
 import { CATEGORIAS, ORDENS, POR_PAGINA } from './afiliados.js';
-import { overview, resumo, evasaoDoDia, periodRange, startOfDay } from './analytics.js';
+import { overview, resumo, evasaoDoDia, periodRange, startOfDay, dayOf } from './analytics.js';
 import { MODOS, LIMITE_MAX, LOTACAO_PCT, slugify, parseLink, pickGroup, statusDosGrupos, verificarLotacao, encaixarGrupoNovo } from './rotador.js';
 import { addLog } from './db.js';
 import crypto from 'node:crypto';
@@ -19,9 +24,10 @@ const LOCAL_HOST = /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i;
 // Páginas e rotas que funcionam sem login.
 const PUBLIC_PATHS = new Set(['/login.html', '/login.js', '/style.css', '/logo.svg', '/icon-192.png', '/healthz', '/favicon.ico', '/api/login']);
 // Política de conteúdo: só scripts do próprio painel; estilos inline e Google Fonts liberados; nada de frames.
-const CSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'";
+// Imagens: as do painel e as fotos de produto do CDN do Mercado Livre (os mesmos hosts de IMAGEM_PERMITIDA, src/ml.js).
+const CSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https://*.mlstatic.com; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'";
 
-export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, panelPassword = PANEL_PASSWORD }) {
+export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, panelPassword = PANEL_PASSWORD, dataDir = DATA_DIR, ml = mlPadrao }) {
   const app = express();
   app.disable('x-powered-by');
   app.set('trust proxy', 1); // Nginx na frente: req.ip e req.secure vêm do X-Forwarded-*
@@ -167,9 +173,12 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
       link_mode: getSetting(db, 'link_mode', 'extension'),
       titulo_max: Number(getSetting(db, 'titulo_max', 60)),
       retencao_dias: Number(getSetting(db, 'retencao_dias', RETENCAO_PADRAO_DIAS)),
+      limite_padrao: limitePadrao(db), virada_dia: configAvisos(db).virada_dia, // de Relatórios e avisos
     },
     ext_token: getSetting(db, 'ext_token'), porta: PORT,
     endereco_publico: enderecoPublico, auth: auth.enabled(),
+    usuario: null, // a etapa 7 troca pela pessoa da sessão
+    conta_nome: getSetting(db, 'conta_nome', ''),
     placeholders: PLACEHOLDERS,
     afiliados: { categorias: CATEGORIAS, ordens: ORDENS, por_pagina: POR_PAGINA }, max_fontes: MAX_SOURCES,
     modos_link: MODOS, limite_max: LIMITE_MAX, lotacao_pct: LOTACAO_PCT,
@@ -221,7 +230,7 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
     for (const j of jids) ins.run(id, j);
   };
   app.get('/api/blocks', wrap(() => {
-    const hoje = periodRange('hoje');
+    const hoje = periodRange('hoje', Date.now(), {}, viradaMin(db));
     return all('SELECT * FROM blocks ORDER BY name COLLATE NOCASE').map((b) => {
       const jids = all('SELECT jid FROM block_groups WHERE block_id = ?', b.id).map((r) => r.jid);
       const grupos = jids.length ? all(`SELECT jid, name, size FROM groups WHERE jid IN (${jids.map(() => '?').join(',')})`, ...jids) : [];
@@ -245,12 +254,12 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
 
   // ---------- visão geral ----------
   app.get('/api/overview', wrap((req) => {
-    const q = req.query; const now = Date.now();
-    const range = periodRange(String(q.periodo || 'hoje'), now, { de: q.de, ate: q.ate });
+    const q = req.query; const now = Date.now(); const v = viradaMin(db); // dias de negócio: começam na virada do dia
+    const range = periodRange(String(q.periodo || 'hoje'), now, { de: q.de, ate: q.ate }, v);
     const jids = q.bloco ? all('SELECT jid FROM block_groups WHERE block_id = ?', q.bloco).map((r) => r.jid) : null;
-    const o = overview(db, { ...range, jids, now });
+    const o = overview(db, { ...range, jids, now, viradaMin: v });
     o.anterior = { ...o.anterior, ...resumo(db, { ...o.anterior, jids }) };
-    o.evasao.ontem = evasaoDoDia(db, startOfDay(now) - 86400000, jids);
+    o.evasao.ontem = evasaoDoDia(db, startOfDay(now, v) - 1, jids, v); // 1 ms antes do início de hoje = ontem
     return o;
   }));
 
@@ -260,7 +269,7 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
     const slug = slugify(b.slug || name); if (!slug) throw new Error('Endereço inválido: use letras e números.');
     if (one('SELECT id FROM links WHERE slug = ? AND id IS NOT ?', slug, id)) throw new Error('Já existe um link com esse endereço.');
     const mode = MODOS.some((m) => m.id === b.mode) ? b.mode : 'fill';
-    const limit = Math.min(Math.max(Number(b.limit_members) || 1000, 2), LIMITE_MAX);
+    const limit = Math.min(Math.max(Number(b.limit_members) || limitePadrao(db), 2), LIMITE_MAX);
     const reopen = Math.min(Math.max(Number(b.reopen_below) || Math.floor(limit * 0.9), 1), limit - 1);
     const fallback = String(b.fallback_url || '').trim();
     if (fallback && !/^https?:\/\//i.test(fallback)) throw new Error('A URL reserva precisa começar com http:// ou https://');
@@ -269,7 +278,7 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
     return [name, slug, mode, fallback || null, limit, reopen, JSON.stringify(jids), b.auto_next ? 1 : 0];
   };
   const linkView = (row) => {
-    const l = parseLink(row); const hoje = periodRange('hoje');
+    const l = parseLink(row); const hoje = periodRange('hoje', Date.now(), {}, viradaMin(db));
     return {
       ...l, auto_next: !!l.auto_next, url: `${enderecoPublico}/g/${l.slug}`, grupos: statusDosGrupos(l, groupsByJid()),
       cliques_total: one('SELECT COUNT(*) AS n FROM link_clicks WHERE link_id = ?', l.id).n,
@@ -425,7 +434,13 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
     const lim = Math.min(Number(req.query.limite) || 200, 1000);
     return only ? all('SELECT * FROM log WHERE level = ? ORDER BY id DESC LIMIT ?', only, lim) : all('SELECT * FROM log ORDER BY id DESC LIMIT ?', lim);
   }));
-  app.get('/api/simulados', wrap(() => wa.simulated.slice(-50)));
+  // o que o modo simulado "enviou": grupo aparece; número de pessoa (destino de aviso) vai mascarado para a tela
+  app.get('/api/simulados', wrap(() => wa.simulated.slice(-50).map((m) => (String(m.jid).endsWith('@g.us') ? m : { ...m, jid: mascararNumero(m.jid) }))));
+
+  // ---------- features novas: cada módulo monta as próprias rotas, todas depois do Host/Origin e do login ----------
+  const soDono = (req, res, next) => next(); // por enquanto deixa passar: a etapa 7 troca por soDono(auth) de src/auth.js
+  const ctx = { db, wa, links, scheduler, auth, wrap, soDono, dataDir, ml, enderecoPublico };
+  for (const montar of [rotasEnvios, rotasAvisos, rotasConexoes, rotasEquipe]) montar(app, ctx);
 
   // Erros de parsing (JSON inválido, corpo grande demais) e inesperados: resposta curta, sem stack nem caminhos.
   // eslint-disable-next-line no-unused-vars
@@ -443,12 +458,19 @@ if (import.meta.url === `file://${process.argv[1].replace(/\\/g, '/')}` || proce
   const db = openDb(DATA_DIR);
   const migrados = migrarPseudonimos(db);
   if (migrados) console.log(`Privacidade: ${migrados} registros de participantes convertidos em pseudônimos.`);
-  const wa = createWhatsApp({ db, dir: DATA_DIR, dryRun: DRY_RUN, pseudo: (id) => pseudonimo(db, id) });
+  // leitura conta 1× por pessoa por dia de negócio (a virada do dia de Relatórios e avisos), como os relatórios
+  const wa = createWhatsApp({ db, dir: DATA_DIR, dryRun: DRY_RUN, pseudo: (id) => pseudonimo(db, id), diaDe: (ts) => dayOf(ts, viradaMin(db)) });
   const links = createLinkService({ getMode: () => (DRY_RUN ? 'fake' : getSetting(db, 'link_mode', 'extension')) });
-  const scheduler = createScheduler({ db, wa, links, fast: FAST });
+  const scheduler = createScheduler({ db, wa, links, fast: FAST, dir: DATA_DIR, ml: mlPadrao });
   let app;
   try { app = buildApp({ db, wa, links, scheduler }); } catch (e) { console.error('ERRO:', e.message); process.exit(1); }
-  const retencao = () => { try { const r = limparAntigos(db, Number(getSetting(db, 'retencao_dias', RETENCAO_PADRAO_DIAS))); if (r.eventos || r.leituras || r.cliques) console.log(`Retenção: apagados ${r.eventos} eventos, ${r.leituras} leituras, ${r.cliques} cliques antigos.`); } catch (e) { console.error('[retenção]', e.message); } };
+  const retencao = () => {
+    try { const r = limparAntigos(db, Number(getSetting(db, 'retencao_dias', RETENCAO_PADRAO_DIAS))); if (r.eventos || r.leituras || r.cliques) console.log(`Retenção: apagados ${r.eventos} eventos, ${r.leituras} leituras, ${r.cliques} cliques antigos.`); } catch (e) { console.error('[retenção]', e.message); }
+    // envios avulsos encerrados e fotos sem uso (src/envios.js); uma falha só vai para o log
+    Promise.resolve().then(() => scheduler.envios.limpar(Number(getSetting(db, 'retencao_dias', RETENCAO_PADRAO_DIAS))))
+      .then((r) => { const n = Object.entries(r || {}).filter(([, v]) => v > 0); if (n.length) console.log(`Retenção (envios avulsos): apagados ${n.map(([k, v]) => `${v} ${k}`).join(', ')}.`); })
+      .catch((e) => console.error('[retenção]', e.message));
+  };
   retencao(); setInterval(retencao, 6 * 60 * 60 * 1000);
 
   if (!app.locals.auth.enabled()) {

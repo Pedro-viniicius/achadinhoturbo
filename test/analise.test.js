@@ -1,5 +1,5 @@
 // Visão Geral (analytics), eventos de grupo, blocos e rotacionador de links.
-import test from 'node:test';
+import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -13,7 +13,10 @@ import { buildApp } from '../src/server.js';
 import { overview, resumo, periodRange, evasaoDoDia, dayOf, startOfDay } from '../src/analytics.js';
 import { pickGroup, slugify, statusDosGrupos, parseLink } from '../src/rotador.js';
 
-const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'disp-an-'));
+// pastas temporárias apagadas no fim do arquivo
+const pastas = [];
+after(() => { for (const p of pastas) fs.rmSync(p, { recursive: true, force: true }); });
+const tmp = () => { const p = fs.mkdtempSync(path.join(os.tmpdir(), 'disp-an-')); pastas.push(p); return p; };
 const H = 3600000; const D = 86400000;
 const ev = (db, ts, jid, who, action, byLink = 0, actor = null) => db.prepare('INSERT INTO group_events (ts, jid, participant, action, by_link, actor) VALUES (?,?,?,?,?,?)').run(ts, jid, who, action, byLink, actor);
 
@@ -29,8 +32,10 @@ test('períodos: hoje, ontem, 7 dias, mês e personalizado', () => {
   const now = new Date(2026, 10, 2, 15, 30).getTime(); // 02/11/2026 15:30
   const sod = startOfDay(now);
   assert.deepEqual(periodRange('hoje', now), { de: sod, ate: sod + D - 1 });
-  assert.deepEqual(periodRange('ontem', now), { de: sod - D, ate: sod - 1 });
-  assert.equal(periodRange('7d', now).de, sod - 6 * D);
+  // pelo calendário: em fuso com horário de verão, 01/11/2026 pode ter 25 h (America/New_York), e "ontem" começa
+  // à meia-noite de 01/11, não 24 h antes de hoje
+  assert.deepEqual(periodRange('ontem', now), { de: new Date(2026, 10, 1).getTime(), ate: sod - 1 });
+  assert.equal(periodRange('7d', now).de, new Date(2026, 9, 27).getTime());
   assert.equal(dayOf(periodRange('mes', now).de), '2026-11-01');
   const mp = periodRange('mes_passado', now); assert.equal(dayOf(mp.de), '2026-10-01'); assert.equal(dayOf(mp.ate), '2026-10-31');
   const c = periodRange('custom', now, { de: '2026-10-10', ate: '2026-10-12' }); assert.equal(dayOf(c.de), '2026-10-10'); assert.equal(dayOf(c.ate), '2026-10-12');
@@ -238,4 +243,60 @@ test('API: proposta aparece, pode ser ignorada ou criada (simulado) e o grupo no
     assert.equal((await req(s.port, `/api/proposals/${nova.id}/create`, { method: 'POST', headers: auth })).status, 400, 'não cria duas vezes');
     assert.match(s.db.prepare('SELECT message FROM log ORDER BY id DESC LIMIT 1').get().message, /Grupo criado/);
   } finally { await s.fechar(); }
+});
+
+// ---------- virada do dia (viradaMin): o dia de negócio começa num horário que não é a meia-noite ----------
+test('virada do dia: com virada 02:00 a entrada da 01:30 conta para o dia anterior (dayOf, startOfDay, periodRange)', () => {
+  const V = 120; const at = (d, h, m = 0) => new Date(2026, 10, d, h, m).getTime(); // novembro de 2026
+  assert.equal(startOfDay(at(3, 1, 30), V), at(2, 2), '01:30 de 03/11 ainda é o dia 02/11');
+  assert.equal(dayOf(at(3, 1, 30), V), '2026-11-02');
+  assert.equal(dayOf(at(3, 2, 0), V), '2026-11-03', 'às 02:00 começa o dia novo');
+  assert.equal(dayOf(at(3, 1, 30)), '2026-11-03', 'sem virada: meia-noite, como antes');
+  assert.equal(startOfDay(at(3, 1, 30), 0), at(3, 0));
+  const now = at(4, 1, 30); // ainda é o dia de negócio 03/11
+  assert.deepEqual(periodRange('hoje', now, {}, V), { de: at(3, 2), ate: at(4, 2) - 1 });
+  assert.deepEqual(periodRange('ontem', now, {}, V), { de: at(2, 2), ate: at(3, 2) - 1 });
+  assert.equal(periodRange('7d', now, {}, V).de, new Date(2026, 9, 28, 2, 0).getTime(), '7 dias = 28/10 a 03/11');
+  assert.deepEqual(periodRange('custom', now, { de: '2026-11-01', ate: '2026-11-02' }, V), { de: at(1, 2), ate: at(3, 2) - 1 });
+  // 01/12 01:00 ainda é 30/11: o mês atual é novembro e o passado, outubro
+  const dez = new Date(2026, 11, 1, 1, 0).getTime();
+  assert.equal(periodRange('mes', dez, {}, V).de, at(1, 2));
+  assert.deepEqual(periodRange('mes_passado', dez, {}, V), { de: new Date(2026, 9, 1, 2, 0).getTime(), ate: at(1, 2) - 1 });
+  assert.equal(dayOf(periodRange('mes', dez).de), '2026-12-01', 'sem virada: dezembro');
+  // valores fora de 0..1439 viram meia-noite
+  assert.equal(startOfDay(at(3, 1, 30), 5000), at(3, 0)); assert.equal(startOfDay(at(3, 1, 30), -60), at(3, 0));
+});
+
+test('virada do dia: overview, série por hora a partir da virada, evasão e resumo usam o dia de negócio', () => {
+  const V = 120; const at = (d, h, m = 0) => new Date(2026, 10, d, h, m).getTime();
+  const db = base();
+  ev(db, at(3, 1, 30), 'g1@g.us', 'a@s', 'add', 1);   // dia 02/11 (antes da virada)
+  ev(db, at(3, 1, 50), 'g1@g.us', 'a@s', 'remove');   // saiu no mesmo dia de negócio (02/11)
+  ev(db, at(3, 2, 10), 'g1@g.us', 'b@s', 'add', 1);   // dia 03/11
+  ev(db, at(4, 1, 0), 'g1@g.us', 'b@s', 'remove');    // 04/11 01:00 ainda é 03/11: mesmo dia
+  const now = at(4, 1, 30);
+
+  const hoje = overview(db, { ...periodRange('hoje', now, {}, V), now, viradaMin: V });
+  assert.deepEqual([hoje.entradas, hoje.saidas, hoje.saidas_mesmo_dia, hoje.evasao.entrou_dia.n], [1, 1, 1, 1]);
+  assert.equal(hoje.periodo.por_hora, true); assert.equal(hoje.serie.length, 24);
+  assert.deepEqual([hoje.serie[0].k, hoje.serie[23].k], [2, 1], 'a série por hora começa na hora da virada');
+  assert.deepEqual([hoje.serie.find((s) => s.k === 2).entradas, hoje.serie.find((s) => s.k === 1).saidas], [1, 1]);
+  const ontem = overview(db, { ...periodRange('ontem', now, {}, V), now, viradaMin: V });
+  assert.deepEqual([ontem.entradas, ontem.saidas, ontem.saidas_mesmo_dia], [1, 1, 1], 'a entrada da 01:30 de 03/11 é de ontem');
+
+  // sem virada (meia-noite) o mesmo instante conta diferente: hoje = 04/11, só a saída de b, que entrou em outro dia
+  const semVirada = overview(db, { ...periodRange('hoje', now), now });
+  assert.deepEqual([semVirada.entradas, semVirada.saidas, semVirada.saidas_mesmo_dia], [0, 1, 0]);
+  assert.equal(semVirada.serie[0].k, 0);
+
+  // série por dia em dias de negócio
+  const sem7 = overview(db, { ...periodRange('7d', now, {}, V), now, viradaMin: V });
+  assert.equal(sem7.serie.length, 7); assert.equal(sem7.serie[6].k, '2026-11-03');
+  assert.deepEqual(['2026-11-02', '2026-11-03'].map((k) => sem7.serie.find((s) => s.k === k).entradas), [1, 1]);
+
+  assert.deepEqual(evasaoDoDia(db, at(3, 1, 30), null, V), { pct: 100, n: 1, de: 1, dia: '2026-11-02' });
+  assert.deepEqual(evasaoDoDia(db, at(3, 1, 30)), { pct: 50, n: 1, de: 2, dia: '2026-11-03' }, 'sem virada: a e b entraram em 03/11, só a saiu no dia');
+  const r = resumo(db, { dia: at(3, 1, 30), viradaMin: V });
+  assert.deepEqual([r.entradas, r.saidas], [1, 1]);
+  assert.deepEqual(resumo(db, periodRange('hoje', now, {}, V)), resumo(db, { dia: now, viradaMin: V }), 'dia + viradaMin = o período do dia');
 });

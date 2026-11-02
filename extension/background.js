@@ -106,7 +106,7 @@ async function laco() {
       try {
         resp = await fetch(`${c.servidor}/api/ext/poll`, { headers: { 'x-token': c.token } });
       } catch { await status({ ok: false, erro: 'Painel fechado ou endereço errado.' }); return; }
-      if (resp.status === 401) { await status({ ok: false, erro: 'Token recusado. Copie de novo em Ajustes.' }); return; }
+      if (resp.status === 401) { await status({ ok: false, erro: 'Token recusado. Copie de novo em Conexões → Mercado Livre, no painel.' }); return; }
       await status({ ok: true, erro: null, em: Date.now() });
       let job;
       try { ({ job } = await resp.json()); } catch { continue; }

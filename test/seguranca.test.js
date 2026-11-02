@@ -1,6 +1,6 @@
 // Correções da revisão de segurança (S1–S11): privacidade, validação do que a extensão devolve,
 // limites de taxa e de corpo, erros sem stack, CSP, sessão com hash, backup fora do git.
-import test from 'node:test';
+import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -16,7 +16,10 @@ import { validarPaginas, amostraHub } from '../src/afiliados.js';
 import { parseListLines, hostPermitido, IMAGEM_PERMITIDA, parseProductHtml } from '../src/ml.js';
 import { periodRange, dayOf } from '../src/analytics.js';
 
-const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'disp-seg-'));
+// pastas temporárias apagadas no fim do arquivo
+const pastas = [];
+after(() => { for (const p of pastas) fs.rmSync(p, { recursive: true, force: true }); });
+const tmp = () => { const p = fs.mkdtempSync(path.join(os.tmpdir(), 'disp-seg-')); pastas.push(p); return p; };
 const D = 86400000;
 
 test('pseudonimização: estável, não reversível, idempotente; migração converte o que já existia; IPv6 por /64', () => {

@@ -59,7 +59,7 @@ function faixa() {
 // ---------- regras ----------
 function proximo(r) {
   if (r.em_andamento) return 'Enviando agora…';
-  if (!r.enabled) return 'Pausada';
+  if (!r.enabled) return 'Pausado';
   if (!r.next_run_at) return 'Começa no próximo ciclo (até 15 s)';
   const d = r.next_run_at - Date.now();
   if (d <= 0) return 'Enviando em instantes';
@@ -71,7 +71,7 @@ function cartaoRegra(r) {
   const fontes = (r.sources?.length ? r.sources : [{ type: r.source_type, config: r.source_config }]).map(resumoFonte);
   const fonte = fontes.length === 1 ? fontes[0] : `${fontes.length} fontes intercaladas (${fontes.join('; ')})`;
   return `<article class="card regra" data-id="${r.id}">
-    <h2><label class="chave" title="Ligar ou pausar"><input type="checkbox" data-act="ligar" ${r.enabled ? 'checked' : ''} aria-label="Regra ativa"><span></span></label>
+    <h2><label class="chave" title="Ligar ou pausar"><input type="checkbox" data-act="ligar" ${r.enabled ? 'checked' : ''} aria-label="Disparo automático ativo"><span></span></label>
       ${esc(r.name)} ${tag ? `<span class="chip etq">${esc(tag.name)}</span>` : '<span class="chip">sem etiqueta</span>'}</h2>
     <p class="res">${r.per_run} ${r.per_run === 1 ? 'oferta' : 'ofertas'} a cada ${r.interval_min} min, das ${esc(r.window_start)} às ${esc(r.window_end)}, para ${r.group_jids.length} ${r.group_jids.length === 1 ? 'grupo' : 'grupos'}.
       Fonte: ${fonte}. Template: ${esc(tpl?.name || '—')}.</p>
@@ -93,26 +93,26 @@ function fonteAfiliados(c = {}) {
   return `Central de Afiliados${partes.length ? ' (' + partes.join(', ') + ')' : ''}`;
 }
 function paginaRegras() {
-  $('#pagina').innerHTML = `<div class="topo"><div><h1>Regras de envio ${q('regras')}</h1>
-    <p class="sub">Cada regra escolhe uma etiqueta, os grupos, o template e o ritmo. Você pode ter quantas quiser, cada uma com a sua etiqueta.</p></div>
-    <button class="pri" id="nova">Nova regra</button></div><div id="lista"></div>`;
+  $('#pagina').innerHTML = `<div class="topo"><div><h1>Disparo automático ${q('regras')}</h1>
+    <p class="sub">Antes chamado de Regras. Cada disparo automático escolhe uma etiqueta, os grupos, o template e o ritmo. Pode ter quantos quiser.</p></div>
+    <button class="pri" id="nova">Novo disparo automático</button></div><div id="lista"></div>`;
   $('#nova').onclick = () => formRegra();
   listaRegras();
   $('#lista').onclick = tentar(async (ev) => {
     const b = ev.target.closest('[data-act]'); if (!b) return;
     const id = Number(b.closest('[data-id]').dataset.id); const r = S.rules.find((x) => x.id === id); const act = b.dataset.act;
-    if (act === 'ligar') { await api(`/rules/${id}/enabled`, 'POST', { enabled: b.checked }); aviso(b.checked ? 'Regra ligada' : 'Regra pausada'); await recarregarRegras(); }
+    if (act === 'ligar') { await api(`/rules/${id}/enabled`, 'POST', { enabled: b.checked }); aviso(b.checked ? 'Disparo automático ligado' : 'Disparo automático pausado'); await recarregarRegras(); }
     if (act === 'rodar') { await api(`/rules/${id}/run`, 'POST'); aviso('Envio iniciado. Acompanhe no Histórico.'); setTimeout(recarregarRegras, 800); }
     if (act === 'editar') formRegra(r);
     if (act === 'ver') verOfertas(r);
-    if (act === 'zerar' && confirm('Limpar a lista de ofertas já enviadas desta regra?')) { await api(`/rules/${id}/reset-sent`, 'POST'); aviso('Lista limpa'); }
-    if (act === 'excluir' && confirm(`Excluir a regra “${r.name}”?`)) { await api(`/rules/${id}`, 'DELETE'); await recarregarRegras(); }
+    if (act === 'zerar' && confirm('Limpar a lista de ofertas já enviadas deste disparo automático?')) { await api(`/rules/${id}/reset-sent`, 'POST'); aviso('Lista limpa'); }
+    if (act === 'excluir' && confirm(`Excluir o disparo automático “${r.name}”?`)) { await api(`/rules/${id}`, 'DELETE'); await recarregarRegras(); }
   });
 }
 function listaRegras() {
   const el = $('#lista'); if (!el) return;
   el.innerHTML = S.rules.length ? S.rules.map(cartaoRegra).join('')
-    : '<div class="vazio">Nenhuma regra ainda. Cadastre uma etiqueta, conecte o WhatsApp e crie a primeira regra.</div>';
+    : '<div class="vazio">Nenhum disparo automático ainda. Cadastre uma etiqueta em <a href="#conexoes">Conexões</a>, conecte o WhatsApp em <a href="#numeros">Números de WhatsApp</a> e crie o primeiro.</div>';
 }
 async function recarregarRegras() { S.rules = await api('/rules'); listaRegras(); }
 
@@ -134,10 +134,40 @@ function filtroGrupos(dlg, conta) {
   $('#gr', dlg).onchange = aplica; aplica();
   return aplica;
 }
+/**
+ * Seletor de grupos reutilizável (Disparo automático, Blocos, Disparo manual, Disparar mensagem): busca,
+ * "Só marcados", "Marcar visíveis", "Limpar" e, se pedido, o atalho "Marcar um bloco…".
+ * opts = { selecionados: [jid], blocos: bool, marcarVisiveis: bool (padrão true) }.
+ * Devolve { html, ligar(raiz, { contador, aoMudar, aoBloco }) → reaplica o filtro, marcados(raiz) → [jid] }.
+ * Use um seletor por tela ou diálogo: as consultas valem dentro de `raiz`.
+ */
+function seletorGrupos(opts = {}) {
+  const sel = new Set(opts.selecionados || []);
+  const html = !S.groups.length
+    ? '<div class="dica">Nenhum grupo carregado. Conecte o WhatsApp em <a href="#numeros">Números de WhatsApp</a>.</div>'
+    : `<div class="linha">${opts.blocos && S.blocks?.length ? `<select id="bloco-atalho" style="width:auto" aria-label="Marcar os grupos de um bloco"><option value="">Marcar um bloco…</option>${S.blocks.map((b) => `<option value="${b.id}">${esc(b.name)} (${b.group_jids.length})</option>`).join('')}</select>` : ''}<input id="busca" placeholder="Buscar grupo…" aria-label="Buscar grupo" style="flex:1 1 180px;min-width:160px"><button type="button" id="so-marcados" class="alt" aria-pressed="false" title="Mostrar só os grupos marcados, para conferir e desmarcar">Só marcados</button>${opts.marcarVisiveis === false ? '' : '<button type="button" id="todos">Marcar visíveis</button>'}<button type="button" id="nenhum">Limpar</button></div>
+      <div class="grupos" id="gr">${S.groups.map((g) => `<label data-n="${esc(g.name.toLowerCase())}"><input type="checkbox" value="${esc(g.jid)}" ${sel.has(g.jid) ? 'checked' : ''}>${esc(g.name)}<small>${g.size ?? ''}</small></label>`).join('')}</div>`;
+  const marcados = (raiz) => $$('#gr input:checked', raiz).map((i) => i.value);
+  const ligar = (raiz, { contador, aoMudar, aoBloco } = {}) => {
+    if (!$('#gr', raiz)) return () => {};
+    const aplica = filtroGrupos(raiz, () => { const n = marcados(raiz).length; if (contador) contador.textContent = `(${n} ${n === 1 ? 'selecionado' : 'selecionados'})`; aoMudar?.(n); });
+    const todos = $('#todos', raiz);
+    if (todos) todos.onclick = () => { $$('#gr label:not([hidden]) input', raiz).forEach((i) => (i.checked = true)); aplica(); };
+    $('#nenhum', raiz).onclick = () => { $$('#gr input', raiz).forEach((i) => (i.checked = false)); aplica(); };
+    const atalho = $('#bloco-atalho', raiz);
+    if (atalho) atalho.onchange = () => {
+      const b = S.blocks.find((x) => String(x.id) === atalho.value); if (!b) return;
+      $$('#gr input', raiz).forEach((i) => { if (b.group_jids.includes(i.value)) i.checked = true; });
+      aoBloco?.(b); aplica(); atalho.value = '';
+    };
+    return aplica;
+  };
+  return { html, ligar, marcados };
+}
 function fonteHtml(f, i, total) {
   const sc = f.config || {}; const catsSel = new Set(categoriasDe(sc));
   return `<div class="fonte sub-campo" data-i="${i}" style="margin-bottom:10px"><legend>Fonte ${i + 1}${total > 1 ? '' : ''} ${total > 1 ? `<button type="button" data-rm-fonte class="leve perigo" style="float:right;padding:2px 8px">Remover</button>` : ''}</legend>
-    <div class="grade" style="margin-bottom:8px"><label class="campo"><span>Etiqueta desta fonte ${q('fonte.etiqueta')}</span><select name="src_tag"><option value="">A mesma da regra</option>${S.tags.map((t) => `<option value="${t.id}" ${t.id === f.tag_id ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}</select></label></div>
+    <div class="grade" style="margin-bottom:8px"><label class="campo"><span>Etiqueta desta fonte ${q('fonte.etiqueta')}</span><select name="src_tag"><option value="">A etiqueta padrão</option>${S.tags.map((t) => `<option value="${t.id}" ${t.id === f.tag_id ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}</select></label></div>
     <div class="linha">${q('fonte.tipos')}<label><input type="radio" name="st${i}" value="afiliados" ${f.type === 'afiliados' ? 'checked' : ''} style="width:auto"> Central de Afiliados</label>
       <label><input type="radio" name="st${i}" value="list" ${f.type === 'list' ? 'checked' : ''} style="width:auto"> Lista de links</label>
       <label><input type="radio" name="st${i}" value="search" ${f.type === 'search' ? 'checked' : ''} style="width:auto"> Busca por palavra-chave (experimental)</label></div>
@@ -150,7 +180,7 @@ function fonteHtml(f, i, total) {
         <small>Nenhuma marcada = todas. Com várias, as ofertas saem intercaladas (uma de cada categoria por vez).</small></fieldset>
       <div class="linha"><label><input type="checkbox" name="af_mais_vendidos" ${sc.mais_vendidos ? 'checked' : ''} style="width:auto"> Só mais vendidos</label>${q('fonte.maisvendidos')}
         <label><input type="checkbox" name="af_ganhos_extras" ${sc.ganhos_extras ? 'checked' : ''} style="width:auto"> Só com ganhos extras</label>${q('fonte.ganhos')}</div>
-      <small class="dica">É a lista “Produtos selecionados para você” da sua Central de Afiliados. A extensão do Chrome busca a lista e gera cada link meli.la com a etiqueta desta regra.</small></div>
+      <small class="dica">É a lista “Produtos selecionados para você” da sua Central de Afiliados. A extensão do Chrome busca a lista e gera cada link meli.la com a etiqueta desta fonte (ou a padrão).</small></div>
     <div class="f-list"><label class="campo"><span>Um produto por linha ${REQ} ${q('fonte.lista')}</span><textarea name="items" class="mono" rows="5" placeholder="https://produto.mercadolivre.com.br/MLB-123...&#10;https://produto.mercadolivre.com.br/MLB-456... | Fone Bluetooth | 89,90 | 149,90 | CUPOM10">${esc(sc.items || '')}</textarea>
       <small>Formato opcional: link | título | preço | preço antigo | cupom. Se o título e o preço não forem lidos sozinhos, escreva-os aqui.</small></label></div>
     <div class="f-search grade"><label class="campo"><span>Palavra-chave ${REQ}</span><input name="query" value="${esc(sc.query || '')}" placeholder="Ex.: air fryer"></label>
@@ -160,26 +190,24 @@ function formRegra(r) {
   const nova = !r;
   r = r || { name: '', enabled: true, tag_id: S.tags[0]?.id, template_id: S.templates[0]?.id, group_jids: [], sources: [{ type: 'afiliados', config: { paginas: 3 } }],
     per_run: 3, interval_min: 60, window_start: '08:00', window_end: '22:00', dedupe_days: 7, send_image: true };
-  const sel = new Set(r.group_jids); const dlg = $('#dlg');
+  const grupos = seletorGrupos({ selecionados: r.group_jids, blocos: true }); const dlg = $('#dlg');
   const fontes = (r.sources?.length ? r.sources : [{ type: r.source_type || 'afiliados', config: r.source_config || {} }]).map((f) => ({ type: f.type, tag_id: f.tag_id ?? null, config: { ...(f.config || {}) } }));
   const MAXF = S.st.max_fontes || 5;
-  dlg.innerHTML = `<form method="dialog" id="f" novalidate><h1>${nova ? 'Nova regra' : 'Editar regra'}</h1>
+  dlg.innerHTML = `<form method="dialog" id="f" novalidate><h1>${nova ? 'Novo disparo automático' : 'Editar disparo automático'}</h1>
     <div class="grade">
-      <label class="campo"><span>Nome da regra ${REQ}</span><input name="name" value="${esc(r.name)}" placeholder="Ex.: Tecnologia" required></label>
-      <label class="campo"><span>Etiqueta padrão da regra ${REQ} ${q('regras.etiqueta')}</span><select name="tag_id">${opcoes(S.tags, r.tag_id, 'Escolha…')}</select>
-        ${S.tags.length ? '' : '<small>Cadastre uma etiqueta em “Etiquetas”.</small>'}</label>
+      <label class="campo"><span>Nome ${REQ}</span><input name="name" value="${esc(r.name)}" placeholder="Ex.: Tecnologia" required></label>
+      <label class="campo"><span>Etiqueta padrão ${REQ} ${q('regras.etiqueta')}</span><select name="tag_id">${opcoes(S.tags, r.tag_id, 'Escolha…')}</select>
+        ${S.tags.length ? '' : '<small>Cadastre uma etiqueta em <a href="#conexoes">Conexões</a> (Mercado Livre).</small>'}</label>
       <label class="campo"><span>Template ${REQ} ${q('regras.template')}</span><select name="template_id">${opcoes(S.templates, r.template_id)}</select></label></div>
     <fieldset><legend>De onde vêm as ofertas ${REQ} ${q('regras.fontes')} <span class="dica" id="f-cont"></span></legend>
       <div id="fontes"></div>
-      <div class="linha"><button type="button" id="add-fonte">+ Adicionar fonte</button><small class="dica">Até ${MAXF} fontes por regra. Com mais de uma, as ofertas saem intercaladas (uma de cada fonte por vez). Um grupo também pode estar em várias regras.</small></div></fieldset>
+      <div class="linha"><button type="button" id="add-fonte">+ Adicionar fonte</button><small class="dica">Até ${MAXF} fontes por disparo automático. Com mais de uma, as ofertas saem intercaladas (uma de cada fonte por vez). Um grupo também pode estar em vários disparos automáticos.</small></div></fieldset>
     <fieldset><legend>Filtros ${q('regras.filtros')}</legend><div class="grade">
       <label class="campo">Preço mínimo (R$)<input name="min_price" type="number" step="0.01" min="0" value="${r.min_price ?? ''}" placeholder="Sem mínimo"></label>
       <label class="campo">Preço máximo (R$)<input name="max_price" type="number" step="0.01" min="0" value="${r.max_price ?? ''}" placeholder="Sem máximo"></label>
       <label class="campo">Desconto mínimo (%)<input name="min_discount" type="number" min="0" max="99" value="${r.min_discount ?? ''}" placeholder="Qualquer"></label></div></fieldset>
     <fieldset><legend>Grupos que vão receber ${REQ} ${q('regras.grupos')} <span id="cont" class="dica"></span></legend>
-      ${S.groups.length ? `<div class="linha">${S.blocks?.length ? `<select id="bloco-atalho" style="width:auto"><option value="">Marcar um bloco…</option>${S.blocks.map((b) => `<option value="${b.id}">${esc(b.name)} (${b.group_jids.length})</option>`).join('')}</select>` : ''}<input id="busca" placeholder="Buscar grupo…" style="flex:1"><button type="button" id="so-marcados" class="alt" aria-pressed="false" title="Mostrar só os grupos marcados, para conferir e desmarcar">Só marcados</button><button type="button" id="todos">Marcar visíveis</button><button type="button" id="nenhum">Limpar</button></div>
-      <div class="grupos" id="gr">${S.groups.map((g) => `<label data-n="${esc(g.name.toLowerCase())}"><input type="checkbox" value="${esc(g.jid)}" ${sel.has(g.jid) ? 'checked' : ''}>${esc(g.name)}<small>${g.size ?? ''}</small></label>`).join('')}</div>`
-        : '<div class="dica">Nenhum grupo carregado. Conecte o WhatsApp na aba “WhatsApp e grupos”.</div>'}</fieldset>
+      ${grupos.html}</fieldset>
     <fieldset><legend>Ritmo de envio</legend><div class="grade">
       <label class="campo"><span>Ofertas por envio ${REQ} ${q('regras.por_envio')}</span><input name="per_run" type="number" min="1" max="20" value="${r.per_run}"><small>Cada oferta vai para todos os grupos, uma atrás da outra.</small></label>
       <label class="campo"><span>Intervalo entre envios (minutos) ${REQ} ${q('regras.intervalo')}</span><input name="interval_min" type="number" min="1" value="${r.interval_min}"></label>
@@ -187,7 +215,7 @@ function formRegra(r) {
       <label class="campo">Até<input name="window_end" type="time" value="${esc(r.window_end)}"></label>
       <label class="campo"><span>Não repetir a mesma oferta por (dias) ${q('regras.dedupe')}</span><input name="dedupe_days" type="number" min="0" value="${r.dedupe_days}"><small>0 = pode repetir.</small></label>
       <label class="campo"><span>Foto do produto ${q('regras.foto')}</span><select name="send_image"><option value="1">Enviar com foto, quando houver</option><option value="0" ${r.send_image ? '' : 'selected'}>Só texto</option></select></label></div></fieldset>
-    <div class="rodape"><button type="button" id="cancelar">Cancelar</button><button class="pri" id="salvar">${nova ? 'Criar regra' : 'Salvar'}</button></div></form>`;
+    <div class="rodape"><button type="button" id="cancelar">Cancelar</button><button class="pri" id="salvar">${nova ? 'Criar disparo automático' : 'Salvar'}</button></div></form>`;
   const pintaFontes = () => {
     $('#fontes').innerHTML = fontes.map((f, i) => fonteHtml(f, i, fontes.length)).join('');
     $('#f-cont').textContent = fontes.length > 1 ? `(${fontes.length} fontes)` : '';
@@ -211,32 +239,21 @@ function formRegra(r) {
   };
   pintaFontes();
   $('#add-fonte').onclick = () => { lerFontes(); if (fontes.length < MAXF) fontes.push({ type: 'afiliados', config: { paginas: 3 } }); pintaFontes(); };
-  const conta = () => { const n = $$('#gr input:checked', dlg).length; const c = $('#cont'); if (c) c.textContent = `(${n} selecionados)`; };
-  if ($('#gr')) {
-    const filtro = filtroGrupos(dlg, conta);
-    $('#todos').onclick = () => { $$('#gr label:not([hidden]) input').forEach((i) => (i.checked = true)); filtro(); };
-    $('#nenhum').onclick = () => { $$('#gr input').forEach((i) => (i.checked = false)); filtro(); };
-    if ($('#bloco-atalho')) $('#bloco-atalho').onchange = (e) => {
-      const b = S.blocks.find((x) => String(x.id) === e.target.value); if (!b) return;
-      $$('#gr input').forEach((i) => { if (b.group_jids.includes(i.value)) i.checked = true; });
-      if (b.tag_id) $('select[name=tag_id]', dlg).value = b.tag_id;
-      filtro(); e.target.value = '';
-    };
-  }
+  grupos.ligar(dlg, { contador: $('#cont', dlg), aoBloco: (b) => { if (b.tag_id) $('select[name=tag_id]', dlg).value = b.tag_id; } });
   $('#cancelar').onclick = () => dlg.close();
   $('#f').onsubmit = tentar(async (ev) => {
     ev.preventDefault(); const f = new FormData($('#f'));
     const g = (k) => f.get(k);
     const corpo = {
       name: g('name'), tag_id: g('tag_id') || null, template_id: g('template_id') || null,
-      group_jids: $$('#gr input:checked', dlg).map((i) => i.value), sources: (lerFontes(), fontes),
+      group_jids: grupos.marcados(dlg), sources: (lerFontes(), fontes),
       min_price: g('min_price'), max_price: g('max_price'), min_discount: g('min_discount'),
       per_run: g('per_run'), interval_min: g('interval_min'), window_start: g('window_start'), window_end: g('window_end'),
       dedupe_days: g('dedupe_days'), send_image: g('send_image') === '1', enabled: nova ? true : r.enabled,
     };
     const erros = [];
-    if (!String(corpo.name || '').trim()) erros.push({ msg: 'Dê um nome à regra.', el: $('[name=name]', dlg) });
-    if (!corpo.tag_id) erros.push({ msg: 'Escolha a etiqueta padrão da regra (cadastre em Etiquetas se ainda não tiver).', el: $('[name=tag_id]', dlg) });
+    if (!String(corpo.name || '').trim()) erros.push({ msg: 'Dê um nome ao disparo automático.', el: $('[name=name]', dlg) });
+    if (!corpo.tag_id) erros.push({ msg: 'Escolha a etiqueta padrão (cadastre em Conexões > Mercado Livre se ainda não tiver).', el: $('[name=tag_id]', dlg) });
     if (!corpo.template_id) erros.push({ msg: 'Escolha um template.', el: $('[name=template_id]', dlg) });
     fontes.forEach((f, i) => {
       const el = $(`.fonte[data-i="${i}"]`, dlg);
@@ -248,7 +265,7 @@ function formRegra(r) {
     if (!(Number(corpo.interval_min) >= 1)) erros.push({ msg: 'Intervalo entre envios: ao menos 1 minuto.', el: $('[name=interval_min]', dlg) });
     if (mostrarErros(dlg, erros)) return;
     try { await api(nova ? '/rules' : `/rules/${r.id}`, nova ? 'POST' : 'PUT', corpo); } catch (e) { mostrarErros(dlg, [{ msg: e.message }]); return; }
-    dlg.close(); aviso(nova ? 'Regra criada' : 'Regra salva'); await recarregarRegras();
+    dlg.close(); aviso(nova ? 'Disparo automático criado' : 'Disparo automático salvo'); await recarregarRegras();
   });
   dlg.showModal();
 }
@@ -264,27 +281,6 @@ async function verOfertas(r) {
     dlg.innerHTML = `<div class="corpo"><h1>Não consegui buscar</h1><p>${esc(e.message)}</p><div class="rodape"><button id="fechar" class="pri">Fechar</button></div></div>`;
   }
   $('#fechar').onclick = () => dlg.close();
-}
-
-// ---------- etiquetas ----------
-function paginaEtiquetas() {
-  $('#pagina').innerHTML = `<div class="topo"><div><h1>Etiquetas de afiliado ${q('etiquetas')}</h1>
-    <p class="sub">Cadastre aqui os nomes das suas etiquetas do programa de afiliados do Mercado Livre, escritos exatamente como aparecem lá. Depois escolha qual usar em cada regra.</p></div></div>
-    <form class="card" id="nt" novalidate><div class="linha"><label class="campo" style="flex:1;min-width:200px"><span>Nome da etiqueta ${REQ}</span><input name="name" placeholder="Ex.: achadosdesejo" style="width:100%"></label>
-      <label class="campo" style="flex:1;min-width:200px"><span>Anotação (opcional)</span><input name="note" placeholder="Ex.: grupo de casa"></label><button class="pri" style="align-self:end">Adicionar etiqueta</button></div></form>
-    ${S.tags.length ? `<div class="card tabela"><table><thead><tr><th>Etiqueta</th><th>Anotação</th><th>Usada em</th><th></th></tr></thead><tbody>
-      ${S.tags.map((t) => { const uso = S.rules.filter((r) => r.tag_id === t.id).length; return `<tr><td><span class="chip etq">${esc(t.name)}</span></td><td>${esc(t.note)}</td><td>${uso} ${uso === 1 ? 'regra' : 'regras'}</td><td style="text-align:right"><button class="perigo leve" data-del="${t.id}">Excluir</button></td></tr>`; }).join('')}
-      </tbody></table></div>` : '<div class="vazio">Nenhuma etiqueta cadastrada.</div>'}`;
-  $('#nt').onsubmit = tentar(async (ev) => {
-    ev.preventDefault(); const f = new FormData(ev.target); const nome = String(f.get('name') || '').trim();
-    const erros = [];
-    if (!nome) erros.push({ msg: 'Digite o nome da etiqueta, igual ao cadastrado na Central de Afiliados.', el: $('[name=name]', ev.target) });
-    else if (!/^[\w.-]{2,60}$/.test(nome)) erros.push({ msg: 'A etiqueta deve ter 2 a 60 caracteres: letras, números, ponto, hífen ou _ (sem espaços).', el: $('[name=name]', ev.target) });
-    if (mostrarErros(ev.target, erros)) return;
-    try { await api('/tags', 'POST', { name: nome, note: f.get('note') }); } catch (e) { mostrarErros(ev.target, [{ msg: e.message }]); return; }
-    S.tags = await api('/tags'); aviso('Etiqueta adicionada'); paginaEtiquetas();
-  });
-  $$('[data-del]').forEach((b) => (b.onclick = tentar(async () => { await api('/tags/' + b.dataset.del, 'DELETE'); S.tags = await api('/tags'); paginaEtiquetas(); })));
 }
 
 // ---------- templates ----------
@@ -317,13 +313,12 @@ function paginaTemplates(id) {
   $('#dl').onclick = tentar(async () => { if (!confirm('Excluir este template?')) return; await api('/templates/' + t.id, 'DELETE'); S.templates = await api('/templates'); paginaTemplates(); });
 }
 
-// ---------- WhatsApp ----------
-function paginaWhatsapp() {
+// ---------- Números de WhatsApp (conexão por QR, estado e desconectar) ----------
+function paginaNumeros() {
   const w = S.st.whatsapp; let corpo;
   if (w.status === 'open') {
-    corpo = `<div class="card"><h2>Conectado</h2><p class="sub">Número: ${esc(String(w.me || '').split(':')[0].split('@')[0])}. ${S.groups.length} grupos encontrados.</p>
-      <div class="acoes" style="border:0;padding:0"><button id="sync">Atualizar lista de grupos</button><button id="sair" class="perigo">Desconectar</button></div></div>
-      ${tabelaGrupos(S.groups)}`;
+    corpo = `<div class="card"><h2>Conectado</h2><p class="sub">Número: ${esc(String(w.me || '').split(':')[0].split('@')[0])}. ${S.groups.length} ${S.groups.length === 1 ? 'grupo encontrado' : 'grupos encontrados'}, listados em <a href="#grupos">Grupos</a>.</p>
+      <div class="acoes" style="border:0;padding:0"><button id="desconectar" class="perigo">Desconectar</button></div></div>`;
   } else if (w.status === 'qr') {
     corpo = `<div class="card qr"><h2>Leia o QR no celular</h2><img src="${w.qr}" alt="QR Code para conectar o WhatsApp">
       <ol class="passos"><li>Abra o WhatsApp Business no celular.</li><li>Toque nos três pontos e em “Aparelhos conectados”.</li><li>Toque em “Conectar um aparelho” e aponte para este QR.</li></ol>
@@ -334,14 +329,24 @@ function paginaWhatsapp() {
     corpo = `<div class="card"><h2>Nenhum número conectado</h2><p class="sub">Você vai conectar o seu WhatsApp Business como “aparelho conectado”, igual ao WhatsApp Web. O celular continua funcionando normalmente.</p>
       ${w.error ? `<p style="color:var(--err)">${esc(w.error)}</p>` : ''}<button class="pri" id="conectar">Conectar WhatsApp</button></div>`;
   }
-  $('#pagina').innerHTML = `<div class="topo"><div><h1>WhatsApp e grupos ${q('whatsapp')}</h1><p class="sub">Este número envia as ofertas. Para reduzir o risco de bloqueio, use as pausas em Ajustes e prefira um número que você não precise muito.</p></div></div>${corpo}`;
+  $('#pagina').innerHTML = `<div class="topo"><div><h1>Números de WhatsApp ${q('whatsapp')}</h1><p class="sub">Este número envia as ofertas. Para reduzir o risco de bloqueio, use as pausas em Ajustes e prefira um número que você não precise muito.</p></div></div>${corpo}`;
   if ($('#conectar')) $('#conectar').onclick = tentar(async () => { await api('/wa/connect', 'POST'); await atualizarEstado(true); });
-  if ($('#sync')) $('#sync').onclick = tentar(async () => { await api('/wa/sync-groups', 'POST'); S.groups = await api('/groups'); aviso('Grupos atualizados'); paginaWhatsapp(); });
-  if ($('#sair')) $('#sair').onclick = tentar(async () => {
+  // id "desconectar", não "sair": #sair é o botão de sair do painel, no menu.
+  if ($('#desconectar')) $('#desconectar').onclick = tentar(async () => {
     if (!confirm('Desconectar o WhatsApp deste programa?')) return;
     const apagar = confirm('Apagar também o histórico de entradas, saídas, leituras e cliques dos grupos? (recomendado se não for usar mais este número aqui)');
     await api('/wa/logout', 'POST', { apagar_eventos: apagar }); S.groups = []; await atualizarEstado(true);
   });
+}
+
+// ---------- Grupos (lista, convites e sincronização) ----------
+function paginaGrupos() {
+  const aberto = S.st.whatsapp.status === 'open';
+  $('#pagina').innerHTML = `<div class="topo"><div><h1>Grupos ${q('grupos')}</h1><p class="sub">Os grupos do número conectado, com membros, blocos e o link de convite que o Rotacionador de Links usa.</p></div>
+    ${aberto ? '<button id="sync">Atualizar lista de grupos</button>' : ''}</div>
+    ${aberto ? '' : '<div class="card"><h2>WhatsApp desconectado</h2><p class="sub">Conecte o número em <a href="#numeros">Números de WhatsApp</a> para atualizar a lista e buscar convites.</p></div>'}
+    ${aberto || S.groups.length ? tabelaGrupos(S.groups) : ''}`;
+  if ($('#sync')) $('#sync').onclick = tentar(async () => { await api('/wa/sync-groups', 'POST'); S.groups = await api('/groups'); aviso('Grupos atualizados'); paginaGrupos(); });
 }
 
 // ---------- histórico ----------
@@ -349,7 +354,7 @@ async function paginaHistorico(nivel = '') {
   const log = await api('/log' + (nivel ? `?nivel=${nivel}` : ''));
   $('#pagina').innerHTML = `<div class="topo"><div><h1>Histórico ${q('historico')}</h1><p class="sub">Tudo que foi enviado e tudo que deu errado, com o motivo.</p></div>
     <select id="nv" style="width:auto" aria-label="Filtrar"><option value="">Tudo</option><option value="ok" ${nivel === 'ok' ? 'selected' : ''}>Só enviados</option><option value="erro" ${nivel === 'erro' ? 'selected' : ''}>Só erros</option><option value="aviso" ${nivel === 'aviso' ? 'selected' : ''}>Só avisos</option></select></div>
-    ${log.length ? `<div class="card tabela"><table><thead><tr><th>Quando</th><th>Regra</th><th>Grupo</th><th>Oferta</th><th>Resultado</th></tr></thead><tbody>
+    ${log.length ? `<div class="card tabela"><table><thead><tr><th>Quando</th><th>Origem</th><th>Grupo</th><th>Oferta</th><th>Resultado</th></tr></thead><tbody>
     ${log.map((l) => `<tr><td>${hora(l.ts)}</td><td>${esc(l.rule_name || '')}</td><td>${esc(l.group_name || '')}</td><td>${esc(l.offer_title || '')}</td><td><span class="nivel-${l.level}">${esc(l.message)}</span></td></tr>`).join('')}</tbody></table></div>`
       : '<div class="vazio">Nada por aqui ainda.</div>'}`;
   $('#nv').onchange = (e) => paginaHistorico(e.target.value);
@@ -358,7 +363,7 @@ async function paginaHistorico(nivel = '') {
 
 // ---------- ajustes ----------
 function paginaAjustes() {
-  const a = S.st.ajustes; const url = S.st.endereco_publico || `http://127.0.0.1:${S.st.porta}`;
+  const a = S.st.ajustes;
   $('#pagina').innerHTML = `<div class="topo"><div><h1>Ajustes</h1></div></div>
     <div class="card" style="display:grid;gap:14px"><div><h2>Pausas entre mensagens ${q('ajustes.pausas')}</h2><p class="sub">Pausas curtas demais parecem robô. O programa varia o tempo para mais ou para menos, de forma aleatória.</p></div>
       <div class="grade"><label class="campo">Entre um grupo e outro (segundos)<input id="dg" type="number" min="2" value="${a.delay_group_s}"></label>
@@ -371,15 +376,11 @@ function paginaAjustes() {
       <label class="campo"><select id="lm"><option value="extension">Pela extensão do Chrome (com a etiqueta, gera comissão)</option>
         <option value="direct" ${a.link_mode === 'direct' ? 'selected' : ''}>Link direto, sem etiqueta (só para testar, não gera comissão)</option></select></label>
       <div><button id="sl">Salvar modo</button></div></div>
-    <div class="card" style="display:grid;gap:12px"><div><h2>Conectar a extensão do Chrome ${q('ajustes.extensao')}</h2><p class="sub">Na extensão, clique no ícone e cole estes dois valores.</p></div>
-      <label class="campo">Endereço<div class="copia"><input readonly value="${esc(url)}" id="c1"><button data-c="c1">Copiar</button></div></label>
-      <label class="campo">Token<div class="copia"><input readonly value="${esc(S.st.ext_token)}" id="c2"><button data-c="c2">Copiar</button></div></label>
-      <p class="dica">Último link gerado: ${S.st.extensao.lastOkAt ? hora(S.st.extensao.lastOkAt) : 'nenhum ainda'}${S.st.extensao.lastError ? `. Último erro: ${esc(S.st.extensao.lastError)}` : ''}</p>
-      <div class="linha"><button id="novo-token" class="leve perigo">Gerar novo token</button><small class="dica">Use se achar que o token vazou. A extensão para de funcionar até você colar o novo.</small></div></div>
+    <div class="card" style="display:grid;gap:12px"><div><h2>Extensão do Chrome ${q('ajustes.extensao')}</h2><p class="sub">O endereço, o token e o estado da extensão ficam em Conexões, no cartão do Mercado Livre.</p></div>
+      <div><a class="btn" href="#conexoes" style="text-decoration:none;display:inline-block">Ver em Conexões</a></div></div>
     <div class="card" style="display:grid;gap:14px"><div><h2>Privacidade dos grupos ${q('ajustes.privacidade')}</h2><p class="sub">Entradas, saídas e leituras são guardadas com um pseudônimo por pessoa (não o número) e apagadas depois do prazo abaixo. Cliques do rotacionador também.</p></div>
       <div class="grade"><label class="campo">Guardar por (dias)<input id="ret" type="number" min="0" max="3650" value="${a.retencao_dias ?? 90}"><small>0 = guardar para sempre (não recomendado).</small></label></div>
       <div class="linha"><button class="pri" id="sr">Salvar</button><button id="limpar-agora">Apagar o que já passou do prazo</button></div></div>`;
-  $('#novo-token').onclick = tentar(async () => { if (!confirm('Gerar um novo token? A extensão do Chrome vai parar até você colar o token novo nela.')) return; await api('/ajustes/token', 'POST'); await atualizarEstado(); aviso('Token novo gerado'); paginaAjustes(); });
   $('#sr').onclick = tentar(async () => { await api('/ajustes', 'PUT', { retencao_dias: $('#ret').value }); await atualizarEstado(); aviso('Salvo'); });
   $('#limpar-agora').onclick = tentar(async () => { const r = await api('/privacidade/limpar', 'POST'); aviso(`Apagados: ${r.eventos ?? 0} eventos, ${r.leituras ?? 0} leituras, ${r.cliques ?? 0} cliques`); });
   $('#sa').onclick = tentar(async () => { await api('/ajustes', 'PUT', { delay_group_s: $('#dg').value, delay_offer_s: $('#do').value }); await atualizarEstado(); aviso('Pausas salvas'); });
@@ -387,31 +388,86 @@ function paginaAjustes() {
   exemploTitulo();
   $('#st').onclick = tentar(async () => { await api('/ajustes', 'PUT', { titulo_max: $('#tm').value }); await atualizarEstado(); aviso('Salvo'); exemploTitulo(); });
   $('#sl').onclick = tentar(async () => { await api('/ajustes', 'PUT', { link_mode: $('#lm').value }); await atualizarEstado(); aviso('Modo salvo'); });
-  $$('[data-c]').forEach((b) => (b.onclick = async () => { await navigator.clipboard.writeText($('#' + b.dataset.c).value); aviso('Copiado'); }));
 }
 
 // ---------- navegação e atualização ----------
-const ROTAS = { ajuda: () => paginaAjuda(), visao: () => paginaVisao(), blocos: () => paginaBlocos(), links: () => paginaLinks(), regras: paginaRegras, etiquetas: paginaEtiquetas, templates: () => paginaTemplates(), whatsapp: paginaWhatsapp, historico: () => paginaHistorico(), ajustes: paginaAjustes };
+// Uma rota por hash. As páginas novas ficam nos próprios arquivos (disparos.js, relatorios.js, conexoes.js,
+// equipe.js, carregados antes deste); aqui a função só é procurada na hora de abrir a página.
+const ROTAS = {
+  visao: () => paginaVisao(), links: () => paginaLinks(), grupos: () => paginaGrupos(), blocos: () => paginaBlocos(),
+  'disparo-manual': () => paginaDisparoManual(), 'disparo-automatico': () => paginaRegras(),
+  'disparar-mensagem': () => paginaDispararMensagem(), templates: () => paginaTemplates(),
+  relatorios: () => paginaRelatorios(),
+  conexoes: (pedido) => paginaConexoes({ rolarPara: pedido === 'etiquetas' ? 'ml-etiquetas' : '' }),
+  numeros: () => paginaNumeros(), equipe: () => paginaEquipe(),
+  historico: () => paginaHistorico(), ajustes: () => paginaAjustes(), ajuda: () => paginaAjuda(),
+};
+// Endereços antigos continuam abrindo a página nova (favoritos, links da ajuda). #etiquetas rola até a seção em Conexões.
+const ALIASES = { regras: 'disparo-automatico', whatsapp: 'numeros', etiquetas: 'conexoes' };
+// Telas de duas colunas (formulário à esquerda, acompanhamento à direita) usam main.larga.
+const ROTAS_LARGAS = new Set(['disparo-manual', 'disparar-mensagem']);
+// Equipe é só do Dono. Sem usuários (painel de senha única, antes da etapa de Equipe) usuario é null e ela aparece.
+const podeEquipe = () => !S.st?.usuario || S.st.usuario.papel === 'dono';
+/** Rota que está aberta: resolve os nomes antigos e manda rota desconhecida (ou Equipe para o Operador) para a Visão Geral. */
+function rotaAtual() {
+  const pedido = (location.hash || '#visao').slice(1); const r = Object.hasOwn(ALIASES, pedido) ? ALIASES[pedido] : pedido;
+  return Object.hasOwn(ROTAS, r) && (r !== 'equipe' || podeEquipe()) ? r : 'visao';
+}
 function ir() {
-  const r = (location.hash || '#visao').slice(1); const f = ROTAS[r] || paginaVisao;
-  $$('#nav a').forEach((a) => a.classList.toggle('on', a.getAttribute('href') === '#' + r));
+  const pedido = (location.hash || '#visao').slice(1); const r = rotaAtual();
+  if (location.hash !== '#' + r) history.replaceState(null, '', '#' + r); // o endereço passa a mostrar a página aberta
+  $$('#rail nav a').forEach((a) => { if (a.getAttribute('href') === '#' + r) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current'); });
+  $('#menu-atual').textContent = '· ' + ($(`#rail nav a[href="#${r}"]`)?.textContent || '');
+  $('main').classList.toggle('larga', ROTAS_LARGAS.has(r));
+  fecharMenu();
   const pg = $('#pagina'); pg.onclick = null; pg.innerHTML = ''; // tratadores da tela anterior não podem vazar para a próxima
   if ($('#dlg').open) $('#dlg').close();
-  f();
+  ROTAS[r](pedido);
+}
+
+// ---------- menu em telas estreitas (≤ 900 px): o botão "Menu" abre os grupos sobre o conteúdo ----------
+const menuAberto = () => $('#rail').classList.contains('aberto');
+function abrirMenu() { $('#rail').classList.add('aberto'); $('#menu-btn').setAttribute('aria-expanded', 'true'); }
+function fecharMenu() {
+  if (!menuAberto()) return;
+  const rail = $('#rail'); const btn = $('#menu-btn'); const foco = document.activeElement;
+  rail.classList.remove('aberto'); btn.setAttribute('aria-expanded', 'false');
+  // O foco estava num item que agora some: volta ao botão. Não rouba o foco de um campo tocado fora do menu.
+  if (!foco || foco === document.body || (rail.contains(foco) && foco !== btn)) btn.focus();
+}
+$('#menu-btn').onclick = () => (menuAberto() ? fecharMenu() : abrirMenu());
+$('#rail').addEventListener('click', (e) => { if (e.target.closest('a')) fecharMenu(); }); // inclusive o item da página já aberta
+document.addEventListener('click', (e) => { if (menuAberto() && !$('#rail').contains(e.target)) fecharMenu(); });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && menuAberto()) fecharMenu(); });
+
+// ---------- conta no menu: pessoa, "Sair" e o item Equipe (só para o Dono) ----------
+function pintarConta() {
+  const u = S.st.usuario; const p = $('#pessoa');
+  const html = u ? `<b>${esc(u.nome || '')}</b>${esc(u.email || '')}` : '';
+  if (p.innerHTML !== html) p.innerHTML = html;
+  p.hidden = !u; $('#sair').hidden = !S.st.auth;
+  // Para o Operador o item não fica escondido: sai do DOM.
+  const item = $('#rail nav a[href="#equipe"]');
+  if (podeEquipe() && !item) $('#ng-conta').parentElement.insertAdjacentHTML('beforeend', '<a href="#equipe">Equipe</a>');
+  if (!podeEquipe() && item) item.remove();
+  if (!podeEquipe() && location.hash === '#equipe') ir();
 }
 async function atualizarEstado(forcar) {
-  const antes = JSON.stringify([S.st?.whatsapp?.status, S.st?.whatsapp?.qr]);
-  S.st = await api('/state'); faixa();
-  const depois = JSON.stringify([S.st.whatsapp.status, S.st.whatsapp.qr]);
-  if (location.hash === '#whatsapp' && (forcar || antes !== depois)) {
-    if (S.st.whatsapp.status === 'open') [S.groups, S.blocks] = await Promise.all([api('/groups'), api('/blocks')]);
-    paginaWhatsapp();
+  const antes = S.st?.whatsapp || {};
+  S.st = await api('/state'); faixa(); pintarConta();
+  const w = S.st.whatsapp; const r = rotaAtual();
+  const mudou = antes.status !== w.status;
+  if ((r === 'numeros' && (forcar || mudou || antes.qr !== w.qr)) || (r === 'grupos' && (forcar || mudou))) {
+    if (w.status === 'open') [S.groups, S.blocks] = await Promise.all([api('/groups'), api('/blocks')]);
+    if (r === 'numeros') paginaNumeros(); else paginaGrupos();
   }
+  if (r === 'conexoes') pintarEstadoML();
 }
 window.addEventListener('hashchange', ir);
 carregar().then(() => {
-  faixa(); ir();
-  if (S.st.auth) { const b = $('#sair'); b.hidden = false; b.onclick = tentar(async () => { await api('/logout', 'POST'); location.replace('/login.html'); }); }
+  faixa(); pintarConta(); ir();
+  $('#sair').onclick = tentar(async () => { await api('/logout', 'POST'); location.replace('/login.html'); });
+  if (S.st.usuario?.precisa_completar) completarCadastro();
 }).catch((e) => aviso(e.message, true));
 setInterval(() => atualizarEstado().catch(() => {}), 3000);
-setInterval(() => { if ((location.hash || '#regras') === '#regras' && !$('#dlg').open) recarregarRegras().catch(() => {}); }, 10000);
+setInterval(() => { if (rotaAtual() === 'disparo-automatico' && !$('#dlg').open) recarregarRegras().catch(() => {}); }, 10000);

@@ -1,5 +1,5 @@
 // Testes do servidor HTTP: login, sessão, Host/Origin, token da extensão, cabeçalhos.
-import test from 'node:test';
+import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -13,8 +13,12 @@ import { createScheduler } from '../src/scheduler.js';
 
 const HOST = 'disparador.exemplo.com.br';
 const SENHA = 'senha-de-teste-123';
+// pastas temporárias apagadas no fim do arquivo
+const pastas = [];
+after(() => { for (const p of pastas) fs.rmSync(p, { recursive: true, force: true }); });
+const tmp = () => { const p = fs.mkdtempSync(path.join(os.tmpdir(), 'disp-srv-')); pastas.push(p); return p; };
 
-function subir({ publicHost = HOST, panelPassword = SENHA, dir = fs.mkdtempSync(path.join(os.tmpdir(), 'disp-srv-')) } = {}) {
+function subir({ publicHost = HOST, panelPassword = SENHA, dir = tmp() } = {}) {
   const db = openDb(dir);
   const wa = createWhatsApp({ db, dir, dryRun: true }); wa.connect();
   const links = createLinkService({ getMode: () => 'fake' });
@@ -86,7 +90,7 @@ test('senha errada dá 401 e bloqueia depois de 5 tentativas; senha certa abre s
 });
 
 test('sessão sobrevive a reinício (fica no SQLite)', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'disp-srv-'));
+  const dir = tmp();
   const s = await subir({ dir });
   const sid = sidDe(await login(s.port));
   await s.fechar();

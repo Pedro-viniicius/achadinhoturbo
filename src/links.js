@@ -9,6 +9,8 @@ import { amostraHub, validarPaginas } from './afiliados.js';
 export const LINK_MELI = /^https:\/\/meli\.la\/[A-Za-z0-9_-]{3,40}$/;
 
 const ONLINE_MS = 45000;
+const MAX_ERRO = 300; // o erro vem da extensão (texto livre): vai para o log, para a tela e para /api/state
+const erroCurto = (t) => String(t).slice(0, MAX_ERRO);
 
 export function createLinkService({ getMode }) {
   const jobs = new Map();   // id -> { resolve, reject, timer, type }
@@ -73,7 +75,7 @@ export function createLinkService({ getMode }) {
   function submit(id, { ok, link, data, error }) {
     const e = jobs.get(id); if (!e) return false;
     clearTimeout(e.timer); jobs.delete(id);
-    if (!ok) { lastError = error || 'a extensão não conseguiu'; e.reject(new Error(lastError)); return true; }
+    if (!ok) { lastError = erroCurto(error || 'a extensão não conseguiu'); e.reject(new Error(lastError)); return true; }
     if (e.type === 'ofertas') {
       const v = validarPaginas(data);
       if (!v.ok) { lastError = v.erro; e.reject(new Error(lastError)); return true; }
@@ -82,9 +84,10 @@ export function createLinkService({ getMode }) {
     const l = String(link || '').trim();
     const valido = getMode() === 'extension' ? LINK_MELI.test(l) : /^https?:\/\//i.test(l);
     if (valido) { lastOkAt = Date.now(); lastError = ''; e.resolve({ link: l }); }
-    else { lastError = error || (l ? 'a extensão devolveu um link que não é meli.la; recusado' : 'resposta sem link'); e.reject(new Error(lastError)); }
+    else { lastError = erroCurto(error || (l ? 'a extensão devolveu um link que não é meli.la; recusado' : 'resposta sem link')); e.reject(new Error(lastError)); }
     return true;
   }
 
-  return { requestLink, requestOffers, poll, submit, status };
+  // modo(): o modo em que requestLink vai gerar o link agora (quem precisa saber se a extensão é necessária pergunta aqui)
+  return { requestLink, requestOffers, poll, submit, status, modo: () => getMode() };
 }
