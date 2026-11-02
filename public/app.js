@@ -164,7 +164,7 @@ function formRegra(r) {
       $$(`input[name=st${i}]`, el).forEach((r) => (r.onchange = ajusta)); ajusta();
       const conta = () => { const n = $$('.af-cats input:checked', el).length; $('.af-cont', el).textContent = n ? `(${n} marcadas)` : '(todas)'; };
       $('.af-cats', el).onchange = conta; conta();
-      $('[data-rm-fonte]', el).onclick = () => { lerFontes(); fontes.splice(i, 1); pintaFontes(); };
+      const rm = $('[data-rm-fonte]', el); if (rm) rm.onclick = () => { lerFontes(); fontes.splice(i, 1); pintaFontes(); };
     });
   };
   const lerFontes = () => {
