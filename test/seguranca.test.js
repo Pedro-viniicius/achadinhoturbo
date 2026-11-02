@@ -122,7 +122,7 @@ function req(port, caminho, { method = 'GET', headers = {}, body, raw } = {}) {
 }
 const login = (port, senha = 'senha-de-teste-123', headers = {}) => req(port, '/api/login', { method: 'POST', body: { senha }, headers });
 
-test('rotacionador público: 1 clique por IP por hora, limite de 30/min, IP não vai para o banco', async () => {
+test('rotacionador público: 1 clique por IP por hora, limite de 120/min, IP não vai para o banco', async () => {
   const s = await subir();
   try {
     for (let i = 0; i < 5; i++) assert.equal((await req(s.port, '/g/l')).status, 302);
@@ -131,8 +131,8 @@ test('rotacionador público: 1 clique por IP por hora, limite de 30/min, IP não
     assert.equal((await req(s.port, '/g/l', { headers: { 'x-forwarded-for': '203.0.113.9' } })).status, 302);
     assert.equal(s.db.prepare('SELECT COUNT(*) AS n FROM link_clicks').get().n, 2, 'outro IP conta');
     let ultimo;
-    for (let i = 0; i < 40; i++) ultimo = await req(s.port, '/g/l', { headers: { 'x-forwarded-for': '198.51.100.7' } });
-    assert.equal(ultimo.status, 429, 'passou de 30 no minuto');
+    for (let i = 0; i < 125; i++) ultimo = await req(s.port, '/g/l', { headers: { 'x-forwarded-for': '198.51.100.7' } });
+    assert.equal(ultimo.status, 429, 'passou de 120 no minuto');
   } finally { await s.fechar(); }
 });
 
@@ -185,7 +185,8 @@ test('API: configuração de fonte só com chaves e tipos conhecidos; token da e
     const cfg = (await req(s.port, '/api/rules', { headers: h })).json[0].sources[0].config;
     assert.deepEqual(cfg, { busca: 'x'.repeat(80), categorias: ['MLB1574'], ordem: 'relevance', paginas: 3, mais_vendidos: false, ganhos_extras: false });
     const antes = getSetting(s.db, 'ext_token');
-    assert.equal((await req(s.port, '/api/ext/token', { method: 'POST', headers: h })).status, 200);
+    assert.equal((await req(s.port, '/api/ajustes/token', { method: 'POST', headers: h })).status, 200);
+    assert.equal((await req(s.port, '/api/ajustes/token', { method: 'POST', headers: { ...h, origin: 'https://site-malicioso.com' } })).status, 403, 'rotação do token exige origem própria');
     const depois = getSetting(s.db, 'ext_token');
     assert.notEqual(antes, depois); assert.equal(depois.length, 48);
     assert.equal((await req(s.port, '/api/ext/result', { method: 'POST', body: {}, headers: { 'x-token': antes } })).status, 401, 'token antigo morreu');
@@ -202,4 +203,30 @@ test('backup: destino padrão fica em data/backups (ignorado pelo git) e o .giti
   for (const linha of ['data/', 'backups/', '*.tar.gz', '.env', '.env.*', '!.env.example']) assert.ok(gi.split('\n').includes(linha), linha);
   const src = fs.readFileSync(new URL('../scripts/backup.js', import.meta.url), 'utf8');
   assert.ok(src.includes("path.join(DATA_DIR, 'backups')")); assert.ok(!src.includes("path.join(DATA_DIR, '..', 'backups')"));
+});
+
+test('S12: rajada simultânea não atravessa o freio; teto de 2 logins em andamento; IP com login recente não sofre o limite global; IPv6 comprimido', async () => {
+  const s = await subir();
+  try {
+    const rajada = await Promise.all(Array.from({ length: 20 }, () => login(s.port, 'errada', { 'x-forwarded-for': '203.0.113.50' })));
+    const c = rajada.reduce((m, r) => ((m[r.status] = (m[r.status] || 0) + 1), m), {});
+    assert.ok((c[401] || 0) <= 5, `no máximo 5 palpites avaliados, veio ${JSON.stringify(c)}`);
+    assert.equal((c[401] || 0) + (c[429] || 0), 20);
+    // dono: entra certo de um IP; depois 50 erros de terceiros não o trancam
+    assert.equal((await login(s.port, 'senha-de-teste-123', { 'x-forwarded-for': '198.51.100.1' })).status, 200);
+    for (let i = 0; i < 60; i++) await login(s.port, 'errada', { 'x-forwarded-for': `203.0.113.${100 + (i % 50)}` });
+    assert.equal((await login(s.port, 'errada', { 'x-forwarded-for': '203.0.113.200' })).status, 429, 'terceiro: limite global ativo');
+    assert.equal((await login(s.port, 'senha-de-teste-123', { 'x-forwarded-for': '198.51.100.1' })).status, 200, 'dono continua entrando');
+  } finally { await s.fechar(); }
+  assert.equal(chaveIp('2804:14c::aaaa:bbbb:cccc:dddd'), '2804:14c:0:0::/64');
+  assert.equal(chaveIp('2804:14c:0:0:1111:2222:3333:4444'), '2804:14c:0:0::/64', 'mesmo /64, mesma chave');
+  assert.notEqual(chaveIp('2804:14c::aaaa:bbbb:cccc:dddd'), chaveIp('2804:14c:0:1::1'));
+});
+
+test('extensão: corpo grande sem token é recusado antes de ser lido (401, não 413)', async () => {
+  const s = await subir();
+  try {
+    const r = await req(s.port, '/api/ext/result', { method: 'POST', raw: '{"a":"' + 'x'.repeat(3_000_000) + '"}', headers: { 'x-token': 'errado' } });
+    assert.equal(r.status, 401);
+  } finally { await s.fechar(); }
 });

@@ -31,6 +31,14 @@ export function migrarPseudonimos(db) {
   let n = 0;
   db.exec('BEGIN');
   try {
+    db.exec('UPDATE link_clicks SET ip_hash = NULL');
+    // propostas antigas guardavam a lista de telefones dos admins: fica só a contagem
+    for (const p of db.prepare("SELECT id, detail FROM group_proposals WHERE detail LIKE '%admins_%'").all()) {
+      try {
+        const d = JSON.parse(p.detail); const conta = (x) => (Array.isArray(x) ? x.length : x);
+        db.prepare('UPDATE group_proposals SET detail = ? WHERE id = ?').run(JSON.stringify({ ...d, admins_adicionados: conta(d.admins_adicionados), admins_nao_adicionados: conta(d.admins_nao_adicionados) }), p.id);
+      } catch { /* detalhe não é JSON: deixa */ }
+    }
     const upd = db.prepare('UPDATE group_events SET participant = ?, actor = ? WHERE id = ?');
     for (const r of db.prepare('SELECT id, participant, actor FROM group_events').all()) {
       upd.run(pseudonimo(db, r.participant), r.actor ? pseudonimo(db, r.actor) : null, r.id); n++;
@@ -70,5 +78,9 @@ export function apagarParticipante(db, id) {
 export function chaveIp(ip) {
   const s = String(ip || '').replace(/^::ffff:/, '');
   if (!s.includes(':')) return s;
-  return s.split(':').slice(0, 4).join(':') + '::/64';
+  // expande o "::" antes de cortar, senão um prefixo com hextets zero deixaria parte do sufixo entrar na chave
+  const [esq, dir = ''] = s.split('::');
+  const a = esq ? esq.split(':') : []; const b = dir ? dir.split(':') : [];
+  const cheio = s.includes('::') ? [...a, ...Array(Math.max(0, 8 - a.length - b.length)).fill('0'), ...b] : a;
+  return cheio.slice(0, 4).map((h) => h.toLowerCase().replace(/^0+(?=\w)/, '')).join(':') + '::/64';
 }

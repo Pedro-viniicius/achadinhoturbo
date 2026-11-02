@@ -11,7 +11,9 @@
   "host_permissions": [
     "https://*.mercadolivre.com.br/*",
     "http://127.0.0.1/*",
-    "http://localhost/*",
+    "http://localhost/*"
+  ],
+  "optional_host_permissions": [
     "https://*/*"
   ],
   "background": {

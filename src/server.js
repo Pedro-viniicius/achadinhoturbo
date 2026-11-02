@@ -26,14 +26,16 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
   app.disable('x-powered-by');
   app.set('trust proxy', 1); // Nginx na frente: req.ip e req.secure vêm do X-Forwarded-*
   const jsonPequeno = express.json({ limit: '100kb' });
-  const jsonGrande = express.json({ limit: '5mb' }); // só a lista da Central, que vem pela extensão
-  app.use((req, res, next) => (req.path === '/api/ext/result' ? jsonGrande : jsonPequeno)(req, res, next));
+  const jsonGrande = express.json({ limit: '5mb' }); // só a lista da Central, que vem pela extensão, e só depois do token conferido
+  app.use((req, res, next) => (req.path === '/api/ext/result' ? next() : jsonPequeno(req, res, next)));
 
   const auth = createAuth({ db, password: panelPassword });
   const loginLimiter = createLimiter({ max: 5, windowMs: 15 * 60 * 1000 });       // por IP (/64 no IPv6)
   const loginGlobal = createLimiter({ max: 50, windowMs: 15 * 60 * 1000 });        // todas as origens juntas
   const extLimiter = createLimiter({ max: 20, windowMs: 15 * 60 * 1000 });
-  const gLimiter = createLimiter({ max: 30, windowMs: 60 * 1000 });                 // /g/<slug>: 30 por minuto por IP
+  const gLimiter = createLimiter({ max: 120, windowMs: 60 * 1000 });                // /g/<slug>: 120 por minuto por IP (CGNAT junta muita gente num IP)
+  const sucessoRecente = new Map();                                                  // ip -> ts do último login certo: esse IP não sofre o limite global
+  let loginsEmAndamento = 0;                                                         // no máximo 2 scrypt ao mesmo tempo
   const cliquesRecentes = new Map();                                                // (link|ip|hora) -> ts: 1 clique por hora por IP
   const enderecoPublico = publicHost ? `https://${publicHost}` : `http://127.0.0.1:${PORT}`;
   app.locals.auth = auth;
@@ -82,7 +84,7 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
     res.status(200).type('application/json').flushHeaders();
     res.end(JSON.stringify({ job: await links.poll(20000) }));
   });
-  app.post('/api/ext/result', extAuth, (req, res) => {
+  app.post('/api/ext/result', extAuth, jsonGrande, (req, res) => {
     const ok = links.submit(Number(req.body.id), { ok: !!req.body.ok, link: req.body.link, data: req.body.data, error: req.body.error });
     res.json({ ok });
   });
@@ -121,13 +123,20 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
   app.post('/api/login', async (req, res) => {
     if (!auth.enabled()) return res.json({ ok: true });
     const ip = chaveIp(req.ip);
-    if (loginLimiter.blocked(ip) || loginGlobal.blocked('todos')) {
-      const s = Math.max(loginLimiter.retryAfterS(ip), loginGlobal.retryAfterS('todos'));
+    // quem já entrou deste IP nas últimas 24 h não sofre o limite global (senão 50 erros de terceiros trancariam o dono)
+    const confiavel = Date.now() - (sucessoRecente.get(ip) || 0) < 24 * 3600000;
+    if (loginLimiter.blocked(ip) || (!confiavel && loginGlobal.blocked('todos'))) {
+      const s = Math.max(loginLimiter.retryAfterS(ip), confiavel ? 0 : loginGlobal.retryAfterS('todos'));
       return res.status(429).json({ erro: `Muitas tentativas. Tente de novo em ${Math.ceil(s / 60)} min.` });
     }
-    const sid = await auth.login(String(req.body?.senha ?? '').slice(0, 200), ip);
-    if (!sid) { loginLimiter.fail(ip); loginGlobal.fail('todos'); return res.status(401).json({ erro: 'Senha incorreta' }); }
-    loginLimiter.reset(ip);
+    if (loginsEmAndamento >= 2) return res.status(429).json({ erro: 'Aguarde um instante e tente de novo.' });
+    // a tentativa é contada ANTES de calcular o hash: uma rajada simultânea não passa pelo freio
+    loginLimiter.fail(ip); loginGlobal.fail('todos'); loginsEmAndamento++;
+    let sid;
+    try { sid = await auth.login(String(req.body?.senha ?? '').slice(0, 200), ip); } finally { loginsEmAndamento--; }
+    if (!sid) return res.status(401).json({ erro: 'Senha incorreta' });
+    loginLimiter.reset(ip); sucessoRecente.set(ip, Date.now());
+    if (sucessoRecente.size > 1000) for (const [k, t] of sucessoRecente) if (Date.now() - t > 24 * 3600000) sucessoRecente.delete(k);
     res.cookie(cookieName(req), sid, { ...cookieOpts(req), maxAge: SESSION_MS });
     res.json({ ok: true });
   });
@@ -183,7 +192,7 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
   app.post('/api/wa/connect', wrap(async () => { await wa.connect(); }));
   app.post('/api/wa/logout', wrap(async (req) => { await wa.logout({ apagarEventos: !!req.body?.apagar_eventos }); }));
   // ---------- privacidade: rotação do token da extensão, limpeza e exclusão por titular ----------
-  app.post('/api/ext/token', wrap(() => { setSetting(db, 'ext_token', crypto.randomBytes(24).toString('hex')); }));
+  app.post('/api/ajustes/token', wrap(() => { setSetting(db, 'ext_token', crypto.randomBytes(24).toString('hex')); })); // fora de /api/ext/: passa pelo Host/Origin e pelo login
   app.post('/api/privacidade/limpar', wrap(() => limparAntigos(db, Number(getSetting(db, 'retencao_dias', RETENCAO_PADRAO_DIAS)))));
   app.post('/api/privacidade/apagar-participante', wrap((req) => {
     const id = String(req.body?.id || '').trim().slice(0, 80); if (!id) throw new Error('Informe o número (com DDI) ou o pseudônimo.');
