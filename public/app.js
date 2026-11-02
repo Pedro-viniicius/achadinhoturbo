@@ -65,8 +65,9 @@ function cartaoRegra(r) {
       <button data-act="zerar" class="leve" title="Permite que as ofertas já enviadas saiam de novo">Limpar “já enviadas”</button>
       <button data-act="excluir" class="perigo leve">Excluir</button></div></article>`;
 }
-const resumoFonte = (f) => f.type === 'afiliados' ? fonteAfiliados(f.config)
-  : f.type === 'search' ? `busca por “${esc(f.config?.query || '')}”` : `${String(f.config?.items || '').split('\n').filter((l) => /^https?:/i.test(l.trim())).length} links na lista`;
+const resumoFonte = (f) => (f.type === 'afiliados' ? fonteAfiliados(f.config)
+  : f.type === 'search' ? `busca por “${esc(f.config?.query || '')}”` : `${String(f.config?.items || '').split('\n').filter((l) => /^https?:/i.test(l.trim())).length} links na lista`)
+  + (f.tag_id && S.tags.find((t) => t.id === f.tag_id) ? ` · etiqueta ${esc(S.tags.find((t) => t.id === f.tag_id).name)}` : '');
 const categoriasDe = (c = {}) => Array.isArray(c.categorias) ? c.categorias : c.categoria ? [c.categoria] : [];
 function fonteAfiliados(c = {}) {
   const nomes = categoriasDe(c).map((id) => S.st.afiliados?.categorias.find((x) => x.id === id)?.name).filter(Boolean);
@@ -104,6 +105,7 @@ function opcoes(lista, sel, vazio) {
 function fonteHtml(f, i, total) {
   const sc = f.config || {}; const catsSel = new Set(categoriasDe(sc));
   return `<div class="fonte sub-campo" data-i="${i}" style="margin-bottom:10px"><legend>Fonte ${i + 1}${total > 1 ? '' : ''} ${total > 1 ? `<button type="button" data-rm-fonte class="leve perigo" style="float:right;padding:2px 8px">Remover</button>` : ''}</legend>
+    <div class="grade" style="margin-bottom:8px"><label class="campo"><span>Etiqueta desta fonte ${q('fonte.etiqueta')}</span><select name="src_tag"><option value="">A mesma da regra</option>${S.tags.map((t) => `<option value="${t.id}" ${t.id === f.tag_id ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}</select></label></div>
     <div class="linha">${q('fonte.tipos')}<label><input type="radio" name="st${i}" value="afiliados" ${f.type === 'afiliados' ? 'checked' : ''} style="width:auto"> Central de Afiliados</label>
       <label><input type="radio" name="st${i}" value="list" ${f.type === 'list' ? 'checked' : ''} style="width:auto"> Lista de links</label>
       <label><input type="radio" name="st${i}" value="search" ${f.type === 'search' ? 'checked' : ''} style="width:auto"> Busca por palavra-chave (experimental)</label></div>
@@ -127,12 +129,12 @@ function formRegra(r) {
   r = r || { name: '', enabled: true, tag_id: S.tags[0]?.id, template_id: S.templates[0]?.id, group_jids: [], sources: [{ type: 'afiliados', config: { paginas: 3 } }],
     per_run: 3, interval_min: 60, window_start: '08:00', window_end: '22:00', dedupe_days: 7, send_image: true };
   const sel = new Set(r.group_jids); const dlg = $('#dlg');
-  const fontes = (r.sources?.length ? r.sources : [{ type: r.source_type || 'afiliados', config: r.source_config || {} }]).map((f) => ({ type: f.type, config: { ...(f.config || {}) } }));
+  const fontes = (r.sources?.length ? r.sources : [{ type: r.source_type || 'afiliados', config: r.source_config || {} }]).map((f) => ({ type: f.type, tag_id: f.tag_id ?? null, config: { ...(f.config || {}) } }));
   const MAXF = S.st.max_fontes || 5;
   dlg.innerHTML = `<form method="dialog" id="f"><h1>${nova ? 'Nova regra' : 'Editar regra'}</h1>
     <div class="grade">
       <label class="campo">Nome da regra<input name="name" value="${esc(r.name)}" placeholder="Ex.: Tecnologia" required></label>
-      <label class="campo"><span>Etiqueta de afiliado ${q('regras.etiqueta')}</span><select name="tag_id">${opcoes(S.tags, r.tag_id, 'Escolha…')}</select>
+      <label class="campo"><span>Etiqueta padrão da regra ${q('regras.etiqueta')}</span><select name="tag_id">${opcoes(S.tags, r.tag_id, 'Escolha…')}</select>
         ${S.tags.length ? '' : '<small>Cadastre uma etiqueta em “Etiquetas”.</small>'}</label>
       <label class="campo"><span>Template ${q('regras.template')}</span><select name="template_id">${opcoes(S.templates, r.template_id)}</select></label></div>
     <fieldset><legend>De onde vêm as ofertas ${q('regras.fontes')} <span class="dica" id="f-cont"></span></legend>
@@ -170,7 +172,7 @@ function formRegra(r) {
   const lerFontes = () => {
     $$('.fonte', dlg).forEach((el) => {
       const i = Number(el.dataset.i); const v = (n) => $(`[name=${n}]`, el)?.value ?? ''; const t = $(`input[name=st${i}]:checked`, el).value;
-      fontes[i] = { type: t, config: t === 'afiliados'
+      fontes[i] = { type: t, tag_id: Number(v('src_tag')) || null, config: t === 'afiliados'
         ? { busca: v('af_busca'), categorias: $$('.af-cats input:checked', el).map((c) => c.value), ordem: v('af_ordem'), paginas: Number(v('af_paginas')) || 3, mais_vendidos: !!$('[name=af_mais_vendidos]', el).checked, ganhos_extras: !!$('[name=af_ganhos_extras]', el).checked }
         : t === 'list' ? { items: v('items') } : { query: v('query'), sort: v('sort') } };
     });
@@ -213,7 +215,7 @@ async function verOfertas(r) {
     const of = await api(`/rules/${r.id}/offers`);
     dlg.innerHTML = `<div class="corpo"><h1>Próximas ofertas de “${esc(r.name)}”</h1>
       <p class="dica">É o que sairia no próximo envio, nesta ordem. O link meli.la só é gerado na hora de enviar.</p>
-      ${of.length ? `<div class="chat">${of.map((o) => `<div class="balao">${zap(o.text)}${o.comissao ? `<small class="dica" style="display:block;margin-top:6px">${esc(o.comissao)}${o.destaque ? ' · ' + esc(o.destaque) : ''}</small>` : ''}</div>`).join('')}</div>` : '<div class="vazio">Nenhuma oferta nova dentro dos filtros. Veja o Histórico para o motivo.</div>'}
+      ${of.length ? `<div class="chat">${of.map((o) => `<div class="balao">${o.etiqueta ? `<small class="dica" style="display:block;margin-bottom:6px">Fonte ${o.fonte} · etiqueta <b>${esc(o.etiqueta)}</b></small>` : ''}${zap(o.text)}${o.comissao ? `<small class="dica" style="display:block;margin-top:6px">${esc(o.comissao)}${o.destaque ? ' · ' + esc(o.destaque) : ''}</small>` : ''}</div>`).join('')}</div>` : '<div class="vazio">Nenhuma oferta nova dentro dos filtros. Veja o Histórico para o motivo.</div>'}
       <div class="rodape"><button id="fechar" class="pri">Fechar</button></div></div>`;
   } catch (e) {
     dlg.innerHTML = `<div class="corpo"><h1>Não consegui buscar</h1><p>${esc(e.message)}</p><div class="rodape"><button id="fechar" class="pri">Fechar</button></div></div>`;

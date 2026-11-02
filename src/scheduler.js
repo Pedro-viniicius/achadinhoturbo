@@ -87,10 +87,11 @@ export function createScheduler({ db, wa, links, ml = mlDefault, fast = false })
       if (!picked.length) { log(rule, { level: 'info', message: 'Sem ofertas novas dentro dos filtros desta vez.' }); return summary; }
 
       const d = delays();
+      const tagDaFonte = (o) => (o.tag_id && db.prepare('SELECT * FROM tags WHERE id = ?').get(o.tag_id)) || tag;
       for (let i = 0; i < picked.length; i++) {
-        const offer = picked[i];
+        const offer = picked[i]; const etq = tagDaFonte(offer);
         let link;
-        try { link = await links.requestLink({ url: offer.url, tag: tag.name }); } catch (e) {
+        try { link = await links.requestLink({ url: offer.url, tag: etq.name }); } catch (e) {
           log(rule, { level: 'erro', offer_title: offer.title, message: 'Link de afiliado não gerado: ' + e.message });
           summary.errors++; continue;
         }
@@ -102,7 +103,7 @@ export function createScheduler({ db, wa, links, ml = mlDefault, fast = false })
               try { await wa.sendImage(groups[g].jid, offer.image, text); } catch { await wa.sendText(groups[g].jid, text); }
             } else await wa.sendText(groups[g].jid, text);
             okCount++; summary.messages++;
-            log(rule, { level: 'ok', group_name: groups[g].name, offer_title: offer.title, message: `Enviado com a etiqueta ${tag.name}` });
+            log(rule, { level: 'ok', group_name: groups[g].name, offer_title: offer.title, message: `Enviado com a etiqueta ${etq.name}${picked.some((p) => p.source_index !== offer.source_index) ? ` (fonte ${(offer.source_index ?? 0) + 1})` : ''}` });
           } catch (e) {
             summary.errors++;
             log(rule, { level: 'erro', group_name: groups[g].name, offer_title: offer.title, message: 'Falha no envio: ' + e.message });
@@ -126,7 +127,8 @@ export function createScheduler({ db, wa, links, ml = mlDefault, fast = false })
     if (!rule) throw new Error('Regra não encontrada');
     const tpl = rule.template_id && db.prepare('SELECT * FROM templates WHERE id = ?').get(rule.template_id);
     const picked = await pickOffers(rule, rule.per_run);
-    return picked.map((o) => ({ ...o, text: tpl ? renderTemplate(tpl.body, { ...o, link: 'https://meli.la/(gerado no envio)' }, tplOpts()) : '' }));
+    const nome = (id) => db.prepare('SELECT name FROM tags WHERE id = ?').get(id)?.name;
+    return picked.map((o) => ({ ...o, etiqueta: nome(o.tag_id) || nome(rule.tag_id) || null, fonte: (o.source_index ?? 0) + 1, text: tpl ? renderTemplate(tpl.body, { ...o, link: 'https://meli.la/(gerado no envio)' }, tplOpts()) : '' }));
   }
 
   async function tick() {

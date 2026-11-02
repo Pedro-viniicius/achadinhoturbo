@@ -159,12 +159,12 @@ test('API: regra aceita até 5 fontes, valida cada uma e devolve sources; mais d
     assert.equal(ok.status, 200, JSON.stringify(ok.json));
     const r = (await req(s.port, '/api/rules', { headers: h })).json[0];
     assert.equal(r.sources.length, 3); assert.equal(r.source_type, 'list', 'a primeira fonte vira a fonte principal, para compatibilidade');
-    assert.deepEqual(r.sources[1], { type: 'afiliados', config: { categorias: ['MLB1574'] } });
+    assert.deepEqual(r.sources[1], { type: 'afiliados', config: { categorias: ['MLB1574'] }, tag_id: null });
     assert.equal((await req(s.port, '/api/rules', { method: 'POST', body: { ...base, sources: [1, 2, 3, 4, 5, 6].map(lista) }, headers: h })).status, 400, 'seis fontes');
     assert.equal((await req(s.port, '/api/rules', { method: 'POST', body: { ...base, sources: [lista(1), { type: 'list', config: { items: 'sem url' } }] }, headers: h })).status, 400, 'lista vazia');
     assert.equal((await req(s.port, '/api/rules', { method: 'POST', body: { ...base, sources: [{ type: 'search', config: {} }] }, headers: h })).status, 400, 'busca sem palavra');
     // formato antigo continua aceito
     assert.equal((await req(s.port, '/api/rules', { method: 'POST', body: { ...base, source_type: 'afiliados', source_config: { paginas: 2 } }, headers: h })).status, 200);
-    assert.deepEqual((await req(s.port, '/api/rules', { headers: h })).json[1].sources, [{ type: 'afiliados', config: { paginas: 2 } }]);
+    assert.deepEqual((await req(s.port, '/api/rules', { headers: h })).json[1].sources, [{ type: 'afiliados', config: { paginas: 2 }, tag_id: null }]);
   } finally { await s.fechar(); }
 });

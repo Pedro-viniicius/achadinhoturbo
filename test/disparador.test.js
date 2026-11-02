@@ -295,7 +295,7 @@ test('regra com várias fontes: intercala, não repete, fonte que falha vira avi
   await assert.rejects(candidates({ sources: [{ type: 'search', config: {} }, { type: 'search', config: {} }] }, { links }), /fonte 1.*fonte 2/);
   // regra antiga (sem coluna sources preenchida) -> uma fonte
   const antiga = parseRule({ id: 1, group_jids: '[]', source_type: 'list', source_config: '{"items":"https://x/MLB-5-e | E | 5"}', sources: null });
-  assert.deepEqual(antiga.sources, [{ type: 'list', config: { items: 'https://x/MLB-5-e | E | 5' } }]);
+  assert.deepEqual(antiga.sources, [{ type: 'list', config: { items: 'https://x/MLB-5-e | E | 5' }, tag_id: null }]);
   assert.equal((await candidates(antiga, { links })).length, 1);
   assert.equal(parseRule({ id: 1, group_jids: '[]', source_type: 'list', source_config: '{}', sources: 'lixo' }).sources.length, 1, 'JSON inválido não quebra');
 });
@@ -328,4 +328,21 @@ test('título abreviado: corta compatibilidade e enfeites, respeita o limite sem
   assert.equal(abreviarTitulo('Fone A | Mouse B'), 'Fone A | Mouse B', 'letra de modelo no fim fica');
   const t = renderTemplate('*{TITULO_PRODUTO}*\n{TITULO_COMPLETO}\n{LINK}', { title: longo, price: 10, link: 'L' }, { tituloMax: 40 });
   assert.equal(t.split('\n')[0], '*Fones De Ouvido Usb-c Tipo C*'); assert.equal(t.split('\n')[1], longo);
+});
+
+test('etiqueta por fonte: cada oferta sai com a etiqueta da fonte de origem; sem etiqueta própria usa a da regra', async () => {
+  const { db, wa, scheduler } = setup(); // etiquetas: 1 = etiquetaA, 2 = etiquetaB
+  const sources = [
+    { type: 'list', tag_id: 2, config: { items: 'https://x/MLB-1-a | Fone A | 50 | 100\nhttps://x/MLB-2-b | Mouse B | 30 | 40' } },
+    { type: 'list', tag_id: null, config: { items: 'https://x/MLB-3-c | Teclado C | 200 | 400\nhttps://x/MLB-4-d | Cabo D | 10' } },
+  ];
+  const id = db.prepare(`INSERT INTO rules (name, enabled, tag_id, template_id, group_jids, source_type, source_config, sources, per_run, interval_min, window_start, window_end, dedupe_days, send_image, created_at)
+    VALUES ('Duas etiquetas', 1, 1, 1, ?, 'list', '{}', ?, 4, 60, '00:00', '23:59', 7, 1, ?)`).run(JSON.stringify(['111@g.us']), JSON.stringify(sources), Date.now()).lastInsertRowid;
+  const prev = await scheduler.previewOffers(id);
+  assert.deepEqual(prev.map((o) => [o.fonte, o.etiqueta]), [[1, 'etiquetaB'], [2, 'etiquetaA'], [1, 'etiquetaB'], [2, 'etiquetaA']]);
+  const r = await scheduler.runRule(id);
+  assert.deepEqual([r.offers, r.errors], [4, 0]);
+  const porTitulo = Object.fromEntries(wa.simulated.map((m) => [m.text.split('\n')[0], m.text.match(/fake-(\w+)-/)[1]]));
+  assert.deepEqual(porTitulo, { '*Fone A*': 'etiquetaB', '*Mouse B*': 'etiquetaB', '*Teclado C*': 'etiquetaA', '*Cabo D*': 'etiquetaA' });
+  assert.match(db.prepare("SELECT message FROM log WHERE level = 'ok' ORDER BY id LIMIT 1").get().message, /etiqueta etiquetaB \(fonte 1\)/);
 });

@@ -292,6 +292,8 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
   app.delete('/api/tags/:id', wrap((req) => {
     const used = one('SELECT name FROM rules WHERE tag_id = ? LIMIT 1', req.params.id);
     if (used) throw new Error(`A regra "${used.name}" usa esta etiqueta. Troque a etiqueta dela antes.`);
+    const naFonte = all('SELECT name, sources FROM rules').find((r) => { try { return (JSON.parse(r.sources || '[]') || []).some((s) => String(s.tag_id) === String(req.params.id)); } catch { return false; } });
+    if (naFonte) throw new Error(`Uma fonte da regra "${naFonte.name}" usa esta etiqueta. Troque lá antes.`);
     const bloco = one('SELECT name FROM blocks WHERE tag_id = ? LIMIT 1', req.params.id);
     if (bloco) throw new Error(`O bloco "${bloco.name}" usa esta etiqueta. Troque a etiqueta dele antes.`);
     db.prepare('DELETE FROM tags WHERE id = ?').run(req.params.id);
@@ -330,7 +332,7 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
     // fontes: lista nova (até 5) ou, nas regras antigas, source_type + source_config
     const tipo = (t) => (['afiliados', 'search'].includes(t) ? t : 'list');
     let sources = Array.isArray(b.sources) && b.sources.length
-      ? b.sources.map((s) => ({ type: tipo(s?.type), config: s?.config && typeof s.config === 'object' ? s.config : {} }))
+      ? b.sources.map((s) => ({ type: tipo(s?.type), config: s?.config && typeof s.config === 'object' ? s.config : {}, tag_id: nz(s?.tag_id) == null ? null : Number(s.tag_id) }))
       : [{ type: tipo(b.source_type), config: b.source_config && typeof b.source_config === 'object' ? b.source_config : {} }];
     if (sources.length > MAX_SOURCES) throw new Error(`Uma regra aceita no máximo ${MAX_SOURCES} fontes.`);
     for (const [i, s] of sources.entries()) {

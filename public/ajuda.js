@@ -4,9 +4,10 @@
 const TIPS = {
   // regras
   'regras': 'Uma regra é um disparo automático: escolhe a etiqueta, o template, as fontes de ofertas, os grupos e o ritmo. Pode ter quantas quiser.',
-  'regras.etiqueta': 'Nome da sua etiqueta no programa de afiliados do Mercado Livre. Entra em todo link meli.la desta regra e é o que atribui a comissão a você.',
+  'regras.etiqueta': 'Etiqueta usada nos links desta regra quando a fonte não tem uma própria. É o que atribui a comissão a você.',
+  'fonte.etiqueta': 'Etiqueta usada nos links das ofertas que vierem desta fonte. Assim uma regra manda ofertas de 2 a 5 etiquetas diferentes, uma por fonte. “A mesma da regra” usa a etiqueta padrão.',
   'regras.template': 'Modelo da mensagem. Campos como {PRECO_PRODUTO} são preenchidos com a oferta; linha com campo vazio some sozinha.',
-  'regras.fontes': 'De onde vêm as ofertas. Até 5 fontes por regra; com mais de uma, saem intercaladas (uma de cada fonte por vez). Fonte que falhar vira aviso, as outras seguem.',
+  'regras.fontes': 'De onde vêm as ofertas. Até 5 fontes por regra, cada uma podendo ter a própria etiqueta; com mais de uma, saem intercaladas (uma de cada fonte por vez). Para todas saírem no mesmo envio, ponha “Ofertas por envio” igual ao número de fontes.',
   'fonte.tipos': 'Central de Afiliados: lista pronta do Mercado Livre, com filtros. Lista de links: você cola os produtos. Busca: experimental, pode ser recusada pelo ML.',
   'fonte.busca': 'Palavras que a Central usa para filtrar a lista (ex.: “organizador”). Vazio = sem filtro de texto.',
   'fonte.paginas': 'Quantas páginas da Central são lidas a cada envio (18 produtos por página). Mais páginas = mais variedade, busca um pouco mais demorada.',

@@ -166,10 +166,12 @@ export const NOME_FONTE = { afiliados: 'Central de Afiliados', list: 'lista de l
  */
 export async function candidates(rule, deps = {}) {
   const fontes = rule.sources?.length ? rule.sources : [{ type: rule.source_type, config: rule.source_config }];
-  if (fontes.length === 1) return candidatesFor(fontes[0], deps);
+  // cada candidato carrega a fonte de origem e a etiqueta dela (se tiver uma própria)
+  const marcar = (lista, i, f) => lista.map((c) => ({ ...c, source_index: i, tag_id: f.tag_id ?? null }));
+  if (fontes.length === 1) return marcar(await candidatesFor(fontes[0], deps), 0, fontes[0]);
   const filas = []; const erros = [];
   for (const [i, f] of fontes.entries()) {
-    try { filas.push(await candidatesFor(f, deps)); } catch (e) {
+    try { filas.push(marcar(await candidatesFor(f, deps), i, f)); } catch (e) {
       erros.push(`fonte ${i + 1} (${NOME_FONTE[f.type] || f.type}): ${e.message}`);
     }
   }
