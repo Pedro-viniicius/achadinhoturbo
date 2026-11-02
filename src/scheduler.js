@@ -33,6 +33,7 @@ export function createScheduler({ db, wa, links, ml = mlDefault, fast = false })
     offer: Number(getSetting(db, 'delay_offer_s', 30)),
   };
   const log = (rule, o) => addLog(db, { rule, ...o });
+  const tplOpts = () => ({ tituloMax: Number(getSetting(db, 'titulo_max', 60)) });
 
   function wasSent(rule, key) {
     if (!rule.dedupe_days) return false;
@@ -93,7 +94,7 @@ export function createScheduler({ db, wa, links, ml = mlDefault, fast = false })
           log(rule, { level: 'erro', offer_title: offer.title, message: 'Link de afiliado não gerado: ' + e.message });
           summary.errors++; continue;
         }
-        const text = renderTemplate(tpl.body, { ...offer, link });
+        const text = renderTemplate(tpl.body, { ...offer, link }, tplOpts());
         summary.offers++; let okCount = 0;
         for (let g = 0; g < groups.length; g++) {
           try {
@@ -125,7 +126,7 @@ export function createScheduler({ db, wa, links, ml = mlDefault, fast = false })
     if (!rule) throw new Error('Regra não encontrada');
     const tpl = rule.template_id && db.prepare('SELECT * FROM templates WHERE id = ?').get(rule.template_id);
     const picked = await pickOffers(rule, rule.per_run);
-    return picked.map((o) => ({ ...o, text: tpl ? renderTemplate(tpl.body, { ...o, link: 'https://meli.la/(gerado no envio)' }) : '' }));
+    return picked.map((o) => ({ ...o, text: tpl ? renderTemplate(tpl.body, { ...o, link: 'https://meli.la/(gerado no envio)' }, tplOpts()) : '' }));
   }
 
   async function tick() {

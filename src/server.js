@@ -136,6 +136,7 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
       delay_group_s: Number(getSetting(db, 'delay_group_s', 6)),
       delay_offer_s: Number(getSetting(db, 'delay_offer_s', 30)),
       link_mode: getSetting(db, 'link_mode', 'extension'),
+      titulo_max: Number(getSetting(db, 'titulo_max', 60)),
     },
     ext_token: getSetting(db, 'ext_token'), porta: PORT,
     endereco_publico: enderecoPublico, auth: auth.enabled(),
@@ -146,7 +147,8 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
   })));
 
   app.put('/api/ajustes', wrap((req) => {
-    const { delay_group_s, delay_offer_s, link_mode } = req.body;
+    const { delay_group_s, delay_offer_s, link_mode, titulo_max } = req.body;
+    if (titulo_max != null) { const n = Number(titulo_max); if (!(n >= 0 && n <= 200)) throw new Error('Tamanho do título: de 0 (inteiro) a 200.'); setSetting(db, 'titulo_max', Math.round(n)); }
     if (delay_group_s != null) setSetting(db, 'delay_group_s', Math.max(2, Number(delay_group_s) || 6));
     if (delay_offer_s != null) setSetting(db, 'delay_offer_s', Math.max(5, Number(delay_offer_s) || 30));
     if (link_mode != null) {
@@ -315,7 +317,7 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
     if (one('SELECT COUNT(*) AS n FROM templates').n <= 1) throw new Error('Mantenha ao menos um template.');
     db.prepare('DELETE FROM templates WHERE id = ?').run(req.params.id);
   }));
-  app.post('/api/templates/preview', wrap((req) => ({ texto: renderTemplate(String(req.body.body || ''), { ...SAMPLE_OFFER, ...(req.body.amostra || {}) }) })));
+  app.post('/api/templates/preview', wrap((req) => ({ texto: renderTemplate(String(req.body.body || ''), { ...SAMPLE_OFFER, ...(req.body.amostra || {}) }, { tituloMax: Number(getSetting(db, 'titulo_max', 60)) }) })));
 
   // ---------- regras ----------
   const ruleFromBody = (b) => {

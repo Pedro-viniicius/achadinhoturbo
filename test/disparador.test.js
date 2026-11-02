@@ -309,3 +309,23 @@ test('envio com duas fontes alterna entre elas e grava sources no banco', async 
   assert.deepEqual([r.offers, r.errors], [4, 0]);
   assert.deepEqual(wa.simulated.map((m) => m.text.split('\n')[0]), ['*Fone A*', '*Kit 10 Potes Herméticos de Vidro*', '*Mouse B*', '*Organizador de Gaveta Dobrável*']);
 });
+
+// ---------- título abreviado ----------
+import { abreviarTitulo } from '../src/titulo.js';
+
+test('título abreviado: corta compatibilidade e enfeites, respeita o limite sem partir palavra, não termina em conector', () => {
+  const longo = 'Fones De Ouvido Usb-c Tipo C Com Microfone Integrado Som Estéreo Alta Qualidade Controle Chamadas Compatível Com iPhone 15 16 17 18 Android Samsung Xiaomi Motorola PLUG & PLAY Premium Eletric Teck';
+  const a = abreviarTitulo(longo);
+  assert.ok(a.length <= 60, a); assert.ok(!/compat|premium|alta qualidade|plug/i.test(a), a); assert.ok(!/\s(com|de|e|para)$/i.test(a), a);
+  assert.equal(a, 'Fones De Ouvido Usb-c Tipo C Com Microfone Integrado');
+  assert.equal(abreviarTitulo('Creatina 300g Monohidratada Dark Lab Refil Sem Sabor'), 'Creatina 300g Monohidratada Dark Lab Refil Sem Sabor', 'curto fica igual');
+  assert.equal(abreviarTitulo('Carregador de Bateria 12V 6A Bivolt Inteligente Carro Moto Caminhão Automotivo 4Ah a 100Ah Com Função Reparo Display Digital'), 'Carregador de Bateria 12V 6A Bivolt Inteligente Carro Moto');
+  assert.equal(abreviarTitulo('Air Fryer 4L Mondial Original Promoção Envio Imediato'), 'Air Fryer 4L Mondial');
+  assert.equal(abreviarTitulo('Smartwatch W59 Pro - Preto - Lançamento 2026 - Original'), 'Smartwatch W59 Pro', 'segmento antes do hífen');
+  assert.equal(abreviarTitulo('Kit 3 Garrafas Térmicas 500 ml Inox PREMIUM', 30), 'Kit 3 Garrafas Térmicas 500 ml');
+  assert.equal(abreviarTitulo('Mouse Gamer RGB 7200 DPI', 0), 'Mouse Gamer RGB 7200 DPI', '0 = não abrevia');
+  assert.equal(abreviarTitulo('CAPINHA SILICONE ANTI-IMPACTO Para iPhone 15 Pro Max'), 'Capinha Silicone Anti-impacto', 'palavra gritada vira capitalizada; "Para iPhone" sai');
+  assert.equal(abreviarTitulo('Fone A | Mouse B'), 'Fone A | Mouse B', 'letra de modelo no fim fica');
+  const t = renderTemplate('*{TITULO_PRODUTO}*\n{TITULO_COMPLETO}\n{LINK}', { title: longo, price: 10, link: 'L' }, { tituloMax: 40 });
+  assert.equal(t.split('\n')[0], '*Fones De Ouvido Usb-c Tipo C*'); assert.equal(t.split('\n')[1], longo);
+});

@@ -303,6 +303,9 @@ function paginaAjustes() {
       <div class="grade"><label class="campo">Entre um grupo e outro (segundos)<input id="dg" type="number" min="2" value="${a.delay_group_s}"></label>
       <label class="campo">Entre uma oferta e a próxima (segundos)<input id="do" type="number" min="5" value="${a.delay_offer_s}"></label></div>
       <div><button class="pri" id="sa">Salvar pausas</button></div></div>
+    <div class="card" style="display:grid;gap:14px"><div><h2>Título do produto na mensagem</h2><p class="sub">Os títulos do Mercado Livre vêm cheios de palavras-chave. {TITULO_PRODUTO} sai abreviado: só o que identifica o produto, sem “Compatível com…”, “Premium”, “Alta Qualidade”. Para o nome inteiro, use {TITULO_COMPLETO} no template.</p></div>
+      <div class="grade"><label class="campo">Tamanho máximo (caracteres)<input id="tm" type="number" min="0" max="200" value="${a.titulo_max ?? 60}"><small>0 = não abreviar. Sugestão: 50 a 70.</small></label></div>
+      <div class="linha"><button class="pri" id="st">Salvar</button><small class="dica" id="tm-ex"></small></div></div>
     <div class="card" style="display:grid;gap:14px"><div><h2>Como gerar o link de afiliado</h2></div>
       <label class="campo"><select id="lm"><option value="extension">Pela extensão do Chrome (com a etiqueta, gera comissão)</option>
         <option value="direct" ${a.link_mode === 'direct' ? 'selected' : ''}>Link direto, sem etiqueta (só para testar, não gera comissão)</option></select></label>
@@ -312,6 +315,9 @@ function paginaAjustes() {
       <label class="campo">Token<div class="copia"><input readonly value="${esc(S.st.ext_token)}" id="c2"><button data-c="c2">Copiar</button></div></label>
       <p class="dica">Último link gerado: ${S.st.extensao.lastOkAt ? hora(S.st.extensao.lastOkAt) : 'nenhum ainda'}${S.st.extensao.lastError ? `. Último erro: ${esc(S.st.extensao.lastError)}` : ''}</p></div>`;
   $('#sa').onclick = tentar(async () => { await api('/ajustes', 'PUT', { delay_group_s: $('#dg').value, delay_offer_s: $('#do').value }); await atualizarEstado(); aviso('Pausas salvas'); });
+  const exemploTitulo = tentar(async () => { const r = await api('/templates/preview', 'POST', { body: '{TITULO_PRODUTO}', amostra: { title: 'Fones De Ouvido Usb-c Tipo C Com Microfone Integrado Som Estéreo Alta Qualidade Controle Chamadas Compatível Com iPhone 15 16 17 Android Samsung Premium' } }); $('#tm-ex').textContent = 'Exemplo: “' + r.texto + '”'; });
+  exemploTitulo();
+  $('#st').onclick = tentar(async () => { await api('/ajustes', 'PUT', { titulo_max: $('#tm').value }); await atualizarEstado(); aviso('Salvo'); exemploTitulo(); });
   $('#sl').onclick = tentar(async () => { await api('/ajustes', 'PUT', { link_mode: $('#lm').value }); await atualizarEstado(); aviso('Modo salvo'); });
   $$('[data-c]').forEach((b) => (b.onclick = async () => { await navigator.clipboard.writeText($('#' + b.dataset.c).value); aviso('Copiado'); }));
 }

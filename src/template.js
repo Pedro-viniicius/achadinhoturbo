@@ -1,8 +1,10 @@
 // Monta o texto da mensagem a partir do template e da oferta.
 // Linha cujo campo ficou vazio (ex.: sem cupom) é removida inteira.
 
+import { abreviarTitulo, TITULO_MAX_PADRAO } from './titulo.js';
+
 export const PLACEHOLDERS = [
-  'TITULO_PRODUTO', 'PRECO_ANTIGO', 'PRECO_PRODUTO', 'DESCONTO_PRODUTO',
+  'TITULO_PRODUTO', 'TITULO_COMPLETO', 'PRECO_ANTIGO', 'PRECO_PRODUTO', 'DESCONTO_PRODUTO',
   'NUMERO_VENDAS', 'FRETE', 'CUPOM', 'LINK',
 ];
 
@@ -24,10 +26,13 @@ function vendas(n) {
   return `+${n} vendidos`;
 }
 
-export function offerValues(o) {
+/** opts.tituloMax: tamanho máximo de {TITULO_PRODUTO} (0 = inteiro). {TITULO_COMPLETO} é sempre o nome inteiro. */
+export function offerValues(o, opts = {}) {
   const pct = o.discountPct ?? discountPct(o.price, o.oldPrice);
+  const completo = String(o.title || '').replace(/[*_~]/g, '').replace(/\s+/g, ' ').trim();
   return {
-    TITULO_PRODUTO: String(o.title || '').replace(/[*_~]/g, '').trim(),
+    TITULO_PRODUTO: abreviarTitulo(completo, opts.tituloMax ?? TITULO_MAX_PADRAO),
+    TITULO_COMPLETO: completo,
     PRECO_ANTIGO: o.oldPrice && o.oldPrice > o.price ? brl(o.oldPrice) : '',
     PRECO_PRODUTO: brl(o.price),
     DESCONTO_PRODUTO: pct > 0 ? `${pct}%` : '',
@@ -38,8 +43,8 @@ export function offerValues(o) {
   };
 }
 
-export function renderTemplate(body, offer) {
-  const vals = offerValues(offer);
+export function renderTemplate(body, offer, opts = {}) {
+  const vals = offerValues(offer, opts);
   const out = [];
   for (const line of String(body).split('\n')) {
     const keys = [...line.matchAll(/\{([A-Z_]+)\}/g)].map((m) => m[1]);
