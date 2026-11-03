@@ -96,3 +96,18 @@ export function chaveIp(ip) {
   const cheio = s.includes('::') ? [...a, ...Array(Math.max(0, 8 - a.length - b.length)).fill('0'), ...b] : a;
   return cheio.slice(0, 4).map((h) => h.toLowerCase().replace(/^0+(?=\w)/, '')).join(':') + '::/64';
 }
+
+// E-mail (inclusive JID "5531…@s.whatsapp.net") e telefone: 8+ dígitos, com até 3 separadores
+// entre eles ("+55 (31) 9 9999-8888", "31 - 99999 - 8888"); separador é espaço, parêntese, ponto, hífen,
+// travessão (– —) ou hífen que não quebra (U+2011). Preço ("R$ 1.310,05"), ASIN e "+200 compras" ficam intactos.
+// Custo linear: o separador não inclui dígito, então cada repetição casa de um jeito só.
+const RE_EMAIL = /[\w.+-]+@[\w-]+(?:\.[\w-]+)+/g;
+const RE_TELEFONE = /\+?\d(?:[\s().\-\u2011\u2013\u2014]{0,3}\d){7,}/g;
+
+/**
+ * Texto de mensagem de terceiros antes de ir ao banco (espelhamento): e-mails, telefones e qualquer
+ * sequência de 8+ dígitos viram "…". Não é reversível e nunca guarda o participante.
+ */
+export function mascararPessoais(texto) {
+  return String(texto ?? '').replace(RE_EMAIL, '…').replace(RE_TELEFONE, '…');
+}

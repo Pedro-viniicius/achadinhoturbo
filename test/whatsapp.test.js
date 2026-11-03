@@ -7,9 +7,17 @@ import os from 'node:os';
 import path from 'node:path';
 import { generateWAMessageContent } from '@whiskeysockets/baileys';
 import { openDb, setSetting } from '../src/db.js';
-import { createWhatsApp, montarEnquete, normalizarNumero } from '../src/whatsapp.js';
+import libsignal from 'libsignal';
+import { createWhatsApp, montarEnquete, normalizarNumero, textoDaMensagem, MAX_TEXTO_RECEBIDO, protegerConsole } from '../src/whatsapp.js';
 import { dayOf } from '../src/analytics.js';
 import { viradaMin } from '../src/avisos.js';
+
+// rede bloqueada no arquivo inteiro (CA10): quem precisa de fetch usa t.mock.method; o último teste prova que o
+// fetch global nunca foi chamado
+const fetchOriginal = globalThis.fetch;
+let chamadasGlobais = 0;
+test.before(() => { globalThis.fetch = async () => { chamadasGlobais++; throw new Error('rede proibida no teste'); }; });
+test.after(() => { globalThis.fetch = fetchOriginal; });
 
 // pastas temporárias apagadas no fim do arquivo
 const pastas = [];
@@ -29,7 +37,8 @@ function comSocketFalso({ onWhatsApp = async () => [] } = {}) {
   const wa = createWhatsApp({ db, dir });
   const enviados = []; const consultas = [];
   wa._usarSocket({
-    sendMessage: async (jid, conteudo) => { enviados.push({ jid, conteudo }); },
+    // como o Baileys, devolve a mensagem enviada com key.id
+    sendMessage: async (jid, conteudo) => { enviados.push({ jid, conteudo }); return { key: { remoteJid: jid, fromMe: true, id: `ENVIADA${enviados.length}` } }; },
     onWhatsApp: async (...nums) => { consultas.push(nums); return onWhatsApp(...nums); },
   });
   return { wa, enviados, consultas, fechar: () => db.close() };
@@ -216,4 +225,288 @@ test('S20: a prévia só baixa imagem do mlstatic (a regra está no próprio bai
   assert.equal(enviados.length, 4, 'todos saem, sem miniatura');
   assert.ok(enviados.every((e) => e.conteudo.linkPreview.jpegThumbnail === undefined));
   fechar();
+});
+
+// ---------- etapa 5 do espelhamento da Amazon: ouvinte de mensagens dos grupos (CA9, CA11) ----------
+const PESSOA = '5511988887777@s.whatsapp.net';
+const LINK = 'https://link.amazon/xyz';
+/** Um WAMessage do Baileys como chega no messages.upsert, com participante e pushName (que nunca podem sair). */
+const recebida = (message, { id = 'MSG1', jid = GRUPO, fromMe = false, ts = 1793620000 } = {}) => ({
+  key: { remoteJid: jid, fromMe, id, participant: PESSOA, participantPn: PESSOA },
+  pushName: 'Maria da Silva', participant: PESSOA, messageTimestamp: ts, message,
+});
+function ouvinte(opcoes = {}) {
+  const dir = tmp(); const db = openDb(dir);
+  const recebidas = [];
+  const wa = createWhatsApp({ db, dir, dryRun: true, onMensagem: (m) => { recebidas.push(m); }, ...opcoes });
+  return { wa, recebidas, fechar: () => db.close() };
+}
+
+test('textoDaMensagem: cada formato do Baileys vira o texto; sem texto, string vazia', () => {
+  const texto = `Fone por R$ 99 ${LINK}`;
+  assert.equal(textoDaMensagem({ conversation: texto }), texto);
+  assert.equal(textoDaMensagem({ extendedTextMessage: { text: texto, matchedText: LINK, canonicalUrl: 'https://www.amazon.com.br/dp/B0ABCDEFGH' } }), texto, 'texto com link: não repete o da prévia');
+  assert.equal(textoDaMensagem({ extendedTextMessage: { text: 'Fone por R$ 99', matchedText: LINK } }), `Fone por R$ 99\n${LINK}`, 'link só na prévia');
+  assert.equal(textoDaMensagem({ extendedTextMessage: { text: 'Fone', canonicalUrl: LINK } }), `Fone\n${LINK}`);
+  assert.equal(textoDaMensagem({ extendedTextMessage: { text: 'Só texto' } }), 'Só texto');
+  assert.equal(textoDaMensagem({ imageMessage: { caption: texto, mimetype: 'image/jpeg' } }), texto);
+  assert.equal(textoDaMensagem({ videoMessage: { caption: texto } }), texto);
+  assert.equal(textoDaMensagem({ documentWithCaptionMessage: { message: { documentMessage: { caption: texto } } } }), texto);
+  assert.equal(textoDaMensagem({ ephemeralMessage: { message: { extendedTextMessage: { text: texto } } } }), texto);
+  assert.equal(textoDaMensagem({ viewOnceMessage: { message: { imageMessage: { caption: texto } } } }), texto);
+  assert.equal(textoDaMensagem({ viewOnceMessageV2: { message: { imageMessage: { caption: texto } } } }), texto);
+  assert.equal(textoDaMensagem({ ephemeralMessage: { message: { viewOnceMessageV2: { message: { videoMessage: { caption: texto } } } } } }), texto, 'embrulho dentro de embrulho');
+  for (const vazio of [null, undefined, 'texto solto', {}, { imageMessage: {} }, { reactionMessage: { text: '👍' } },
+    { protocolMessage: { type: 14, editedMessage: { conversation: texto } } }, { conversation: 42 }, { extendedTextMessage: { text: { x: 1 } } }]) {
+    assert.equal(textoDaMensagem(vazio), '', JSON.stringify(vazio));
+  }
+});
+
+test('onMensagem: cada formato chega como o mesmo { jid, fromMe, texto, msgId, ts }, sem participante nem pushName (CA11)', () => {
+  const { wa, recebidas, fechar } = ouvinte();
+  const texto = `Fone por R$ 99 ${LINK}`;
+  const formatos = [
+    { conversation: texto },
+    { extendedTextMessage: { text: texto, matchedText: LINK } },
+    { imageMessage: { caption: texto } },
+    { videoMessage: { caption: texto } },
+    { documentWithCaptionMessage: { message: { documentMessage: { caption: texto } } } },
+    { ephemeralMessage: { message: { conversation: texto } } },
+    { viewOnceMessageV2: { message: { imageMessage: { caption: texto } } } },
+  ];
+  wa._onMensagens({ type: 'notify', messages: formatos.map((m, i) => recebida(m, { id: `M${i}` })) });
+  assert.equal(recebidas.length, formatos.length);
+  recebidas.forEach((r, i) => {
+    assert.deepEqual(r, { jid: GRUPO, fromMe: false, texto, msgId: `M${i}`, ts: 1793620000 * 1000 });
+    assert.deepEqual(Object.keys(r).sort(), ['fromMe', 'jid', 'msgId', 'texto', 'ts']);
+  });
+  const cru = JSON.stringify(recebidas);
+  assert.ok(!cru.includes('5511988887777') && !cru.includes('Maria') && !/participant|pushName/.test(cru), 'nada da pessoa sai do ouvinte');
+  fechar();
+});
+
+test('onMensagem: append, conversa privada, status, sem id e sem texto são ignorados', () => {
+  const { wa, recebidas, fechar } = ouvinte();
+  const msg = { conversation: `Oferta ${LINK}` };
+  wa._onMensagens({ type: 'append', messages: [recebida(msg, { id: 'HIST' })] });
+  wa._onMensagens({ type: 'notify', messages: [
+    recebida(msg, { id: 'PV', jid: PESSOA }),
+    recebida(msg, { id: 'LID', jid: '123456789@lid' }),
+    recebida(msg, { id: 'ST', jid: 'status@broadcast' }),
+    recebida(msg, { id: '' }),
+    { key: { remoteJid: GRUPO }, message: msg },
+    recebida({ reactionMessage: { text: '👍' } }, { id: 'REACAO' }),
+    recebida(null, { id: 'STUB' }),
+    null,
+  ] });
+  wa._onMensagens(undefined); wa._onMensagens({ type: 'notify' }); wa._onMensagens({ type: 'notify', messages: 'x' });
+  assert.deepEqual(recebidas, []);
+  fechar();
+});
+
+test('onMensagem: fromMe chega como está (quem decide é o espelho); ts sem valor ou como Long', () => {
+  const { wa, recebidas, fechar } = ouvinte();
+  const antes = Date.now();
+  wa._onMensagens({ type: 'notify', messages: [
+    recebida({ conversation: 'minha' }, { id: 'A', fromMe: true }),
+    recebida({ conversation: 'long' }, { id: 'B', ts: { toNumber: () => 1793620001, low: 1, high: 0 } }),
+    recebida({ conversation: 'texto' }, { id: 'C', ts: '1793620002' }),
+    recebida({ conversation: 'sem ts' }, { id: 'D', ts: null }),
+  ] });
+  assert.equal(recebidas[0].fromMe, true);
+  assert.equal(recebidas[1].fromMe, false);
+  assert.equal(recebidas[1].ts, 1793620001000);
+  assert.equal(recebidas[2].ts, 1793620002000);
+  assert.ok(recebidas[3].ts >= antes && recebidas[3].ts <= Date.now());
+  fechar();
+});
+
+test('onMensagem: id de mensagem que o próprio programa enviou é ignorado ao voltar pelo upsert (CA9, anti-laço)', async () => {
+  const dir = tmp(); const db = openDb(dir);
+  const recebidas = [];
+  const wa = createWhatsApp({ db, dir, onMensagem: (m) => recebidas.push(m) });
+  const enviados = [];
+  wa._usarSocket({ sendMessage: async (jid, conteudo) => { enviados.push(conteudo); return { key: { remoteJid: jid, fromMe: true, id: `NOSSA${enviados.length}` } }; } });
+  await wa.sendImage(GRUPO, 'https://http2.mlstatic.com/D_x.jpg', `Oferta ${LINK}`);
+  await wa.sendText(GRUPO, `Oferta ${LINK}`);
+  await wa.sendPoll(GRUPO, { pergunta: 'Qual?', opcoes: ['A', 'B'] });
+  wa._onMensagens({ type: 'notify', messages: [
+    recebida({ imageMessage: { caption: `Oferta ${LINK}` } }, { id: 'NOSSA1', fromMe: true }),
+    recebida({ conversation: `Oferta ${LINK}` }, { id: 'NOSSA2', fromMe: true }),
+    recebida({ conversation: 'enquete' }, { id: 'NOSSA3', fromMe: true }),
+    recebida({ conversation: `Do celular ${LINK}` }, { id: 'DO-CELULAR', fromMe: true }),
+  ] });
+  assert.deepEqual(recebidas.map((r) => r.msgId), ['DO-CELULAR'], 'só a mensagem que não saiu do programa');
+
+  // guarda só os últimos 1000 ids: o mais antigo sai
+  for (let i = 0; i < 1000; i++) await wa.sendText(GRUPO, 'x');
+  recebidas.length = 0;
+  wa._onMensagens({ type: 'notify', messages: [recebida({ conversation: 'a' }, { id: 'NOSSA1' }), recebida({ conversation: 'b' }, { id: 'NOSSA1003' })] });
+  assert.deepEqual(recebidas.map((r) => r.msgId), ['NOSSA1']);
+
+  // sendMessage sem retorno (ou sem key) não quebra o envio
+  wa._usarSocket({ sendMessage: async () => undefined });
+  await wa.sendText(GRUPO, 'ok');
+  db.close();
+});
+
+test('onMensagem: erro no handler (síncrono ou assíncrono) não derruba o ouvinte nem vaza o texto no console', async (t) => {
+  const erros = []; t.mock.method(console, 'error', (...a) => erros.push(a.join(' ')));
+  const vistas = [];
+  const { wa, fechar } = ouvinte({ onMensagem: (m) => {
+    vistas.push(m.msgId);
+    if (m.msgId === 'SINC') throw new Error('falhou');
+    if (m.msgId === 'ASSINC') return Promise.reject(new Error('falhou depois'));
+  } });
+  const segredo = `texto-da-pessoa ${LINK}`;
+  assert.doesNotThrow(() => wa._onMensagens({ type: 'notify', messages: [
+    recebida({ conversation: segredo }, { id: 'SINC' }),
+    recebida({ conversation: segredo }, { id: 'ASSINC' }),
+    recebida({ conversation: segredo }, { id: 'DEPOIS' }),
+  ] }));
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(vistas, ['SINC', 'ASSINC', 'DEPOIS'], 'as mensagens seguintes continuam chegando');
+  assert.equal(erros.length, 2);
+  assert.ok(erros.every((e) => e.startsWith('[espelho]') && !e.includes('texto-da-pessoa') && !e.includes('5511988887777')), erros.join('\n'));
+  assert.deepEqual(erros, ['[espelho] erro no handler: Error', '[espelho] erro no handler: Error'], 'só o nome do erro (S7)');
+  fechar();
+});
+
+test('S7: erro cuja mensagem carrega o texto recebido (SyntaxError do JSON.parse, Error com o texto) vai ao console só pelo nome', async (t) => {
+  const erros = []; t.mock.method(console, 'error', (...a) => erros.push(a.join(' ')));
+  const { wa, fechar } = ouvinte({ onMensagem: (m) => {
+    if (m.msgId === 'JSON') JSON.parse(m.texto);
+    if (m.msgId === 'ECO') return Promise.reject(new Error(`não entendi: ${m.texto}`));
+    if (m.msgId === 'NOME') { const e = new Error('x'); e.name = `Nome ${m.texto}`; throw e; }
+    if (m.msgId === 'NADA') throw null; // valor lançado sem nome
+  } });
+  const segredo = `{texto-da-pessoa 5511988887777 ${LINK}`;
+  wa._onMensagens({ type: 'notify', messages: ['JSON', 'ECO', 'NOME', 'NADA'].map((id) => recebida({ conversation: segredo }, { id })) });
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(erros.sort(), [
+    '[espelho] erro no handler: Error', '[espelho] erro no handler: Error',
+    '[espelho] erro no handler: Error', '[espelho] erro no handler: SyntaxError',
+  ]);
+  assert.ok(erros.every((e) => !e.includes('texto-da-pessoa') && !e.includes('5511988887777') && !e.includes('amazon')));
+  fechar();
+});
+
+test('S1: texto recebido é cortado em 4.096 caracteres antes do handler (mensagem de 100 k caracteres)', () => {
+  assert.equal(MAX_TEXTO_RECEBIDO, 4096);
+  const { wa, recebidas, fechar } = ouvinte();
+  const grande = `${LINK} ${'a'.repeat(100_000)}`;
+  wa._onMensagens({ type: 'notify', messages: [
+    recebida({ conversation: grande }, { id: 'CONV' }),
+    recebida({ extendedTextMessage: { text: 'b'.repeat(100_000), canonicalUrl: LINK } }, { id: 'EXT' }),
+    recebida({ imageMessage: { caption: grande } }, { id: 'IMG' }),
+    recebida({ conversation: 'curta' }, { id: 'CURTA' }),
+  ] });
+  assert.deepEqual(recebidas.map((r) => r.texto.length), [4096, 4096, 4096, 5]);
+  assert.equal(recebidas[0].texto, grande.slice(0, 4096));
+  assert.ok(recebidas[0].texto.startsWith(LINK), 'o começo (com o link) é preservado');
+  fechar();
+});
+
+test('onMensagem(handler): troca ou desliga quem recebe; sem handler nada é processado', () => {
+  const dir = tmp(); const db = openDb(dir);
+  const wa = createWhatsApp({ db, dir, dryRun: true });
+  const lote = (id) => ({ type: 'notify', messages: [recebida({ conversation: 'oi' }, { id })] });
+  assert.doesNotThrow(() => wa._onMensagens(lote('X')));
+  const recebidas = [];
+  wa.onMensagem((m) => recebidas.push(m.msgId));
+  wa._onMensagens(lote('Y'));
+  wa.onMensagem(null);
+  wa._onMensagens(lote('Z'));
+  assert.deepEqual(recebidas, ['Y']);
+  db.close();
+});
+
+test('R9 (decisão documentada): link sem esquema no texto não impede o link da prévia; os dois saem (a etapa 11 deduplica por ASIN)', () => {
+  const canonico = 'https://www.amazon.com.br/dp/B0ABCDEFGH';
+  assert.equal(textoDaMensagem({ extendedTextMessage: { text: 'Fone amzn.to/x', canonicalUrl: canonico } }), `Fone amzn.to/x\n${canonico}`);
+});
+
+// ---------------------------------------------------------------- S1 (rodada 1 de correção): sessão do Signal fora do journal
+/** Sessão falsa da libsignal com chaves marcadas, para procurar os valores (texto, hex e base64) no que foi escrito. */
+function sessaoFalsa() {
+  const chaves = { privKey: 'PRIVKEYzzSEGREDO1', rootKey: 'ROOTKEYzzSEGREDO2', chainKey: 'CHAINKEYzSEGREDO3', baseKey: 'BASEKEYzzSEGREDO4', remoteIdentityKey: 'REMOTEIDzSEGREDO5' };
+  const b = Object.fromEntries(Object.entries(chaves).map(([k, v]) => [k, Buffer.from(v)]));
+  const s = libsignal.SessionRecord.createEntry();
+  s.indexInfo = { baseKey: b.baseKey, baseKeyType: 1, closed: -1, used: 1, created: 1, remoteIdentityKey: b.remoteIdentityKey };
+  s.currentRatchet = { rootKey: b.rootKey, ephemeralKeyPair: { privKey: b.privKey, pubKey: Buffer.from('pub') }, lastRemoteEphemeralKey: Buffer.from('last'), previousCounter: 0 };
+  s._chains = { abc: { chainKey: { counter: 0, key: b.chainKey }, chainType: 1, messageKeys: {} } };
+  const proibidos = [...Object.keys(chaves), ...Object.values(b).flatMap((x) => [x.toString(), x.toString('hex'), x.toString('base64'), [...x].map((n) => n.toString(16).padStart(2, '0')).join(' ')])];
+  return { s, proibidos };
+}
+
+/** Roda `fn` (síncrona) com o stdout e o stderr do processo capturados; devolve o que o console escreveu. */
+function capturarSaida(fn) {
+  const escrito = [];
+  const { write: out } = process.stdout; const { write: err } = process.stderr;
+  process.stdout.write = (c) => { escrito.push(String(c)); return true; };
+  process.stderr.write = (c) => { escrito.push(String(c)); return true; };
+  try { fn(); } finally { process.stdout.write = out; process.stderr.write = err; }
+  return escrito.join('');
+}
+
+test('S1: a libsignal fecha, reabre e descarta sessões sem escrever as chaves no console (o journal do serviço)', () => {
+  const { s, proibidos } = sessaoFalsa();
+  const velha = sessaoFalsa().s; velha.indexInfo.closed = 1; velha.indexInfo.baseKey = Buffer.from('outraBase');
+  const rec = new libsignal.SessionRecord();
+  const saida = capturarSaida(() => {
+    rec.setSession(s);
+    rec.closeSession(s); // "Closing session:", sessão
+    rec.closeSession(s); // "Session already closed", sessão
+    rec.openSession(s); // "Opening session:", sessão
+    for (let i = 0; i < 40; i++) { const x = sessaoFalsa().s; x.indexInfo.closed = i + 1; x.indexInfo.baseKey = Buffer.from(`b${i}`); rec.setSession(x); }
+    rec.setSession(velha);
+    rec.removeOldSessions(); // "Removing old closed session:", sessão
+    console.info('captura viva', 42); // prova de que a captura pega o que o console escreve
+  });
+  assert.equal(saida, 'captura viva 42\n');
+  for (const p of proibidos) assert.ok(!saida.includes(p), `vazou ${p}`);
+});
+
+test('S1: o resto do console segue igual; objeto com cara de sessão do Signal vira [omitido]; o filtro nunca lança', () => {
+  const linhas = [];
+  const falso = {};
+  for (const n of ['log', 'info', 'warn', 'error', 'debug']) falso[n] = (...a) => { linhas.push([n, ...a]); };
+  assert.equal(protegerConsole(falso), falso);
+  const embrulhadas = { ...falso };
+  assert.equal(protegerConsole(falso), falso, 'idempotente');
+  assert.deepEqual({ ...falso }, embrulhadas, 'a segunda chamada não embrulha de novo');
+  const { s, proibidos } = sessaoFalsa();
+  const erro = new Error('boom');
+  falso.info('Closing session:', s);
+  falso.warn('Session already open');
+  falso.warn('Closing open session in favor of incoming prekey bundle');
+  falso.error('Session error:Error: Bad MAC', 'stack');
+  falso.error('Failed to decrypt message with any known session...');
+  falso.warn('Decrypted message with closed session.');
+  falso.info('Migrating session to:', 'v1');
+  falso.error('[espelho] erro no handler:', 'TypeError');
+  falso.error('[grupos]', erro);
+  falso.log('%o', s);
+  falso.log('registro', { record: { sessions: { k: s } } }, 7);
+  falso.debug('getter', { get privKey() { throw new Error('não leia'); } });
+  falso.warn('proxy', new Proxy({}, { ownKeys() { throw new Error('não liste'); } }));
+  falso.log('grande', Array.from({ length: 2000 }, () => ({ a: 1 })));
+  falso.log('normal', { a: 1 }, Buffer.from('x'));
+  assert.deepEqual(linhas, [
+    ['error', '[espelho] erro no handler:', 'TypeError'],
+    ['error', '[grupos]', erro],
+    ['log', '%o', '[omitido]'],
+    ['log', 'registro', '[omitido]', 7],
+    ['debug', 'getter', '[omitido]'],
+    ['warn', 'proxy', '[omitido]'],
+    ['log', 'grande', '[omitido]'],
+    ['log', 'normal', { a: 1 }, Buffer.from('x')],
+  ]);
+  const texto = JSON.stringify(linhas);
+  for (const p of proibidos) assert.ok(!texto.includes(p), `vazou ${p}`);
+  assert.doesNotThrow(() => protegerConsole(null));
+});
+
+test('CA10: nenhum teste deste arquivo chamou o fetch global', () => {
+  assert.equal(chamadasGlobais, 0);
 });

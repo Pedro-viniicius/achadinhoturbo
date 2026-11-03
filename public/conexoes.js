@@ -1,5 +1,5 @@
 // Conexões (#conexoes; os endereços antigos #etiquetas e a extensão de Ajustes vieram para cá).
-// Hoje só o Mercado Livre funciona: etiquetas de afiliado + extensão do Chrome.
+// Mercado Livre: etiquetas de afiliado + extensão do Chrome. Amazon: tag, credencial da API e teste (4 estados do selo).
 // Carrega antes de app.js: só define funções. Os utilitários de app.js e paineis.js ($, $$, esc, api,
 // aviso, tentar, mostrarErros, REQ, S, atualizarEstado, podeEquipe, dataHora) só são usados quando as funções rodam.
 
@@ -20,6 +20,25 @@ const TEXTOS_CONEXOES = {
   carregando: 'Carregando as outras lojas…',
   erroCarregar: 'Não consegui carregar as outras lojas.',
   formatoSegredo: 'formato inválido. Confira se copiou o valor inteiro, sem espaços.',
+  // Amazon (a API oficial é a Creators API; sem ela o espelhamento usa o texto da mensagem de origem)
+  soTag: 'Só com a tag',
+  amazonConectada: 'Conectada',
+  credencialSalva: 'Credencial salva',
+  amazonDesc: 'Programa de Associados da Amazon. Com a API oficial, o painel busca título, preço e foto do produto e gera o link com a sua tag.',
+  // EM BREVE (etapa 14): ' Sem esse acesso o espelhamento continua funcionando, só que usa o título e os preços escritos na mensagem de origem.'
+  amazonPreRequisito: '<b>Antes de usar a API:</b> a API oficial da Amazon (Creators API) exige uma conta de Associados aprovada na Amazon Brasil e vendas qualificadas recentes (hoje, ao menos 10 nos últimos 30 dias).',
+  amazonComoConseguir: 'Como conseguir as credenciais (abre em outra aba)',
+  amazonDocs: 'https://affiliate-program.amazon.com/creatorsapi/docs',
+  espelhosEmUso: (n) => (n === 1 ? 'Há 1 espelhamento usando o texto da origem.' : `Há ${n} espelhamentos usando o texto da origem.`),
+  verEspelhamentos: 'Ver espelhamentos',
+  // resultado do teste da Amazon, por `resultado` (a frase vem daqui; nunca repete o ID nem o segredo)
+  testeAmazon: {
+    ok: 'Credencial aceita pela Amazon.',
+    recusada: 'A Amazon não aceitou a credencial. Confira o ID e o segredo e se a credencial está ativa.',
+    sem_acesso: 'A credencial é válida, mas a conta ainda não tem acesso à API. Confira se há vendas qualificadas nos últimos 30 dias.',
+    tag_invalida: 'A tag não pertence a esta credencial/loja.',
+    indisponivel: 'A Amazon não respondeu agora. Tente de novo em alguns minutos.',
+  },
 };
 
 function paginaConexoes({ rolarPara } = {}) {
@@ -112,25 +131,40 @@ async function outrasLojas() {
   outras.forEach((p) => { const art = $(`#cx-${CSS.escape(p.id)}`, el); if (art) { aplicarConexao(art, p); ligarConexao(art, p); } });
 }
 
-/** Classe e texto do selo para o `estado` que o servidor manda. Texto sempre visível (nunca só cor). */
-function pillConexao(estado) {
+/**
+ * Classe e texto do selo para o `estado` que o servidor manda. Texto sempre visível (nunca só cor).
+ * A Amazon tem 4 estados: falta_configurar, so_tag (aviso), pronta ("Credencial salva", neutro) e conectada.
+ */
+function pillConexao(estado, id) {
+  if (id === 'amazon') {
+    const a = {
+      falta_configurar: ['falta', TEXTOS_CONEXOES.falta], so_tag: ['pendente', TEXTOS_CONEXOES.soTag],
+      pronta: ['', TEXTOS_CONEXOES.credencialSalva], conectada: ['conectado', TEXTOS_CONEXOES.amazonConectada],
+    }[estado];
+    if (a) return a;
+  }
   return {
-    conectado: ['conectado', TEXTOS_CONEXOES.conectado], pronta: ['pronta', TEXTOS_CONEXOES.pronta],
-    falta_configurar: ['falta', TEXTOS_CONEXOES.falta],
+    conectado: ['conectado', TEXTOS_CONEXOES.conectado], conectada: ['conectado', TEXTOS_CONEXOES.conectado],
+    pronta: ['pronta', TEXTOS_CONEXOES.pronta], falta_configurar: ['falta', TEXTOS_CONEXOES.falta],
   }[estado] || ['impl', TEXTOS_CONEXOES.impl];
 }
 
 function cartaoConexao(p) {
   const id = esc(p.id); const campos = Array.isArray(p.campos) ? p.campos : [];
-  const aviso = p.implementada ? '' : `<div class="aviso-impl"><p>${campos.length ? TEXTOS_CONEXOES.avisoImpl : TEXTOS_CONEXOES.avisoImplSemCampos}</p></div>`;
+  const amazon = p.id === 'amazon' && p.implementada;
+  const aviso = amazon
+    ? `<div class="aviso-impl"><p>${TEXTOS_CONEXOES.amazonPreRequisito} <a href="${TEXTOS_CONEXOES.amazonDocs}" target="_blank" rel="noopener">${TEXTOS_CONEXOES.amazonComoConseguir}</a></p></div>
+      <p class="dica" data-espelhos role="status" hidden></p>`
+    : p.implementada ? '' : `<div class="aviso-impl"><p>${campos.length ? TEXTOS_CONEXOES.avisoImpl : TEXTOS_CONEXOES.avisoImplSemCampos}</p></div>`;
+  const desc = amazon ? TEXTOS_CONEXOES.amazonDesc : p.descricao;
   const form = !campos.length ? '' : `<form novalidate>
       ${campos.map((c) => campoConexao(p, c)).join('')}
       <div class="acoes"><button type="submit" class="pri">Salvar</button><button type="button" data-testar aria-describedby="cx-${id}-estado">Testar</button></div>
       <p class="estado-linha" id="cx-${id}-estado" role="status"></p>
     </form>`;
   return `<article class="card conexao" id="cx-${id}" aria-labelledby="cx-${id}-h">
-    <header class="cab"><h2 id="cx-${id}-h">${esc(p.nome || p.id)}</h2><span class="estado-pill"></span></header>
-    ${p.descricao ? `<p class="desc">${esc(p.descricao)}</p>` : ''}
+    <header class="cab"><h2 id="cx-${id}-h">${esc(p.nome || p.id)}${amazon ? ' ' + q('conexoes.amazon') : ''}</h2><span class="estado-pill"></span></header>
+    ${desc ? `<p class="desc">${esc(desc)}</p>` : ''}
     ${aviso}${form}
   </article>`;
 }
@@ -149,10 +183,20 @@ function campoConexao(p, c) {
     <input type="text" name="${esc(c.nome)}" id="${id}" autocomplete="off" spellcheck="false"${desc}>${dica}</label>`;
 }
 
+/** Selo do cartão e, na Amazon, a nota dos espelhamentos que dependem só do texto da origem. */
+function pintarSeloConexao(art, p) {
+  const [cls, txt] = pillConexao(p.estado, p.id);
+  const selo = $('.cab .estado-pill', art); selo.className = 'estado-pill ' + cls; selo.textContent = txt;
+  const nota = $('[data-espelhos]', art); if (!nota) return;
+  const n = Number(p.espelhos_ativos) || 0;
+  const mostrar = p.estado === 'so_tag' && n > 0;
+  nota.hidden = !mostrar;
+  nota.innerHTML = mostrar ? `${esc(TEXTOS_CONEXOES.espelhosEmUso(n))} <a href="#disparo-automatico">${TEXTOS_CONEXOES.verEspelhamentos}</a>` : '';
+}
+
 /** Põe no cartão o que o servidor respondeu: selo, valores de texto, placeholder do segredo e linha de estado. */
 function aplicarConexao(art, p) {
-  const [cls, txt] = pillConexao(p.estado);
-  const selo = $('.cab .estado-pill', art); selo.className = 'estado-pill ' + cls; selo.textContent = txt;
+  pintarSeloConexao(art, p);
   const form = $('form', art); if (!form) return;
   const salvos = Array.isArray(p.segredos_salvos) ? p.segredos_salvos : null;
   for (const c of p.campos) {
@@ -165,6 +209,9 @@ function aplicarConexao(art, p) {
   $('[data-testar]', form).disabled = !p.updated_at; // "Testar" só depois de salvar; a linha abaixo diz por quê
   const linha = $('.estado-linha', form); linha.classList.remove('aviso');
   linha.textContent = p.updated_at ? TEXTOS_CONEXOES.salvoEm(p.updated_at) : TEXTOS_CONEXOES.nadaSalvo;
+  // Amazon: a falha da última verificação (frase fixa do servidor) continua visível ao recarregar, em texto e não só no selo
+  const falha = p.id === 'amazon' && p.situacao && !['ok', 'desconhecido', 'nao_configurada'].includes(p.situacao.acesso) ? p.situacao.motivo : '';
+  if (falha) { linha.textContent = `${falha} ${linha.textContent}`; linha.classList.add('aviso'); }
 }
 
 /** Erro de um campo, igual ao que o servidor confere (max e padrao do registro). Nunca repete o valor. */
@@ -210,7 +257,17 @@ function ligarConexao(art, p) {
     testar.disabled = true; testar.textContent = 'Testando…';
     try {
       const r = await api('/conexoes/' + encodeURIComponent(atual.id) + '/testar', 'POST', {});
-      linha.textContent = r.mensagem; linha.classList.toggle('aviso', !r.ok);
+      // Na Amazon a frase vem de `resultado` (texto fixo da tela). No sucesso vale a do servidor (frase fixa), que pode
+      // trazer a dica de cadastrar a tag; sem `resultado` conhecido, também a mensagem do servidor.
+      const fraseTela = atual.id === 'amazon' && !r.ok ? TEXTOS_CONEXOES.testeAmazon[r.resultado] : null;
+      const frase = fraseTela || r.mensagem || TEXTOS_CONEXOES.testeAmazon[r.resultado] || '';
+      linha.classList.toggle('aviso', !r.ok);
+      if (r.ok) linha.innerHTML = `<span class="nivel-ok">✓ ${esc(frase)}</span>`; else linha.textContent = frase;
+      if (r.resultado) { // o teste muda o estado (Conectada ou não): relê o cartão sem apagar a frase do teste
+        const lista = await api('/conexoes').catch(() => null);
+        const nova = Array.isArray(lista) ? lista.find((x) => x?.id === atual.id) : null;
+        if (nova) { atual = nova; pintarSeloConexao(art, atual); }
+      }
     } catch (e) {
       linha.textContent = e.message; linha.classList.add('aviso');
     } finally { testar.disabled = !atual.updated_at; testar.textContent = 'Testar'; }

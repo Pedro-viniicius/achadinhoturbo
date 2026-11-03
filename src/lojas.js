@@ -1,14 +1,21 @@
 // Ponto único de loja: descobre de que loja é um link e, para as lojas já integradas, lê o
-// produto e gera o link de afiliado. Hoje só o Mercado Livre funciona. As outras lojas
+// produto e gera o link de afiliado. Hoje funcionam o Mercado Livre e a Amazon. As outras lojas
 // aparecem em Conexões (campos que já podem ser salvos) e são recusadas com LojaNaoConectada.
 //
-// SSRF: identificar() só olha o hostname e nunca acessa a rede. Só o Mercado Livre lê página
-// (resolveOffer, que segue só hosts do ML) e a imagem só passa se vier do CDN mlstatic.
+// SSRF: identificar() só olha o hostname e nunca acessa a rede. O Mercado Livre lê a página (resolveOffer, que
+// segue só hosts do ML); a Amazon só resolve o link pelos redirecionamentos e consulta a API oficial (as duas
+// coisas em src/amazon.js, injetado). A imagem só passa se vier do CDN da própria loja (imagemPermitida).
+//
+// Amazon (plano espelhamento-amazon, etapa 7): o link enviado é sempre https://www.amazon.com.br/dp/<ASIN>?tag=<tag>
+// (montarLink de amazon.js, com a tag de Conexões na hora da chamada): o slug, os parâmetros de rastreio e a tag
+// de terceiro do link de origem nunca seguem adiante.
 
 import { IMAGEM_PERMITIDA, offerKey } from './ml.js';
+import { IMAGEM_AMAZON, ErroAmazon, LinkNaoResolvido, extrairAsin } from './amazon.js';
 import { brl } from './template.js';
 
 const MAX_URL = 4096;
+const RE_ASIN = /^[A-Z0-9]{10}$/;
 
 function congelar(o) {
   for (const v of Object.values(o)) if (v && typeof v === 'object') congelar(v);
@@ -32,12 +39,20 @@ const LISTA = [
     ],
   },
   {
-    id: 'amazon', nome: 'Amazon', implementada: false,
-    descricao: 'Programa de Associados da Amazon. Sem API: o link leva a sua tag de associado.',
-    hosts: ['amazon.com.br', 'www.amazon.com.br', 'amazon.com', 'amzn.to', 'a.co'],
+    // A tag é texto (decisão do lead de 02/11): vai em todo link enviado, então escondê-la não protege nada.
+    // Só o ID e o segredo da credencial da Creators API são segredos.
+    id: 'amazon', nome: 'Amazon', implementada: true,
+    descricao: 'Programa de Associados da Amazon. Com a API oficial, o painel busca título, preço e foto do produto e gera o link com a sua tag.',
+    hosts: ['amazon.com.br', 'www.amazon.com.br', 'amazon.com', 'amzn.to', 'amzn.com', 'a.co', 'link.amazon'],
     campos: [
       { nome: 'tag', rotulo: 'Tag de associado', tipo: 'texto', max: 64, padrao: '^[A-Za-z0-9_-]{2,64}$',
-        ajuda: 'Ex.: seunome-20' },
+        ajuda: 'Ex.: seunome-20. Todo link enviado leva esta tag.' },
+      { nome: 'credencial_id', rotulo: 'ID da credencial', tipo: 'segredo', max: 128, padrao: '^[A-Za-z0-9._-]{8,128}$',
+        ajuda: 'Da Central de Associados, em Creators API. Não volta para esta tela; deixe em branco para manter o salvo.' },
+      { nome: 'credencial_secret', rotulo: 'Segredo da credencial', tipo: 'segredo', max: 256, padrao: '^[!-~]{8,256}$',
+        ajuda: 'O segredo fica guardado no seu computador e não volta para esta tela. Deixe em branco para manter o salvo.' },
+      { nome: 'credencial_versao', rotulo: 'Versão da credencial', tipo: 'texto', max: 10, padrao: '^3\\.[1-3]$',
+        ajuda: 'Versão que veio com a credencial; Brasil: 3.1' },
     ],
   },
   {
@@ -114,22 +129,84 @@ function exigirLoja(id, url) {
   return url.trim();
 }
 
-const imagemSegura = (img) => (typeof img === 'string' && IMAGEM_PERMITIDA.test(img) ? img : null);
+/** CDN de imagem de cada loja integrada. Sem protótipo: id vindo de fora não acha 'constructor'. */
+const IMAGENS = Object.freeze(Object.assign(Object.create(null), { mercadolivre: IMAGEM_PERMITIDA, amazon: IMAGEM_AMAZON }));
 
 /**
- * Lê título, preço e foto do produto. Só o Mercado Livre (ml.resolveOffer, injetado).
- * A imagem fora do CDN mlstatic vira null: o envio busca essa URL no servidor.
+ * A foto do produto pode seguir adiante? Só https do CDN da própria loja (o envio baixa essa URL no servidor).
+ * Loja sem CDN conhecido, URL de outra loja ou valor que não é texto → false.
  */
-export async function lerProduto(id, url, { ml } = {}) {
-  const limpo = exigirLoja(id, url);
-  if (!ml?.resolveOffer) throw new Error('Leitura de produtos do Mercado Livre indisponível.');
-  const offer = await ml.resolveOffer({ key: offerKey(limpo), url: limpo });
-  return { ...offer, image: imagemSegura(offer?.image) };
+export function imagemPermitida(lojaId, url) {
+  if (typeof url !== 'string' || !url || url.length > MAX_URL) return false;
+  const re = typeof lojaId === 'string' && Object.hasOwn(IMAGENS, lojaId) ? IMAGENS[lojaId] : null;
+  return !!re && re.test(url);
 }
 
-/** Link de afiliado do produto com a etiqueta (tag) escolhida. Só o Mercado Livre (links.requestLink, injetado). */
-export async function linkAfiliado(id, { url, tag } = {}, { links } = {}) {
+const imagemSegura = (lojaId, img) => (imagemPermitida(lojaId, img) ? img : null);
+
+/** ErroAmazon novo (nunca o mesmo objeto que outro chamador recebeu) com o ASIN já resolvido. */
+function erroComAsin(e, asin) {
+  const tipo = e instanceof ErroAmazon ? e.tipo : 'indisponivel';
+  const novo = new ErroAmazon(tipo, e instanceof ErroAmazon ? { status: e.status, retryAfterSeconds: e.retryAfterSeconds } : {});
+  novo.asin = asin;
+  return novo;
+}
+
+function exigirAmazon(amazon, ...metodos) {
+  if (!amazon || metodos.some((m) => typeof amazon[m] !== 'function')) throw new Error('Serviço da Amazon indisponível.');
+}
+
+/**
+ * Amazon: resolve o link até o ASIN (amazon.resolver: só redirecionamentos de hosts da Amazon, sem ler página) e
+ * consulta a API (amazon.lerItem). Erros:
+ * - LinkNaoResolvido { causa: 'invalido' | 'nao_produto' } quando o link não chega a um ASIN;
+ * - ErroAmazon { tipo, asin } quando a API não respondeu ou não achou o produto ('nao_encontrado'). O `asin` vai
+ *   junto para quem chama poder seguir com os campos vazios (o link limpo só precisa dele).
+ */
+async function lerProdutoAmazon(url, amazon) {
+  exigirAmazon(amazon, 'resolver', 'lerItem');
+  const resolvido = await amazon.resolver(url);
+  const asin = typeof resolvido?.asin === 'string' ? resolvido.asin.toUpperCase() : '';
+  if (!RE_ASIN.test(asin)) throw new LinkNaoResolvido('invalido');
+  let oferta;
+  try { oferta = await amazon.lerItem(asin); } catch (e) { throw erroComAsin(e, asin); }
+  if (!oferta) throw erroComAsin(new ErroAmazon('nao_encontrado'), asin);
+  return { ...oferta, key: `ASIN:${asin}`, asin, image: imagemSegura('amazon', oferta.image) };
+}
+
+/**
+ * Lê título, preço e foto do produto. Mercado Livre: ml.resolveOffer (injetado). Amazon: amazon (createAmazon,
+ * injetado) → { key: 'ASIN:<ASIN>', asin, title, price, oldPrice, discountPct, image, … }.
+ * A imagem fora do CDN da loja vira null: o envio busca essa URL no servidor.
+ */
+export async function lerProduto(id, url, { ml, amazon } = {}) {
   const limpo = exigirLoja(id, url);
+  if (id === 'amazon') return lerProdutoAmazon(limpo, amazon);
+  if (!ml?.resolveOffer) throw new Error('Leitura de produtos do Mercado Livre indisponível.');
+  const offer = await ml.resolveOffer({ key: offerKey(limpo), url: limpo });
+  return { ...offer, image: imagemSegura('mercadolivre', offer?.image) };
+}
+
+/**
+ * Link de afiliado do produto.
+ * - Mercado Livre: com a etiqueta (tag) escolhida, por links.requestLink (injetado).
+ * - Amazon: sempre https://www.amazon.com.br/dp/<ASIN>?tag=<tag de Conexões> (amazon.montarLink). O ASIN vem de
+ *   `asin` (já resolvido pelo servidor, ex.: o do payload do envio), do próprio link ou, para encurtador, de
+ *   amazon.resolver. `tag` é ignorada: a tag é a de Conexões. Sem tag salva → ErroAmazon('sem_tag'), com a
+ *   mensagem fixa (nunca carrega ID, segredo nem token).
+ */
+export async function linkAfiliado(id, { url, tag, asin } = {}, { links, amazon } = {}) {
+  const limpo = exigirLoja(id, url);
+  if (id === 'amazon') {
+    exigirAmazon(amazon, 'montarLink');
+    const dado = typeof asin === 'string' ? asin.trim().toUpperCase() : '';
+    let a = RE_ASIN.test(dado) ? dado : extrairAsin(limpo);
+    if (!a) {
+      exigirAmazon(amazon, 'montarLink', 'resolver');
+      a = (await amazon.resolver(limpo))?.asin;
+    }
+    return amazon.montarLink(a);
+  }
   if (typeof tag !== 'string' || !tag.trim()) throw new Error('Escolha uma etiqueta.');
   if (!links?.requestLink) throw new Error('Serviço de links indisponível.');
   return links.requestLink({ url: limpo, tag: tag.trim() });

@@ -8,17 +8,22 @@
 // Pausas: `sleep` e `jitter` de ./util.js, as mesmas das regras.
 // Dado pessoal: log, tela e console levam o nome do grupo, nunca JID nem número (ver limparErro). As fotos enviadas
 // pelo painel são regravadas pelo sharp (giradas pelo Exif, sem metadados: GPS, aparelho, textos): ver regravarFoto.
+// Amazon (plano espelhamento-amazon, decisão 6): sem etiqueta; o link é sempre .../dp/<ASIN>?tag=<tag de Conexões>,
+// montado na hora do envio. Do painel vêm só ajustes de título, preços, cupom, frete e foto (por upload, nunca por URL);
+// a imagem por URL e o link são sempre do servidor. `payload.origem` diz se veio do Disparo manual ou de um espelho.
 
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import express from 'express';
 import { addLog, getSetting } from './db.js';
-import { IMAGEM_PERMITIDA } from './ml.js';
-import { PLATAFORMAS, identificar, LojaNaoConectada, lerProduto, linkAfiliado, previaDoLink } from './lojas.js';
+import * as lojasPadrao from './lojas.js';
+import { LinkNaoResolvido } from './amazon.js';
 import { montarEnquete } from './whatsapp.js';
-import { renderTemplate } from './template.js';
+import { renderTemplate, discountPct } from './template.js';
 import { sleep, jitter } from './util.js';
+
+const { PLATAFORMAS, LojaNaoConectada } = lojasPadrao;
 
 const HHMM = /^([01]?\d|2[0-3]):([0-5]\d)$/;
 const DATA = /^(\d{4})-(\d{2})-(\d{2})$/;
@@ -42,6 +47,22 @@ const CAMPOS_OFERTA = ['key', 'title', 'price', 'oldPrice', 'discountPct', 'sold
 const LINK_EXEMPLO = 'https://meli.la/(gerado no envio)';
 const NAO_RECONHECI = 'Não reconheci este link. Cole o endereço completo da página do produto.';
 const PERDEU = 'perdeu o horário: passou mais de 2 h (WhatsApp desconectado ou programa desligado).';
+// Amazon (plano espelhamento-amazon, decisão 6): o navegador só ajusta estes campos; `image` e `link` são sempre do servidor
+const MAX_TITULO = 200;
+const MAX_CUPOM = 30;
+const PRECO_MAX = 10_000_000;
+const SEM_AMAZON = 'A integração com a Amazon não está disponível neste servidor.';
+const SEM_TAG = 'Falta a tag de associado da Amazon. Cadastre em Conexões → Amazon antes de disparar.';
+const RE_ASIN = /^[A-Z0-9]{10}$/;
+const SONDA_ASIN = 'B000000000'; // ASIN de sonda: montarLink diz se há tag salva sem acessar a rede
+// ErroAmazon.tipo → causa que o Identificar devolve (a tela tem um texto por causa; o resto vira "indisponível")
+const CAUSA_DA_API = {
+  sem_credenciais: 'sem_credenciais', sem_tag: 'sem_tag', sem_acesso: 'sem_acesso', credenciais_invalidas: 'sem_acesso',
+  tag_invalida: 'sem_acesso', cota: 'cota', nao_encontrado: 'indisponivel', indisponivel: 'indisponivel',
+};
+const urlDoAsin = (asin) => `https://www.amazon.com.br/dp/${asin}`;
+/** Link com a tag mascarada, para as prévias do painel (CA7): a tag só vai inteira ao WhatsApp. */
+const mascararTag = (link) => String(link).replace(/([?&]tag=)[^&#]*/, '$1•••');
 
 const pad = (n) => String(n).padStart(2, '0');
 const hora = (ts) => { const d = new Date(ts); return `${pad(d.getDate())}/${pad(d.getMonth() + 1)} ${pad(d.getHours())}:${pad(d.getMinutes())}`; };
@@ -105,24 +126,84 @@ function templateDe(db, id) {
 }
 
 /** Link de oferta: só loja conhecida e integrada (sem rede). → { url, loja } */
-function lojaDoLink(url) {
+function lojaDoLink(url, lojas) {
   const limpo = typeof url === 'string' ? url.trim() : '';
   if (!limpo) throw new Error('Cole o link do produto.');
   if (limpo.length > MAX_URL) throw new Error(NAO_RECONHECI);
-  const loja = identificar(limpo);
+  const loja = lojas.identificar(limpo);
   if (!loja) throw new Error(NAO_RECONHECI);
   if (!loja.implementada) throw new LojaNaoConectada(loja);
   return { url: limpo, loja };
 }
 
+const soCamposDaOferta = (o) => Object.fromEntries(CAMPOS_OFERTA.map((k) => [k, o?.[k] ?? null]));
+
 /** Lê o produto no servidor (o que o navegador manda não é confiável) e guarda só os campos do template. */
-async function lerOferta(lojaId, url, ml) {
+async function lerOferta(lojaId, url, { ml, amazon, lojas }) {
+  return (await lerOfertaComUrl(lojaId, url, { ml, amazon, lojas })).offer;
+}
+
+/**
+ * Como lerOferta, e devolve também o endereço do produto que a leitura achou (o meli.la de afiliado leva à página do
+ * produto de verdade): é ele que vai à Central de Afiliados no envio. Só vale se for da mesma loja do link colado;
+ * senão, o link colado.
+ */
+async function lerOfertaComUrl(lojaId, url, { ml, amazon, lojas }) {
   let o;
-  try { o = await lerProduto(lojaId, url, { ml }); } catch (e) {
+  try { o = await lojas.lerProduto(lojaId, url, { ml, amazon }); } catch (e) {
     if (e instanceof LojaNaoConectada) throw e;
     throw new Error(`Não consegui ler o produto deste link${motivoDe(e)}. Confira o link e tente de novo.`);
   }
-  return Object.fromEntries(CAMPOS_OFERTA.map((k) => [k, o?.[k] ?? null]));
+  const achada = typeof o?.url === 'string' && o.url.length <= MAX_URL && lojas.identificar(o.url)?.id === lojaId ? o.url : null;
+  return { offer: soCamposDaOferta(o), url: achada || url };
+}
+
+/**
+ * Preço digitado no painel: número, ou texto como "89,90", "1.299,90" ou "89.90". Vazio → null.
+ * → número > 0 com 2 casas, ou erro com o nome do campo.
+ */
+function lerPreco(v, rotulo) {
+  if (v == null || v === '') return null;
+  let n = NaN;
+  if (typeof v === 'number') n = v;
+  else if (typeof v === 'string') {
+    const t = v.replace(/^\s*R\$\s*/i, '').trim();
+    if (t === '') return null;
+    if (/^\d{1,3}(\.\d{3})+(,\d{1,2})?$/.test(t)) n = Number(t.replace(/\./g, '').replace(',', '.'));
+    else if (/^\d+(,\d{1,2})?$/.test(t)) n = Number(t.replace(',', '.'));
+    else if (/^\d+\.\d{1,2}$/.test(t)) n = Number(t);
+  }
+  if (!Number.isFinite(n) || n <= 0 || n > PRECO_MAX) throw new Error(`${rotulo} inválido: use só números, como 89,90.`);
+  return Math.round(n * 100) / 100;
+}
+
+/** Texto curto do painel numa linha só (título, cupom): espaços e quebras viram um espaço. Vazio → null. */
+function lerTextoCurto(v, nome, max) {
+  if (v == null) return null;
+  if (typeof v !== 'string') throw new Error(`O ${nome} precisa ser texto.`);
+  const t = v.replace(/\s+/g, ' ').trim();
+  if (t.length > max) throw new Error(`O ${nome} passa de ${max} caracteres.`);
+  return t || null;
+}
+
+/**
+ * Oferta da API com os ajustes do painel por cima. Preço antigo só se for maior que o atual (nenhuma linha "De"
+ * inventada); o desconto é recalculado quando um dos preços mudou; `sem_foto` tira a foto da API.
+ */
+function aplicarAjustes(produto, a) {
+  const o = { ...produto };
+  for (const k of ['title', 'price', 'oldPrice', 'coupon', 'freeShipping']) if (Object.hasOwn(a, k)) o[k] = a[k];
+  if (o.oldPrice != null && (o.price == null || o.oldPrice <= o.price)) o.oldPrice = null;
+  if (o.price !== produto.price || o.oldPrice !== produto.oldPrice) o.discountPct = discountPct(o.price, o.oldPrice);
+  if (a.sem_foto) o.image = null;
+  return o;
+}
+
+/** A oferta sai como a API mandou? → fonte_dados 'api'; senão 'manual'. */
+function igualAApi(produto, o, a) {
+  if (a.upload || a.sem_foto) return false;
+  const mudou = ['title', 'price', 'oldPrice', 'discountPct', 'coupon', 'image'].some((k) => (o[k] ?? null) !== (produto[k] ?? null));
+  return !mudou && !!o.freeShipping === !!produto.freeShipping;
 }
 
 /** Hora de um agendado no fuso do servidor. Sem data, hoje. Tem que ser no futuro. */
@@ -194,12 +275,24 @@ export function proximaOcorrencia(repetir, depoisDe = Date.now()) {
   return null;
 }
 
+/** Nome da origem no log (log.rule_name): "Disparo manual", "Mensagem", "Enquete" ou "Espelho: <nome>". */
+function origemDoLog(tipo, p) {
+  if (p?.origem?.tipo === 'espelho') {
+    const nome = String(p.origem.nome ?? '').replace(/\s+/g, ' ').trim().slice(0, 80);
+    return `Espelho: ${nome || 'sem nome'}`;
+  }
+  return ORIGEM[tipo] || 'Envio';
+}
+
 /**
  * Fila de envios. `dir` é a pasta de dados (as fotos enviadas ficam em <dir>/uploads); `fast` zera as pausas (testes).
  * O agendador chama recuperar() ao iniciar e processarPendentes() a cada tick e depois de cada regra, e passa
  * `acordar` (pede um tick já): é por ele que o "agora" sai. Sem agendador, o "agora" chama processarPendentes().
+ * `amazon`: cliente de src/amazon.js (createAmazon); sem ele, oferta da Amazon é recusada. `lojas`: o módulo
+ * src/lojas.js (injetável nos testes). O Identificar do Disparo manual (identificar) usa os mesmos ml/amazon/lojas
+ * do envio.
  */
-export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acordar = null } = {}) {
+export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acordar = null, amazon = null, lojas = lojasPadrao } = {}) {
   const pastaFotos = dir ? path.join(dir, 'uploads') : null;
   const pausaEntreGrupos = () => (fast ? 0 : Number(getSetting(db, 'delay_group_s', 6)));
   // o modo em que o serviço de links vai gerar o link (src/links.js): simulação = links falsos, sem extensão
@@ -212,7 +305,7 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
     .all(id, ocorrencia).map((r) => r.jid));
   const registrar = (id, ocorrencia, jid, nome, ok, erro) => db.prepare('INSERT INTO envio_resultados (envio_id, ocorrencia, ts, jid, group_name, ok, erro) VALUES (?,?,?,?,?,?,?)')
     .run(id, ocorrencia, Date.now(), jid, nome, ok ? 1 : 0, erro);
-  const logDe = (e, titulo) => (o) => addLog(db, { rule: { id: null, name: ORIGEM[e.tipo] || 'Envio' }, offer_title: titulo || null, ...o });
+  const logDe = (e, p) => (o) => addLog(db, { rule: { id: null, name: origemDoLog(e.tipo, p) }, offer_title: tituloDe(e.tipo, p) || null, ...o });
 
   /** Grupos do corpo: lista não vazia, sem repetir, só grupos que existem na tabela `groups`. */
   function validarGrupos(lista) {
@@ -246,6 +339,115 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
     return { texto, imagem };
   }
 
+  /** Foto enviada pelo painel (POST /api/uploads): id no formato do upload e arquivo existente. */
+  function exigirUpload(v) {
+    const up = typeof v === 'string' ? v : '';
+    if (!UPLOAD_ID.test(up)) throw new Error('Escolha a foto de novo.');
+    if (!pastaFotos || !fs.existsSync(path.join(pastaFotos, up))) throw new Error('A foto não foi encontrada. Envie de novo.');
+    return up;
+  }
+
+  /**
+   * Ajustes do painel para uma oferta da Amazon (sem rede). Só title, price, oldPrice, coupon, freeShipping,
+   * upload e sem_foto, com tamanho e tipo; o resto (image, link, url…) é ignorado. Chave presente substitui o
+   * valor da API (vazio/null apaga); chave ausente mantém. → objeto só com as chaves presentes
+   */
+  function validarAjustes(a) {
+    if (a == null) return {};
+    if (typeof a !== 'object' || Array.isArray(a)) throw new Error('Dados da oferta inválidos.');
+    const r = {};
+    if (Object.hasOwn(a, 'title')) r.title = lerTextoCurto(a.title, 'título', MAX_TITULO);
+    if (Object.hasOwn(a, 'price')) r.price = lerPreco(a.price, 'Preço atual');
+    if (Object.hasOwn(a, 'oldPrice')) r.oldPrice = lerPreco(a.oldPrice, 'Preço antigo');
+    if (Object.hasOwn(a, 'coupon')) r.coupon = lerTextoCurto(a.coupon, 'cupom', MAX_CUPOM);
+    if (Object.hasOwn(a, 'freeShipping') && a.freeShipping != null) {
+      if (typeof a.freeShipping !== 'boolean') throw new Error('Frete grátis: marque ou desmarque.');
+      r.freeShipping = a.freeShipping;
+    }
+    if (a.sem_foto != null && typeof a.sem_foto !== 'boolean') throw new Error('Foto: envie com ou sem foto.');
+    if (a.sem_foto === true) r.sem_foto = true;
+    if (a.upload != null && a.upload !== '') r.upload = exigirUpload(a.upload);
+    if (r.sem_foto && r.upload) throw new Error('Escolha entre trocar a foto e enviar sem foto.');
+    return r;
+  }
+
+  /** Há tag de associado salva? Pergunta ao montarLink com um ASIN de sonda (sem rede). */
+  function temTagAmazon() {
+    try { amazon.montarLink(SONDA_ASIN); return true; } catch (e) {
+      if (e?.tipo === 'sem_tag') return false;
+      throw e;
+    }
+  }
+
+  /** ASIN do link (encurtador: segue os redirecionamentos, só hosts da Amazon). Falha → LinkNaoResolvido. */
+  async function asinDoLink(url) {
+    try { return (await amazon.resolver(url)).asin; } catch (e) {
+      throw e instanceof LinkNaoResolvido ? e : new LinkNaoResolvido('invalido');
+    }
+  }
+
+  /**
+   * Dados do produto pela API (lojas.lerProduto). A falha da API não impede o disparo manual: o dono preenche.
+   * → { produto (campos nulos se a API não respondeu), causa: null | 'sem_credenciais' | 'sem_acesso' | … }
+   */
+  async function produtoAmazon(asin) {
+    const vazio = { ...soCamposDaOferta(null), key: `ASIN:${asin}` };
+    try {
+      const o = await lojas.lerProduto('amazon', urlDoAsin(asin), { ml, amazon });
+      return o ? { produto: { ...soCamposDaOferta(o), key: `ASIN:${asin}` }, causa: null } : { produto: vazio, causa: 'indisponivel' };
+    } catch (e) {
+      // ErroAmazon tem mensagem fixa por tipo; de outro erro, só o nome (nada de URL, ID, segredo ou token)
+      if (!e?.tipo) console.error('[envios] dados da Amazon:', e?.name || 'erro');
+      return { produto: vazio, causa: CAUSA_DA_API[e?.tipo] ?? 'indisponivel' };
+    }
+  }
+
+  /** Oferta da Amazon do disparo manual: ASIN, dados da API e os ajustes do painel. → campos do payload */
+  async function ofertaAmazon(url, ajustes) {
+    const asin = await asinDoLink(url);
+    const { produto, causa } = await produtoAmazon(asin);
+    const offer = aplicarAjustes(produto, ajustes);
+    if (!offer.title) throw new Error(causa ? 'Não consegui buscar os dados na Amazon: preencha o título do produto.' : 'Preencha o título do produto.');
+    return {
+      asin, fonte_dados: !causa && igualAApi(produto, offer, ajustes) ? 'api' : 'manual',
+      ...(ajustes.upload ? { upload: ajustes.upload } : {}), offer,
+    };
+  }
+
+  /**
+   * POST /api/disparo/identificar: loja do link e, se integrada, o produto e o texto com o template.
+   * Amazon: { loja, motivo:null, editavel:true, produto, causa, texto (tag mascarada), template_id, etiqueta:null,
+   * tag_salva }. Sem tag → causa 'sem_tag' sem acessar a rede; link que não chega a um produto → 'invalido' ou
+   * 'nao_produto' (produto null); API fora → produto com os campos nulos e a causa.
+   */
+  async function identificarLink(corpo) {
+    const url = typeof corpo?.url === 'string' ? corpo.url.trim() : '';
+    if (!url) throw new Error('Cole o link do produto.');
+    const loja = url.length <= MAX_URL ? lojas.identificar(url) : null;
+    if (!loja) throw new Error(NAO_RECONHECI);
+    if (!loja.implementada) {
+      return { loja, motivo: new LojaNaoConectada(loja).message, produto: null, texto: null, template_id: null, etiqueta: null };
+    }
+    const template = templateDe(db, corpo.template_id);
+    if (loja.id === 'amazon') {
+      if (!amazon) throw new Error(SEM_AMAZON);
+      const base = { loja, motivo: null, editavel: true, produto: null, causa: null, texto: null, template_id: template.id, etiqueta: null, tag_salva: true };
+      if (!temTagAmazon()) return { ...base, causa: 'sem_tag', tag_salva: false };
+      let asin;
+      try { asin = await asinDoLink(url); } catch (e) { return { ...base, causa: e.causa }; }
+      const { produto, causa } = await produtoAmazon(asin);
+      const link = mascararTag(amazon.montarLink(asin));
+      return { ...base, produto, causa, texto: renderTemplate(template.body, { ...produto, link }, tplOpts(db)) };
+    }
+    const etiqueta = etiquetaDe(db, corpo.tag_id, { exigir: false });
+    const produto = await lerOferta(loja.id, url, { ml, amazon, lojas });
+    return {
+      loja, motivo: null, editavel: false, causa: null, produto,
+      texto: renderTemplate(template.body, { ...produto, link: LINK_EXEMPLO }, tplOpts(db)),
+      template_id: template.id, etiqueta,
+    };
+  }
+
   /**
    * Valida o corpo de POST /api/envios por tipo (oferta|mensagem|enquete) e quando (agora|agendado|repetir),
    * resolve a oferta no servidor (o que o navegador manda não é confiável) e grava em `envios`.
@@ -261,9 +463,17 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
     if (tipo === 'oferta' && quando === 'repetir') throw new Error('O disparo manual sai agora ou agendado para hoje.');
 
     // 1. conteúdo, sem rede (a loja não conectada é recusada aqui, antes de qualquer coisa: CA2)
-    const conteudo = tipo === 'oferta'
-      ? { ...lojaDoLink(b.url), etiqueta: etiquetaDe(db, b.tag_id), template: templateDe(db, b.template_id) }
-      : tipo === 'mensagem' ? validarMensagem(b) : validarEnquete(b);
+    let conteudo;
+    if (tipo === 'oferta') {
+      const { url, loja } = lojaDoLink(b.url, lojas);
+      conteudo = { url, loja, template: templateDe(db, b.template_id) };
+      if (loja.id === 'amazon') {
+        // a Amazon não tem etiqueta: o link leva a tag de associado de Conexões (sem ela, não dispara: CA2)
+        if (!amazon) throw new Error(SEM_AMAZON);
+        if (!temTagAmazon()) throw new Error(SEM_TAG);
+        conteudo.ajustes = validarAjustes(b.ajustes);
+      } else conteudo.etiqueta = etiquetaDe(db, b.tag_id);
+    } else conteudo = tipo === 'mensagem' ? validarMensagem(b) : validarEnquete(b);
     // 2. grupos e horário
     const groupJids = validarGrupos(b.group_jids);
     const now = Date.now();
@@ -276,19 +486,24 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
     }
     if (quando === 'agora') {
       if (!wa.isReady()) throw new Error('O WhatsApp está desconectado. Conecte o número antes de disparar.');
-      if (tipo === 'oferta' && modoLink() === 'extension' && !links.status().online) {
+      if (tipo === 'oferta' && conteudo.loja.id === 'mercadolivre' && modoLink() === 'extension' && !links.status().online) {
         throw new Error('A extensão do Chrome não está conectada: abra o Chrome com a extensão para gerar o link de afiliado.');
       }
     }
-    // 3. o que depende de rede: o produto do Mercado Livre e a prévia do link
+    // 3. o que depende de rede: o produto (Mercado Livre, ou link resolvido e API da Amazon) e a prévia do link
     let payload;
     if (tipo === 'oferta') {
       const { url, loja, etiqueta, template } = conteudo;
-      payload = {
-        url, loja: loja.id, tag_id: etiqueta.id, etiqueta: etiqueta.name,
+      const base = {
+        url, loja: loja.id, tag_id: etiqueta?.id ?? null, etiqueta: etiqueta?.name ?? null,
         template_id: template.id, template_criado_em: template.created_at, // created_at: ver preparar (Q6)
-        offer: await lerOferta(loja.id, url, ml),
+        origem: { tipo: 'manual' },
       };
+      if (loja.id === 'amazon') payload = { ...base, ...(await ofertaAmazon(url, conteudo.ajustes)) };
+      else {
+        const lida = await lerOfertaComUrl(loja.id, url, { ml, amazon, lojas });
+        payload = { ...base, url: lida.url, offer: lida.offer };
+      }
     } else if (tipo === 'mensagem' && conteudo.imagem === 'previa') {
       const previa = await lerPrevia(conteudo.previa_url);
       // o WhatsApp liga a prévia ao link escrito na mensagem: se ele não estiver no texto, vai no fim
@@ -312,8 +527,8 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
   /** Prévia do link (só Mercado Livre). Falha ao ler o produto vira mensagem própria, sem a dica das regras. */
   async function lerPrevia(url) {
     // outro site ou loja não conectada: previaDoLink recusa antes de ler nada, com a mensagem dela
-    if (identificar(url)?.id !== 'mercadolivre') return previaDoLink(url, { ml });
-    try { return await previaDoLink(url, { ml }); } catch (e) {
+    if (lojas.identificar(url)?.id !== 'mercadolivre') return lojas.previaDoLink(url, { ml });
+    try { return await lojas.previaDoLink(url, { ml }); } catch (e) {
       throw new Error(`Não consegui ler a prévia deste link${motivoDe(e)}. Confira o link ou envie sem a prévia.`);
     }
   }
@@ -321,23 +536,40 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
   /** O que vai a cada grupo, preparado uma vez por ocorrência. → { enviar(jid) → texto do log } */
   async function preparar(tipo, p) {
     if (tipo === 'oferta') {
-      // a etiqueta é a escolhida ao criar, pelo nome: se ela for apagada e outra herdar o id, a comissão não muda de dono
-      const etiqueta = p.etiqueta || (Number.isInteger(p.tag_id) && db.prepare('SELECT name FROM tags WHERE id = ?').get(p.tag_id)?.name);
-      if (!etiqueta) throw new Error('a etiqueta foi apagada');
+      const ehAmazon = p.loja === 'amazon';
+      // a etiqueta é a escolhida ao criar, pelo nome: se ela for apagada e outra herdar o id, a comissão não muda de dono.
+      // Só o Mercado Livre tem etiqueta; a Amazon usa a tag de Conexões da hora do envio.
+      const etiqueta = ehAmazon ? null : p.etiqueta || (Number.isInteger(p.tag_id) && db.prepare('SELECT name FROM tags WHERE id = ?').get(p.tag_id)?.name);
+      if (!ehAmazon && !etiqueta) throw new Error('a etiqueta foi apagada');
       // o template é o mesmo id e a mesma criação (renomear ou editar não muda created_at; apagar e recriar muda)
       const tpl = Number.isInteger(p.template_id) && db.prepare('SELECT body, created_at FROM templates WHERE id = ?').get(p.template_id);
       if (!tpl || (p.template_criado_em != null && tpl.created_at !== p.template_criado_em)) throw new Error('o template foi apagado');
       let link;
-      try { link = await linkAfiliado(p.loja, { url: p.url, tag: etiqueta }, { links }); } catch (e) {
+      try {
+        if (ehAmazon && !amazon) throw new Error(SEM_AMAZON);
+        // sem ASIN válido no payload, nada de resolver link na hora do envio: só o ASIN gravado ao criar vale
+        if (ehAmazon && !RE_ASIN.test(String(p.asin ?? ''))) throw new Error('o produto da Amazon está sem ASIN');
+        // Amazon: sempre https://www.amazon.com.br/dp/<ASIN>?tag=<tag>, montado do ASIN (nunca o link que veio)
+        link = ehAmazon
+          ? await lojas.linkAfiliado('amazon', { url: urlDoAsin(p.asin), asin: p.asin }, { links, amazon })
+          : await lojas.linkAfiliado(p.loja, { url: p.url, tag: etiqueta }, { links, amazon });
+      } catch (e) {
         throw new Error(`link de afiliado não gerado: ${e?.message || 'erro desconhecido'}`);
       }
       const texto = renderTemplate(tpl.body, { ...p.offer, link }, tplOpts(db));
-      const foto = IMAGEM_PERMITIDA.test(p.offer?.image || '') ? p.offer.image : null;
-      const ok = `Enviado com a etiqueta ${etiqueta}`;
+      // foto: a enviada pelo painel (Buffer) ou a URL que a loja devolveu, só de CDN permitido (o Baileys baixa a URL)
+      let foto = null; let mimetype = null;
+      if (p.enviar_foto !== false && p.upload) {
+        const m = UPLOAD_ID.exec(String(p.upload));
+        if (!m || !pastaFotos) throw new Error('a foto não foi encontrada');
+        try { foto = await fs.promises.readFile(path.join(pastaFotos, m[0])); } catch { throw new Error('a foto não foi encontrada (foi apagada?)'); }
+        mimetype = MIME[m[1]];
+      } else if (p.enviar_foto !== false && p.offer?.image && lojas.imagemPermitida(p.loja, p.offer.image)) foto = p.offer.image;
+      const ok = ehAmazon ? 'Enviado com a tag de associado da Amazon' : `Enviado com a etiqueta ${etiqueta}`;
       return {
         async enviar(jid) {
           if (foto) {
-            try { await wa.sendImage(jid, foto, texto); return ok; } catch { /* cai para o texto, como as regras */ }
+            try { await wa.sendImage(jid, foto, texto, ...(mimetype ? [{ mimetype }] : [])); return ok; } catch { /* cai para o texto, como as regras */ }
             await wa.sendText(jid, texto); return `${ok} (sem a foto: ela não carregou)`;
           }
           await wa.sendText(jid, texto); return ok;
@@ -366,7 +598,7 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
     }
     if (p.imagem === 'previa') {
       let previa = p.previa || {};
-      try { previa = await previaDoLink(p.previa_url, { ml }); } catch { /* usa a prévia lida ao criar */ }
+      try { previa = await lojas.previaDoLink(p.previa_url, { ml }); } catch { /* usa a prévia lida ao criar */ }
       const opcoes = { previa: { ...previa, url: p.previa_url } };
       return { async enviar(jid) { await wa.sendText(jid, texto, opcoes); return 'Mensagem enviada com prévia do link'; } };
     }
@@ -409,7 +641,7 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
     }
     if (ocorrencia == null) { ocorrencia = Date.now(); db.prepare('UPDATE envios SET next_run_at = ? WHERE id = ?').run(ocorrencia, n); }
     const p = lerJson(e.payload, {});
-    const log = logDe(e, tituloDe(e.tipo, p));
+    const log = logDe(e, p);
     let ok = 0; let erro = 0; let motivo = null;
     try {
       const jids = lerJson(e.group_jids, []);
@@ -459,7 +691,7 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
 
   /** Agendado que perdeu o horário: o único vira erro; o repetido pula para a próxima ocorrência. */
   function perdeuHorario(e, now) {
-    const log = logDe(e, tituloDe(e.tipo, lerJson(e.payload, {})));
+    const log = logDe(e, lerJson(e.payload, {}));
     if (e.quando === 'repetir') {
       const prox = proximaOcorrencia(lerJson(e.repetir, null), now);
       const r = db.prepare("UPDATE envios SET status = ?, next_run_at = ? WHERE id = ? AND status = 'pendente' AND next_run_at = ?")
@@ -556,9 +788,10 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
     let nomes;
     try { nomes = fs.readdirSync(pastaFotos); } catch { return 0; } // ainda não houve upload
     const uso = new Map(); // id -> { ativo, ultimo }
-    for (const e of db.prepare("SELECT status, last_run_at, payload FROM envios WHERE tipo = 'mensagem'").all()) {
+    // a foto da mensagem (imagem 'upload') e a trocada na oferta da Amazon (payload.upload)
+    for (const e of db.prepare("SELECT tipo, status, last_run_at, payload FROM envios WHERE tipo IN ('mensagem','oferta')").all()) {
       const p = lerJson(e.payload, {});
-      if (p?.imagem !== 'upload' || !UPLOAD_ID.test(String(p.upload || ''))) continue;
+      if ((e.tipo === 'mensagem' && p?.imagem !== 'upload') || !UPLOAD_ID.test(String(p?.upload || ''))) continue;
       const u = uso.get(p.upload) || { ativo: false, ultimo: 0 };
       if (ATIVOS.includes(e.status)) u.ativo = true;
       u.ultimo = Math.max(u.ultimo, e.last_run_at || 0);
@@ -600,6 +833,7 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
 
   return {
     criar,
+    identificar: identificarLink,
     processarPendentes,
     runEnvio,
     gravarFoto,
@@ -658,25 +892,6 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
       }
       return { envios, fotos: limparFotos(now) };
     },
-  };
-}
-
-/** POST /api/disparo/identificar: loja do link e, se integrada, o produto e o texto com o template. */
-async function identificarLink(corpo, { db, ml }) {
-  const url = typeof corpo?.url === 'string' ? corpo.url.trim() : '';
-  if (!url) throw new Error('Cole o link do produto.');
-  const loja = url.length <= MAX_URL ? identificar(url) : null;
-  if (!loja) throw new Error(NAO_RECONHECI);
-  if (!loja.implementada) {
-    return { loja, motivo: new LojaNaoConectada(loja).message, produto: null, texto: null, template_id: null, etiqueta: null };
-  }
-  const template = templateDe(db, corpo.template_id);
-  const etiqueta = etiquetaDe(db, corpo.tag_id, { exigir: false });
-  const produto = await lerOferta(loja.id, url, ml);
-  return {
-    loja, motivo: null, produto,
-    texto: renderTemplate(template.body, { ...produto, link: LINK_EXEMPLO }, tplOpts(db)),
-    template_id: template.id, etiqueta,
   };
 }
 
@@ -827,7 +1042,8 @@ function extensaoDaFoto(req) {
 export function montarRotas(app, ctx) {
   const { wrap } = ctx;
   const fila = () => ctx.scheduler.envios;
-  app.post('/api/disparo/identificar', wrap((req) => identificarLink(req.body, ctx)));
+  // o Identificar usa o ml, o amazon e o lojas da fila de envios: os mesmos que vão ler o produto e montar o link
+  app.post('/api/disparo/identificar', wrap((req) => fila().identificar(req.body)));
   app.get('/api/envios', wrap((req) => fila().painel(String(req.query.tipo ?? 'oferta'))));
   app.post('/api/envios', wrap((req) => fila().criar(req.body, { userId: req.user?.id ?? null })));
   for (const acao of ['cancelar', 'pausar', 'retomar']) app.post(`/api/envios/:id/${acao}`, wrap((req) => fila()[acao](req.params.id)));

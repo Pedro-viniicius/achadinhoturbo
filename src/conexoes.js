@@ -7,10 +7,15 @@
 //
 // Mercado Livre: a "configuração" dele são as etiquetas (tabela tags, seção "Etiquetas de afiliado") mais a
 // extensão do Chrome. Não há campo para salvar aqui; o estado vem do mesmo que o /api/state mostra.
+//
+// Amazon (plano espelhamento-amazon, etapa 7): a tag e a versão da credencial são texto; o ID e o segredo da
+// credencial são segredo. O "Testar" é real (amazon.testar de src/amazon.js, injetado) e a resposta só carrega
+// frases fixas desta tela: nada do que a Amazon devolveu (corpo, token) chega ao navegador. Salvar esquece o token.
 
 import { PLATAFORMAS } from './lojas.js';
 import { getSetting } from './db.js';
 import { DRY_RUN } from './config.js';
+import { ErroAmazon, MENSAGENS_AMAZON } from './amazon.js';
 
 /** Erro com status HTTP e mensagem pronta para a tela. Nunca carrega valor vindo do corpo. */
 class ErroConexao extends Error {
@@ -51,6 +56,42 @@ function lerLista(texto) {
   try { const a = JSON.parse(texto); return Array.isArray(a) ? a : []; } catch { return []; }
 }
 
+/**
+ * Valores salvos da conexão (texto e segredo), só os campos do registro e só texto não vazio. USO INTERNO do
+ * servidor (ex.: `lerConexao` de createAmazon): nunca vai para resposta, log, console ou mensagem de erro.
+ */
+export function segredosDe(db, id) {
+  const p = plataformaDe(id);
+  const linha = db.prepare('SELECT config, segredos FROM conexoes WHERE plataforma = ?').get(p.id);
+  const config = lerJson(linha?.config);
+  const segredos = lerJson(linha?.segredos);
+  const valores = {};
+  for (const c of p.campos) {
+    const v = (c.tipo === 'segredo' ? segredos : config)[c.nome];
+    if (typeof v === 'string' && v) valores[c.nome] = v;
+  }
+  return valores;
+}
+
+// "Testar" da Amazon: frases da spec por resultado. A resposta só leva estas frases (nunca o texto de um erro).
+const FRASES_TESTE_AMAZON = Object.freeze({
+  ok: 'Credencial aceita pela Amazon.',
+  nao_configurada: 'Preencha o ID e o segredo da credencial e salve antes de testar.',
+  recusada: MENSAGENS_AMAZON.credenciais_invalidas,
+  sem_acesso: MENSAGENS_AMAZON.sem_acesso,
+  tag_invalida: MENSAGENS_AMAZON.tag_invalida,
+  indisponivel: MENSAGENS_AMAZON.indisponivel, // cota e instabilidade: a mesma frase (spec)
+});
+const SEM_TAG_NO_TESTE = ' Cadastre a tag de associado para conferir o acesso à API.';
+// ErroAmazon.tipo → resultado do teste
+const RESULTADO_DO_ERRO = Object.freeze({
+  sem_credenciais: 'nao_configurada', sem_tag: 'nao_configurada', credenciais_invalidas: 'recusada',
+  sem_acesso: 'sem_acesso', tag_invalida: 'tag_invalida', cota: 'indisponivel', nao_encontrado: 'indisponivel',
+  indisponivel: 'indisponivel',
+});
+const CAMPOS_TESTE = ['title', 'price', 'oldPrice', 'discountPct', 'image']; // o que o teste diz que veio da API
+const ACESSOS = ['nao_configurada', 'desconhecido', 'ok', 'sem_acesso', 'credenciais_invalidas', 'tag_invalida', 'cota', 'indisponivel'];
+
 /** Mensagem de erro do campo, ou ''. Nunca inclui o valor (pode ser um segredo). */
 function validarCampo(c, valor) {
   if (valor.length > c.max) return `${c.rotulo}: até ${c.max} caracteres.`;
@@ -61,11 +102,25 @@ function validarCampo(c, valor) {
 }
 
 /**
- * Regra das conexões. db: banco aberto; links: serviço de links (status da extensão).
+ * Regra das conexões. db: banco aberto; links: serviço de links (status da extensão); amazon: createAmazon
+ * (situação da API, "Testar" e invalidar o token ao salvar).
  * → { listar(verSegredos), salvar(id, corpo, verSegredos), testar(id) }
  */
-export function createConexoes({ db, links }) {
+export function createConexoes({ db, links, amazon }) {
   const linhaDe = (id) => db.prepare(`${SQL_LER} WHERE plataforma = ?`).get(id);
+
+  /** Situação da API da Amazon para o cartão: só os campos conhecidos (o motivo é uma frase fixa de amazon.js). */
+  function situacaoAmazon(temCredencial) {
+    const s = typeof amazon?.situacao === 'function' ? amazon.situacao() : null;
+    if (!s) return { acesso: temCredencial ? 'desconhecido' : 'nao_configurada', verificado_em: null, motivo: null };
+    return {
+      acesso: ACESSOS.includes(s.acesso) ? s.acesso : 'desconhecido',
+      verificado_em: Number.isFinite(s.verificado_em) ? s.verificado_em : null,
+      motivo: Object.values(MENSAGENS_AMAZON).includes(s.motivo) ? s.motivo : null,
+    };
+  }
+
+  const espelhosAtivos = () => db.prepare('SELECT COUNT(*) AS n FROM espelhos WHERE enabled = 1').get().n;
 
   /** Mercado Livre: etiqueta cadastrada, modo de link e extensão, como o /api/state e o cartão do painel. */
   function situacaoML() {
@@ -99,10 +154,18 @@ export function createConexoes({ db, links }) {
       if (c.tipo === 'segredo') { if (nomesSalvos.has(c.nome)) segredosSalvos.push(c.nome); }
       else if (typeof salvo[c.nome] === 'string') config[c.nome] = salvo[c.nome];
     }
+    const comum = { ...base, campos: p.campos.map(descreverCampo), config, ...(verSegredos ? { segredos_salvos: segredosSalvos } : {}) };
+    if (p.id === 'amazon') {
+      // falta_configurar (sem tag) | so_tag (tag sem credencial: dados do texto da origem) | pronta (tag e
+      // credencial, API ainda não confirmada) | conectada (a última consulta com estas credenciais e tag deu certo)
+      const temCredencial = nomesSalvos.has('credencial_id') && nomesSalvos.has('credencial_secret');
+      const situacao = situacaoAmazon(temCredencial);
+      const estado = !config.tag ? 'falta_configurar' : !temCredencial ? 'so_tag' : situacao.acesso === 'ok' ? 'conectada' : 'pronta';
+      return { ...comum, estado, situacao, espelhos_ativos: espelhosAtivos(), updated_at: linha?.updated_at ?? null };
+    }
     const completo = p.campos.length > 0 && p.campos.every((c) => (c.tipo === 'segredo' ? nomesSalvos.has(c.nome) : !!config[c.nome]));
     const estado = !p.implementada ? 'nao_implementada' : completo ? 'pronta' : 'falta_configurar';
-    return { ...base, campos: p.campos.map(descreverCampo), config, ...(verSegredos ? { segredos_salvos: segredosSalvos } : {}),
-      estado, updated_at: linha?.updated_at ?? null };
+    return { ...comum, estado, updated_at: linha?.updated_at ?? null };
   }
 
   function listar(verSegredos) {
@@ -136,17 +199,47 @@ export function createConexoes({ db, links }) {
     if (erros.length) throw new ErroConexao(400, erros.map((e) => e.msg).join(' '), { erros });
     if (Object.keys(config).length || Object.keys(segredos).length) {
       db.prepare(SQL_GRAVAR).run({ id: p.id, config: JSON.stringify(config), segredos: JSON.stringify(segredos), agora: Date.now() });
+      if (p.id === 'amazon') amazon?.invalidarToken?.(); // credencial ou tag nova: token e situação velhos não valem
     }
     return visao(p, linhaDe(p.id), verSegredos);
   }
 
-  /** "Testar": { ok, mensagem }. Só o Mercado Livre tem o que testar; as outras dizem que não existem ainda. */
-  function testar(id) {
+  /** Resultado do teste a partir de um erro: ErroAmazon pelo tipo; qualquer outro vira 'indisponivel'. */
+  function falhaDoTeste(e) {
+    if (!(e instanceof ErroAmazon)) console.error('[conexões] teste da Amazon falhou:', e?.name || 'erro'); // sem e.message
+    const tipo = e instanceof ErroAmazon ? e.tipo : 'indisponivel';
+    const resultado = RESULTADO_DO_ERRO[tipo] ?? 'indisponivel';
+    const mensagem = tipo === 'sem_tag' ? MENSAGENS_AMAZON.sem_tag : FRASES_TESTE_AMAZON[resultado];
+    return { ok: false, resultado, mensagem, campos: [] };
+  }
+
+  /**
+   * "Testar" da Amazon: token (prova a credencial) e, com tag, um GetItems de teste (amazon.testar).
+   * → { ok, resultado: 'ok'|'nao_configurada'|'recusada'|'sem_acesso'|'tag_invalida'|'indisponivel', mensagem, campos }
+   */
+  async function testarAmazon() {
+    if (typeof amazon?.testar !== 'function') {
+      return { ok: false, resultado: 'indisponivel', mensagem: 'O teste da Amazon não está disponível agora.', campos: [] };
+    }
+    let r;
+    try { r = await amazon.testar(); } catch (e) { return falhaDoTeste(e); }
+    const vindo = typeof r?.resultado === 'string' && Object.hasOwn(FRASES_TESTE_AMAZON, r.resultado) ? r.resultado : 'indisponivel';
+    const ok = vindo === 'ok' && r.ok === true; // nunca sucesso sem os dois sinais
+    const resultado = ok ? 'ok' : vindo === 'ok' ? 'indisponivel' : vindo;
+    let mensagem = FRASES_TESTE_AMAZON[resultado];
+    if (ok && !lerJson(linhaDe('amazon')?.config).tag) mensagem += SEM_TAG_NO_TESTE;
+    const campos = ok && Array.isArray(r.campos) ? CAMPOS_TESTE.filter((c) => r.campos.includes(c)) : [];
+    return { ok, resultado, mensagem, campos };
+  }
+
+  /** "Testar": { ok, mensagem } (+ resultado e campos na Amazon). Lojas não implementadas dizem que não existem ainda. */
+  async function testar(id) {
     const p = plataformaDe(id);
     if (p.id === 'mercadolivre') { const { ok, mensagem } = situacaoML(); return { ok, mensagem }; }
     if (!p.implementada) {
       return { ok: false, mensagem: `${p.nome} ainda não está implementada.${p.campos.length ? ' Os dados ficam salvos para quando a integração existir.' : ''}` };
     }
+    if (p.id === 'amazon') return testarAmazon();
     return { ok: false, mensagem: `O teste de ${p.nome} ainda não está disponível.` }; // nunca sucesso sem testar
   }
 
@@ -168,10 +261,13 @@ const podeVerSegredos = (req) => req.user == null || req.user.papel === 'dono';
 
 /**
  * Rotas de F4, montadas por buildApp depois do login e da checagem Host/Origin.
- * ctx = { db, wa, links, scheduler, auth, wrap, soDono, dataDir, ml, enderecoPublico }.
+ * ctx = { db, wa, links, scheduler, auth, wrap, soDono, dataDir, ml, enderecoPublico, amazon }.
+ * ctx.amazon é o cliente único do servidor (criarServicos em src/server.js), o mesmo da fila de envios: salvar a
+ * conexão invalida o token de todos e o "Testar" usa a mesma fila de 1 chamada/s. Sem ele, o teste da Amazon diz
+ * que não está disponível (createConexoes já trata).
  */
 export function montarRotas(app, ctx) {
-  const conexoes = createConexoes({ db: ctx.db, links: ctx.links });
+  const conexoes = createConexoes({ db: ctx.db, links: ctx.links, amazon: ctx.amazon ?? null });
   app.get('/api/conexoes', responder((req) => conexoes.listar(podeVerSegredos(req))));
   app.put('/api/conexoes/:id', ctx.soDono, responder((req) => conexoes.salvar(req.params.id, req.body, podeVerSegredos(req))));
   app.post('/api/conexoes/:id/testar', ctx.soDono, responder((req) => conexoes.testar(req.params.id)));

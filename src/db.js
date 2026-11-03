@@ -2,6 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { TEMPLATE_AMAZON } from './template.js';
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
@@ -75,6 +76,25 @@ CREATE TABLE IF NOT EXISTS invites (
   id INTEGER PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE, email TEXT NOT NULL COLLATE NOCASE,
   papel TEXT NOT NULL CHECK (papel IN ('dono','operador')), expires_at INTEGER NOT NULL, created_by INTEGER,
   created_at INTEGER, used_at INTEGER, canceled_at INTEGER);
+-- Espelhamento de ofertas (Amazon). origem_jids/destino_jids/palavras_bloqueadas: listas JSON. sem_preco: fila|curto.
+CREATE TABLE IF NOT EXISTS espelhos (
+  id INTEGER PRIMARY KEY, nome TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
+  origem_jids TEXT NOT NULL DEFAULT '[]', destino_jids TEXT NOT NULL DEFAULT '[]', template_id INTEGER,
+  incluir_minhas INTEGER NOT NULL DEFAULT 0, dedupe_horas INTEGER NOT NULL DEFAULT 168,
+  palavras_bloqueadas TEXT NOT NULL DEFAULT '[]', sem_preco TEXT NOT NULL DEFAULT 'fila',
+  max_por_hora INTEGER NOT NULL DEFAULT 10, janela_inicio TEXT, janela_fim TEXT, enviar_foto INTEGER NOT NULL DEFAULT 1,
+  created_at INTEGER, updated_at INTEGER);
+-- Um item por link da Amazon visto numa origem. status: recebido|processando|na_fila|enviado|duplicado|descartado|expirado|erro.
+-- fonte_dados: api|api+texto|texto|curto|manual. oferta: JSON da oferta. texto_origem vai mascarado e nunca ao navegador.
+-- Nunca há participante (autor da mensagem) aqui.
+CREATE TABLE IF NOT EXISTS espelho_itens (
+  id INTEGER PRIMARY KEY, espelho_id INTEGER NOT NULL, origem_jid TEXT NOT NULL, origem_nome TEXT, msg_id TEXT,
+  ts INTEGER NOT NULL, url TEXT NOT NULL, asin TEXT, texto_origem TEXT,
+  status TEXT NOT NULL DEFAULT 'recebido', motivo TEXT, fonte_dados TEXT, oferta TEXT,
+  envio_id INTEGER, tentativas INTEGER NOT NULL DEFAULT 0, espera_ate INTEGER, decidido_em INTEGER);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_esp_msg ON espelho_itens (espelho_id, origem_jid, msg_id, url);
+CREATE INDEX IF NOT EXISTS idx_esp_dedupe ON espelho_itens (espelho_id, asin, status, decidido_em);
+CREATE INDEX IF NOT EXISTS idx_esp_status ON espelho_itens (status, espera_ate, ts);
 `;
 
 // Colunas acrescentadas depois da primeira versão (ALTER TABLE só se faltar).
@@ -88,17 +108,22 @@ const EXTRA_COLUMNS = [
   ['sessions', 'user_id', 'INTEGER'],
 ];
 
+// "[ … ]" é um pedaço opcional: some sozinho quando algum placeholder dentro dele está vazio (renderTemplate).
+// Só vale para instalações novas; quem já tem o template "Padrão" no banco continua com o texto de antes.
 export const DEFAULT_TEMPLATE = [
   '*{TITULO_PRODUTO}*',
   '',
   '😱 De ~{PRECO_ANTIGO}~',
-  '🔥 Por *{PRECO_PRODUTO}* ({DESCONTO_PRODUTO} OFF)',
+  '🔥 Por *{PRECO_PRODUTO}*[ ({DESCONTO_PRODUTO} OFF)]',
   '⭐ {NUMERO_VENDAS}',
   '🚚 {FRETE}',
   '🎟️ Cupom: *{CUPOM}*',
   '',
   '🛒 Compre aqui: {LINK}',
 ].join('\n');
+
+/** Nome do template "Amazon" (texto em TEMPLATE_AMAZON, de template.js), semeado uma vez por openDb (setting tpl_amazon_seed). */
+export const NOME_TEMPLATE_AMAZON = 'Amazon';
 
 /** SQLite aceita só null/número/texto: converte undefined e booleanos. */
 export function nz(v) {
@@ -119,8 +144,29 @@ export function openDb(dir) {
     db.prepare('INSERT INTO templates (name, body, created_at) VALUES (?, ?, ?)')
       .run('Padrão', DEFAULT_TEMPLATE, Date.now());
   }
+  semearTemplateAmazon(db);
   if (!getSetting(db, 'ext_token')) setSetting(db, 'ext_token', crypto.randomBytes(24).toString('hex'));
   return db;
+}
+
+/**
+ * Cria o template "Amazon" uma única vez por banco, em instalação nova ou antiga. A marca tpl_amazon_seed
+ * (id do template criado) impede recriar: se o dono apagar ou renomear o template, ele não volta.
+ */
+function semearTemplateAmazon(db) {
+  if (getSetting(db, 'tpl_amazon_seed') !== null) return;
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    if (getSetting(db, 'tpl_amazon_seed') === null) {
+      const { lastInsertRowid } = db.prepare('INSERT INTO templates (name, body, created_at) VALUES (?, ?, ?)')
+        .run(NOME_TEMPLATE_AMAZON, TEMPLATE_AMAZON, Date.now());
+      setSetting(db, 'tpl_amazon_seed', Number(lastInsertRowid));
+    }
+    db.exec('COMMIT');
+  } catch (e) {
+    db.exec('ROLLBACK');
+    throw e;
+  }
 }
 
 export function getSetting(db, key, def = null) {

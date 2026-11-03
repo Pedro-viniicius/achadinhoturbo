@@ -8,12 +8,14 @@ import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import zlib from 'node:zlib';
+import vm from 'node:vm';
 import { openDb, setSetting } from '../src/db.js';
 import { buildApp } from '../src/server.js';
 import { createWhatsApp } from '../src/whatsapp.js';
 import { createLinkService } from '../src/links.js';
 import { createScheduler } from '../src/scheduler.js';
 import { createEnvios, proximaOcorrencia, limparErro, semMetadados } from '../src/envios.js';
+import { createAmazon } from '../src/amazon.js';
 
 let acessosRede = 0;
 globalThis.fetch = async () => { acessosRede++; throw new Error('rede proibida no teste'); };
@@ -27,7 +29,8 @@ const DIA = 86400000;
 const IMG = 'https://http2.mlstatic.com/D_NQ_NP_123-O.jpg';
 const URL_ML = 'https://produto.mercadolivre.com.br/MLB-1234567890-fone-bom-_JM';
 const URL_AMAZON = 'https://www.amazon.com.br/dp/B0ABC12345';
-const MSG_AMAZON = 'Amazon identificada, mas ainda não está conectada. Configure em Conexões.';
+const URL_SHOPEE = 'https://s.shopee.com.br/abc';
+const MSG_SHOPEE = 'Shopee identificada, mas ainda não está conectada. Configure em Conexões.';
 // PNG 1×1 como o sharp grava (o upload regrava a foto: este volta igual, byte a byte) e um JPEG 1×1 de verdade
 // (o upload decodifica a foto: um começo de JPEG não passa mais)
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACXBIWXMAAAsSAAALEgHS3X78AAAADUlEQVQImWNgYPhfDwACggF/NGwuCgAAAABJRU5ErkJggg==', 'base64');
@@ -175,17 +178,17 @@ test('F1: "agora" é recusado com o WhatsApp desconectado e com a extensão offl
   } finally { await s.fechar(); }
 });
 
-test('CA2: link de loja não conectada (Amazon) é recusado pelo nome, sem enviar nem gravar nada; identificar mostra o aviso', async () => {
+test('CA2: link de loja não conectada (Shopee) é recusado pelo nome, sem enviar nem gravar nada; identificar mostra o aviso', async () => {
   const s = await subir();
   try {
     s.links.poll(0);
-    const r = await s.post('/api/envios', { tipo: 'oferta', url: URL_AMAZON, group_jids: ['111@g.us'], template_id: 1, quando: 'agora' });
+    const r = await s.post('/api/envios', { tipo: 'oferta', url: URL_SHOPEE, group_jids: ['111@g.us'], template_id: 1, quando: 'agora' });
     assert.equal(r.status, 400);
-    assert.equal(r.json.erro, MSG_AMAZON);
-    const ag = await s.post('/api/envios', { tipo: 'oferta', url: 'https://amzn.to/3xYz', group_jids: ['111@g.us'], quando: 'agendado', agendar_hhmm: '23:59' });
-    assert.equal(ag.status, 400); assert.match(ag.json.erro, /^Amazon identificada/);
-    const shopee = await s.post('/api/envios', { tipo: 'oferta', url: 'https://s.shopee.com.br/abc', group_jids: ['111@g.us'] });
-    assert.equal(shopee.status, 400); assert.match(shopee.json.erro, /^Shopee identificada/);
+    assert.equal(r.json.erro, MSG_SHOPEE);
+    const ag = await s.post('/api/envios', { tipo: 'oferta', url: 'https://shp.ee/xYz', group_jids: ['111@g.us'], quando: 'agendado', agendar_hhmm: '23:59' });
+    assert.equal(ag.status, 400); assert.match(ag.json.erro, /^Shopee identificada/);
+    const magalu = await s.post('/api/envios', { tipo: 'oferta', url: 'https://www.magazineluiza.com.br/p/123', group_jids: ['111@g.us'] });
+    assert.equal(magalu.status, 400); assert.match(magalu.json.erro, /^Magalu identificada/);
 
     assert.equal(s.wa.simulated.length, 0, 'nada enviado');
     assert.equal(contar(s.db, 'SELECT COUNT(*) AS n FROM envios'), 0, 'nada gravado');
@@ -195,9 +198,9 @@ test('CA2: link de loja não conectada (Amazon) é recusado pelo nome, sem envia
     const p = (await s.get('/api/envios?tipo=oferta')).json;
     assert.deepEqual(p, { agendadas: [], contadores: { enviados: 0, na_fila: 0, com_erro: 0 }, linhas: [] });
 
-    const id = await s.post('/api/disparo/identificar', { url: URL_AMAZON, template_id: 1 });
+    const id = await s.post('/api/disparo/identificar', { url: URL_SHOPEE, template_id: 1 });
     assert.equal(id.status, 200, 'a tela mostra o aviso da loja');
-    assert.deepEqual(id.json, { loja: { id: 'amazon', nome: 'Amazon', implementada: false }, motivo: MSG_AMAZON, produto: null, texto: null, template_id: null, etiqueta: null });
+    assert.deepEqual(id.json, { loja: { id: 'shopee', nome: 'Shopee', implementada: false }, motivo: MSG_SHOPEE, produto: null, texto: null, template_id: null, etiqueta: null });
   } finally { await s.fechar(); }
 });
 
@@ -555,7 +558,8 @@ test('criar: validação por tipo e por quando; nada é gravado nem lido', async
       [{ tipo: 'mensagem', texto: 'oi', imagem: 'upload', upload: '../../disparador.db', group_jids: g }, /Escolha a foto de novo/],
       [{ tipo: 'mensagem', texto: 'oi', imagem: 'upload', upload: `${'a'.repeat(32)}.png`, group_jids: g }, /não foi encontrada/],
       [{ tipo: 'mensagem', texto: 'oi', imagem: 'previa', previa_url: '', group_jids: g }, /link da prévia/],
-      [{ tipo: 'mensagem', texto: 'oi', imagem: 'previa', previa_url: URL_AMAZON, group_jids: g }, /Amazon identificada, mas ainda não está conectada/],
+      [{ tipo: 'mensagem', texto: 'oi', imagem: 'previa', previa_url: URL_SHOPEE, group_jids: g }, /Shopee identificada, mas ainda não está conectada/],
+      [{ tipo: 'mensagem', texto: 'oi', imagem: 'previa', previa_url: URL_AMAZON, group_jids: g }, /só funciona com links do Mercado Livre/],
       [{ tipo: 'mensagem', texto: 'oi', imagem: 'previa', previa_url: 'https://exemplo.com/x', group_jids: g }, /só funciona com links do Mercado Livre/],
       [{ tipo: 'mensagem', texto: 'oi', group_jids: [] }, /ao menos um grupo/],
       [{ tipo: 'mensagem', texto: 'oi', group_jids: 'x' }, /ao menos um grupo/],
@@ -904,6 +908,451 @@ test('Q6 (template): apagado e recriado com o mesmo id não sai com o template n
     assert.equal(s.wa.simulated.length, 1);
     assert.match(s.wa.simulated[0].text, /^DEPOIS Fone Bom/, 'o envio usa o template como ele está agora');
     assert.ok(s.wa.simulated.every((x) => !/NOVO/.test(x.text)));
+  } finally { await s.fechar(); }
+});
+
+// ---------------------------------------------------------------------------------------------
+// Amazon no Disparo manual (plano espelhamento-amazon, etapa 8; CA2, CA6, CA7). A Amazon é o createAmazon de verdade com
+// um fetch falso injetado (encurtador, token e GetItems); src/lojas.js é o real (etapa 7). A fila de envios do
+// servidor é trocada por uma com o `amazon` (o server.js só passa a criar o cliente na etapa 13).
+const ASIN = 'B0FG2MD49G';
+const TAG = 'pedro-20';
+const CRED_ID = 'credencial-id-0001';
+const SEGREDO = 'segredo-super-secreto-123';
+const TOKEN = 'token-oauth-secreto-xyz';
+const IMG_AMAZON = 'https://m.media-amazon.com/images/I/71abcDEF.jpg';
+const URL_CURTO = 'https://amzn.to/3AbCdEf';
+const URL_LONGO = `https://www.amazon.com.br/Fone-Bluetooth-XYZ/dp/${ASIN}?tag=terceiro-20&crid=XYZ123&linkId=abc&ascsubtag=q`;
+const URL_BUSCA = 'https://amzn.to/busca1';
+const LINK_LIMPO = `https://www.amazon.com.br/dp/${ASIN}?tag=${TAG}`;
+const SEGREDOS = [CRED_ID, SEGREDO, TOKEN];
+
+const respJson = (status, corpo, headers = {}) => new Response(JSON.stringify(corpo), { status, headers: { 'content-type': 'application/json', ...headers } });
+const itemApi = (asin) => ({
+  asin, detailPageURL: `https://www.amazon.com.br/dp/${asin}?tag=${TAG}&linkCode=ogi`,
+  itemInfo: { title: { displayValue: 'Fone Bluetooth XYZ' } },
+  images: { primary: { large: { url: IMG_AMAZON, height: 500, width: 500 } } },
+  offersV2: { listings: [{ isBuyBoxWinner: true, availability: { type: 'IN_STOCK' }, price: { money: { amount: 99.9 }, savingBasis: { money: { amount: 199.9 } }, savings: { percentage: 50 } } }] },
+});
+
+/** fetch falso da Amazon: encurtador (301), token e GetItems. api: 'ok' | '403'. Guarda URL e método de cada chamada. */
+function fetchAmazon(estado) {
+  const chamadas = [];
+  const f = async (url, init = {}) => {
+    const u = String(url);
+    chamadas.push({ url: u, metodo: init.method || 'GET' });
+    if (u === URL_CURTO) return new Response(null, { status: 301, headers: { location: URL_LONGO } });
+    if (u === URL_BUSCA) return new Response(null, { status: 302, headers: { location: 'https://www.amazon.com.br/s?k=fone' } });
+    if (u === 'https://www.amazon.com.br/s?k=fone') return new Response('<html>busca</html>', { status: 200 });
+    if (u === 'https://api.amazon.com/auth/o2/token') return respJson(200, { access_token: TOKEN, token_type: 'bearer', expires_in: 3600 });
+    if (u === 'https://creatorsapi.amazon/catalog/v1/getItems') {
+      if (estado.api === '403') return respJson(403, { type: 'AccessDeniedException', reason: 'AssociateNotEligible', message: 'not eligible' });
+      return respJson(200, { itemsResult: { items: JSON.parse(init.body).itemIds.map(estado.item || itemApi) } });
+    }
+    throw new Error('rede não prevista no teste');
+  };
+  f.chamadas = chamadas;
+  return f;
+}
+
+/** Servidor com a Amazon: tag, credencial e API como pedido (o objeto `conexao` pode mudar no meio do teste). */
+async function subirAmazon({ tag = TAG, credenciais = true, api = 'ok', ...opcoes } = {}) {
+  const s = await subir(opcoes);
+  const estado = { api };
+  const fetchF = fetchAmazon(estado);
+  const conexao = { tag, credencial_versao: '3.1', ...(credenciais ? { credencial_id: CRED_ID, credencial_secret: SEGREDO } : {}) };
+  const amazon = createAmazon({ db: s.db, fetch: fetchF, esperar: async () => {}, lerConexao: () => conexao });
+  s.scheduler.envios = createEnvios({ db: s.db, wa: s.wa, links: s.links, ml: s.ml, fast: true, dir: s.dir, amazon });
+  return { ...s, envios: s.scheduler.envios, amazon, fetchF, estado, conexao };
+}
+
+/** Nenhum texto (resposta, log, console) traz a credencial, o segredo ou o token. */
+function semSegredo(texto, onde) {
+  for (const x of SEGREDOS) assert.ok(!String(texto).includes(x), `${onde}: vazou credencial/segredo/token`);
+}
+
+const OFERTA_API = { key: `ASIN:${ASIN}`, title: 'Fone Bluetooth XYZ', price: 99.9, oldPrice: 199.9, discountPct: 50, sold: null, freeShipping: false, coupon: null, image: IMG_AMAZON };
+const OFERTA_VAZIA = { key: `ASIN:${ASIN}`, title: null, price: null, oldPrice: null, discountPct: null, sold: null, freeShipping: null, coupon: null, image: null };
+
+test('CA6: identificar Amazon com link curto (amzn.to pelo fetch falso, só GET): produto da API, texto com link limpo e tag mascarada', async (t) => {
+  const erros = t.mock.method(console, 'error', () => {});
+  const s = await subirAmazon();
+  try {
+    const r = await s.post('/api/disparo/identificar', { url: `  ${URL_CURTO} `, template_id: 1, tag_id: 1 });
+    assert.equal(r.status, 200, r.txt);
+    const { texto, ...resto } = r.json;
+    assert.deepEqual(resto, {
+      loja: { id: 'amazon', nome: 'Amazon', implementada: true }, motivo: null, editavel: true, produto: OFERTA_API, causa: null,
+      template_id: 1, etiqueta: null, tag_salva: true,
+    });
+    assert.match(texto, /^\*Fone Bluetooth XYZ\*/);
+    assert.match(texto, /De ~R\$ 199,90~/); assert.match(texto, /Por \*R\$ 99,90\* \(50% OFF\)/);
+    assert.ok(texto.endsWith(`Compre aqui: https://www.amazon.com.br/dp/${ASIN}?tag=•••`), texto);
+    assert.ok(!texto.includes(TAG), 'CA7: a tag sai mascarada na prévia do painel');
+    assert.doesNotMatch(texto, /terceiro|crid|linkId|ascsubtag|linkCode/);
+    // o encurtador foi resolvido só com GET; depois token e GetItems, nos hosts fixos
+    assert.deepEqual(s.fetchF.chamadas.map((c) => `${c.metodo} ${c.url}`), [
+      `GET ${URL_CURTO}`, 'POST https://api.amazon.com/auth/o2/token', 'POST https://creatorsapi.amazon/catalog/v1/getItems',
+    ]);
+    semSegredo(r.txt, 'identificar');
+    assert.equal(erros.mock.callCount(), 0);
+  } finally { await s.fechar(); }
+});
+
+test('CA6: identificar Amazon sem dados: API em 403 → campos nulos e causa sem_acesso; sem credencial; sem tag (sem rede); não é produto', async () => {
+  const s = await subirAmazon({ api: '403' });
+  try {
+    const r = await s.post('/api/disparo/identificar', { url: URL_CURTO, template_id: 1 });
+    assert.equal(r.status, 200, r.txt);
+    assert.deepEqual([r.json.causa, r.json.editavel, r.json.tag_salva, r.json.produto], ['sem_acesso', true, true, OFERTA_VAZIA]);
+    assert.ok(r.json.texto.includes(`https://www.amazon.com.br/dp/${ASIN}?tag=•••`), 'o link já foi resolvido e leva a tag');
+    assert.doesNotMatch(r.json.texto, /De ~|Por \*/, 'sem preço, as linhas de preço somem: nada é inventado');
+    semSegredo(r.txt, 'identificar 403');
+    assert.equal(s.amazon.situacao().acesso, 'sem_acesso');
+
+    // sem credencial: a API nem é chamada (só o encurtador já resolvido no cache)
+    delete s.conexao.credencial_id; delete s.conexao.credencial_secret;
+    const antes = s.fetchF.chamadas.length;
+    const semCred = await s.post('/api/disparo/identificar', { url: `https://www.amazon.com.br/dp/${ASIN}`, template_id: 1 });
+    assert.deepEqual([semCred.json.causa, semCred.json.produto], ['sem_credenciais', OFERTA_VAZIA]);
+    assert.equal(s.fetchF.chamadas.length, antes, 'sem credencial: nenhuma chamada de rede');
+
+    // sem tag: causa sem_tag sem resolver o link nem consultar a API
+    s.conexao.tag = '';
+    const semTag = await s.post('/api/disparo/identificar', { url: 'https://amzn.to/outroLink', template_id: 1 });
+    assert.equal(semTag.status, 200);
+    assert.deepEqual(semTag.json, {
+      loja: { id: 'amazon', nome: 'Amazon', implementada: true }, motivo: null, editavel: true, produto: null, causa: 'sem_tag',
+      texto: null, template_id: 1, etiqueta: null, tag_salva: false,
+    });
+    assert.equal(s.fetchF.chamadas.length, antes, 'sem tag: nenhuma chamada de rede');
+
+    // link que chega a uma busca (não é produto) e link de host da Amazon que não leva a lugar nenhum
+    s.conexao.tag = TAG; s.estado.api = 'ok';
+    const busca = await s.post('/api/disparo/identificar', { url: URL_BUSCA, template_id: 1 });
+    assert.deepEqual([busca.status, busca.json.causa, busca.json.produto, busca.json.texto], [200, 'nao_produto', null, null]);
+    const invalido = await s.post('/api/disparo/identificar', { url: 'https://amzn.to/naoexiste', template_id: 1 });
+    assert.deepEqual([invalido.status, invalido.json.causa, invalido.json.produto], [200, 'invalido', null]);
+    for (const [corpo, erro] of [
+      [{ url: 'https://amazon.com.br.evil.com/dp/B0FG2MD49G' }, /Não reconheci este link/],
+      [{ url: URL_CURTO, template_id: 999 }, /Template não encontrado/],
+    ]) {
+      const e = await s.post('/api/disparo/identificar', corpo);
+      assert.equal(e.status, 400, JSON.stringify(corpo)); assert.match(e.json.erro, erro);
+    }
+  } finally { await s.fechar(); }
+});
+
+test('CA6/CA2: oferta da Amazon "agora" com ajustes: imagem da API com legenda ajustada e link .../dp/<ASIN>?tag= em cada grupo', async (t) => {
+  const erros = t.mock.method(console, 'error', () => {});
+  const s = await subirAmazon();
+  try {
+    s.links.modo = () => 'extension'; // a Amazon não usa a extensão do Chrome: offline não impede
+    const r = await s.post('/api/envios', {
+      tipo: 'oferta', url: URL_CURTO, template_id: 1, tag_id: 99, group_jids: ['111@g.us', '222@g.us'], quando: 'agora',
+      ajustes: {
+        title: '  Fone   Ajustado\nPro ', price: '79,90', oldPrice: '159,80', coupon: 'DESC10', freeShipping: true,
+        image: 'https://evil.example/x.jpg', link: 'https://evil.example/link', url: 'https://evil.example', // ignorados
+      },
+      offer: { title: 'Do navegador', image: 'https://evil.example/y.jpg' }, // ignorado
+    });
+    assert.equal(r.status, 200, r.txt);
+    assert.equal(await terminar(s.db, r.json.id), 'concluido');
+    assert.equal(s.wa.simulated.length, 2);
+    for (const [i, jid] of ['111@g.us', '222@g.us'].entries()) {
+      const msg = s.wa.simulated[i];
+      assert.deepEqual([msg.tipo, msg.jid, msg.image], ['image', jid, IMG_AMAZON], 'foto pela URL que a API devolveu');
+      assert.match(msg.text, /^\*Fone Ajustado Pro\*/);
+      assert.match(msg.text, /De ~R\$ 159,80~/); assert.match(msg.text, /Por \*R\$ 79,90\* \(50% OFF\)/);
+      assert.match(msg.text, /Frete grátis/); assert.match(msg.text, /Cupom: \*DESC10\*/);
+      assert.ok(msg.text.endsWith(`Compre aqui: ${LINK_LIMPO}`), msg.text);
+      assert.doesNotMatch(msg.text, /evil|terceiro|crid|linkId|ascsubtag|linkCode|navegador/);
+    }
+    const payload = JSON.parse(s.db.prepare('SELECT payload FROM envios WHERE id = ?').get(r.json.id).payload);
+    assert.deepEqual(payload, {
+      url: URL_CURTO, loja: 'amazon', tag_id: null, etiqueta: null, template_id: 1, template_criado_em: payload.template_criado_em,
+      origem: { tipo: 'manual' }, asin: ASIN, fonte_dados: 'manual',
+      offer: { key: `ASIN:${ASIN}`, title: 'Fone Ajustado Pro', price: 79.9, oldPrice: 159.8, discountPct: 50, sold: null, freeShipping: true, coupon: 'DESC10', image: IMG_AMAZON },
+    });
+    assert.deepEqual(linhas(s.db, "SELECT rule_name, level, group_name, offer_title, message FROM log ORDER BY id"), [
+      { rule_name: 'Disparo manual', level: 'ok', group_name: 'Achadinhos', offer_title: 'Fone Ajustado Pro', message: 'Enviado com a tag de associado da Amazon' },
+      { rule_name: 'Disparo manual', level: 'ok', group_name: 'Tech', offer_title: 'Fone Ajustado Pro', message: 'Enviado com a tag de associado da Amazon' },
+    ]);
+    const p = await s.get('/api/envios?tipo=oferta');
+    assert.deepEqual(p.json.linhas.map((l) => [l.titulo, l.loja, l.status]), [['Fone Ajustado Pro', 'Amazon', 'enviado'], ['Fone Ajustado Pro', 'Amazon', 'enviado']]);
+    for (const [onde, txt] of [['POST', r.txt], ['GET', p.txt], ['log', JSON.stringify(linhas(s.db, 'SELECT * FROM log'))], ['envios', JSON.stringify(linhas(s.db, 'SELECT * FROM envios'))]]) semSegredo(txt, onde);
+    assert.equal(erros.mock.callCount(), 0);
+
+    // sem ajustes: sai como a API mandou (fonte 'api'); preço antigo menor que o atual não vira linha "De"
+    s.wa.simulated.length = 0;
+    const api = await s.post('/api/envios', { tipo: 'oferta', url: `https://www.amazon.com.br/dp/${ASIN}`, template_id: 1, group_jids: ['111@g.us'] });
+    assert.equal(await terminar(s.db, api.json.id), 'concluido');
+    assert.match(s.wa.simulated[0].text, /^\*Fone Bluetooth XYZ\*/); assert.match(s.wa.simulated[0].text, /Por \*R\$ 99,90\* \(50% OFF\)/);
+    assert.equal(JSON.parse(s.db.prepare('SELECT payload FROM envios WHERE id = ?').get(api.json.id).payload).fonte_dados, 'api');
+    s.wa.simulated.length = 0;
+    const menor = await s.post('/api/envios', { tipo: 'oferta', url: URL_CURTO, template_id: 1, group_jids: ['111@g.us'], ajustes: { price: 120, oldPrice: '99,00' } });
+    assert.equal(await terminar(s.db, menor.json.id), 'concluido');
+    assert.doesNotMatch(s.wa.simulated[0].text, /De ~|OFF/, 'preço antigo menor ou igual ao atual some');
+    assert.match(s.wa.simulated[0].text, /Por \*R\$ 120,00\*/);
+    const { offer } = JSON.parse(s.db.prepare('SELECT payload FROM envios WHERE id = ?').get(menor.json.id).payload);
+    assert.deepEqual([offer.price, offer.oldPrice, offer.discountPct], [120, null, 0], 'o payload não guarda preço antigo inválido');
+  } finally { await s.fechar(); }
+});
+
+// R5: a API pode trazer só savings.percentage (sem savingBasis). O desconto da API vale enquanto os preços são os da API;
+// mexeu num preço, recalcula. O painel (dadosOferta em public/disparos.js) faz a mesma conta, e o teste abaixo confere.
+test('R5: Amazon só com percentual da API (sem preço antigo): o desconto da API fica enquanto os preços não mudam e recalcula quando mudam', async () => {
+  const s = await subirAmazon();
+  s.estado.item = (asin) => ({
+    asin, itemInfo: { title: { displayValue: 'Fone Bluetooth XYZ' } }, images: { primary: { large: { url: IMG_AMAZON } } },
+    offersV2: { listings: [{ isBuyBoxWinner: true, price: { money: { amount: 80 }, savings: { percentage: 20 } } }] },
+  });
+  try {
+    const mandar = async (ajustes) => {
+      s.wa.simulated.length = 0;
+      const r = await s.post('/api/envios', { tipo: 'oferta', url: URL_CURTO, template_id: 1, group_jids: ['111@g.us'], ...(ajustes ? { ajustes } : {}) });
+      assert.equal(r.status, 200, r.txt);
+      assert.equal(await terminar(s.db, r.json.id), 'concluido');
+      const { offer, fonte_dados } = JSON.parse(s.db.prepare('SELECT payload FROM envios WHERE id = ?').get(r.json.id).payload);
+      return { offer, fonte_dados, texto: s.wa.simulated[0].text };
+    };
+    const sem = await mandar(null);
+    assert.deepEqual([sem.offer.price, sem.offer.oldPrice, sem.offer.discountPct, sem.fonte_dados], [80, null, 20, 'api']);
+    assert.match(sem.texto, /\(20% OFF\)/);
+    // o painel manda os mesmos preços (e o título que já estava): nada mudou, o desconto da API continua
+    const igual = await mandar({ title: 'Fone Bluetooth XYZ', price: 80, oldPrice: null, coupon: null, freeShipping: false });
+    assert.equal(igual.offer.discountPct, 20); assert.match(igual.texto, /\(20% OFF\)/); assert.equal(igual.fonte_dados, 'api');
+    // só o cupom mudou: preços intactos, desconto da API
+    const cupom = await mandar({ coupon: 'DESC10' });
+    assert.equal(cupom.offer.discountPct, 20); assert.equal(cupom.fonte_dados, 'manual');
+    // preço mexido: recalcula (sem preço antigo, não há desconto)
+    const preco = await mandar({ price: '70,00' });
+    assert.equal(preco.offer.discountPct, 0); assert.doesNotMatch(preco.texto, /OFF/);
+    // com os dois preços, o desconto sai da conta
+    const dois = await mandar({ price: 80, oldPrice: 100 });
+    assert.equal(dois.offer.discountPct, 20);
+  } finally { await s.fechar(); }
+});
+
+/** Carrega public/disparos.js num vm com o mínimo de DOM e devolve `dadosOferta` (o painel). Nada de rede. */
+function carregarDadosOferta() {
+  const campo = () => ({ value: '', checked: false, oninput: null, onchange: null, onclick: null, focus() {}, setAttribute() {}, getAttribute: () => null });
+  const falso = () => ({ hidden: false, textContent: '', className: '', src: '', ...campo(), getAttribute: () => null });
+  const ctx = {
+    console, setTimeout, clearTimeout, Number, String, Math, Date, JSON, Array, Object, RegExp, URL, Intl, Promise, Symbol, Error, Set, Map,
+    document: { createElement: () => { const campos = new Map(); return { dataset: {}, set innerHTML(v) {}, elements: { namedItem: (n) => { if (!campos.has(n)) campos.set(n, campo()); return campos.get(n); } } }; }, getElementById: () => null, activeElement: null, body: falso() },
+    $: () => falso(), $$: () => [], esc: (x) => String(x), zap: (x) => String(x), REQ: '*', S: { templates: [], tags: [], groups: [], st: {} },
+    seletorGrupos: () => ({ html: '', ligar() {}, marcados: () => [] }), aviso() {}, mostrarErros() {}, opcoes: () => '', q: () => '',
+    location: { hash: '' }, confirm: () => true, FileReader: class {}, fetch: async () => { throw new Error('rede proibida no teste'); },
+  };
+  vm.createContext(ctx);
+  vm.runInContext(`${fs.readFileSync(new URL('../public/disparos.js', import.meta.url), 'utf8')}\n;globalThis.__x = { dadosOferta };`, ctx);
+  return ctx.__x.dadosOferta;
+}
+
+test('R5 (painel): o desconto da API fica enquanto os preços são os da API e recalcula quando o dono mexe num preço', () => {
+  const dadosOferta = carregarDadosOferta();
+  const dados = dadosOferta({ title: 'Fone', price: 80, oldPrice: null, discountPct: 20 });
+  const campo = (n) => dados.el.elements.namedItem(n);
+  const digitar = (n, v) => { campo(n).value = v; campo(n).oninput(); };
+  assert.equal(dados.valores().discountPct, 20, 'como a prévia do servidor');
+  assert.equal(campo('desconto').value, '20%');
+  digitar('title', 'Fone melhor'); assert.equal(dados.valores().discountPct, 20, 'título não muda o desconto');
+  digitar('price', '70,00'); assert.equal(dados.valores().discountPct, 0, 'preço mexido: recalcula (sem preço antigo)');
+  assert.equal(campo('desconto').value, '—');
+  digitar('price', '80,00'); assert.equal(dados.valores().discountPct, 20, 'voltou ao preço da API');
+  digitar('oldPrice', '100,00'); assert.equal(dados.valores().discountPct, 20, 'preço antigo novo: conta 80/100');
+  digitar('oldPrice', '160'); assert.equal(dados.valores().discountPct, 50);
+  dados.definir({ price: 50, oldPrice: 100, discountPct: 49 }); // o percentual da API pode diferir do arredondamento
+  assert.equal(dados.valores().discountPct, 49);
+  dados.definir({ price: 50, oldPrice: 100 }); assert.equal(dados.valores().discountPct, 50, 'sem percentual da API: a conta');
+  dados.definir({ price: 50, oldPrice: 100, discountPct: 150 }); assert.equal(dados.valores().discountPct, 50, 'percentual absurdo: a conta');
+  dados.definir({}); assert.equal(dados.valores().discountPct, 0);
+});
+
+test('CA6: Amazon com a API em 403: o dono preenche e a oferta sai só com texto; sem título, é recusada', async () => {
+  const s = await subirAmazon({ api: '403' });
+  try {
+    const semTitulo = await s.post('/api/envios', { tipo: 'oferta', url: URL_CURTO, template_id: 1, group_jids: ['111@g.us'], ajustes: { price: '50' } });
+    assert.equal(semTitulo.status, 400); assert.equal(semTitulo.json.erro, 'Não consegui buscar os dados na Amazon: preencha o título do produto.');
+    assert.equal(contar(s.db, 'SELECT COUNT(*) AS n FROM envios'), 0);
+    const r = await s.post('/api/envios', { tipo: 'oferta', url: URL_CURTO, template_id: 1, group_jids: ['111@g.us'], ajustes: { title: 'Fone à mão', price: '1.299,90' } });
+    assert.equal(r.status, 200, r.txt);
+    assert.equal(await terminar(s.db, r.json.id), 'concluido');
+    const [msg] = s.wa.simulated;
+    assert.equal(msg.tipo, 'text', 'sem foto da API, só texto');
+    assert.match(msg.text, /^\*Fone à mão\*/); assert.match(msg.text, /Por \*R\$ 1\.299,90\*$/m);
+    assert.ok(msg.text.endsWith(`Compre aqui: ${LINK_LIMPO}`));
+    assert.equal(JSON.parse(s.db.prepare('SELECT payload FROM envios WHERE id = ?').get(r.json.id).payload).fonte_dados, 'manual');
+  } finally { await s.fechar(); }
+});
+
+test('CA6: Amazon com foto trocada (upload) manda o Buffer com o tipo; "sem foto" manda só texto; a foto da oferta ativa não é apagada', async () => {
+  const s = await subirAmazon();
+  try {
+    const up = await s.upload(PNG, 'image/png');
+    assert.equal(up.status, 200, up.txt);
+    const r = await s.post('/api/envios', { tipo: 'oferta', url: URL_CURTO, template_id: 1, group_jids: ['111@g.us'], ajustes: { upload: up.json.id } });
+    assert.equal(r.status, 200, r.txt);
+    assert.equal(await terminar(s.db, r.json.id), 'concluido');
+    assert.deepEqual(s.wa.simulated[0], { tipo: 'image', jid: '111@g.us', text: s.wa.simulated[0].text, image: { bytes: PNG.length }, mimetype: 'image/png' });
+    assert.ok(s.wa.simulated[0].text.endsWith(`Compre aqui: ${LINK_LIMPO}`));
+    const payload = JSON.parse(s.db.prepare('SELECT payload FROM envios WHERE id = ?').get(r.json.id).payload);
+    assert.deepEqual([payload.upload, payload.fonte_dados, payload.offer.image], [up.json.id, 'manual', IMG_AMAZON]);
+
+    const sem = await s.post('/api/envios', { tipo: 'oferta', url: URL_CURTO, template_id: 1, group_jids: ['111@g.us'], ajustes: { sem_foto: true } });
+    assert.equal(await terminar(s.db, sem.json.id), 'concluido');
+    assert.equal(s.wa.simulated[1].tipo, 'text');
+    assert.equal(JSON.parse(s.db.prepare('SELECT payload FROM envios WHERE id = ?').get(sem.json.id).payload).offer.image, null);
+
+    // limpeza: foto de oferta da Amazon ainda pendente fica, mesmo velha; sem envio ativo, sai
+    const velha = Date.now() - 8 * DIA;
+    fs.utimesSync(path.join(s.dir, 'uploads', up.json.id), velha / 1000, velha / 1000);
+    s.db.prepare("UPDATE envios SET status = 'pendente', next_run_at = ? WHERE id = ?").run(Date.now() + 3600000, r.json.id);
+    s.db.prepare('UPDATE envios SET last_run_at = ? WHERE id = ?').run(velha, r.json.id);
+    assert.equal((await s.envios.limpar(0)).fotos, 0, 'em uso por uma oferta pendente');
+    s.db.prepare("UPDATE envios SET status = 'concluido' WHERE id = ?").run(r.json.id);
+    assert.equal((await s.envios.limpar(0)).fotos, 1);
+  } finally { await s.fechar(); }
+});
+
+test('CA6: oferta da Amazon agendada para hoje fica pendente e sai no horário com a tag que está em Conexões na hora', async (t) => {
+  const alvo = Date.now() + 3 * 60000;
+  if (new Date(alvo).toDateString() !== new Date().toDateString()) { t.skip('perto da meia-noite: o disparo manual só agenda para hoje'); return; }
+  const T = new Date(alvo).setSeconds(0, 0);
+  const s = await subirAmazon();
+  try {
+    const r = await s.post('/api/envios', { tipo: 'oferta', url: URL_CURTO, template_id: 1, group_jids: ['111@g.us'], quando: 'agendado', agendar_hhmm: hhmmDe(alvo), ajustes: { coupon: 'HOJE5' } });
+    assert.equal(r.status, 200, r.txt);
+    assert.deepEqual([r.json.status, r.json.next_run_at], ['pendente', T]);
+    assert.equal(await s.envios.processarPendentes(T - 1000), 0, 'antes do horário não sai');
+    assert.equal(s.wa.simulated.length, 0);
+    const p = (await s.get('/api/envios?tipo=oferta')).json;
+    assert.deepEqual(p.agendadas.map((a) => [a.id, a.titulo, a.loja, a.status]), [[r.json.id, 'Fone Bluetooth XYZ', 'Amazon', 'pendente']]);
+
+    s.conexao.tag = 'nova-tag-20'; // o link é montado na hora do envio
+    assert.equal(await s.envios.processarPendentes(T + 1000), 1);
+    assert.equal(statusDe(s.db, r.json.id), 'concluido');
+    assert.match(s.wa.simulated[0].text, /Cupom: \*HOJE5\*/);
+    assert.ok(s.wa.simulated[0].text.endsWith(`Compre aqui: https://www.amazon.com.br/dp/${ASIN}?tag=nova-tag-20`));
+
+    // tag apagada depois de agendar: não sai sem tag (CA2), erro no grupo e no log
+    const r2 = await s.post('/api/envios', { tipo: 'oferta', url: URL_CURTO, template_id: 1, group_jids: ['111@g.us'], quando: 'agendado', agendar_hhmm: hhmmDe(alvo) });
+    s.conexao.tag = '';
+    await s.envios.processarPendentes(T + 1000);
+    assert.equal(statusDe(s.db, r2.json.id), 'erro');
+    assert.equal(s.wa.simulated.length, 1);
+    assert.match(s.db.prepare('SELECT erro FROM envio_resultados WHERE envio_id = ?').get(r2.json.id).erro, /^link de afiliado não gerado: Falta a tag de associado/);
+  } finally { await s.fechar(); }
+});
+
+test('Amazon: ajustes validados antes de qualquer rede (nunca image/link do navegador); sem tag e link sem produto são recusados', async () => {
+  const s = await subirAmazon();
+  try {
+    const g = ['111@g.us'];
+    const oferta = (ajustes, extra = {}) => ({ tipo: 'oferta', url: URL_CURTO, template_id: 1, group_jids: g, ajustes, ...extra });
+    const casos = [
+      [oferta('x'), /Dados da oferta inválidos/],
+      [oferta([1]), /Dados da oferta inválidos/],
+      [oferta({ title: 'a'.repeat(201) }), /título passa de 200 caracteres/],
+      [oferta({ title: 12 }), /título precisa ser texto/],
+      [oferta({ price: 'abc' }), /Preço atual inválido/],
+      [oferta({ price: -1 }), /Preço atual inválido/],
+      [oferta({ price: 0 }), /Preço atual inválido/],
+      [oferta({ price: '89,999' }), /Preço atual inválido/],
+      [oferta({ price: 1e9 }), /Preço atual inválido/],
+      [oferta({ oldPrice: '1,2,3' }), /Preço antigo inválido/],
+      [oferta({ oldPrice: true }), /Preço antigo inválido/],
+      [oferta({ coupon: 'C'.repeat(31) }), /cupom passa de 30 caracteres/],
+      [oferta({ freeShipping: 'sim' }), /Frete grátis/],
+      [oferta({ sem_foto: 'sim' }), /Foto: envie com ou sem foto/],
+      [oferta({ upload: '../../disparador.db' }), /Escolha a foto de novo/],
+      [oferta({ upload: `${'a'.repeat(32)}.png` }), /A foto não foi encontrada/],
+      [oferta({}, { group_jids: [] }), /ao menos um grupo/],
+      [oferta({}, { quando: 'repetir', repetir: { dias: TODOS, horarios: ['09:00'] } }), /agora ou agendado para hoje/],
+    ];
+    for (const [corpo, erro] of casos) {
+      const r = await s.post('/api/envios', corpo);
+      assert.equal(r.status, 400, JSON.stringify(corpo).slice(0, 120)); assert.match(r.json.erro, erro, JSON.stringify(corpo).slice(0, 120));
+    }
+    assert.equal(s.fetchF.chamadas.length, 0, 'nada foi à rede com o corpo inválido');
+
+    const up = (await s.upload(PNG, 'image/png')).json.id;
+    const ambos = await s.post('/api/envios', oferta({ upload: up, sem_foto: true }));
+    assert.match(ambos.json.erro, /Escolha entre trocar a foto e enviar sem foto/);
+
+    const busca = await s.post('/api/envios', oferta({}, { url: URL_BUSCA }));
+    assert.deepEqual([busca.status, busca.json.erro], [400, 'Este link da Amazon não leva a um produto.']);
+    const fora = await s.post('/api/envios', oferta({}, { url: 'https://amzn.to/naoexiste' }));
+    assert.deepEqual([fora.status, fora.json.erro], [400, 'Não consegui abrir este link da Amazon.']);
+
+    s.conexao.tag = '';
+    const antes = s.fetchF.chamadas.length;
+    const semTag = await s.post('/api/envios', oferta({ title: 'X' }));
+    assert.deepEqual([semTag.status, semTag.json.erro], [400, 'Falta a tag de associado da Amazon. Cadastre em Conexões → Amazon antes de disparar.']);
+    assert.equal(s.fetchF.chamadas.length, antes, 'sem tag: nem resolve o link');
+
+    assert.equal(contar(s.db, 'SELECT COUNT(*) AS n FROM envios'), 0, 'nada gravado');
+    assert.equal(s.wa.simulated.length, 0);
+  } finally { await s.fechar(); }
+});
+
+test('Amazon sem o cliente da Amazon na fila (servidor antes da ligação): oferta e identificar recusam sem gravar', async () => {
+  const s = await subir();
+  try {
+    const r = await s.post('/api/envios', { tipo: 'oferta', url: URL_AMAZON, template_id: 1, group_jids: ['111@g.us'] });
+    assert.deepEqual([r.status, r.json.erro], [400, 'A integração com a Amazon não está disponível neste servidor.']);
+    const id = await s.post('/api/disparo/identificar', { url: URL_AMAZON });
+    assert.deepEqual([id.status, id.json.erro], [400, 'A integração com a Amazon não está disponível neste servidor.']);
+    assert.equal(contar(s.db, 'SELECT COUNT(*) AS n FROM envios'), 0);
+  } finally { await s.fechar(); }
+});
+
+test('ML continua igual: exige etiqueta (nenhuma cadastrada → recusa), ignora `ajustes` e o identificar diz editavel:false', async () => {
+  const s = await subirAmazon();
+  try {
+    s.links.poll(0);
+    const ok = await s.post('/api/envios', { tipo: 'oferta', url: URL_ML, tag_id: 1, template_id: 1, group_jids: ['111@g.us'], ajustes: { title: 'Do navegador', price: 1, upload: 'x' } });
+    assert.equal(ok.status, 200, ok.txt);
+    assert.equal(await terminar(s.db, ok.json.id), 'concluido');
+    assert.match(s.wa.simulated[0].text, /^\*Fone Bom\*/); assert.match(s.wa.simulated[0].text, /meli\.la\/fake-etiquetaA-/);
+    assert.equal(s.wa.simulated[0].image, IMG);
+    const payload = JSON.parse(s.db.prepare('SELECT payload FROM envios WHERE id = ?').get(ok.json.id).payload);
+    assert.deepEqual([payload.loja, payload.tag_id, payload.etiqueta, payload.offer.title, payload.asin, payload.fonte_dados], ['mercadolivre', 1, 'etiquetaA', 'Fone Bom', undefined, undefined]);
+    const ident = await s.post('/api/disparo/identificar', { url: URL_ML });
+    assert.deepEqual([ident.json.editavel, ident.json.causa, ident.json.etiqueta], [false, null, { id: 1, name: 'etiquetaA' }]);
+
+    s.db.exec('DELETE FROM tags');
+    const sem = await s.post('/api/envios', { tipo: 'oferta', url: URL_ML, template_id: 1, group_jids: ['111@g.us'] });
+    assert.deepEqual([sem.status, sem.json.erro], [400, 'Cadastre uma etiqueta antes de disparar (Conexões → Mercado Livre).']);
+    assert.equal(s.fetchF.chamadas.length, 0, 'o Mercado Livre não fala com a Amazon');
+  } finally { await s.fechar(); }
+});
+
+test('log: envio que veio de um espelho aparece como "Espelho: <nome>", com o nome do grupo e o título', async () => {
+  const s = await subirAmazon();
+  try {
+    const tpl = s.db.prepare('SELECT created_at FROM templates WHERE id = 1').get().created_at;
+    const payload = {
+      url: URL_CURTO, loja: 'amazon', asin: ASIN, tag_id: null, etiqueta: null, template_id: 1, template_criado_em: tpl, fonte_dados: 'texto',
+      origem: { tipo: 'espelho', espelho_id: 3, nome: 'Eletrônicos  do grupo X' }, offer: { ...OFERTA_API, image: 'https://evil.example/z.jpg' },
+    };
+    const id = Number(s.db.prepare(`INSERT INTO envios (tipo, payload, group_jids, quando, status, next_run_at, created_at)
+      VALUES ('oferta', ?, ?, 'agora', 'pendente', ?, ?)`).run(JSON.stringify(payload), JSON.stringify(['222@g.us']), Date.now(), Date.now()).lastInsertRowid);
+    await s.envios.runEnvio(id);
+    assert.equal(statusDe(s.db, id), 'concluido');
+    assert.equal(s.wa.simulated[0].tipo, 'text', 'foto fora do CDN da Amazon não é baixada');
+    assert.ok(s.wa.simulated[0].text.endsWith(`Compre aqui: ${LINK_LIMPO}`));
+    assert.deepEqual(linhas(s.db, 'SELECT rule_id, rule_name, group_name, offer_title, message FROM log'),
+      [{ rule_id: null, rule_name: 'Espelho: Eletrônicos do grupo X', group_name: 'Tech', offer_title: 'Fone Bluetooth XYZ', message: 'Enviado com a tag de associado da Amazon' }]);
+
+    // payload sem ASIN válido: não resolve link na hora do envio (sem rede), vira erro
+    const semAsin = Number(s.db.prepare(`INSERT INTO envios (tipo, payload, group_jids, quando, status, next_run_at, created_at)
+      VALUES ('oferta', ?, ?, 'agora', 'pendente', ?, ?)`).run(JSON.stringify({ ...payload, asin: 'undefined' }), JSON.stringify(['222@g.us']), Date.now(), Date.now()).lastInsertRowid);
+    await s.envios.runEnvio(semAsin);
+    assert.equal(statusDe(s.db, semAsin), 'erro');
+    assert.equal(s.db.prepare('SELECT erro FROM envio_resultados WHERE envio_id = ?').get(semAsin).erro, 'link de afiliado não gerado: o produto da Amazon está sem ASIN');
+    assert.equal(s.fetchF.chamadas.length, 0, 'nenhuma rede no envio');
   } finally { await s.fechar(); }
 });
 

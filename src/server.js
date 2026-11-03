@@ -11,9 +11,11 @@ import { createScheduler } from './scheduler.js';
 import * as mlPadrao from './ml.js';
 import { montarRotas as rotasEnvios } from './envios.js';
 import { montarRotas as rotasAvisos, lerConfig as configAvisos, viradaMin, limitePadrao, mascararNumero } from './avisos.js';
-import { montarRotas as rotasConexoes } from './conexoes.js';
+import { montarRotas as rotasConexoes, segredosDe } from './conexoes.js';
+import { createAmazon } from './amazon.js';
+import { montarRotas as rotasEspelho } from './espelho.js';
 import { montarRotas as rotasEquipe, montarRotasPublicas as rotasEquipePublicas } from './equipe.js';
-import { renderTemplate, SAMPLE_OFFER, PLACEHOLDERS } from './template.js';
+import { renderTemplate, SAMPLE_OFFER, SAMPLE_OFFER_AMAZON, PLACEHOLDERS } from './template.js';
 import { CATEGORIAS, ORDENS, POR_PAGINA } from './afiliados.js';
 import { overview, resumo, evasaoDoDia, periodRange, startOfDay, dayOf } from './analytics.js';
 import { MODOS, LIMITE_MAX, LOTACAO_PCT, slugify, parseLink, pickGroup, statusDosGrupos, verificarLotacao, encaixarGrupoNovo } from './rotador.js';
@@ -25,10 +27,26 @@ const LOCAL_HOST = /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i;
 const PUBLIC_PATHS = new Set(['/login.html', '/login.js', '/convite.html', '/convite.js', '/style.css', '/logo.svg', '/icon-192.png', '/healthz', '/favicon.ico',
   '/api/login', '/api/login/modo', '/api/convite/info', '/api/convite/aceitar']);
 // Política de conteúdo: só scripts do próprio painel; estilos inline e Google Fonts liberados; nada de frames.
-// Imagens: as do painel e as fotos de produto do CDN do Mercado Livre (os mesmos hosts de IMAGEM_PERMITIDA, src/ml.js).
-const CSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https://*.mlstatic.com; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'";
+// Imagens: as do painel e as fotos de produto dos CDNs das lojas: Mercado Livre (IMAGEM_PERMITIDA, src/ml.js) e
+// Amazon (IMAGEM_AMAZON, src/amazon.js; a mesma regra de lojas.imagemPermitida). Nenhum connect-src de fora.
+const CSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https://*.mlstatic.com https://*.media-amazon.com https://*.ssl-images-amazon.com https://*.images-amazon.com; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'";
 
-export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, panelPassword = PANEL_PASSWORD, dataDir = DATA_DIR, ml = mlPadrao }) {
+/**
+ * Serviços com estado que o servidor compartilha: UM cliente da Amazon (um token, uma fila de 1 chamada/s, uma
+ * "situação" da API) usado pela fila de envios do agendador, pelo espelho e pelas rotas (Conexões, Identificar do
+ * Disparo manual). Aqui também o ouvinte de mensagens do WhatsApp é ligado ao espelho: cada mensagem nova de grupo
+ * vai a espelho.receber() (síncrono, sem rede, nunca lança), que grava os itens e acorda o agendador.
+ * O main abaixo e os testes sobem por aqui. `fetch` só nos testes (padrão: o fetch global).
+ */
+export function criarServicos({ db, wa, links, fast = FAST, dir = DATA_DIR, ml = mlPadrao, fetch } = {}) {
+  const amazon = createAmazon({ db, fetch, lerConexao: () => segredosDe(db, 'amazon') });
+  const scheduler = createScheduler({ db, wa, links, fast, dir, ml, amazon });
+  wa.onMensagem((m) => scheduler.espelho.receber(m));
+  return { amazon, scheduler };
+}
+
+// amazon: o mesmo cliente do agendador (criarServicos); sem ele, as rotas tratam a Amazon como indisponível.
+export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, panelPassword = PANEL_PASSWORD, dataDir = DATA_DIR, ml = mlPadrao, amazon = scheduler?.amazon ?? null }) {
   const app = express();
   app.disable('x-powered-by');
   app.set('trust proxy', 1); // Nginx na frente: req.ip e req.secure vêm do X-Forwarded-*
@@ -193,6 +211,8 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
     afiliados: { categorias: CATEGORIAS, ordens: ORDENS, por_pagina: POR_PAGINA }, max_fontes: MAX_SOURCES,
     modos_link: MODOS, limite_max: LIMITE_MAX, lotacao_pct: LOTACAO_PCT,
     propostas_pendentes: one("SELECT COUNT(*) AS n FROM group_proposals WHERE status = 'pending'").n,
+    espelhos_na_fila: one("SELECT COUNT(*) AS n FROM espelho_itens WHERE status = 'na_fila'").n, // ofertas espelhadas esperando o dono completar
+    amostras: { amazon: SAMPLE_OFFER_AMAZON }, // oferta de exemplo para a prévia do template (sem tag no link)
   })));
 
   app.put('/api/ajustes', wrap((req) => {
@@ -212,7 +232,14 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
   app.post('/api/wa/logout', exigeDono, wrap(async (req) => { await wa.logout({ apagarEventos: !!req.body?.apagar_eventos }); }));
   // ---------- privacidade: rotação do token da extensão, limpeza e exclusão por titular ----------
   app.post('/api/ajustes/token', exigeDono, wrap(() => { setSetting(db, 'ext_token', crypto.randomBytes(24).toString('hex')); })); // fora de /api/ext/: passa pelo Host/Origin e pelo login
-  app.post('/api/privacidade/limpar', exigeDono, wrap(() => limparAntigos(db, Number(getSetting(db, 'retencao_dias', RETENCAO_PADRAO_DIAS)))));
+  // "Apagar o que já passou do prazo": a mesma retenção do início do serviço, inclusive os itens do espelhamento
+  // (que guardam o texto mascarado das mensagens dos grupos de origem)
+  app.post('/api/privacidade/limpar', exigeDono, wrap(() => {
+    const dias = Number(getSetting(db, 'retencao_dias', RETENCAO_PADRAO_DIAS));
+    const r = limparAntigos(db, dias);
+    if (scheduler?.espelho) r.espelhamento = scheduler.espelho.limpar(dias).itens;
+    return r;
+  }));
   app.post('/api/privacidade/apagar-participante', wrap((req) => {
     const id = String(req.body?.id || '').trim().slice(0, 80); if (!id) throw new Error('Informe o número (com DDI) ou o pseudônimo.');
     return privacidade.apagarParticipante(db, id);
@@ -439,17 +466,24 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
   app.post('/api/rules/:id/reset-sent', wrap((req) => { db.prepare('DELETE FROM sent_offers WHERE rule_id = ?').run(req.params.id); }));
 
   // ---------- histórico ----------
+  // ?nivel=<level> e ?tipo=automatico (só as linhas das regras do Disparo automático: só o runRule grava rule_id;
+  // Avisos, Equipe, envios avulsos e espelhamento gravam null). Os dois filtros se combinam.
   app.get('/api/log', wrap((req) => {
     const only = req.query.nivel;
+    const tipo = req.query.tipo;
+    if (tipo != null && tipo !== '' && tipo !== 'todos' && tipo !== 'automatico') throw new Error('Filtro inválido: use automatico ou todos.');
     const lim = Math.min(Number(req.query.limite) || 200, 1000);
-    return only ? all('SELECT * FROM log WHERE level = ? ORDER BY id DESC LIMIT ?', only, lim) : all('SELECT * FROM log ORDER BY id DESC LIMIT ?', lim);
+    const filtros = []; const args = [];
+    if (only) { filtros.push('level = ?'); args.push(only); }
+    if (tipo === 'automatico') filtros.push('rule_id IS NOT NULL');
+    return all(`SELECT * FROM log ${filtros.length ? `WHERE ${filtros.join(' AND ')}` : ''} ORDER BY id DESC LIMIT ?`, ...args, lim);
   }));
   // o que o modo simulado "enviou": grupo aparece; número de pessoa (destino de aviso) vai mascarado para a tela
   app.get('/api/simulados', wrap(() => wa.simulated.slice(-50).map((m) => (String(m.jid).endsWith('@g.us') ? m : { ...m, jid: mascararNumero(m.jid) }))));
 
   // ---------- features novas: cada módulo monta as próprias rotas, todas depois do Host/Origin e do login ----------
-  const ctx = { db, wa, links, scheduler, auth, wrap, soDono: exigeDono, dataDir, ml, enderecoPublico, publicHost, gravarCookie, sidDe };
-  for (const montar of [rotasEnvios, rotasAvisos, rotasConexoes, rotasEquipe]) montar(app, ctx);
+  const ctx = { db, wa, links, scheduler, auth, wrap, soDono: exigeDono, dataDir, ml, amazon, enderecoPublico, publicHost, gravarCookie, sidDe };
+  for (const montar of [rotasEnvios, rotasAvisos, rotasConexoes, rotasEspelho, rotasEquipe]) montar(app, ctx);
 
   // Erros de parsing (JSON inválido, corpo grande demais) e inesperados: resposta curta, sem stack nem caminhos.
   // eslint-disable-next-line no-unused-vars
@@ -470,15 +504,17 @@ if (import.meta.url === `file://${process.argv[1].replace(/\\/g, '/')}` || proce
   // leitura conta 1× por pessoa por dia de negócio (a virada do dia de Relatórios e avisos), como os relatórios
   const wa = createWhatsApp({ db, dir: DATA_DIR, dryRun: DRY_RUN, pseudo: (id) => pseudonimo(db, id), diaDe: (ts) => dayOf(ts, viradaMin(db)) });
   const links = createLinkService({ getMode: () => (DRY_RUN ? 'fake' : getSetting(db, 'link_mode', 'extension')) });
-  const scheduler = createScheduler({ db, wa, links, fast: FAST, dir: DATA_DIR, ml: mlPadrao });
+  const { amazon, scheduler } = criarServicos({ db, wa, links, fast: FAST, dir: DATA_DIR, ml: mlPadrao });
   let app;
-  try { app = buildApp({ db, wa, links, scheduler }); } catch (e) { console.error('ERRO:', e.message); process.exit(1); }
+  try { app = buildApp({ db, wa, links, scheduler, amazon }); } catch (e) { console.error('ERRO:', e.message); process.exit(1); }
   const retencao = () => {
     try { const r = limparAntigos(db, Number(getSetting(db, 'retencao_dias', RETENCAO_PADRAO_DIAS))); if (r.eventos || r.leituras || r.cliques) console.log(`Retenção: apagados ${r.eventos} eventos, ${r.leituras} leituras, ${r.cliques} cliques antigos.`); } catch (e) { console.error('[retenção]', e.message); }
     // envios avulsos encerrados e fotos sem uso (src/envios.js); uma falha só vai para o log
     Promise.resolve().then(() => scheduler.envios.limpar(Number(getSetting(db, 'retencao_dias', RETENCAO_PADRAO_DIAS))))
       .then((r) => { const n = Object.entries(r || {}).filter(([, v]) => v > 0); if (n.length) console.log(`Retenção (envios avulsos): apagados ${n.map(([k, v]) => `${v} ${k}`).join(', ')}.`); })
       .catch((e) => console.error('[retenção]', e.message));
+    // itens do espelhamento já decididos (guarda os 'enviado' que ainda contam para "Horas sem repetir")
+    try { const r = scheduler.espelho.limpar(Number(getSetting(db, 'retencao_dias', RETENCAO_PADRAO_DIAS))); if (r.itens) console.log(`Retenção (espelhamento): apagados ${r.itens} itens antigos.`); } catch (e) { console.error('[retenção] espelhamento:', e?.code || e?.name || 'erro'); }
   };
   retencao(); setInterval(retencao, 6 * 60 * 60 * 1000);
 

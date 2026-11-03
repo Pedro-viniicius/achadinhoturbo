@@ -4,6 +4,7 @@ import * as mlDefault from './ml.js';
 import { IMAGEM_PERMITIDA } from './ml.js';
 import { createEnvios } from './envios.js';
 import { createAvisos } from './avisos.js';
+import { createEspelho } from './espelho.js';
 import { sleep, jitter } from './util.js';
 
 // Pausas entre mensagens: moram em ./util.js (src/envios.js usa o mesmo ritmo anti-bloqueio); reexportadas aqui.
@@ -28,16 +29,20 @@ export function alignToWindow(ts, start, end) {
 }
 
 /**
- * Agendador único: regras, envios avulsos (F1/F2) e avisos (F3) passam pelo mesmo tick, para não dobrar
- * a taxa de mensagens. `dir` é a pasta de dados (fotos dos envios).
+ * Agendador único: regras, envios avulsos (F1/F2), espelhamento da Amazon e avisos (F3) passam pelo mesmo tick,
+ * para não dobrar a taxa de mensagens. `dir` é a pasta de dados (fotos dos envios). `amazon`: o cliente único de
+ * src/amazon.js (createAmazon, criado em src/server.js); sem ele, a fila de envios recusa oferta da Amazon e o
+ * espelho marca os itens com o motivo. O espelho só decide: o que ele manda sair vai pela fila de envios.
  */
-export function createScheduler({ db, wa, links, ml = mlDefault, fast = false, dir = null }) {
+export function createScheduler({ db, wa, links, ml = mlDefault, fast = false, dir = null, amazon = null }) {
   const running = new Set();
   let timer = null; let primeiro = null; let ticking = false; let recuperacao = null;
   let acordado = false; // um "agora" chegou com o tick em andamento: ele passa nos envios de novo antes de terminar
   // O "agora" não envia por conta própria: grava pendente e acorda o tick, que manda um envio de cada vez (S14)
-  const envios = createEnvios({ db, wa, links, ml, fast, dir, acordar });
+  const envios = createEnvios({ db, wa, links, ml, fast, dir, acordar, amazon });
   const avisos = createAvisos({ db, wa });
+  // receber() (ouvinte do WhatsApp) e cada envio que o espelho cria chamam acordar(): a oferta sai neste tick
+  const espelho = createEspelho({ db, wa, amazon, envios, acordar });
 
   const getRule = (id) => parseRule(db.prepare('SELECT * FROM rules WHERE id = ?').get(id));
   const delays = () => fast ? { group: 0, offer: 0 } : {
@@ -154,13 +159,23 @@ export function createScheduler({ db, wa, links, ml = mlDefault, fast = false, d
     tick().catch((e) => console.error('[agendador]', e?.message || e));
   }
 
-  // Ordem: envios vencidos → avisos → regras, com os envios de novo depois de cada regra
-  // (um agendado espera no máximo a regra em andamento, não todas).
+  /**
+   * Passos do espelho: a falha vai ao console só pelo código/nome, nunca pela mensagem (erro do banco pode trazer
+   * valores da query, e o espelho lida com texto de grupos de terceiros).
+   */
+  const semDetalhe = (fn) => async () => { try { return await fn(); } catch (e) { throw new Error(e?.code || e?.name || 'erro'); } };
+  /** Espelho: decide os itens recebidos (cada decisão "enviar" grava um envio pendente e acorda o tick). */
+  const passoEspelho = () => passo('espelho', semDetalhe(() => espelho.processarPendentes()));
+
+  // Ordem: envios vencidos → espelho → avisos → regras, com espelho e envios de novo depois de cada regra
+  // (um agendado ou uma oferta espelhada espera no máximo a regra em andamento, não todas).
   async function tick() {
     if (ticking) return; ticking = true; acordado = false;
     try {
       await recuperacao; // o primeiro tick espera o recuperar() do start()
       await passo('envios', () => envios.processarPendentes());
+      await passo('espelho (fila)', semDetalhe(() => espelho.expirarFila())); // 'na_fila' esquecido → 'expirado'
+      await passoEspelho();
       await passo('avisos', () => avisos.tick());
       const rules = db.prepare('SELECT * FROM rules WHERE enabled = 1').all().map(parseRule);
       for (const r of rules) {
@@ -172,19 +187,21 @@ export function createScheduler({ db, wa, links, ml = mlDefault, fast = false, d
         }
         if (!wa.isReady()) continue;
         await runRule(r.id);
+        await passoEspelho();
         await passo('envios', () => envios.processarPendentes());
       }
-      // "agora" criado depois da última passada nos envios: sai neste tick, não no próximo (até 15 s depois)
-      while (acordado) { acordado = false; await passo('envios', () => envios.processarPendentes()); }
+      // "agora" criado (ou mensagem espelhada recebida) depois da última passada: sai neste tick, não no próximo
+      // (até 15 s depois). O espelho vem antes dos envios: o envio que ele criar sai na mesma volta.
+      while (acordado) { acordado = false; await passoEspelho(); await passo('envios', () => envios.processarPendentes()); }
     } catch (e) { console.error('[agendador]', e); } finally { ticking = false; }
   }
 
   return {
-    runRule, previewOffers, tick, envios, avisos,
+    runRule, previewOffers, tick, envios, avisos, amazon, espelho,
     start() {
       if (timer) return;
-      // o que ficou 'enviando' quando o serviço caiu volta para a fila antes do primeiro tick
-      recuperacao = passo('recuperar', () => envios.recuperar());
+      // o que ficou 'enviando' (envios) ou 'processando' (espelho) quando o serviço caiu volta antes do primeiro tick
+      recuperacao = Promise.all([passo('recuperar', () => envios.recuperar()), passo('espelho (recuperar)', semDetalhe(() => espelho.recuperar()))]);
       timer = setInterval(tick, 15000); primeiro = setTimeout(tick, 2000);
     },
     stop() { clearInterval(timer); clearTimeout(primeiro); timer = null; primeiro = null; },

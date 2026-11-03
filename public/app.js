@@ -103,12 +103,15 @@ function fonteAfiliados(c = {}) {
 }
 function paginaRegras() {
   $('#pagina').innerHTML = `<div class="topo"><div><h1>Disparo automático ${q('regras')}</h1>
-    <p class="sub">Antes chamado de Regras. Cada disparo automático escolhe uma etiqueta, os grupos, o template e o ritmo. Pode ter quantos quiser.</p></div>
-    <button class="pri" id="nova">Novo disparo automático</button></div><div id="lista"></div>`;
+    <p class="sub">Antes chamado de Regras. Cada disparo automático escolhe uma etiqueta, os grupos, o template e o ritmo. Pode ter quantos quiser. ${TEXTOS_ESPELHAMENTO.subRegras}</p></div>
+    <div class="linha"><button class="pri" id="nova">Novo disparo automático</button><button id="novo-esp">${TEXTOS_ESPELHAMENTO.novo}</button>${q('espelhamento')}</div></div><div id="lista"></div>`;
   $('#nova').onclick = () => formRegra();
+  $('#novo-esp').onclick = () => formEspelhamento();
   listaRegras();
+  carregarEspelhos().then(listaRegras); // os espelhamentos chegam depois; se a rota falhar, a lista mostra o aviso e as regras seguem
   $('#lista').onclick = tentar(async (ev) => {
     const b = ev.target.closest('[data-act]'); if (!b) return;
+    if (b.dataset.act.startsWith('esp-')) return espelhamentoAcao(b);
     const id = Number(b.closest('[data-id]').dataset.id); const r = S.rules.find((x) => x.id === id); const act = b.dataset.act;
     if (act === 'ligar') { await api(`/rules/${id}/enabled`, 'POST', { enabled: b.checked }); aviso(b.checked ? 'Disparo automático ligado' : 'Disparo automático pausado'); await recarregarRegras(); }
     if (act === 'rodar') { await api(`/rules/${id}/run`, 'POST'); aviso('Envio iniciado. Acompanhe no Histórico.'); setTimeout(recarregarRegras, 800); }
@@ -120,53 +123,59 @@ function paginaRegras() {
 }
 function listaRegras() {
   const el = $('#lista'); if (!el) return;
-  el.innerHTML = S.rules.length ? S.rules.map(cartaoRegra).join('')
-    : '<div class="vazio">Nenhum disparo automático ainda. Cadastre uma etiqueta em <a href="#conexoes">Conexões</a>, conecte o WhatsApp em <a href="#numeros">Números de WhatsApp</a> e crie o primeiro.</div>';
+  // lista mista: os disparos automáticos e, depois, os espelhamentos (espelhamento.js)
+  const vazio = !S.rules.length && !ESP.lista.length;
+  el.innerHTML = S.rules.map(cartaoRegra).join('') + cartoesEspelhamento()
+    + (vazio ? '<div class="vazio">Nenhum disparo automático ainda. Cadastre uma etiqueta em <a href="#conexoes">Conexões</a>, conecte o WhatsApp em <a href="#numeros">Números de WhatsApp</a> e crie o primeiro.</div>' : '');
 }
-async function recarregarRegras() { S.rules = await api('/rules'); listaRegras(); }
+async function recarregarRegras() { S.rules = await api('/rules'); await carregarEspelhos(); listaRegras(); }
 
 function opcoes(lista, sel, vazio) {
   return (vazio ? `<option value="">${vazio}</option>` : '') + lista.map((o) => `<option value="${o.id}" ${o.id === sel ? 'selected' : ''}>${esc(o.name)}</option>`).join('');
 }
-/** Lista de grupos (#gr) com busca (#busca) e o botão "Só marcados" (#so-marcados). Devolve a função que reaplica o filtro. */
-function filtroGrupos(dlg, conta) {
-  const busca = $('#busca', dlg); const so = $('#so-marcados', dlg);
+/** Lista de grupos (#gr) com busca (#busca) e o botão "Só marcados" (#so-marcados); com `prefixo`, #<prefixo>gr etc. Devolve a função que reaplica o filtro. */
+function filtroGrupos(dlg, conta, prefixo = '') {
+  const busca = $(`#${prefixo}busca`, dlg); const so = $(`#${prefixo}so-marcados`, dlg);
   const aplica = () => {
     const q = (busca?.value || '').toLowerCase(); const soMarcados = so?.getAttribute('aria-pressed') === 'true';
     let n = 0;
-    $$('#gr label', dlg).forEach((l) => { const marcado = $('input', l).checked; if (marcado) n++; l.hidden = !l.dataset.n.includes(q) || (soMarcados && !marcado); });
+    $$(`#${prefixo}gr label`, dlg).forEach((l) => { const marcado = $('input', l).checked; if (marcado) n++; l.hidden = !l.dataset.n.includes(q) || (soMarcados && !marcado); });
     if (so) { so.textContent = `Só marcados (${n})`; so.classList.toggle('on', soMarcados); }
     conta();
   };
   if (busca) busca.oninput = aplica;
   if (so) so.onclick = () => { so.setAttribute('aria-pressed', so.getAttribute('aria-pressed') === 'true' ? 'false' : 'true'); aplica(); };
-  $('#gr', dlg).onchange = aplica; aplica();
+  $(`#${prefixo}gr`, dlg).onchange = aplica; aplica();
   return aplica;
 }
 /**
  * Seletor de grupos reutilizável (Disparo automático, Blocos, Disparo manual, Disparar mensagem): busca,
  * "Só marcados", "Marcar visíveis", "Limpar" e, se pedido, o atalho "Marcar um bloco…".
- * opts = { selecionados: [jid], blocos: bool, marcarVisiveis: bool (padrão true) }.
+ * opts = { selecionados: [jid], blocos: bool, marcarVisiveis: bool (padrão true), prefixo: string (padrão ''),
+ *   rotuloBusca: string (padrão 'Buscar grupo') }.
+ * `prefixo` põe um prefixo nos ids (`${prefixo}gr`, `${prefixo}busca`, `${prefixo}so-marcados`, `${prefixo}todos`,
+ * `${prefixo}nenhum`, `${prefixo}bloco-atalho`) para dois seletores caberem no mesmo diálogo; vazio = ids de sempre.
  * Devolve { html, ligar(raiz, { contador, aoMudar, aoBloco }) → reaplica o filtro, marcados(raiz) → [jid] }.
  * Use um seletor por tela ou diálogo: as consultas valem dentro de `raiz`.
  */
 function seletorGrupos(opts = {}) {
   const sel = new Set(opts.selecionados || []);
+  const P = opts.prefixo || ''; const rotuloBusca = opts.rotuloBusca || 'Buscar grupo';
   const html = !S.groups.length
     ? '<div class="dica">Nenhum grupo carregado. Conecte o WhatsApp em <a href="#numeros">Números de WhatsApp</a>.</div>'
-    : `<div class="linha">${opts.blocos && S.blocks?.length ? `<select id="bloco-atalho" style="width:auto" aria-label="Marcar os grupos de um bloco"><option value="">Marcar um bloco…</option>${S.blocks.map((b) => `<option value="${b.id}">${esc(b.name)} (${b.group_jids.length})</option>`).join('')}</select>` : ''}<input id="busca" placeholder="Buscar grupo…" aria-label="Buscar grupo" style="flex:1 1 180px;min-width:160px"><button type="button" id="so-marcados" class="alt" aria-pressed="false" title="Mostrar só os grupos marcados, para conferir e desmarcar">Só marcados</button>${opts.marcarVisiveis === false ? '' : '<button type="button" id="todos">Marcar visíveis</button>'}<button type="button" id="nenhum">Limpar</button></div>
-      <div class="grupos" id="gr">${S.groups.map((g) => `<label data-n="${esc(g.name.toLowerCase())}"><input type="checkbox" value="${esc(g.jid)}" ${sel.has(g.jid) ? 'checked' : ''}>${esc(g.name)}<small>${g.size ?? ''}</small></label>`).join('')}</div>`;
-  const marcados = (raiz) => $$('#gr input:checked', raiz).map((i) => i.value);
+    : `<div class="linha">${opts.blocos && S.blocks?.length ? `<select id="${P}bloco-atalho" style="width:auto" aria-label="Marcar os grupos de um bloco"><option value="">Marcar um bloco…</option>${S.blocks.map((b) => `<option value="${b.id}">${esc(b.name)} (${b.group_jids.length})</option>`).join('')}</select>` : ''}<input id="${P}busca" placeholder="Buscar grupo…" aria-label="${esc(rotuloBusca)}" style="flex:1 1 180px;min-width:160px"><button type="button" id="${P}so-marcados" class="alt" aria-pressed="false" title="Mostrar só os grupos marcados, para conferir e desmarcar">Só marcados</button>${opts.marcarVisiveis === false ? '' : `<button type="button" id="${P}todos">Marcar visíveis</button>`}<button type="button" id="${P}nenhum">Limpar</button></div>
+      <div class="grupos" id="${P}gr">${S.groups.map((g) => `<label data-n="${esc(g.name.toLowerCase())}"><input type="checkbox" value="${esc(g.jid)}" ${sel.has(g.jid) ? 'checked' : ''}>${esc(g.name)}<small>${g.size ?? ''}</small></label>`).join('')}</div>`;
+  const marcados = (raiz) => $$(`#${P}gr input:checked`, raiz).map((i) => i.value);
   const ligar = (raiz, { contador, aoMudar, aoBloco } = {}) => {
-    if (!$('#gr', raiz)) return () => {};
-    const aplica = filtroGrupos(raiz, () => { const n = marcados(raiz).length; if (contador) contador.textContent = `(${n} ${n === 1 ? 'selecionado' : 'selecionados'})`; aoMudar?.(n); });
-    const todos = $('#todos', raiz);
-    if (todos) todos.onclick = () => { $$('#gr label:not([hidden]) input', raiz).forEach((i) => (i.checked = true)); aplica(); };
-    $('#nenhum', raiz).onclick = () => { $$('#gr input', raiz).forEach((i) => (i.checked = false)); aplica(); };
-    const atalho = $('#bloco-atalho', raiz);
+    if (!$(`#${P}gr`, raiz)) return () => {};
+    const aplica = filtroGrupos(raiz, () => { const n = marcados(raiz).length; if (contador) contador.textContent = `(${n} ${n === 1 ? 'selecionado' : 'selecionados'})`; aoMudar?.(n); }, P);
+    const todos = $(`#${P}todos`, raiz);
+    if (todos) todos.onclick = () => { $$(`#${P}gr label:not([hidden]) input`, raiz).forEach((i) => (i.checked = true)); aplica(); };
+    $(`#${P}nenhum`, raiz).onclick = () => { $$(`#${P}gr input`, raiz).forEach((i) => (i.checked = false)); aplica(); };
+    const atalho = $(`#${P}bloco-atalho`, raiz);
     if (atalho) atalho.onchange = () => {
       const b = S.blocks.find((x) => String(x.id) === atalho.value); if (!b) return;
-      $$('#gr input', raiz).forEach((i) => { if (b.group_jids.includes(i.value)) i.checked = true; });
+      $$(`#${P}gr input`, raiz).forEach((i) => { if (b.group_jids.includes(i.value)) i.checked = true; });
       aoBloco?.(b); aplica(); atalho.value = '';
     };
     return aplica;
@@ -359,15 +368,26 @@ function paginaGrupos() {
 }
 
 // ---------- histórico ----------
-async function paginaHistorico(nivel = '') {
-  const log = await api('/log' + (nivel ? `?nivel=${nivel}` : ''));
+// Filtros no endereço: #historico?tipo=espelhamento&regra=3&status=na_fila (tipo: automatico | espelhamento; vazio = tudo).
+// A visão Espelhamento (KPIs, tabela, "Completar") está em espelhamento.js.
+async function paginaHistorico(nivel = '', params = null) {
+  const tipo = ['automatico', 'espelhamento'].includes(params?.get('tipo')) ? params.get('tipo') : '';
+  if (tipo === 'espelhamento') return paginaHistoricoEspelhamento(params);
+  const g = ++ESP_H.ger; clearTimeout(paginaHistorico.t); // para a atualização automática da visão Espelhamento, se estava aberta
+  // "Disparo automático": o servidor devolve só as linhas de regra (rule_id), no mesmo limite de "Tudo"
+  const filtros = [nivel ? `nivel=${nivel}` : '', tipo === 'automatico' ? 'tipo=automatico' : ''].filter(Boolean).join('&');
+  const bruto = await api('/log' + (filtros ? `?${filtros}` : ''));
+  // o dono saiu da página, ou trocou o Tipo, enquanto carregava: a resposta atrasada não sobrescreve a tela
+  if (g !== ESP_H.ger || rotaAtual() !== 'historico') return;
+  const log = tipo === 'automatico' ? bruto.filter(histEhAutomatico) : bruto; // defesa: rule_id != null
   $('#pagina').innerHTML = `<div class="topo"><div><h1>Histórico ${q('historico')}</h1><p class="sub">Tudo que foi enviado e tudo que deu errado, com o motivo.</p></div>
-    <select id="nv" style="width:auto" aria-label="Filtrar"><option value="">Tudo</option><option value="ok" ${nivel === 'ok' ? 'selected' : ''}>Só enviados</option><option value="erro" ${nivel === 'erro' ? 'selected' : ''}>Só erros</option><option value="aviso" ${nivel === 'aviso' ? 'selected' : ''}>Só avisos</option></select></div>
+    <div class="linha">${histTipoHtml(tipo)}<select id="nv" style="width:auto" aria-label="Filtrar"><option value="">Tudo</option><option value="ok" ${nivel === 'ok' ? 'selected' : ''}>Só enviados</option><option value="erro" ${nivel === 'erro' ? 'selected' : ''}>Só erros</option><option value="aviso" ${nivel === 'aviso' ? 'selected' : ''}>Só avisos</option></select></div></div>
     ${log.length ? `<div class="card tabela"><table><thead><tr><th>Quando</th><th>Origem</th><th>Grupo</th><th>Oferta</th><th>Resultado</th></tr></thead><tbody>
     ${log.map((l) => `<tr><td>${hora(l.ts)}</td><td>${esc(l.rule_name || '')}</td><td>${esc(l.group_name || '')}</td><td>${esc(l.offer_title || '')}</td><td><span class="nivel-${l.level}">${esc(l.message)}</span></td></tr>`).join('')}</tbody></table></div>`
       : '<div class="vazio">Nada por aqui ainda.</div>'}`;
-  $('#nv').onchange = (e) => paginaHistorico(e.target.value);
-  clearTimeout(paginaHistorico.t); paginaHistorico.t = setTimeout(() => { if (location.hash === '#historico' && !$('#dlg').open) paginaHistorico($('#nv')?.value || ''); }, 6000);
+  histLigarTipo($('#nv').value);
+  $('#nv').onchange = (e) => paginaHistorico(e.target.value, params);
+  clearTimeout(paginaHistorico.t); paginaHistorico.t = setTimeout(() => { if (rotaAtual() === 'historico' && !$('#dlg').open) paginaHistorico($('#nv')?.value || '', params); }, 6000);
 }
 
 // ---------- ajustes ----------
@@ -391,7 +411,7 @@ function paginaAjustes() {
       <div class="grade"><label class="campo">Guardar por (dias)<input id="ret" type="number" min="0" max="3650" value="${a.retencao_dias ?? 90}"><small>0 = guardar para sempre (não recomendado).</small></label></div>
       <div class="linha"><button class="pri" id="sr">Salvar</button>${podeEquipe() ? '<button id="limpar-agora">Apagar o que já passou do prazo</button>' : `<small class="dica">${SO_DONO_DICA.limpar}</small>`}</div></div>`;
   $('#sr').onclick = tentar(async () => { await api('/ajustes', 'PUT', { retencao_dias: $('#ret').value }); await atualizarEstado(); aviso('Salvo'); });
-  if ($('#limpar-agora')) $('#limpar-agora').onclick = tentar(async () => { const r = await api('/privacidade/limpar', 'POST'); aviso(`Apagados: ${r.eventos ?? 0} eventos, ${r.leituras ?? 0} leituras, ${r.cliques ?? 0} cliques`); });
+  if ($('#limpar-agora')) $('#limpar-agora').onclick = tentar(async () => { const r = await api('/privacidade/limpar', 'POST'); aviso(`Apagados: ${r.eventos ?? 0} eventos, ${r.leituras ?? 0} leituras, ${r.cliques ?? 0} cliques, ${r.espelhamento ?? 0} itens do espelhamento`); });
   $('#sa').onclick = tentar(async () => { await api('/ajustes', 'PUT', { delay_group_s: $('#dg').value, delay_offer_s: $('#do').value }); await atualizarEstado(); aviso('Pausas salvas'); });
   const exemploTitulo = tentar(async () => { const r = await api('/templates/preview', 'POST', { body: '{TITULO_PRODUTO}', amostra: { title: 'Fones De Ouvido Usb-c Tipo C Com Microfone Integrado Som Estéreo Alta Qualidade Controle Chamadas Compatível Com iPhone 15 16 17 Android Samsung Premium' } }); $('#tm-ex').textContent = 'Exemplo: “' + r.texto + '”'; });
   exemploTitulo();
@@ -409,7 +429,7 @@ const ROTAS = {
   relatorios: () => paginaRelatorios(),
   conexoes: (pedido) => paginaConexoes({ rolarPara: pedido === 'etiquetas' ? 'ml-etiquetas' : '' }),
   numeros: () => paginaNumeros(), equipe: () => paginaEquipe(),
-  historico: () => paginaHistorico(), ajustes: () => paginaAjustes(), ajuda: () => paginaAjuda(),
+  historico: (_, params) => paginaHistorico('', params), ajustes: () => paginaAjustes(), ajuda: () => paginaAjuda(),
 };
 // Endereços antigos continuam abrindo a página nova (favoritos, links da ajuda). #etiquetas rola até a seção em Conexões.
 const ALIASES = { regras: 'disparo-automatico', whatsapp: 'numeros', etiquetas: 'conexoes' };
@@ -420,19 +440,20 @@ const ROTAS_LARGAS = new Set(['disparo-manual', 'disparar-mensagem']);
 const podeEquipe = () => !S.st?.usuario || S.st.usuario.papel === 'dono';
 /** Rota que está aberta: resolve os nomes antigos e manda rota desconhecida (ou Equipe para o Operador) para a Visão Geral. */
 function rotaAtual() {
-  const pedido = (location.hash || '#visao').slice(1); const r = Object.hasOwn(ALIASES, pedido) ? ALIASES[pedido] : pedido;
+  const pedido = (location.hash || '#visao').slice(1).split('?')[0]; const r = Object.hasOwn(ALIASES, pedido) ? ALIASES[pedido] : pedido;
   return Object.hasOwn(ROTAS, r) && (r !== 'equipe' || podeEquipe()) ? r : 'visao';
 }
 function ir() {
-  const pedido = (location.hash || '#visao').slice(1); const r = rotaAtual();
-  if (location.hash !== '#' + r) history.replaceState(null, '', '#' + r); // o endereço passa a mostrar a página aberta
+  const [pedido, consulta = ''] = (location.hash || '#visao').slice(1).split('?'); const r = rotaAtual();
+  const endereco = '#' + r + (r === 'historico' && consulta ? '?' + consulta : ''); // só o Histórico leva filtros no endereço
+  if (location.hash !== endereco) history.replaceState(null, '', endereco); // o endereço passa a mostrar a página aberta
   $$('#rail nav a').forEach((a) => { if (a.getAttribute('href') === '#' + r) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current'); });
   $('#menu-atual').textContent = '· ' + ($(`#rail nav a[href="#${r}"]`)?.textContent || '');
   $('main').classList.toggle('larga', ROTAS_LARGAS.has(r));
   fecharMenu();
   const pg = $('#pagina'); pg.onclick = null; pg.innerHTML = ''; // tratadores da tela anterior não podem vazar para a próxima
   if ($('#dlg').open) $('#dlg').close();
-  ROTAS[r](pedido);
+  ROTAS[r](pedido, r === 'historico' ? new URLSearchParams(consulta) : null); // só o Histórico lê filtros do endereço
 }
 
 // ---------- menu em telas estreitas (≤ 900 px): o botão "Menu" abre os grupos sobre o conteúdo ----------

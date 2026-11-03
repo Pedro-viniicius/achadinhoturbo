@@ -11,6 +11,59 @@ import QRCode from 'qrcode';
 import pino from 'pino';
 import { IMAGEM_PERMITIDA } from './ml.js';
 
+// A libsignal (usada pelo Baileys para a criptografia do WhatsApp) escreve no console global, fora do logger do
+// Baileys, a sessão do Signal inteira ("Closing session:", <sessão>), com privKey, rootKey, chainKey e baseKey: num
+// serviço do systemd isso iria para o journal (S1). O console do processo passa por um filtro: as frases da libsignal
+// são descartadas e, em qualquer outra chamada, objeto com cara de material do Signal vira '[omitido]'. O resto
+// (strings, números, erros) segue como está.
+const FRASES_LIBSIGNAL = /^(?:Closing session|Opening session|Removing old closed session|Session already (?:closed|open)|Closing open session in favor|Closing stale open session|Migrating session to|Decrypted message with closed session|Session error|Failed to decrypt message|V1 session storage migration error)/;
+const CHAVES_SIGNAL = new Set(['_chains', 'currentRatchet', 'indexInfo', 'pendingPreKey', 'ephemeralKeyPair', 'privKey',
+  'rootKey', 'chainKey', 'baseKey', 'remoteIdentityKey', 'messageKeys', 'lastRemoteEphemeralKey']);
+const PROTEGIDO = Symbol.for('achadinhoturbo.consoleProtegido');
+const OMITIDO = '[omitido]';
+const ehObjeto = (v) => v !== null && (typeof v === 'object' || typeof v === 'function');
+
+/**
+ * O argumento é (ou carrega, até 4 níveis abaixo) material de sessão do Signal? Um `SessionRecord` guarda as sessões
+ * dois níveis abaixo. Na dúvida, sim: getter ou proxy que lança, ou objeto grande demais para olhar (mais de 1.000 nós).
+ */
+function pareceSessaoSignal(v) {
+  let orcamento = 1000;
+  const olhar = (x, nivel) => {
+    if (!ehObjeto(x) || x instanceof Error || ArrayBuffer.isView(x) || x instanceof ArrayBuffer) return false;
+    if (--orcamento < 0) return true;
+    const chaves = Object.keys(x);
+    if (chaves.some((k) => CHAVES_SIGNAL.has(k))) return true;
+    return nivel < 4 && chaves.some((k) => olhar(x[k], nivel + 1));
+  };
+  try { return olhar(v, 0); } catch { return true; }
+}
+
+/**
+ * Embrulha log/info/warn/error/debug/trace de `alvo` (o console global, por padrão) com o filtro acima. Idempotente.
+ * O filtro nunca lança: se algo der errado nele, a chamada segue com todo objeto não-Error trocado por '[omitido]'.
+ */
+export function protegerConsole(alvo = console) {
+  if (!alvo || alvo[PROTEGIDO]) return alvo;
+  for (const nome of ['log', 'info', 'warn', 'error', 'debug', 'trace']) {
+    const original = alvo[nome];
+    if (typeof original !== 'function') continue;
+    alvo[nome] = (...args) => {
+      let saida;
+      try {
+        if (typeof args[0] === 'string' && FRASES_LIBSIGNAL.test(args[0])) return undefined;
+        saida = args.some((a) => pareceSessaoSignal(a)) ? args.map((a) => (pareceSessaoSignal(a) ? OMITIDO : a)) : args;
+      } catch {
+        saida = args.map((a) => (ehObjeto(a) && !(a instanceof Error) ? OMITIDO : a));
+      }
+      return original.apply(alvo, saida);
+    };
+  }
+  Object.defineProperty(alvo, PROTEGIDO, { value: true });
+  return alvo;
+}
+protegerConsole(console);
+
 const SYNC_MS = 10 * 60 * 1000;
 /** 5511999999999:12@s.whatsapp.net -> 5511999999999@s.whatsapp.net */
 export const bareJid = (j) => String(j || '').replace(/:\d+@/, '@');
@@ -45,6 +98,60 @@ export function normalizarNumero(digitos) {
   if (d.length < 12 || d.length > 15) throw new Error('Número inválido: informe DDD e número.');
   return d;
 }
+
+/** Embrulhos do Baileys que guardam a mensagem de verdade em `.message` (temporária, visualização única). */
+const EMBRULHOS = ['ephemeralMessage', 'viewOnceMessage', 'viewOnceMessageV2', 'viewOnceMessageV2Extension', 'documentWithCaptionMessage'];
+const temUrl = (t) => /https?:\/\/\S/i.test(t);
+
+/** Maior texto que o ouvinte entrega ao handler: o resto é cortado na fronteira (S1, CWE-400: as regex do parser). */
+export const MAX_TEXTO_RECEBIDO = 4096;
+
+/**
+ * Texto de uma mensagem recebida (o `message` de um WAMessage do Baileys), ou '' quando não há texto.
+ * Lê `conversation`, `extendedTextMessage.text` (com o link da prévia quando o texto não traz link nenhum),
+ * legenda de foto, vídeo e documento, e desembrulha mensagem temporária e de visualização única.
+ * Edições, reações, enquetes e mensagens de sistema não têm texto aqui: formato desconhecido é ignorado.
+ *
+ * Decisão (R9): o link da prévia (`matchedText`/`canonicalUrl`) só entra quando o texto não tem link COM esquema
+ * (`http://` ou `https://`). Se o texto traz um link sem esquema (ex.: `amzn.to/x`), a prévia também é anexada e o
+ * texto sai com dois links do mesmo produto. Isso é aceito aqui de propósito (o ouvinte não interpreta links);
+ * quem consome (etapa 11 do plano espelhamento-amazon) deve deduplicar por ASIN dentro da mesma mensagem.
+ */
+export function textoDaMensagem(message) {
+  let m = message;
+  for (let i = 0; i < 5 && m && typeof m === 'object'; i++) {
+    const embrulho = EMBRULHOS.find((k) => m[k]?.message);
+    if (!embrulho) break;
+    m = m[embrulho].message;
+  }
+  if (!m || typeof m !== 'object') return '';
+  const texto = (v) => (typeof v === 'string' ? v : '');
+  if (texto(m.conversation)) return m.conversation;
+  const ext = m.extendedTextMessage;
+  if (ext && typeof ext === 'object') {
+    const t = texto(ext.text);
+    if (temUrl(t)) return t;
+    // a prévia guarda o link quando o texto veio sem ele (ou só com o título)
+    const link = [texto(ext.matchedText), texto(ext.canonicalUrl)].find(temUrl) || '';
+    return [t, link].filter(Boolean).join('\n');
+  }
+  for (const k of ['imageMessage', 'videoMessage', 'documentMessage']) {
+    const legenda = texto(m[k]?.caption);
+    if (legenda) return legenda;
+  }
+  return '';
+}
+
+/** messageTimestamp do Baileys (segundos: número, string ou Long) → ms; sem valor válido, agora. */
+function tsDaMensagem(v) {
+  const n = Number(v && typeof v === 'object' && typeof v.toNumber === 'function' ? v.toNumber() : v);
+  return Number.isFinite(n) && n > 0 ? n * 1000 : Date.now();
+}
+
+const MAX_IDS_ENVIADOS = 1000;
+
+/** Só o nome do erro (ex.: 'SyntaxError'), nunca a mensagem: ela pode carregar texto recebido do grupo (S7). */
+const nomeDoErro = (e) => (typeof e?.name === 'string' && /^[A-Za-z_$][\w$]{0,63}$/.test(e.name) ? e.name : 'Error');
 
 const LARGURA_MINIATURA = 192; // a mesma da prévia do Baileys (linkPreviewImageThumbnailWidth)
 const MAX_IMAGEM_PREVIA = 5 * 1024 * 1024;
@@ -108,11 +215,20 @@ async function montarLinkPreview(previa) {
  * `diaDe(ts)` → 'YYYY-MM-DD': o dia em que uma leitura conta (uma por pessoa por dia). O servidor passa o dia de negócio
  * (com a virada do dia de Relatórios e avisos); sem ele, vale o dia do calendário.
  */
-export function createWhatsApp({ db, dir, dryRun = false, pseudo = (id) => id, diaDe = diaDoCalendario }) {
+export function createWhatsApp({ db, dir, dryRun = false, pseudo = (id) => id, diaDe = diaDoCalendario, onMensagem = null }) {
   const authDir = path.join(dir, 'wa_auth');
   const state = { status: 'idle', qr: null, me: null, error: null };
   let sock = null; let starting = false; let stopped = false; let syncTimer = null;
   const simulated = []; // mensagens "enviadas" no modo simulação
+  let aoReceber = typeof onMensagem === 'function' ? onMensagem : null;
+  // ids das mensagens que este programa enviou (os últimos 1000): voltam pelo messages.upsert e são ignorados (anti-laço)
+  const idsEnviados = new Set();
+  function registrarEnvio(enviada) {
+    const id = enviada?.key?.id;
+    if (!id) return;
+    idsEnviados.delete(id); idsEnviados.add(id);
+    if (idsEnviados.size > MAX_IDS_ENVIADOS) idsEnviados.delete(idsEnviados.values().next().value);
+  }
 
   const upsertGroup = db.prepare(`INSERT INTO groups (jid, name, size, updated_at, is_admin, description) VALUES (?,?,?,?,?,?)
     ON CONFLICT(jid) DO UPDATE SET name = excluded.name, size = excluded.size, updated_at = excluded.updated_at,
@@ -169,6 +285,30 @@ export function createWhatsApp({ db, dir, dryRun = false, pseudo = (id) => id, d
     }
   }
 
+  /**
+   * Mensagens novas nos grupos (messages.upsert). Só `notify` (o que chega agora, não o histórico) e só grupos.
+   * Entrega ao handler apenas { jid, fromMe, texto, msgId, ts }: nunca participante, pushName ou outro dado da pessoa.
+   * `texto` chega cortado em MAX_TEXTO_RECEBIDO caracteres (S1). Ver em textoDaMensagem a decisão R9 (link duplicado).
+   * Nada aqui lança para o Baileys; o erro do handler vai ao console só com o nome do erro (`e.name`), nunca com
+   * `e.message`, que pode trazer trecho da mensagem (ex.: SyntaxError do JSON.parse) (S7).
+   */
+  function onMensagens(upsert) {
+    if (!aoReceber || upsert?.type !== 'notify' || !Array.isArray(upsert.messages)) return;
+    for (const msg of upsert.messages) {
+      try {
+        const key = msg?.key;
+        const msgId = typeof key?.id === 'string' ? key.id : '';
+        const jid = typeof key?.remoteJid === 'string' ? key.remoteJid : '';
+        if (!msgId || idsEnviados.has(msgId)) continue;
+        if (!jid.endsWith('@g.us')) continue;
+        const texto = textoDaMensagem(msg.message).slice(0, MAX_TEXTO_RECEBIDO);
+        if (!texto) continue;
+        const entrega = { jid, fromMe: key.fromMe === true, texto, msgId, ts: tsDaMensagem(msg.messageTimestamp) };
+        Promise.resolve(aoReceber(entrega)).catch((e) => console.error('[espelho] erro no handler:', nomeDoErro(e)));
+      } catch (e) { console.error('[espelho] erro no handler:', nomeDoErro(e)); }
+    }
+  }
+
   async function connect() {
     if (dryRun) { state.status = 'open'; state.me = 'modo-simulacao'; return; }
     if (sock || starting) return;
@@ -187,6 +327,7 @@ export function createWhatsApp({ db, dir, dryRun = false, pseudo = (id) => id, d
       sock.ev.on('creds.update', saveCreds);
       sock.ev.on('group-participants.update', (u) => { try { onParticipants(u); } catch (e) { console.error('[grupos]', e.message); } });
       sock.ev.on('message-receipt.update', (u) => { try { onReceipts(u); } catch (e) { console.error('[leituras]', e.message); } });
+      sock.ev.on('messages.upsert', (u) => { try { onMensagens(u); } catch (e) { console.error('[espelho] erro no ouvinte:', nomeDoErro(e)); } });
       sock.ev.on('groups.update', (list) => {
         for (const g of list || []) {
           if (!g.id) continue;
@@ -244,7 +385,7 @@ export function createWhatsApp({ db, dir, dryRun = false, pseudo = (id) => id, d
       simulated.push(registro); return;
     }
     if (!isReady()) throw new Error('WhatsApp desconectado');
-    await sock.sendMessage(jid, { text, linkPreview: p ? await montarLinkPreview(p) : null });
+    registrarEnvio(await sock.sendMessage(jid, { text, linkPreview: p ? await montarLinkPreview(p) : null }));
   }
 
   /** Foto por URL (o Baileys baixa) ou por Buffer (upload), com legenda. */
@@ -258,7 +399,7 @@ export function createWhatsApp({ db, dir, dryRun = false, pseudo = (id) => id, d
       simulated.push(registro); return;
     }
     if (!isReady()) throw new Error('WhatsApp desconectado');
-    await sock.sendMessage(jid, { image: ehBuffer ? urlOuBuffer : { url: urlOuBuffer }, caption, ...(mimetype ? { mimetype } : {}) });
+    registrarEnvio(await sock.sendMessage(jid, { image: ehBuffer ? urlOuBuffer : { url: urlOuBuffer }, caption, ...(mimetype ? { mimetype } : {}) }));
   }
 
   /** Enquete ({ pergunta, opcoes, multipla }). Valida antes de tudo, também no modo simulado. */
@@ -266,7 +407,7 @@ export function createWhatsApp({ db, dir, dryRun = false, pseudo = (id) => id, d
     const poll = montarEnquete(enquete);
     if (dryRun) { simulated.push({ tipo: 'poll', jid, text: poll.name, poll }); return; }
     if (!isReady()) throw new Error('WhatsApp desconectado');
-    await sock.sendMessage(jid, { poll });
+    registrarEnvio(await sock.sendMessage(jid, { poll }));
   }
 
   /**
@@ -333,8 +474,10 @@ export function createWhatsApp({ db, dir, dryRun = false, pseudo = (id) => id, d
   return {
     state: () => ({ ...state }), isReady, connect, logout, syncGroups, sendText, sendImage, sendPoll, resolverNumero,
     fetchInvite, createNextGroup, simulated,
+    /** Define quem recebe as mensagens novas dos grupos ({ jid, fromMe, texto, msgId, ts }); null desliga. */
+    onMensagem: (handler) => { aoReceber = typeof handler === 'function' ? handler : null; },
     // usados nos testes para simular eventos do WhatsApp e conferir o que vai ao Baileys
-    _onParticipants: onParticipants, _onReceipts: onReceipts,
+    _onParticipants: onParticipants, _onReceipts: onReceipts, _onMensagens: onMensagens,
     _usarSocket: (falso) => { sock = falso; state.status = 'open'; },
     // reconecta sozinho ao abrir o programa se já houver sessão salva
     autoStart: () => { if (!dryRun && fs.existsSync(path.join(authDir, 'creds.json'))) connect(); },

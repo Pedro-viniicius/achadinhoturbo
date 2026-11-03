@@ -3,8 +3,9 @@
 // As rotas ficam em ROTAS (app.js), que já aplica main.larga às duas. Os grupos usam seletorGrupos() de app.js.
 // Carrega antes de app.js: só define funções e constantes. Os utilitários de app.js ($, $$, esc, zap, S, aviso,
 // mostrarErros, REQ, opcoes, seletorGrupos) e de ajuda.js (q) só são usados quando as páginas abrem.
-// CSP (script-src 'self'; img-src 'self' data: https://*.mlstatic.com): nada inline. A miniatura da foto vem do
-// FileReader (data:); a foto do produto só aparece se vier do CDN do Mercado Livre (senão, um desenho no lugar).
+// CSP (script-src 'self'; img-src 'self' data: https://*.mlstatic.com + CDN da Amazon): nada inline. A miniatura da foto
+// vem do FileReader (data:); a foto do produto só aparece se vier do CDN do Mercado Livre ou da Amazon (senão, um desenho no lugar).
+// Amazon (plano docs/produto/planos/espelhamento-amazon.md, etapa 10): dadosOferta() é global e também serve ao "Completar" do Histórico.
 
 const TEXTOS_DISPAROS = {
   manual: {
@@ -49,6 +50,7 @@ const TEXTOS_DISPAROS = {
   motivoProduto: 'Identifique o link do produto.',
   motivoLoja: 'Conecte a loja para disparar.',
   motivoGrupo: 'Marque ao menos um grupo.',
+  motivoLinkMudou: 'O link mudou. Identifique de novo.',
   motivoTemplate: 'Escolha um template.',
   motivoEtiqueta: 'Cadastre uma etiqueta em Conexões.',
   faltaLink: 'Cole o link do produto.',
@@ -60,6 +62,41 @@ const TEXTOS_DISPAROS = {
   agendadosHoje: 'Agendados',
   confirmaCancelarManual: 'Cancelar este disparo? Ele não será enviado.',
   canceladoManual: 'Disparo cancelado',
+  // Amazon no Disparo manual (resolver o link, dados editáveis, causas da falha)
+  resolvendo: 'Resolvendo o link…',
+  confirmaDescartarDados: 'Descartar os dados editados?',
+  amazon: {
+    nome: 'Amazon',
+    invalido: 'Não reconheci este link da Amazon. Cole o endereço do produto (…/dp/…) ou um link curto, como link.amazon ou amzn.to.',
+    naoProduto: 'Este link não leva a um produto específico. Cole o link da página do produto.',
+    semTag: 'Amazon identificada, mas falta a tag de associado.',
+    cadastrarTag: 'Cadastre em Conexões.',
+    indisponivel: 'Não consegui buscar os dados na Amazon agora. Preencha o título e os preços abaixo; o link já está com a sua tag.',
+    semCredenciais: 'A API da Amazon não está configurada. Configure em Conexões ou preencha à mão.',
+    cota: 'A Amazon limitou as consultas por agora. Preencha à mão ou tente de novo em alguns minutos.',
+    semPrecoAntigo: 'A Amazon não trouxe o preço antigo. A linha vai sumir da mensagem. Preencha se quiser.',
+    faltou: (lista) => `A Amazon não trouxe ${lista}. Preencha abaixo; o que ficar vazio some da mensagem.`,
+    etiqueta: 'O link sai com a sua tag de associado da Amazon (de <a href="#conexoes">Conexões</a> &gt; Amazon).',
+    previaAmazon: 'Mostra os dados acima. O link sai limpo, com a sua tag, na hora do envio.',
+    motivoInvalido: 'Cole um link de produto da Amazon.',
+    motivoNaoProduto: 'Cole o link da página do produto.',
+    motivoSemTag: 'Cadastre a tag da Amazon em Conexões.',
+  },
+  // Seção "Dados da oferta" (dadosOferta)
+  dados: {
+    titulo: 'Dados da oferta',
+    tituloCampo: 'Título',
+    preco: 'Preço atual', precoAntigo: 'Preço antigo',
+    precoAntigoDica: 'Se for menor ou igual ao atual, a linha de preço antigo some.',
+    desconto: 'Desconto', descontoDica: 'Calculado dos dois preços.',
+    cupom: 'Cupom (opcional)', frete: 'Frete', freteGratis: 'Frete grátis',
+    foto: 'Foto',
+    semFoto: 'Sem foto: a mensagem sai só com texto.',
+    fotoDica: 'JPG ou PNG, até 5 MB.',
+    faltaTitulo: 'Preencha o título da oferta.',
+    precoInvalido: 'Preço atual: use números, como 89,90.',
+    precoAntigoInvalido: 'Preço antigo: use números, como 149,90.',
+  },
   // Disparar mensagem
   tipo: 'Tipo',
   mensagemRotulo: 'Mensagem',
@@ -118,6 +155,8 @@ const DISP_MAX_HORARIOS = 6;
 const DISP_ATUALIZA_MS = 6000;
 // Foto do produto: só do CDN do Mercado Livre, o único site que a CSP libera (alinhado a IMAGEM_PERMITIDA de src/ml.js).
 const DISP_IMG_ML = /^https:\/\/([a-z0-9-]+\.)+mlstatic\.com\//i;
+// CDN da Amazon (alinhado a IMAGEM_AMAZON de src/amazon.js; a CSP do servidor libera os mesmos hosts).
+const DISP_IMG_AMAZON = /^https:\/\/([\w-]+\.)+(media-amazon\.com|ssl-images-amazon\.com|images-amazon\.com)\//i;
 // Desenho de sacola no lugar da foto do produto quando ela não vem ou vem de outro site.
 const DISP_IMG_VAZIA = 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 72 72"><g fill="none" stroke="#8C88A6" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 28h28l-2.5 24h-23z"/><path d="M29 28v-3a7 7 0 0 1 14 0v3"/></g></svg>');
 
@@ -299,6 +338,160 @@ function dispAcompanhar(rota, passo) {
   agenda();
 }
 
+// ---------- "Dados da oferta" (Amazon): título, preços, cupom, frete e foto editáveis ----------
+/** Foto do produto que a tela pode mostrar: CDN do Mercado Livre ou da Amazon; o resto vira o desenho de sacola. */
+const dispImgSegura = (url) => (DISP_IMG_ML.test(url || '') || DISP_IMG_AMAZON.test(url || '') ? url : DISP_IMG_VAZIA);
+/** Se a foto do CDN não carregar (bloqueada ou fora do ar), troca pelo desenho de sacola. Chame depois de pôr as `img[data-img]`. */
+function dispLigarImgs(raiz) {
+  $$('img[data-img]', raiz).forEach((img) => { img.onerror = () => { img.onerror = null; img.src = DISP_IMG_VAZIA; }; });
+}
+/** "89,90", "R$ 1.299,90" ou "89.90" → número com 2 casas; vazio → null; texto que não é preço → NaN. */
+function dispLerPreco(txt) {
+  let s = String(txt ?? '').replace(/R\$/gi, '').replace(/\s/g, '');
+  if (!s) return null;
+  if (!/^\d[\d.,]*$/.test(s)) return NaN;
+  if (s.includes(',')) s = s.replace(/\./g, '').replace(',', '.');
+  else if (/^\d{1,3}(\.\d{3})+$/.test(s)) s = s.replace(/\./g, '');
+  const n = Number(s);
+  return Number.isFinite(n) && n > 0 && n < 1e7 ? Math.round(n * 100) / 100 : NaN;
+}
+/** Número → "89,90" (para o campo); vazio ou inválido → "". */
+const dispPrecoCampo = (n) => (n == null || n === '' || !Number.isFinite(Number(n)) ? '' : Number(n).toFixed(2).replace('.', ','));
+/** Mesma conta do servidor (src/template.js): só há desconto com preço antigo maior que o atual. */
+const dispDesconto = (preco, antigo) => (!preco || !antigo || antigo <= preco ? 0 : Math.round((1 - preco / antigo) * 100));
+
+let dispSeqDados = 0;
+/**
+ * Seção "Dados da oferta" (fieldset) reutilizada no Disparo manual e no "Completar" do Histórico.
+ * `valores` = { title, price, oldPrice, coupon, freeShipping, image } (qualquer campo pode faltar: o campo fica vazio).
+ * `aoMudar(valores())` roda a cada alteração do dono (digitar, marcar, trocar ou remover a foto).
+ * Devolve:
+ *   el          o <fieldset>, pronto para inserir na tela (use dispTravar(el) para travar durante o envio);
+ *   valores()   { title, price, oldPrice, discountPct, coupon, freeShipping, image, upload, semFoto } já interpretados
+ *               (preço inválido vira null; preço antigo menor ou igual ao atual vira null);
+ *   ajustes()   o objeto `ajustes` de POST /api/envios e /api/espelhos/itens/:id/enviar:
+ *               { title, price, oldPrice, coupon, freeShipping, upload | sem_foto }. Nunca leva `image` nem link;
+ *   erros()     [{ msg, el }] do que impede o envio (título vazio, preço ilegível, foto ainda subindo);
+ *   editado()   true se o dono mexeu em algo desde a criação (ou desde o último definir());
+ *   definir(v)  troca todos os valores (zera o "editado").
+ */
+function dadosOferta(valores = {}, aoMudar = () => {}) {
+  const T = TEXTOS_DISPAROS; const D = T.dados; const n = ++dispSeqDados;
+  const el = document.createElement('fieldset'); el.dataset.dados = '';
+  el.innerHTML = `<legend>${D.titulo}</legend>
+    <label class="campo"><span>${D.tituloCampo} ${REQ}</span><input name="title" maxlength="200" autocomplete="off"></label>
+    <div class="grade eq-campos">
+      <label class="campo"><span>${D.preco}</span><input name="price" type="text" inputmode="decimal" autocomplete="off" placeholder="89,90"></label>
+      <label class="campo"><span>${D.precoAntigo}</span><input name="oldPrice" type="text" inputmode="decimal" autocomplete="off" placeholder="149,90" aria-describedby="do${n}-antigo"><small id="do${n}-antigo">${D.precoAntigoDica}</small></label>
+    </div>
+    <div class="grade dados-tres">
+      <label class="campo"><span>${D.desconto}</span><input name="desconto" type="text" readonly aria-describedby="do${n}-desc"><small id="do${n}-desc">${D.descontoDica}</small></label>
+      <label class="campo"><span>${D.cupom}</span><input name="coupon" maxlength="30" autocomplete="off"></label>
+      <div class="campo"><span id="do${n}-frete">${D.frete}</span>
+        <label class="linha opcao-chk"><input type="checkbox" name="freeShipping" aria-describedby="do${n}-frete"> ${D.freteGratis}</label></div>
+    </div>
+    <div class="dados-foto"><span class="rotulo-campo" id="do${n}-foto">${D.foto}</span>
+      <input type="file" name="arquivo" accept="image/jpeg,image/png" hidden>
+      <div class="miniatura" data-mini hidden><img data-img alt="Prévia da foto" width="64" height="64">
+        <div class="linha"><button type="button" data-trocar>${T.trocarFoto}</button><button type="button" class="perigo leve" data-remover>${T.removerFoto}</button></div></div>
+      <div data-escolher-box><p class="dica">${D.semFoto}</p><button type="button" data-escolher>${T.escolherFoto}</button></div>
+      <p class="dica" data-foto-estado role="status">${D.fotoDica}</p></div>`;
+  const campo = (nome) => el.elements.namedItem(nome);
+  const inTitulo = campo('title'); const inPreco = campo('price'); const inAntigo = campo('oldPrice'); const inDesc = campo('desconto');
+  const inCupom = campo('coupon'); const chkFrete = campo('freeShipping'); const inArq = campo('arquivo');
+  const mini = $('[data-mini]', el); const miniImg = $('img', mini); const escolherBox = $('[data-escolher-box]', el); const estado = $('[data-foto-estado]', el);
+  // foto: modo 'api' (a que a API trouxe, só por URL), 'upload' (a que o dono subiu) ou 'nenhuma'
+  let foto = { modo: 'nenhuma', url: '', dataUrl: '', id: null, subindo: false }; let seq = 0; let editado = false;
+  // desconto que a API informou (savings.percentage) e os preços a que ele se refere: vale enquanto os preços não mudam
+  // (como o servidor, src/envios.js aplicarAjustes); mexeu num preço, o desconto é recalculado
+  let base = { price: null, oldPrice: null, discountPct: 0 };
+
+  const preco = (inp) => { const v = dispLerPreco(inp.value); return Number.isNaN(v) ? null : v; };
+  const ler = () => {
+    const p = preco(inPreco); const a = preco(inAntigo); const antigo = p != null && a != null && a > p ? a : null;
+    const intacto = p === base.price && antigo === base.oldPrice; // preços iguais aos da API
+    return {
+      title: inTitulo.value.trim(), price: p, oldPrice: antigo, discountPct: intacto ? base.discountPct : dispDesconto(p, antigo),
+      coupon: inCupom.value.trim(), freeShipping: chkFrete.checked,
+      image: foto.modo === 'api' ? foto.url : null, upload: foto.modo === 'upload' ? foto.id : null, semFoto: foto.modo === 'nenhuma',
+    };
+  };
+  const pintarDesconto = () => { const d = ler().discountPct; inDesc.value = d > 0 ? `${d}%` : '—'; };
+  const pintarFoto = (msg = '', erro = false) => {
+    const tem = foto.modo !== 'nenhuma';
+    mini.hidden = !tem; escolherBox.hidden = tem;
+    if (tem) {
+      const src = foto.modo === 'upload' ? foto.dataUrl || DISP_IMG_VAZIA : dispImgSegura(foto.url);
+      if (miniImg.getAttribute('src') !== src) miniImg.src = src;
+    }
+    estado.className = 'dica' + (erro ? ' nivel-erro' : '');
+    estado.textContent = msg || (foto.subindo ? T.fotoSubindo : foto.modo === 'upload' && foto.id ? T.fotoPronta : D.fotoDica);
+  };
+  const mudou = () => { editado = true; pintarDesconto(); aoMudar(ler()); };
+  for (const x of [inTitulo, inPreco, inAntigo, inCupom]) x.oninput = mudou;
+  chkFrete.onchange = mudou;
+  dispLigarImgs(el);
+
+  const escolher = async (arq) => {
+    if (!arq) return;
+    inArq.value = '';
+    if (!DISP_FOTO_TIPOS.includes(arq.type) || arq.size > DISP_FOTO_MAX) { pintarFoto(DISP_FOTO_TIPOS.includes(arq.type) ? T.fotoGrande : T.fotoTipo, true); return; }
+    const antes = { ...foto }; const meu = ++seq;
+    foto = { modo: 'upload', url: '', dataUrl: '', id: null, subindo: true }; pintarFoto();
+    const leitor = new FileReader();
+    leitor.onload = () => { if (meu === seq) { foto.dataUrl = String(leitor.result); pintarFoto(); } };
+    leitor.readAsDataURL(arq);
+    try {
+      const r = await dispApi('/uploads', { method: 'POST', arquivo: arq });
+      if (meu !== seq) return;
+      foto.id = r.id ?? null; foto.subindo = false;
+      if (!foto.id) throw new Error(T.fotoFalhou);
+      pintarFoto(); mudou();
+    } catch (e) {
+      if (meu !== seq) return;
+      foto = antes; pintarFoto(e.message || T.fotoFalhou, true); // volta para a foto que havia antes
+    }
+  };
+  $('[data-escolher]', el).onclick = () => inArq.click();
+  $('[data-trocar]', el).onclick = () => inArq.click();
+  inArq.onchange = () => escolher(inArq.files?.[0]);
+  $('[data-remover]', el).onclick = () => {
+    seq++; foto = { modo: 'nenhuma', url: '', dataUrl: '', id: null, subindo: false };
+    pintarFoto(); mudou(); $('[data-escolher]', el).focus();
+  };
+
+  const definir = (v = {}) => {
+    seq++; editado = false;
+    inTitulo.value = String(v.title ?? '').slice(0, 200);
+    inPreco.value = dispPrecoCampo(v.price); inAntigo.value = dispPrecoCampo(v.oldPrice);
+    inCupom.value = String(v.coupon ?? '').slice(0, 30); chkFrete.checked = !!v.freeShipping;
+    const img = typeof v.image === 'string' && v.image ? v.image : '';
+    foto = { modo: img ? 'api' : 'nenhuma', url: img, dataUrl: '', id: null, subindo: false };
+    const d = Number(v.discountPct);
+    base = { price: null, oldPrice: null, discountPct: 0 };
+    const b = ler(); // preços como o campo os interpreta (ida e volta do arredondamento)
+    base = { price: b.price, oldPrice: b.oldPrice, discountPct: Number.isFinite(d) && d > 0 && d < 100 ? Math.round(d) : b.discountPct };
+    pintarDesconto(); pintarFoto();
+  };
+  definir(valores);
+
+  return {
+    el, valores: ler, definir, editado: () => editado,
+    ajustes() {
+      const v = ler();
+      return { title: v.title, price: v.price, oldPrice: v.oldPrice, coupon: v.coupon, freeShipping: v.freeShipping, ...(v.upload ? { upload: v.upload } : v.semFoto ? { sem_foto: true } : {}) };
+    },
+    erros() {
+      const erros = []; const v = ler();
+      if (!v.title) erros.push({ msg: D.faltaTitulo, el: inTitulo });
+      if (Number.isNaN(dispLerPreco(inPreco.value))) erros.push({ msg: D.precoInvalido, el: inPreco });
+      if (Number.isNaN(dispLerPreco(inAntigo.value))) erros.push({ msg: D.precoAntigoInvalido, el: inAntigo });
+      if (foto.subindo) erros.push({ msg: T.fotoAindaSubindo, el: $('[data-trocar]', el) || $('[data-escolher]', el) });
+      return erros;
+    },
+  };
+}
+
 // ================= Disparo manual (F1) =================
 function paginaDisparoManual() {
   const T = TEXTOS_DISPAROS; const t = T.manual;
@@ -314,6 +507,7 @@ function paginaDisparoManual() {
             <button type="button" id="dm-identificar" style="flex:1 0 auto">${T.identificar}</button></div>
         </div>
         <div id="dm-prod" aria-live="polite"></div>
+        <div id="dm-dados"></div>
         <fieldset><legend>Grupos que vão receber ${REQ} <span class="contagem" id="dm-cont"></span></legend>${grupos.html}</fieldset>
         <div style="display:grid;gap:8px">
           <label class="campo"><span>Template ${REQ}</span><select id="dm-tpl">${opcoes(S.templates, S.templates[0]?.id)}</select>
@@ -321,7 +515,8 @@ function paginaDisparoManual() {
           <a href="#templates" class="dica" style="justify-self:start">${T.gerenciarTemplates}</a>
           <div class="previa"><div class="chat" style="min-height:0"><div class="balao" id="dm-pv"></div></div><p class="legenda-previa" id="dm-pv-leg"></p></div>
         </div>
-        <label class="campo"><span>Etiqueta ${q('manual.etiqueta')}</span>
+        <p class="dica" id="dm-etq-amazon" hidden>${T.amazon.etiqueta} ${q('manual.amazon')}</p>
+        <label class="campo" id="dm-etq"><span>Etiqueta ${q('manual.etiqueta')}</span>
           ${S.tags.length ? `<select id="dm-tag">${opcoes(S.tags, S.tags[0]?.id)}</select><small>${T.etiquetaDica}</small>`
             : `<select id="dm-tag" disabled><option value="">Nenhuma etiqueta cadastrada</option></select><small>${T.semEtiqueta}</small>`}</label>
         <div style="display:grid;gap:6px">
@@ -342,36 +537,47 @@ function paginaDisparoManual() {
 
   const form = $('#dm-form'); const inUrl = $('#dm-url'); const btnId = $('#dm-identificar'); const prodEl = $('#dm-prod');
   const selTpl = $('#dm-tpl'); const selTag = $('#dm-tag'); const pv = $('#dm-pv'); const pvLeg = $('#dm-pv-leg');
+  const dadosEl = $('#dm-dados'); const etqEl = $('#dm-etq'); const etqAmazonEl = $('#dm-etq-amazon');
   const chkAg = $('#dm-agendar'); const campoHora = $('#dm-hora-campo'); const inHora = $('#dm-hora');
   const btn = $('#dm-disparar'); const motivoEl = $('#dm-motivo'); const kpisEl = $('#dm-kpis'); const histEl = $('#dm-hist');
-  // produto: o que a identificação devolveu; texto: a prévia do servidor para o template textoTpl
-  const st = { url: '', loja: null, produto: null, texto: '', textoTpl: '', identificando: false, enviando: false, ok: '' };
+  // produto: o que a identificação devolveu; texto: a prévia do servidor para o template textoTpl.
+  // Amazon: dados = a seção "Dados da oferta" (dadosOferta); bloqueio = por que não dá para disparar (link inválido, sem tag);
+  // asin só serve à prévia; editou = o dono mexeu nos dados (a prévia deixa de ser a do servidor).
+  const st = { url: '', loja: null, produto: null, texto: '', textoTpl: '', dados: null, bloqueio: '', asin: '', editou: false, identificando: false, enviando: false, ok: '' };
   form.onsubmit = (e) => e.preventDefault(); // Enter num campo nunca dispara
 
   let seqPv = 0;
   const prever = async () => {
     const n = ++seqPv; const tpl = S.templates.find((x) => String(x.id) === selTpl.value);
     if (!tpl) { pv.textContent = ''; pvLeg.textContent = T.semTemplates; return; }
-    if (st.produto && st.texto && st.textoTpl === selTpl.value) { pv.innerHTML = zap(st.texto); pvLeg.textContent = T.previaProduto; return; }
+    if (st.produto && st.texto && st.textoTpl === selTpl.value && !st.editou) { pv.innerHTML = zap(st.texto); pvLeg.textContent = st.dados ? T.amazon.previaAmazon : T.previaProduto; return; }
     const p = st.produto;
-    const amostra = p ? { title: p.title || '', price: p.price ?? null, oldPrice: p.oldPrice ?? null, sold: p.sold ?? null, freeShipping: !!p.freeShipping, coupon: p.coupon || '', discountPct: p.discountPct ?? null } : null;
+    let amostra = null;
+    if (st.dados) { // Amazon: a prévia mostra o que está nos campos; o link é só ilustrativo (tag mascarada)
+      const v = st.dados.valores();
+      amostra = { title: v.title, price: v.price, oldPrice: v.oldPrice, sold: p?.sold ?? null, freeShipping: v.freeShipping, coupon: v.coupon, discountPct: v.discountPct, link: `https://www.amazon.com.br/dp/${st.asin || '…'}?tag=•••` };
+    } else if (p) {
+      amostra = { title: p.title || '', price: p.price ?? null, oldPrice: p.oldPrice ?? null, sold: p.sold ?? null, freeShipping: !!p.freeShipping, coupon: p.coupon || '', discountPct: p.discountPct ?? null };
+    }
     try {
       const r = await dispApi('/templates/preview', { method: 'POST', body: { body: tpl.body, ...(amostra ? { amostra } : {}) } });
       if (n !== seqPv) return;
-      pv.innerHTML = zap(r.texto); pvLeg.textContent = p ? T.previaProduto : T.previaExemplo;
+      pv.innerHTML = zap(r.texto); pvLeg.textContent = st.dados ? T.amazon.previaAmazon : p ? T.previaProduto : T.previaExemplo;
     } catch { /* fica a prévia anterior */ }
   };
 
   const motivo = () => {
     const agora = !chkAg.checked;
     if (agora && S.st.whatsapp?.status !== 'open') return T.motivoWhats;
-    if (agora && modoExt() && !S.st.extensao?.online) return T.motivoExtensao;
+    if (agora && modoExt() && !st.dados && !S.st.extensao?.online) return T.motivoExtensao; // a Amazon não usa a extensão
     if (st.identificando) return T.motivoIdentificando;
+    if (st.bloqueio) return st.bloqueio;
     if (st.loja && !st.loja.implementada) return T.motivoLoja;
-    if (!st.produto) return T.motivoProduto;
+    if (!st.produto && !st.dados) return T.motivoProduto;
+    if (st.url && inUrl.value.trim() !== st.url) return T.motivoLinkMudou;
     if (!grupos.marcados(form).length) return T.motivoGrupo;
     if (!selTpl.value) return T.motivoTemplate;
-    if (!S.tags.length && modoExt()) return T.motivoEtiqueta;
+    if (!S.tags.length && modoExt() && !st.dados) return T.motivoEtiqueta;
     return '';
   };
   const resumo = () => {
@@ -388,11 +594,56 @@ function paginaDisparoManual() {
   };
 
   // ----- identificar -----
+  const hostAmazon = /(^|\.)(amazon(\.[a-z]{2,3}){1,2}|amazon|amzn\.(to|com)|a\.co)$/i;
+  const pareceAmazon = (url) => { try { return hostAmazon.test(new URL(url).hostname); } catch { return false; } };
+  const mostrarEtiqueta = () => { const amz = !!st.dados; etqEl.hidden = amz; etqAmazonEl.hidden = !amz; };
   const limparProduto = () => {
     st.url = ''; st.loja = null; st.produto = null; st.texto = ''; st.textoTpl = '';
-    prodEl.innerHTML = ''; inUrl.classList.remove('invalido'); inUrl.removeAttribute('aria-invalid');
+    clearTimeout(st.tPrever); st.dados = null; st.bloqueio = ''; st.asin = ''; st.editou = false;
+    prodEl.innerHTML = ''; dadosEl.innerHTML = ''; mostrarEtiqueta();
+    inUrl.classList.remove('invalido'); inUrl.removeAttribute('aria-invalid');
   };
   const pintarFalha = (msg) => { prodEl.innerHTML = `<div class="card-prod aviso" role="alert"><div class="info"><span>${esc(msg)}</span></div></div>`; };
+  /** Cartão do produto com a foto do CDN permitido (Mercado Livre ou Amazon); qualquer outra vira o desenho de sacola. */
+  const cartaoProduto = (p, loja, dica) => {
+    const temPreco = p.price != null && p.price !== '';
+    const preco = temPreco ? `<span class="preco">${dispBrl(p.price)}${Number(p.oldPrice) > Number(p.price) ? `<s>${dispBrl(p.oldPrice)}</s>` : ''}</span>` : '';
+    prodEl.innerHTML = `<div class="card-prod"><img src="${esc(dispImgSegura(p.image))}" data-img alt="${esc(p.title || 'Produto')}" width="72" height="72">
+      <div class="info"><span class="titulo" title="${esc(p.title || '')}">${esc(p.title || 'Produto sem título')}</span>${preco}
+        <span class="chip">${esc(loja.nome || '')}</span>
+        <span class="dica">${esc(dica)}</span></div></div>`;
+    dispLigarImgs(prodEl);
+    return temPreco;
+  };
+  /** Falha que impede o disparo (link inválido, não é produto, sem tag): mostra o aviso e diz o motivo ao lado do botão. */
+  const bloquear = (htmlOuTexto, motivo, ehHtml = false) => {
+    if (ehHtml) prodEl.innerHTML = `<div class="card-prod aviso" role="alert"><div class="info"><span>${htmlOuTexto}</span></div></div>`;
+    else pintarFalha(htmlOuTexto);
+    st.bloqueio = motivo;
+  };
+  /** Amazon: o servidor devolve `produto` (campos nulos se a API não respondeu) e `causa` da falha. Campos ausentes valem como "sem dados". */
+  const pintarAmazon = (r) => {
+    const A = T.amazon; const loja = r.loja;
+    const causa = r.causa || (r.tag_salva === false ? 'sem_tag' : null);
+    if (causa === 'invalido') { bloquear(A.invalido, A.motivoInvalido); return; }
+    if (causa === 'nao_produto') { bloquear(A.naoProduto, A.motivoNaoProduto); return; }
+    if (causa === 'sem_tag') { bloquear(`${esc(A.semTag)} <a href="#conexoes">${A.cadastrarTag}</a>`, A.motivoSemTag, true); return; }
+    const p = r.produto && typeof r.produto === 'object' ? r.produto : null;
+    st.asin = String(p?.asin || String(p?.key || '').replace(/^ASIN:/, '') || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+    const semDados = !p || (!p.title && p.price == null);
+    const aviso = { sem_credenciais: A.semCredenciais, cota: A.cota }[causa] || A.indisponivel;
+    if (causa || semDados) { // a API não respondeu: o link já leva a tag, os dados vão em branco para o dono preencher
+      prodEl.innerHTML = `<div class="card-prod aviso" role="status"><div class="info"><span>${esc(aviso)}</span></div></div>`;
+    } else {
+      const faltou = [!p.title && 'o título', p.price == null && 'o preço', p.price != null && p.oldPrice == null && 'o preço antigo'].filter(Boolean);
+      const dica = !faltou.length ? T.pronto(loja.nome || A.nome) : faltou.length === 1 && faltou[0] === 'o preço antigo' ? A.semPrecoAntigo : A.faltou(dispLista(faltou));
+      cartaoProduto(p, loja, dica);
+    }
+    st.dados = dadosOferta(p || {}, () => { // prévia ao vivo, com um pequeno atraso enquanto o dono digita
+      st.editou = true; clearTimeout(st.tPrever); st.tPrever = setTimeout(prever, 250); atualizar();
+    });
+    dadosEl.innerHTML = ''; dadosEl.appendChild(st.dados.el); mostrarEtiqueta();
+  };
   const pintarProduto = (r) => {
     const loja = r.loja;
     if (!loja.implementada) {
@@ -400,36 +651,32 @@ function paginaDisparoManual() {
       prodEl.innerHTML = `<div class="card-prod aviso"><div class="info"><span>${esc(txt)} <a href="#conexoes">${T.configureConexoes}</a></span></div></div>`;
       return;
     }
+    if (r.editavel ?? loja.id === 'amazon') { pintarAmazon(r); return; }
     const p = r.produto;
     if (!p) { pintarFalha(r.motivo || T.semProduto); return; }
-    // Foto do CDN do Mercado Livre (a CSP libera https://*.mlstatic.com); qualquer outra vira o desenho de sacola.
-    const img = DISP_IMG_ML.test(p.image || '') ? p.image : DISP_IMG_VAZIA;
-    const temPreco = p.price != null && p.price !== '';
-    const preco = temPreco ? `<span class="preco">${dispBrl(p.price)}${Number(p.oldPrice) > Number(p.price) ? `<s>${dispBrl(p.oldPrice)}</s>` : ''}</span>` : '';
-    prodEl.innerHTML = `<div class="card-prod"><img src="${esc(img)}" alt="${esc(p.title || 'Produto')}" width="72" height="72">
-      <div class="info"><span class="titulo" title="${esc(p.title || '')}">${esc(p.title || 'Produto sem título')}</span>${preco}
-        <span class="chip">${esc(loja.nome || '')}</span>
-        <span class="dica">${esc(temPreco ? T.pronto(loja.nome || '') : T.semPreco)}</span></div></div>`;
+    cartaoProduto(p, loja, p.price != null && p.price !== '' ? T.pronto(loja.nome || '') : T.semPreco);
   };
   const identificar = async () => {
     const url = inUrl.value.trim();
     if (st.identificando) return;
     if (!url) { dispErros(form, [{ msg: T.faltaLink, el: inUrl }]); return; }
+    if (st.dados?.editado() && !confirm(T.confirmaDescartarDados)) return; // não perde o que o dono digitou por acidente
     const voltarFoco = document.activeElement === btnId;
     limparProduto(); dispErros(form, []);
     st.identificando = true; btnId.disabled = true; btnId.textContent = T.identificando; atualizar();
+    if (pareceAmazon(url)) prodEl.innerHTML = `<div class="card-prod" role="status"><div class="info"><span>${T.resolvendo}</span></div></div>`; // link curto precisa de redirecionamento
     try {
       const tplId = selTpl.value;
       const r = await dispApi('/disparo/identificar', { method: 'POST', body: { url, template_id: Number(tplId) || null, tag_id: Number(selTag.value) || null } });
-      if (inUrl.value.trim() !== url) return; // o link mudou enquanto identificava
+      if (inUrl.value.trim() !== url) { limparProduto(); return; } // o link mudou enquanto identificava
       if (!r || !r.loja) { pintarFalha(T.linkInvalido); return; }
       st.url = url; st.loja = r.loja;
       st.produto = r.loja.implementada ? r.produto || null : null;
       st.texto = st.produto ? r.texto || '' : ''; st.textoTpl = tplId;
       pintarProduto(r);
     } catch (e) {
-      if (inUrl.value.trim() !== url) return;
-      pintarFalha(e.message);
+      if (inUrl.value.trim() !== url) { limparProduto(); return; }
+      limparProduto(); pintarFalha(e.message);
       inUrl.classList.add('invalido'); inUrl.setAttribute('aria-invalid', 'true');
     } finally {
       st.identificando = false; btnId.disabled = false; btnId.textContent = T.identificar;
@@ -439,9 +686,11 @@ function paginaDisparoManual() {
   };
   btnId.onclick = identificar;
   inUrl.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); identificar(); } };
-  // Editar o link depois de identificar limpa o resultado.
+  // Editar o link depois de identificar limpa o resultado; com dados da Amazon já editados, eles ficam até o dono
+  // identificar de novo (aí vem a pergunta "Descartar os dados editados?") e o botão avisa que o link mudou.
   inUrl.oninput = () => {
-    if (st.url && inUrl.value.trim() === st.url) return;
+    if (st.url && inUrl.value.trim() === st.url) { atualizar(); return; }
+    if (st.dados?.editado()) { atualizar(); return; }
     if (st.url || st.loja || prodEl.innerHTML) { limparProduto(); prever(); }
     atualizar();
   };
@@ -464,7 +713,9 @@ function paginaDisparoManual() {
   // ----- disparar -----
   btn.onclick = async () => {
     const erros = [];
-    if (!st.produto) erros.push({ msg: T.motivoProduto, el: inUrl });
+    if (!st.produto && !st.dados) erros.push({ msg: T.motivoProduto, el: inUrl });
+    if (st.bloqueio) erros.push({ msg: st.bloqueio, el: inUrl });
+    if (st.dados) erros.push(...st.dados.erros());
     if (!grupos.marcados(form).length) erros.push({ msg: T.motivoGrupo, el: $('#gr', form) });
     if (!selTpl.value) erros.push({ msg: T.motivoTemplate, el: selTpl });
     if (chkAg.checked && !inHora.value) erros.push({ msg: T.faltaHora, el: inHora });
@@ -472,10 +723,12 @@ function paginaDisparoManual() {
     if (dispErros(form, erros)) return;
     const n = grupos.marcados(form).length; const hhmm = inHora.value;
     // Corpo achatado, como POST /api/envios lê (o servidor relê o produto pela url: o que a tela mostrou não vale).
+    // Amazon: `ajustes` leva só o que o dono editou (título, preços, cupom, frete, foto por upload); nunca link nem URL de foto.
     const corpo = {
       tipo: 'oferta', group_jids: grupos.marcados(form), quando: chkAg.checked ? 'agendado' : 'agora',
       ...(chkAg.checked ? { agendar_data: dispDataISO(), agendar_hhmm: hhmm } : {}),
-      url: st.url, tag_id: Number(selTag.value) || null, template_id: Number(selTpl.value),
+      url: st.url, tag_id: st.dados ? null : Number(selTag.value) || null, template_id: Number(selTpl.value),
+      ...(st.dados ? { ajustes: st.dados.ajustes() } : {}),
     };
     st.enviando = true; const soltar = dispTravar(form); form.setAttribute('aria-busy', 'true'); atualizar();
     let ok = false;

@@ -419,3 +419,51 @@ nav a[href="#equipe"] { --ic:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3
 nav a[href="#historico"] { --ic:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='10'/%3E%3Cpolyline points='12 6 12 12 16 14'/%3E%3C/svg%3E"); }
 nav a[href="#ajustes"] { --ic:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cline x1='4' y1='21' x2='4' y2='14'/%3E%3Cline x1='4' y1='10' x2='4' y2='3'/%3E%3Cline x1='12' y1='21' x2='12' y2='12'/%3E%3Cline x1='12' y1='8' x2='12' y2='3'/%3E%3Cline x1='20' y1='21' x2='20' y2='16'/%3E%3Cline x1='20' y1='12' x2='20' y2='3'/%3E%3Cline x1='1' y1='14' x2='7' y2='14'/%3E%3Cline x1='9' y1='8' x2='15' y2='8'/%3E%3Cline x1='17' y1='16' x2='23' y2='16'/%3E%3C/svg%3E"); }
 nav a[href="#ajuda"] { --ic:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='10'/%3E%3Cpath d='M9.1 9a3 3 0 0 1 5.8 1c0 2-3 3-3 3'/%3E%3Cline x1='12' y1='17' x2='12.01' y2='17'/%3E%3C/svg%3E"); }
+
+/* ---------- "Dados da oferta" (Disparo manual e Completar) ---------- */
+.dados-tres { grid-template-columns:repeat(auto-fit,minmax(130px,1fr)); align-items:start; }
+.opcao-chk { font-weight:500; min-height:40px; cursor:pointer; }
+.opcao-chk input { width:auto; flex:none; }
+.dados-foto { display:grid; gap:8px; }
+.dados-foto .dica { margin:0; }
+.dados-foto [data-escolher-box] .dica { margin-bottom:8px; }
+.rotulo-campo { font-weight:600; font-size:14px; }
+fieldset[data-dados] input[readonly] { background:var(--inset); }
+@media (max-width:900px) { .opcao-chk { min-height:44px; } .miniatura button { min-height:44px; } }
+
+/* Espelhamento: classes no lugar de estilos inline */
+.nome-grupo { display:inline-block; max-width:16em; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; vertical-align:bottom; }
+.kpi.atencao { border-color:var(--warn); }
+a.chip.chip-link { text-decoration:underline; }
+@media (max-width:600px) { td [data-completar] { min-height:44px; min-width:44px; } #esp-filtros .campo { min-width:0; flex:1 1 100%; } }
+/* Controle segmentado no celular: quando quebra em linhas, os botões ocupam a linha toda, com alvo de 44 px */
+@media (max-width:480px) { .seg { display:flex; } .seg button { flex:1 1 auto; min-height:44px; } }
+
+/* Espelhamento (revisão): alvos de toque, aviso do cartão, opção com caixa, KPIs e histórico no celular */
+.alvo24, .dica-celula a { display:inline-block; min-height:24px; line-height:24px; }
+a[href="#templates"].dica { display:inline-block; min-height:24px; line-height:24px; }
+.aviso-cartao { margin:0 0 8px; }
+.opcao-chk { flex-wrap:nowrap; align-items:flex-start; }
+.opcao-chk input { margin-top:3px; }
+.esp-destino { min-width:7em; }
+@media (max-width:900px) { a.chip-toque { display:inline-flex; align-items:center; min-height:44px; padding:0 14px; } }
+@media (max-width:600px) {
+  .esp-kpis { grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; }
+  .esp-kpis .kpi { padding:10px; }
+  .esp-kpis .kpi .rotulo { font-size:10px; letter-spacing:.02em; overflow-wrap:anywhere; }
+  .esp-kpis .kpi .valor { font-size:24px; margin:4px 0 0; }
+  .esp-kpis .kpi .nota { font-size:12px; }
+  .esp-tab { overflow-x:visible; }
+  .esp-tab table, .esp-tab tbody { display:block; min-width:0; }
+  .esp-tab thead { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); white-space:nowrap; }
+  .esp-tab tr { display:grid; grid-template-columns:auto minmax(0,1fr); grid-template-areas:"quando resultado" "oferta oferta" "regra regra" "origem origem" "destino destino"; gap:4px 12px; align-items:start; padding:12px 0; border-bottom:1px solid var(--line); }
+  .esp-tab td { display:block; padding:0; border:0; min-width:0; }
+  .esp-tab .esp-quando { grid-area:quando; color:var(--muted); font-size:13px; }
+  .esp-tab .esp-resultado { grid-area:resultado; text-align:right; }
+  .esp-tab .esp-oferta { grid-area:oferta; }
+  .esp-tab .esp-regra { grid-area:regra; } .esp-tab .esp-origem { grid-area:origem; } .esp-tab .esp-destino { grid-area:destino; min-width:0; }
+  .esp-tab .esp-regra, .esp-tab .esp-origem, .esp-tab .esp-destino { color:var(--muted); font-size:13px; }
+  .esp-tab td[data-l] { display:flex; gap:4px; }
+  .esp-tab td[data-l]::before { content:attr(data-l) ":"; font-weight:600; flex:none; }
+  .esp-tab td[data-l] > * { min-width:0; }
+}

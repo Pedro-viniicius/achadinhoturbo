@@ -1,4 +1,4 @@
-// Testes do servidor HTTP: login, sessão, Host/Origin, token da extensão, cabeçalhos.
+// Testes do servidor HTTP: login, sessão, Host/Origin, token da extensão, cabeçalhos e a Amazon ligada.
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -6,10 +6,9 @@ import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import { openDb } from '../src/db.js';
-import { buildApp } from '../src/server.js';
+import { buildApp, criarServicos } from '../src/server.js';
 import { createWhatsApp } from '../src/whatsapp.js';
 import { createLinkService } from '../src/links.js';
-import { createScheduler } from '../src/scheduler.js';
 
 const HOST = 'disparador.exemplo.com.br';
 const SENHA = 'senha-de-teste-123';
@@ -18,16 +17,20 @@ const pastas = [];
 after(() => { for (const p of pastas) fs.rmSync(p, { recursive: true, force: true }); });
 const tmp = () => { const p = fs.mkdtempSync(path.join(os.tmpdir(), 'disp-srv-')); pastas.push(p); return p; };
 
-function subir({ publicHost = HOST, panelPassword = SENHA, dir = tmp() } = {}) {
+/** fetch padrão do cliente da Amazon nos testes: nenhuma chamada sai para a rede. */
+const redeProibida = async () => { throw new Error('rede proibida no teste'); };
+
+/** Sobe pelo mesmo caminho do main de src/server.js: criarServicos (Amazon + agendador) e buildApp. */
+function subir({ publicHost = HOST, panelPassword = SENHA, dir = tmp(), fetch = redeProibida } = {}) {
   const db = openDb(dir);
   const wa = createWhatsApp({ db, dir, dryRun: true }); wa.connect();
   const links = createLinkService({ getMode: () => 'fake' });
-  const scheduler = createScheduler({ db, wa, links, fast: true });
-  const app = buildApp({ db, wa, links, scheduler, publicHost, panelPassword });
+  const { amazon, scheduler } = criarServicos({ db, wa, links, fast: true, dir, fetch });
+  const app = buildApp({ db, wa, links, scheduler, amazon, publicHost, panelPassword });
   return new Promise((ok) => {
     const server = app.listen(0, '127.0.0.1', () => {
       const port = server.address().port;
-      ok({ db, dir, port, fechar: () => new Promise((r) => { server.closeAllConnections?.(); server.close(() => { db.close(); r(); }); }) });
+      ok({ db, dir, port, amazon, scheduler, fechar: () => new Promise((r) => { server.closeAllConnections?.(); server.close(() => { db.close(); r(); }); }) });
     });
   });
 }
@@ -170,5 +173,110 @@ test('API: regra aceita até 5 fontes, valida cada uma e devolve sources; mais d
     // formato antigo continua aceito
     assert.equal((await req(s.port, '/api/rules', { method: 'POST', body: { ...base, source_type: 'afiliados', source_config: { paginas: 2 } }, headers: h })).status, 200);
     assert.deepEqual((await req(s.port, '/api/rules', { headers: h })).json[1].sources, [{ type: 'afiliados', config: { busca: '', categorias: [], ordem: 'relevance', paginas: 2, mais_vendidos: false, ganhos_extras: false }, tag_id: null }]);
+  } finally { await s.fechar(); }
+});
+
+test('Amazon ligada (criarServicos): Identificar com link da Amazon traz o produto, e Conexões usa o mesmo cliente da fila', async () => {
+  const ASINS = ['B0FG2MD49G', 'B0ABCDEF12'];
+  const chamadas = [];
+  const resposta = (status, corpo) => new Response(JSON.stringify(corpo), { status, headers: { 'content-type': 'application/json' } });
+  const fetch = async (url, init = {}) => {
+    const u = String(url); chamadas.push(u);
+    if (u === 'https://api.amazon.com/auth/o2/token') return resposta(200, { access_token: 'token-teste', token_type: 'bearer', expires_in: 3600 });
+    if (u === 'https://creatorsapi.amazon/catalog/v1/getItems') {
+      return resposta(200, { itemsResult: { items: JSON.parse(init.body).itemIds.map((asin) => ({
+        asin, itemInfo: { title: { displayValue: `Produto ${asin}` } }, images: { primary: { large: { url: 'https://m.media-amazon.com/images/I/71abc.jpg' } } },
+        offersV2: { listings: [{ isBuyBoxWinner: true, price: { money: { amount: 100 } } }] },
+      })) } });
+    }
+    throw new Error('rede não prevista no teste');
+  };
+  const s = await subir({ publicHost: '', panelPassword: '', fetch });
+  try {
+    assert.equal(s.scheduler.amazon, s.amazon, 'o agendador (fila de envios) recebeu o cliente criado pelo servidor');
+    const origin = `http://127.0.0.1:${s.port}`;
+    const salvar = (campos) => req(s.port, '/api/conexoes/amazon', { method: 'PUT', headers: { origin }, body: { campos } });
+    const identificar = (asin) => req(s.port, '/api/disparo/identificar', { method: 'POST', headers: { origin }, body: { url: `https://www.amazon.com.br/dp/${asin}` } });
+    const tokens = () => chamadas.filter((u) => u.endsWith('/auth/o2/token')).length;
+
+    assert.equal((await salvar({ tag: 'pedro-20', credencial_id: 'credencial-id-0001', credencial_secret: 'segredo-super-secreto-123', credencial_versao: '3.1' })).status, 200);
+    let r = await identificar(ASINS[0]);
+    assert.equal(r.status, 200, `identificar respondeu ${r.status}: ${r.json?.erro}`);
+    assert.doesNotMatch(r.txt, /não está disponível neste servidor/);
+    assert.equal(r.json.editavel, true);
+    assert.equal(r.json.causa, null);
+    assert.equal(r.json.produto.title, `Produto ${ASINS[0]}`);
+    assert.equal(tokens(), 1);
+
+    // salvar a conexão invalida o token do cliente único: o próximo Identificar (fila de envios) pede outro
+    assert.equal((await salvar({ tag: 'pedro-20' })).status, 200);
+    r = await identificar(ASINS[1]);
+    assert.equal(r.status, 200, r.txt);
+    assert.equal(r.json.produto.title, `Produto ${ASINS[1]}`);
+    assert.equal(tokens(), 2, 'Conexões e a fila de envios usam o mesmo cliente da Amazon');
+    assert.ok(!r.txt.includes('segredo-super-secreto-123') && !r.txt.includes('token-teste'));
+  } finally { await s.fechar(); }
+});
+
+test('R1: GET /api/log?tipo=automatico traz só as linhas das regras do Disparo automático (rule_id), com o mesmo limite e formato; sem tipo, tudo', async () => {
+  const s = await subir({ publicHost: '', panelPassword: '' });
+  try {
+    const origin = `http://127.0.0.1:${s.port}`;
+    const ins = s.db.prepare('INSERT INTO log (ts, rule_id, rule_name, level, group_name, offer_title, message) VALUES (?,?,?,?,?,?,?)');
+    ins.run(1, 7, 'Regra ML', 'ok', 'Grupo A', 'Fone', 'Enviado com a etiqueta x');            // 1: regra
+    ins.run(2, null, 'Avisos', 'info', null, null, 'Resumo enviado');                              // 2
+    ins.run(3, null, 'Espelho: Amazon', 'ok', 'Origem', 'Roteador', 'Espelhada com dados da Amazon'); // 3
+    ins.run(4, null, 'Disparo manual', 'erro', 'Grupo B', 'Mesa', 'Não enviado: perdeu o horário'); // 4: envio avulso
+    ins.run(5, 7, 'Regra ML', 'erro', null, null, 'WhatsApp desconectado: nada foi enviado.');     // 5: regra
+    ins.run(6, null, 'Equipe', 'info', null, null, 'Convite criado');                              // 6
+    const ler = async (q) => { const r = await req(s.port, `/api/log${q}`, { headers: { origin } }); return r; };
+    const ids = (r) => r.json.map((l) => l.id);
+
+    let r = await ler('');
+    assert.equal(r.status, 200);
+    assert.deepEqual(ids(r), [6, 5, 4, 3, 2, 1], 'sem tipo: igual a hoje');
+    assert.deepEqual(ids(await ler('?tipo=todos')), [6, 5, 4, 3, 2, 1]);
+    assert.deepEqual(ids(await ler('?tipo=')), [6, 5, 4, 3, 2, 1]);
+    r = await ler('?tipo=automatico');
+    assert.equal(r.status, 200);
+    assert.deepEqual(ids(r), [5, 1]);
+    assert.deepEqual({ ...r.json[1] }, { id: 1, ts: 1, rule_id: 7, rule_name: 'Regra ML', level: 'ok', group_name: 'Grupo A', offer_title: 'Fone', message: 'Enviado com a etiqueta x' }, 'mesmo formato (a linha inteira)');
+    assert.deepEqual(ids(await ler('?tipo=automatico&nivel=erro')), [5], 'combina com o nível');
+    assert.deepEqual(ids(await ler('?nivel=erro')), [5, 4], 'o nível sozinho continua igual');
+    assert.deepEqual(ids(await ler('?tipo=automatico&limite=1')), [5], 'mesmo LIMIT');
+    for (const q of ['?tipo=espelho', '?tipo=automatico&tipo=todos']) {
+      r = await ler(q);
+      assert.deepEqual([r.status, r.json], [400, { erro: 'Filtro inválido: use automatico ou todos.' }], q);
+    }
+  } finally { await s.fechar(); }
+});
+
+test('S4/R7: "Apagar o que já passou do prazo" (POST /api/privacidade/limpar) também apaga os itens antigos do espelhamento, com a mesma regra da retenção do início', async () => {
+  const s = await subir({ publicHost: '', panelPassword: '' });
+  try {
+    const origin = `http://127.0.0.1:${s.port}`;
+    const DIA = 86400000; const agora = Date.now();
+    s.db.prepare("INSERT INTO settings (key, value) VALUES ('retencao_dias', '30') ON CONFLICT(key) DO UPDATE SET value = excluded.value").run();
+    const esp = s.db.prepare("INSERT INTO espelhos (nome, enabled, origem_jids, destino_jids, template_id, dedupe_horas, created_at, updated_at) VALUES (?, 0, '[]', '[]', 1, ?, ?, ?)");
+    const curta = Number(esp.run('curta', 24, agora, agora).lastInsertRowid);
+    const longa = Number(esp.run('longa', 8760, agora, agora).lastInsertRowid);
+    const ins = s.db.prepare("INSERT INTO espelho_itens (espelho_id, origem_jid, msg_id, ts, url, asin, texto_origem, status, decidido_em) VALUES (?, '1@g.us', ?, ?, 'https://www.amazon.com.br/dp/B000000001', 'B000000001', 'texto guardado', ?, ?)");
+    const velho = agora - 60 * DIA;
+    ins.run(curta, 'velho-descartado', velho, 'descartado', velho);   // apaga
+    ins.run(curta, 'velho-enviado', velho, 'enviado', velho);         // fora das 24 h de "Horas sem repetir": apaga
+    ins.run(longa, 'velho-dedupe', velho, 'enviado', velho);          // ainda conta para "Horas sem repetir" (1 ano): fica
+    ins.run(curta, 'velho-fila', velho, 'na_fila', velho);            // ativo: fica
+    ins.run(curta, 'recente', agora - DIA, 'descartado', agora - DIA); // dentro dos 30 dias: fica
+    const r = await req(s.port, '/api/privacidade/limpar', { method: 'POST', headers: { origin } });
+    assert.equal(r.status, 200, r.txt);
+    assert.equal(r.json.espelhamento, 2);
+    assert.ok('sessoes' in r.json && 'eventos' in r.json, 'o resto da resposta continua igual');
+    assert.deepEqual(s.db.prepare('SELECT msg_id FROM espelho_itens ORDER BY id').all().map((i) => i.msg_id), ['velho-dedupe', 'velho-fila', 'recente']);
+
+    // retenção 0 (para sempre): nada do espelhamento sai
+    s.db.prepare("UPDATE settings SET value = '0' WHERE key = 'retencao_dias'").run();
+    const r0 = await req(s.port, '/api/privacidade/limpar', { method: 'POST', headers: { origin } });
+    assert.deepEqual([r0.status, r0.json.espelhamento], [200, 0]);
+    assert.equal(s.db.prepare('SELECT COUNT(*) AS n FROM espelho_itens').get().n, 3);
   } finally { await s.fechar(); }
 });

@@ -14,6 +14,7 @@ import { createWhatsApp } from '../src/whatsapp.js';
 import { createLinkService } from '../src/links.js';
 import { buildApp } from '../src/server.js';
 import * as mlReal from '../src/ml.js';
+import { IMAGEM_AMAZON } from '../src/amazon.js';
 import * as envios from '../src/envios.js';
 import * as avisos from '../src/avisos.js';
 import * as conexoes from '../src/conexoes.js';
@@ -48,7 +49,8 @@ test('esquema: openDb duas vezes no mesmo diretório não falha nem duplica nada
   const db2 = openDb(dir);
   assert.deepEqual(linhas(db2, 'SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name'), esquema1, 'a segunda abertura não cria nem altera nada');
   assert.equal(colunas(db2, 'sessions').filter((c) => c === 'user_id').length, 1);
-  assert.equal(db2.prepare('SELECT COUNT(*) AS n FROM templates').get().n, 1, 'template padrão não é semeado de novo');
+  // A semente "Amazon" entrou em 02/11/2026 (etapa 1 do plano espelhamento-amazon): aqui conta só o Padrão.
+  assert.equal(db2.prepare("SELECT COUNT(*) AS n FROM templates WHERE name = 'Padrão'").get().n, 1, 'template padrão não é semeado de novo');
   assert.equal(db2.prepare("SELECT COUNT(*) AS n FROM settings WHERE key = 'ext_token'").get().n, 1);
   assert.equal(getSetting(db2, 'ext_token'), token, 'o token da extensão não muda ao reabrir');
   db2.close();
@@ -106,8 +108,10 @@ test('esquema: banco da versão anterior reabre com os dados intactos e ganha ta
 
   for (let abertura = 1; abertura <= 2; abertura++) {
     const db = openDb(dir);
+    // A semente "Amazon" entrou em 02/11/2026 (etapa 1 do plano espelhamento-amazon): fora a marca e o template dela, nada muda.
+    const semSemente = { settings: " WHERE key <> 'tpl_amazon_seed'", templates: " WHERE name <> 'Amazon'" };
     for (const t of ['settings', 'tags', 'templates', 'groups', 'rules']) {
-      assert.deepEqual(linhas(db, `SELECT * FROM ${t} ORDER BY rowid`), antes[t], `${t} intacta (abertura ${abertura})`);
+      assert.deepEqual(linhas(db, `SELECT * FROM ${t}${semSemente[t] || ''} ORDER BY rowid`), antes[t], `${t} intacta (abertura ${abertura})`);
     }
     assert.deepEqual(linhas(db, 'SELECT * FROM sessions ORDER BY rowid'), antes.sessions.map((s) => ({ ...s, user_id: null })), `sessão aberta continua, com user_id nulo (abertura ${abertura})`);
     for (const tabela of Object.keys(TABELAS_NOVAS)) assert.ok(existe(db, 'table', tabela), `tabela ${tabela} criada (abertura ${abertura})`);
@@ -343,13 +347,16 @@ test('servidor: /api/state traz o usuario da sessão (Dono migrado, sem e-mail) 
   } finally { await s.fechar(); }
 });
 
-test('servidor: a CSP libera as fotos de produto do CDN do Mercado Livre (*.mlstatic.com, como IMAGEM_PERMITIDA) e nada mais de fora', async () => {
+test('servidor: a CSP libera as fotos de produto dos CDNs do Mercado Livre e da Amazon (como IMAGEM_PERMITIDA e IMAGEM_AMAZON) e nada mais de fora', async () => {
   const s = await subir();
   try {
     const csp = (await req(s.port, '/login.html')).headers['content-security-policy'];
     const img = csp.split(';').map((p) => p.trim()).find((p) => p.startsWith('img-src'));
-    assert.equal(img, "img-src 'self' data: https://*.mlstatic.com");
+    assert.equal(img, "img-src 'self' data: https://*.mlstatic.com https://*.media-amazon.com https://*.ssl-images-amazon.com https://*.images-amazon.com");
+    assert.equal(csp.split(';').map((p) => p.trim()).find((p) => p.startsWith('connect-src')), "connect-src 'self'", 'nenhum connect-src de fora');
     assert.ok(mlReal.IMAGEM_PERMITIDA.test('https://http2.mlstatic.com/D_1.jpg') && !mlReal.IMAGEM_PERMITIDA.test('https://evil.com/mlstatic.com/x.jpg'));
+    // cada host da Amazon liberado na CSP é um que a regra do servidor aceita para a foto
+    for (const h of ['m.media-amazon.com', 'images-na.ssl-images-amazon.com', 'g-ecx.images-amazon.com']) assert.ok(IMAGEM_AMAZON.test(`https://${h}/images/I/1.jpg`), h);
   } finally { await s.fechar(); }
 });
 
@@ -385,4 +392,161 @@ test('servidor: rotas dos módulos novos montadas atrás do Host/Origin e do log
     }
     t.diagnostic(`${stubs} de ${ROTAS_STUB.length} rotas ainda em stub (501)`);
   } finally { await s.fechar(); }
+});
+
+// ---------------------------------------------------------------------------------------------
+// Espelhamento Amazon, etapa 1 (docs/produto/planos/espelhamento-amazon.md, CA8): tabelas espelhos e
+// espelho_itens, índices, semente única do template "Amazon" e DEFAULT_TEMPLATE com pedaço opcional "[ … ]".
+const dbMod = await import('../src/db.js');
+const { TEMPLATE_AMAZON } = await import('../src/template.js');
+
+const TABELAS_ESPELHO = {
+  espelhos: ['id', 'nome', 'enabled', 'origem_jids', 'destino_jids', 'template_id', 'incluir_minhas', 'dedupe_horas',
+    'palavras_bloqueadas', 'sem_preco', 'max_por_hora', 'janela_inicio', 'janela_fim', 'enviar_foto', 'created_at', 'updated_at'],
+  espelho_itens: ['id', 'espelho_id', 'origem_jid', 'origem_nome', 'msg_id', 'ts', 'url', 'asin', 'texto_origem',
+    'status', 'motivo', 'fonte_dados', 'oferta', 'envio_id', 'tentativas', 'espera_ate', 'decidido_em'],
+};
+const INDICES_ESPELHO = {
+  idx_esp_msg: [['espelho_id', 'origem_jid', 'msg_id', 'url'], 1],
+  idx_esp_dedupe: [['espelho_id', 'asin', 'status', 'decidido_em'], 0],
+  idx_esp_status: [['status', 'espera_ate', 'ts'], 0],
+};
+const TEXTO_AMAZON = [
+  '*{TITULO_PRODUTO}*', '', '😱 De ~{PRECO_ANTIGO}~', '🔥 Por *{PRECO_PRODUTO}*[ ({DESCONTO_PRODUTO} OFF)]',
+  '🚚 {FRETE}', '🎟️ Cupom: *{CUPOM}*', '', '🛒 Compre aqui: {LINK}',
+].join('\n');
+const DEFAULT_ANTERIOR = [
+  '*{TITULO_PRODUTO}*', '', '😱 De ~{PRECO_ANTIGO}~', '🔥 Por *{PRECO_PRODUTO}* ({DESCONTO_PRODUTO} OFF)',
+  '⭐ {NUMERO_VENDAS}', '🚚 {FRETE}', '🎟️ Cupom: *{CUPOM}*', '', '🛒 Compre aqui: {LINK}',
+].join('\n');
+const templatesAmazon = (db) => linhas(db, "SELECT id, name, body FROM templates WHERE name = 'Amazon'");
+
+function conferirTabelasEspelho(db, quando) {
+  for (const [tabela, cols] of Object.entries(TABELAS_ESPELHO)) {
+    assert.ok(existe(db, 'table', tabela), `tabela ${tabela} (${quando})`);
+    assert.deepEqual(colunas(db, tabela), cols, `colunas de ${tabela} (${quando})`);
+  }
+  for (const [indice, [cols, unico]] of Object.entries(INDICES_ESPELHO)) {
+    assert.equal(db.prepare("SELECT tbl_name FROM sqlite_master WHERE type = 'index' AND name = ?").get(indice)?.tbl_name, 'espelho_itens', `índice ${indice} (${quando})`);
+    assert.deepEqual(db.prepare(`PRAGMA index_info(${indice})`).all().map((c) => c.name), cols, `colunas de ${indice} (${quando})`);
+    assert.equal(db.prepare('PRAGMA index_list(espelho_itens)').all().find((i) => i.name === indice)?.unique, unico, `${indice} ${unico ? 'é' : 'não é'} único (${quando})`);
+  }
+}
+
+test('espelho etapa 1: banco novo tem espelhos, espelho_itens, índices e um único template "Amazon"; reabrir não muda nada', () => {
+  const dir = tmp();
+  const db1 = openDb(dir);
+  conferirTabelasEspelho(db1, 'primeira abertura');
+  const amazon = templatesAmazon(db1);
+  assert.equal(amazon.length, 1, 'template "Amazon" semeado');
+  assert.equal(amazon[0].body, TEXTO_AMAZON, 'texto do brief com o desconto como pedaço opcional');
+  assert.equal(TEMPLATE_AMAZON, TEXTO_AMAZON, 'a semente usa o TEMPLATE_AMAZON de template.js');
+  assert.equal(getSetting(db1, 'tpl_amazon_seed'), String(amazon[0].id), 'a marca guarda o id do template semeado');
+  assert.deepEqual(linhas(db1, 'SELECT name FROM templates ORDER BY id').map((t) => t.name), ['Padrão', 'Amazon'], 'Padrão continua sendo o primeiro (id 1)');
+  const esquema = linhas(db1, 'SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name');
+  const templates = linhas(db1, 'SELECT * FROM templates ORDER BY id');
+  db1.close();
+
+  const db2 = openDb(dir);
+  conferirTabelasEspelho(db2, 'segunda abertura');
+  assert.deepEqual(linhas(db2, 'SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name'), esquema, 'reabrir não cria nem altera nada');
+  assert.deepEqual(linhas(db2, 'SELECT * FROM templates ORDER BY id'), templates, 'a semente não duplica');
+  assert.equal(db2.prepare("SELECT COUNT(*) AS n FROM settings WHERE key = 'tpl_amazon_seed'").get().n, 1);
+  for (const tabela of Object.keys(TABELAS_ESPELHO)) assert.equal(db2.prepare(`SELECT COUNT(*) AS n FROM ${tabela}`).get().n, 0, `${tabela} nasce vazia`);
+  db2.close();
+});
+
+test('espelho etapa 1: template "Amazon" apagado ou renomeado pelo dono não volta ao reabrir', () => {
+  const dir = tmp();
+  let db = openDb(dir);
+  const id = templatesAmazon(db)[0].id;
+  db.prepare("UPDATE templates SET name = 'Minha Amazon', body = '{TITULO_PRODUTO} {LINK}' WHERE id = ?").run(id);
+  db.close();
+  db = openDb(dir);
+  assert.equal(templatesAmazon(db).length, 0, 'renomeado: não cria outro "Amazon"');
+  assert.equal(db.prepare('SELECT body FROM templates WHERE id = ?').get(id).body, '{TITULO_PRODUTO} {LINK}', 'a edição do dono fica');
+  db.prepare('DELETE FROM templates WHERE id = ?').run(id);
+  db.close();
+  db = openDb(dir);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM templates').get().n, 1, 'apagado: fica só o Padrão');
+  assert.equal(getSetting(db, 'tpl_amazon_seed'), String(id), 'a marca continua');
+  db.close();
+});
+
+test('espelho etapa 1: banco da versão anterior (sem as tabelas de espelho) migra com os dados intactos', () => {
+  const dir = tmp();
+  // Banco como o do serviço antes desta etapa: esquema atual sem espelhos/espelho_itens/índices, sem a semente
+  // e com o template "Padrão" no texto antigo, mais dados em várias tabelas.
+  const velho = openDb(dir);
+  velho.exec(`
+    DROP TABLE espelho_itens; DROP TABLE espelhos;
+    DELETE FROM templates; DELETE FROM settings WHERE key = 'tpl_amazon_seed';
+    INSERT INTO templates (id, name, body, created_at) VALUES (1, 'Padrão', '${DEFAULT_ANTERIOR}', 1), (7, 'Meu template', '{TITULO_PRODUTO} {LINK}', 2);
+    INSERT INTO groups (jid, name, size, updated_at) VALUES ('g1@g.us', 'Grupo 1', 250, 1);
+    INSERT INTO rules (id, name, template_id, group_jids, created_at) VALUES (3, 'Regra', 7, '["g1@g.us"]', 1);
+    INSERT INTO envios (id, tipo, payload, group_jids, status, created_at) VALUES (5, 'mensagem', '{"texto":"oi"}', '["g1@g.us"]', 'concluido', 1);
+    INSERT INTO conexoes (plataforma, config, segredos, updated_at) VALUES ('amazon', '{}', '{"tag":"minhatag-20"}', 1);
+  `);
+  for (const tabela of Object.keys(TABELAS_ESPELHO)) assert.ok(!existe(velho, 'table', tabela), `o banco simulado não tem ${tabela}`);
+  for (const indice of Object.keys(INDICES_ESPELHO)) assert.ok(!existe(velho, 'index', indice), `o banco simulado não tem ${indice}`);
+  const tabelasAntigas = linhas(velho, "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").map((t) => t.name);
+  const antes = {};
+  for (const t of tabelasAntigas) antes[t] = linhas(velho, `SELECT * FROM ${t} ORDER BY rowid`);
+  velho.close();
+
+  for (let abertura = 1; abertura <= 2; abertura++) {
+    const db = openDb(dir);
+    conferirTabelasEspelho(db, `abertura ${abertura}`);
+    for (const t of tabelasAntigas) {
+      if (t === 'templates' || t === 'settings') continue;
+      assert.deepEqual(linhas(db, `SELECT * FROM ${t} ORDER BY rowid`), antes[t], `${t} intacta (abertura ${abertura})`);
+    }
+    const templates = linhas(db, 'SELECT * FROM templates ORDER BY rowid');
+    assert.deepEqual(templates.slice(0, antes.templates.length), antes.templates, `templates existentes intactos, Padrão com o texto antigo (abertura ${abertura})`);
+    assert.equal(templates.length, antes.templates.length + 1, `só o "Amazon" a mais (abertura ${abertura})`);
+    assert.equal(templates.at(-1).name, 'Amazon');
+    assert.equal(templates.at(-1).body, TEXTO_AMAZON);
+    assert.ok(templates.at(-1).id > 7, 'id novo, sem reaproveitar o de um template existente');
+    const settings = linhas(db, 'SELECT * FROM settings ORDER BY rowid');
+    assert.deepEqual(settings.filter((s) => s.key !== 'tpl_amazon_seed'), antes.settings, `settings intactas (abertura ${abertura})`);
+    assert.equal(getSetting(db, 'tpl_amazon_seed'), String(templates.at(-1).id));
+    db.close();
+  }
+});
+
+test('espelho etapa 1: defaults das tabelas e índice único por mensagem e link', () => {
+  const db = openDb(tmp());
+  const { lastInsertRowid: espId } = db.prepare("INSERT INTO espelhos (nome, created_at) VALUES ('Amazon → meus grupos', 1)").run();
+  assert.deepEqual({ ...db.prepare('SELECT * FROM espelhos WHERE id = ?').get(espId) }, {
+    id: Number(espId), nome: 'Amazon → meus grupos', enabled: 1, origem_jids: '[]', destino_jids: '[]', template_id: null,
+    incluir_minhas: 0, dedupe_horas: 168, palavras_bloqueadas: '[]', sem_preco: 'fila', max_por_hora: 10,
+    janela_inicio: null, janela_fim: null, enviar_foto: 1, created_at: 1, updated_at: null,
+  });
+  assert.throws(() => db.prepare('INSERT INTO espelhos (created_at) VALUES (1)').run(), /NOT NULL/, 'nome é obrigatório');
+
+  const item = db.prepare('INSERT INTO espelho_itens (espelho_id, origem_jid, msg_id, ts, url) VALUES (?, ?, ?, ?, ?)');
+  const { lastInsertRowid: itemId } = item.run(espId, 'o1@g.us', 'MSG1', 10, 'https://amzn.to/abc');
+  const r = { ...db.prepare('SELECT status, tentativas, asin, oferta, envio_id FROM espelho_itens WHERE id = ?').get(itemId) };
+  assert.deepEqual(r, { status: 'recebido', tentativas: 0, asin: null, oferta: null, envio_id: null });
+  assert.throws(() => item.run(espId, 'o1@g.us', 'MSG1', 11, 'https://amzn.to/abc'), /UNIQUE/, 'mesma mensagem e mesmo link não entram duas vezes');
+  item.run(espId, 'o1@g.us', 'MSG1', 11, 'https://amzn.to/outro'); // segundo link da mesma mensagem
+  item.run(espId, 'o2@g.us', 'MSG1', 11, 'https://amzn.to/abc'); // outra origem
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM espelho_itens').get().n, 3);
+  for (const col of ['espelho_id', 'origem_jid', 'ts', 'url']) {
+    const vals = { espelho_id: espId, origem_jid: 'o3@g.us', ts: 1, url: 'https://amzn.to/x' };
+    vals[col] = null;
+    assert.throws(() => item.run(vals.espelho_id, vals.origem_jid, 'M9', vals.ts, vals.url), /NOT NULL/, `${col} é obrigatório`);
+  }
+  db.close();
+});
+
+test('espelho etapa 1: DEFAULT_TEMPLATE só troca o desconto por pedaço opcional; o resto é o texto de antes', () => {
+  const novo = dbMod.DEFAULT_TEMPLATE.split('\n');
+  const antigo = DEFAULT_ANTERIOR.split('\n');
+  assert.equal(novo.length, antigo.length);
+  const diferentes = novo.map((l, i) => [l, antigo[i]]).filter(([a, b]) => a !== b);
+  assert.deepEqual(diferentes, [['🔥 Por *{PRECO_PRODUTO}*[ ({DESCONTO_PRODUTO} OFF)]', '🔥 Por *{PRECO_PRODUTO}* ({DESCONTO_PRODUTO} OFF)']]);
+  const db = openDb(tmp());
+  assert.equal(db.prepare("SELECT body FROM templates WHERE name = 'Padrão'").get().body, dbMod.DEFAULT_TEMPLATE, 'instalação nova recebe o texto novo');
+  db.close();
 });
