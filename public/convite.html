@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Convite · achadinhoturbo</title>
+<link rel="icon" type="image/svg+xml" href="logo.svg">
+<meta name="theme-color" content="#5B3DF5">
+<meta name="referrer" content="no-referrer">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@700;800&family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="login">
+<main class="login-caixa">
+  <div class="brand"><img src="logo.svg" alt="" width="30" height="30">achadinho<span>turbo</span></div>
+
+  <!-- Enquanto confere o convite (POST /api/convite/info). convite.js mostra só um dos quatro blocos abaixo. -->
+  <section id="carregando" class="card" aria-live="polite">
+    <h1>Você foi convidado</h1>
+    <p class="sub">Conferindo o convite…</p>
+  </section>
+
+  <form id="f" class="card" novalidate hidden>
+    <h1>Você foi convidado</h1>
+    <p class="sub" id="quem"></p>
+    <label class="campo">E-mail<input id="email" type="email" autocomplete="username" readonly aria-describedby="email-dica"><small id="email-dica">É com este e-mail que você vai entrar.</small></label>
+    <label class="campo">Nome<input id="nome" name="nome" maxlength="80" autocomplete="name" required aria-describedby="erro-nome"></label>
+    <p id="erro-nome" class="login-erro" role="alert" hidden></p>
+    <div class="campo">
+      <label for="senha">Senha</label>
+      <div class="senha-campo">
+        <input id="senha" name="senha" type="password" autocomplete="new-password" minlength="8" required aria-describedby="senha-dica erro-senha">
+        <button type="button" id="ver-senha" class="alt" aria-pressed="false" aria-controls="senha confirma" aria-label="Mostrar senha">Mostrar</button>
+      </div>
+      <small id="senha-dica">Ao menos 8 caracteres.</small>
+    </div>
+    <p id="erro-senha" class="login-erro" role="alert" hidden></p>
+    <label class="campo">Confirmar senha<input id="confirma" name="confirma" type="password" autocomplete="new-password" required aria-describedby="erro-confirma"></label>
+    <p id="erro-confirma" class="login-erro" role="alert" hidden></p>
+    <p id="erro" class="login-erro" role="alert" hidden></p>
+    <button class="pri" id="criar" type="submit">Criar minha conta</button>
+  </form>
+
+  <!-- Inválido, vencido, usado ou cancelado: mensagem única, sem dizer qual. -->
+  <section id="invalido" class="card" hidden>
+    <h1>Este convite não vale mais</h1>
+    <p class="sub">Peça um novo link a quem convidou você.</p>
+  </section>
+
+  <!-- Falha que não é do convite (servidor fora, muitas tentativas): mostra o motivo e deixa tentar de novo. -->
+  <section id="falha" class="card" hidden>
+    <h1>Não consegui abrir o convite</h1>
+    <p class="sub" id="falha-msg" role="alert"></p>
+    <button type="button" id="de-novo">Tentar de novo</button>
+  </section>
+</main>
+<script src="convite.js"></script>
+</body>
+</html>

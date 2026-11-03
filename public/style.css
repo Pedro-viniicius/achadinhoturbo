@@ -364,6 +364,17 @@ td .trunca { display:-webkit-box; -webkit-line-clamp:2; line-clamp:2; -webkit-bo
 .senha-campo button { flex:none; width:auto !important; padding:8px 12px; }
 .login-caixa .campo input[aria-invalid="true"] { border-color:var(--err); }
 .login-caixa .card > p.sub { margin:0; }
+.login-caixa input[readonly] { background:var(--inset); }
+/* campo de senha com "Mostrar" (convite, Equipe): o botão não pode ficar dentro do <label>, então o campo é um <div> */
+div.campo { display:grid; gap:4px; font-weight:600; font-size:14px; }
+div.campo small { font-weight:400; color:var(--muted); font-size:13px; }
+.eq-form { margin-top:12px; gap:12px; }
+.eq-grade { align-items:start; margin-bottom:12px; }
+.eq-grade > .card { margin:0; }
+.grade.eq-campos { grid-template-columns:repeat(2, minmax(0,1fr)); align-items:start; }
+@media (max-width:600px) { .grade.eq-campos { grid-template-columns:minmax(0,1fr); } }
+#eq-criado:not(:empty), .eq-manual { margin-top:14px; }
+.sucesso .copia button { flex:none; white-space:nowrap; }
 
 /* ---------- relatórios: números e prévia ---------- */
 .chips-lista { display:flex; flex-wrap:wrap; gap:4px; }

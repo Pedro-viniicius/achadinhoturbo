@@ -328,14 +328,14 @@ function req(port, caminho, { method = 'GET', headers = {}, body } = {}) {
 /** Entra com a senha e devolve o cookie de sessão ("sid=…"). */
 const entrar = async (port) => String((await req(port, '/api/login', { method: 'POST', body: { senha: SENHA } })).headers['set-cookie']?.[0] || '').split(';')[0];
 
-test('servidor: /api/state traz usuario (null até a etapa 7) e conta_nome', async () => {
+test('servidor: /api/state traz o usuario da sessão (Dono migrado, sem e-mail) e conta_nome', async () => {
   const s = await subir();
   try {
     const cookie = await entrar(s.port);
     assert.match(cookie, /^sid=/);
     const st = await req(s.port, '/api/state', { headers: { cookie } });
     assert.equal(st.status, 200);
-    assert.equal(st.json.usuario, null);
+    assert.deepEqual(st.json.usuario, { id: 1, nome: 'Dono', email: null, papel: 'dono', precisa_completar: true });
     assert.equal(st.json.conta_nome, '', 'sem nome de conta: vazio');
     assert.equal(st.json.auth, true, 'o resto do estado continua');
     setSetting(s.db, 'conta_nome', 'Achadinhos da Ana');

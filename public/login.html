@@ -14,10 +14,12 @@
 <body class="login">
 <main class="login-caixa">
   <div class="brand"><img src="logo.svg" alt="" width="30" height="30">achadinho<span>turbo</span></div>
-  <form id="f" class="card" autocomplete="off">
+  <form id="f" class="card" novalidate>
     <h1>Entrar</h1>
-    <p class="sub">Seus achadinhos chegam primeiro. Use a senha definida na instalação.</p>
-    <label class="campo">Senha<input id="senha" name="senha" type="password" autocomplete="current-password" required autofocus></label>
+    <p class="sub" id="sub">Seus achadinhos chegam primeiro.</p>
+    <!-- No modo legado (Dono migrado ainda sem e-mail) login.js deixa o e-mail opcional: em branco, entra a conta sem e-mail. -->
+    <label class="campo" id="campo-email"><span id="rotulo-email">E-mail</span><input id="email" name="email" type="email" autocomplete="username" maxlength="120" required autofocus aria-describedby="erro"><small id="dica-email" hidden></small></label>
+    <label class="campo">Senha<input id="senha" name="senha" type="password" autocomplete="current-password" required aria-describedby="erro"></label>
     <p id="erro" class="login-erro" role="alert" hidden></p>
     <button class="pri" id="entrar" type="submit">Entrar</button>
   </form>

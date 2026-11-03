@@ -1,7 +1,7 @@
 // Conexões (#conexoes; os endereços antigos #etiquetas e a extensão de Ajustes vieram para cá).
 // Hoje só o Mercado Livre funciona: etiquetas de afiliado + extensão do Chrome.
 // Carrega antes de app.js: só define funções. Os utilitários de app.js e paineis.js ($, $$, esc, api,
-// aviso, tentar, mostrarErros, REQ, S, atualizarEstado, dataHora) só são usados quando as funções rodam.
+// aviso, tentar, mostrarErros, REQ, S, atualizarEstado, podeEquipe, dataHora) só são usados quando as funções rodam.
 
 const TEXTOS_CONEXOES = {
   sub: 'Plataformas ligadas ao painel.',
@@ -14,6 +14,7 @@ const TEXTOS_CONEXOES = {
   avisoImplSemCampos: '<b>Ainda não implementado.</b> Em breve neste painel.',
   segredoSalvo: '•••••••• salva; digite para trocar',
   segredoSoDono: 'Só o Dono vê e troca esta chave.',
+  tokenSoDono: 'Só o Dono pode gerar um novo token.',
   nadaSalvo: 'Nada salvo ainda. Salve os dados para poder testar.',
   salvoEm: (ms) => `Dados salvos em ${dataHora(ms)}.`,
   carregando: 'Carregando as outras lojas…',
@@ -37,7 +38,8 @@ function paginaConexoes({ rolarPara } = {}) {
           <label class="campo">Endereço<div class="copia"><input readonly value="${esc(url)}" id="c1"><button type="button" data-c="c1" aria-label="Copiar endereço">Copiar</button></div></label>
           <label class="campo">Token<div class="copia"><input readonly value="${esc(S.st.ext_token)}" id="c2"><button type="button" data-c="c2" aria-label="Copiar token">Copiar</button></div></label>
           <p class="estado-linha" id="ml-estado" role="status"></p>
-          <div class="linha"><button type="button" id="novo-token" class="leve perigo">Gerar novo token</button><small class="dica">Use se achar que o token vazou. A extensão para de funcionar até você colar o novo.</small></div>
+          <div class="linha">${podeEquipe() ? '<button type="button" id="novo-token" class="leve perigo">Gerar novo token</button><small class="dica">Use se achar que o token vazou. A extensão para de funcionar até você colar o novo.</small>'
+    : `<small class="dica">${TEXTOS_CONEXOES.tokenSoDono}</small>`}</div>
         </section>
       </article>
     </div>
@@ -45,7 +47,8 @@ function paginaConexoes({ rolarPara } = {}) {
   paginaEtiquetas($('#ml-etiquetas'));
   pintarEstadoML();
   $$('[data-c]', $('#pagina')).forEach((b) => (b.onclick = async () => { await navigator.clipboard.writeText($('#' + b.dataset.c).value); aviso('Copiado'); }));
-  $('#novo-token').onclick = tentar(async () => {
+  // Operador: o botão não existe (podeEquipe, de app.js); o servidor também recusa com 403.
+  if ($('#novo-token')) $('#novo-token').onclick = tentar(async () => {
     if (!confirm('Gerar um novo token? A extensão do Chrome vai parar até você colar o token novo nela.')) return;
     await api('/ajustes/token', 'POST'); await atualizarEstado(); aviso('Token novo gerado'); paginaConexoes();
   });

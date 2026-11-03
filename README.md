@@ -26,13 +26,18 @@ Nenhum cookie do Mercado Livre sai do seu Chrome: a extensão devolve só a list
 
 Quer só olhar o painel sem conectar nada? Rode `npm run simular`. Nesse modo nada é enviado de verdade.
 
-### Senha do painel
+### Login do painel
 
-Em casa, só no `localhost`, o painel abre sem senha (aparece um aviso no terminal). Para proteger, defina `PANEL_PASSWORD` no primeiro start ou rode `npm run senha`. A senha vira um hash no banco; a sessão fica num cookie `httpOnly` por 30 dias e sobrevive a reinícios. Cinco senhas erradas bloqueiam o IP por 15 minutos. Para trocar a senha (e encerrar todas as sessões): `npm run senha`.
+Em casa, só no `localhost`, o painel abre sem login (aparece um aviso no terminal). Para proteger, abra *Conta → Equipe* e use **Ativar login**: você cria a sua conta de **Dono** (nome, e-mail e senha) e continua entrado neste navegador. Também valem `PANEL_PASSWORD` no primeiro start ou `npm run senha`; nesses dois casos o Dono é criado sem e-mail e entra só com a senha até completar o cadastro.
+
+- **Quem já tinha senha:** no primeiro start desta versão, a senha única vira a conta do **Dono** (sem e-mail), e as sessões abertas continuam valendo. Ao entrar, o painel pede **"Complete seu cadastro"** (nome e e-mail; nova senha é opcional). Depois disso, o login pede **e-mail e senha**.
+- A senha vira um hash no banco; a sessão fica num cookie `httpOnly` por 30 dias (cai depois de 7 dias sem uso) e sobrevive a reinícios. Cinco tentativas erradas bloqueiam o IP por 15 minutos. A mensagem de erro é sempre "E-mail ou senha incorretos.", sem dizer qual dos dois errou.
+- **`npm run senha`** troca a senha do Dono (o mais antigo da equipe) e encerra **todas** as sessões. Serve para recuperar o acesso. Em "Complete seu cadastro" dá para escolher uma senha nova: as outras sessões dessa pessoa caem, a do navegador em uso fica.
+- **Voltar à versão anterior:** a senha única continua guardada e acompanha a senha do Dono mais antigo, então o código antigo entra com ela.
 
 ### Publicar num servidor (VPS)
 
-**Nginx:** além do proxy, defina `proxy_set_header X-Forwarded-For $remote_addr;` e `proxy_set_header X-Forwarded-Proto $scheme;` (o programa confia nesses cabeçalhos para o limite de tentativas de login e para o HSTS; sem reescrevê-los, um cliente pode falsificá-los) e `server_name` só com o seu domínio. Variáveis de ambiente: `PUBLIC_HOST` (ex.: `disparador.meudominio.com`; exigido para aceitar o domínio e a origem `https://`), `PORT` (padrão 3737), `DATA_DIR` (pasta dos dados), `TZ` (ex.: `America/Sao_Paulo`; o horário de funcionamento das regras usa a hora local) e `PANEL_PASSWORD`. Com `PUBLIC_HOST` definido, o programa se recusa a subir sem senha. Ele continua ouvindo só em `127.0.0.1`: coloque um Nginx com HTTPS na frente. No `/api/ext/poll` (long-poll de 20 s) use `proxy_buffering off` e `proxy_read_timeout 60s`; no `/api/ext/result` aceite corpos de até 8 MB. Encerra limpo com SIGTERM.
+**Nginx:** além do proxy, defina `proxy_set_header X-Forwarded-For $remote_addr;` e `proxy_set_header X-Forwarded-Proto $scheme;` (o programa confia nesses cabeçalhos para o limite de tentativas de login e para o HSTS; sem reescrevê-los, um cliente pode falsificá-los) e `server_name` só com o seu domínio. Variáveis de ambiente: `PUBLIC_HOST` (ex.: `disparador.meudominio.com`; exigido para aceitar o domínio e a origem `https://`), `PORT` (padrão 3737), `DATA_DIR` (pasta dos dados), `TZ` (ex.: `America/Sao_Paulo`; o horário de funcionamento das regras usa a hora local) e `PANEL_PASSWORD`. Com `PUBLIC_HOST` definido, o programa se recusa a subir sem login (senha ou conta de Dono). Ele continua ouvindo só em `127.0.0.1`: coloque um Nginx com HTTPS na frente. No `/api/ext/poll` (long-poll de 20 s) use `proxy_buffering off` e `proxy_read_timeout 60s`; no `/api/ext/result` aceite corpos de até 8 MB. Encerra limpo com SIGTERM.
 
 ### Backup
 
@@ -46,7 +51,7 @@ O menu lateral é dividido em grupos:
 - **Principal**: Rotacionador de Links, Grupos, Blocos de análise
 - **Disparos**: Disparo manual, Disparo automático (antes chamado *Regras*), Disparar mensagem, Templates
 - **Comunicação**: Relatórios e avisos
-- **Conta**: Conexões, Números de WhatsApp, Equipe (**em breve**)
+- **Conta**: Conexões, Números de WhatsApp, Equipe (só o Dono vê)
 - No rodapé: Histórico, Ajustes, Ajuda
 
 Os endereços antigos continuam funcionando: `#regras` abre *Disparo automático*, `#whatsapp` abre *Números de WhatsApp* e `#etiquetas` abre *Conexões* (na seção do Mercado Livre).
@@ -111,9 +116,15 @@ Em *Conta → Conexões* ficam os cartões das lojas:
 - **Amazon, Shopee, Magalu e Facebook**: mostram **"ainda não implementado"**. Você já pode preencher e salvar os dados (tag de associado, AppID e chave, nome da loja de parceiro etc.), mas nenhum envio usa essas lojas ainda.
 - **Segredos nunca voltam ao navegador**: depois de salvos, o painel só mostra que o campo está preenchido. Deixar o campo vazio mantém o valor salvo; digitar um valor novo substitui.
 
-## Equipe (em breve)
+## Equipe
 
-O item *Equipe* aparece no menu (só para o Dono) e a página mostra **"Em construção"**: convites e papéis para mais pessoas usarem o painel chegam na próxima entrega.
+Em *Conta → Equipe* o Dono dá acesso ao painel para outras pessoas. Cada uma entra com o próprio e-mail e senha.
+
+- **Papéis:** **Operador** usa as telas do dia a dia, mas não vê *Equipe* nem pode gerar novo token da extensão, desconectar o WhatsApp, apagar dados antigos (*Ajustes*) ou salvar e testar *Conexões* (nem ver quais segredos estão salvos). **Dono** faz tudo isso e também convida, remove pessoas e muda papéis. O servidor confere o papel a cada pedido: uma troca vale na hora.
+- **Convidar:** informe o e-mail e o papel e clique em *Criar convite*. **Nenhum e-mail é enviado**: copie o link e mande pelo WhatsApp. A pessoa abre o link, escolhe nome e senha e já entra. O link vale **7 dias** e **uma vez só**.
+- **O link só aparece completo na hora em que é criado.** Depois, *Copiar link* na lista gera um link **novo** e o anterior deixa de funcionar (o painel guarda só uma impressão do link, não o link). *Cancelar* invalida o convite. Link inválido, vencido, usado ou cancelado mostra sempre a mesma mensagem: "Este convite não vale mais".
+- **Proteções:** ninguém muda o próprio papel nem remove a si mesmo, e a equipe sempre fica com ao menos um Dono. Remover alguém encerra as sessões dessa pessoa na hora.
+- Convites usados, cancelados ou vencidos há mais de 30 dias são apagados quando a tela *Equipe* é aberta. O *Histórico* registra entradas, trocas de papel e remoções pelo **nome** da pessoa, nunca pelo e-mail.
 
 ## Extensão do Chrome
 
@@ -125,7 +136,7 @@ O Chrome precisa ficar aberto enquanto as regras rodam. A extensão abre sozinha
 
 ## O que foi testado e o que não foi
 
-Testado (`npm test`, mais de 100 testes; a saída do comando mostra o número atual): disparo manual, mensagens e enquetes (agendamento, repetição, pausar e cancelar, retomada após reinício, atraso máximo), conexões e segredos, avisos e resumo diário, várias fontes por regra, próximo grupo, visão geral, eventos de grupo, blocos, rotacionador, login, sessão, Host/Origin, token da extensão, cabeçalhos, backup e restauração, várias categorias, template, horário de funcionamento (inclusive virando a noite), envio para vários grupos, etiquetas separadas por regra, não repetir ofertas, filtros de preço e desconto, leitura da lista da Central de Afiliados, fila de pedidos com a extensão, API do painel e proteções.
+Testado (`npm test`, mais de 100 testes; a saída do comando mostra o número atual): disparo manual, mensagens e enquetes (agendamento, repetição, pausar e cancelar, retomada após reinício, atraso máximo), conexões e segredos, avisos e resumo diário, equipe (migração da senha única, login por e-mail, convites, papéis), várias fontes por regra, próximo grupo, visão geral, eventos de grupo, blocos, rotacionador, login, sessão, Host/Origin, token da extensão, cabeçalhos, backup e restauração, várias categorias, template, horário de funcionamento (inclusive virando a noite), envio para vários grupos, etiquetas separadas por regra, não repetir ofertas, filtros de preço e desconto, leitura da lista da Central de Afiliados, fila de pedidos com a extensão, API do painel e proteções.
 
 Conferido uma vez contra a Central de Afiliados real (02/11/2026): a lista de produtos e a geração do link `meli.la` com etiqueta. O Mercado Livre pode mudar esses endereços sem aviso; se isso acontecer, o *Histórico* mostra o motivo. **Não testado contra o WhatsApp real**, porque exige a sua conta.
 
@@ -135,7 +146,8 @@ Conferido uma vez contra a Central de Afiliados real (02/11/2026): a lista de pr
 ## Privacidade (LGPD)
 
 - Quem entra, sai ou lê mensagens nos grupos é guardado com um **pseudônimo** (HMAC-SHA256 do número com uma chave local que fica só no banco), nunca com o número. O painel mostra só os primeiros caracteres do pseudônimo.
-- **Números de telefone em `data/`:** além do pseudônimo dos membros, o banco guarda os **números de WhatsApp que você cadastra para receber avisos** (tabela `aviso_destinos`) e, quando a Equipe chegar, os **e-mails das pessoas convidadas**. A API mostra o número mascarado e o programa não o escreve no log. **Os backups carregam tudo isso**: trate-os como dado pessoal.
+- **Números de telefone e e-mails em `data/`:** além do pseudônimo dos membros, o banco guarda os **números de WhatsApp que você cadastra para receber avisos** (tabela `aviso_destinos`) e os **nomes e e-mails da equipe e dos convidados** (tabelas `users` e `invites`). A API mostra o número mascarado; o programa não escreve número nem e-mail no log nem em mensagem de erro. **Os backups carregam tudo isso**: trate-os como dado pessoal.
+- **Convites:** o banco guarda só uma impressão (hash) do link, nunca o link. Convites usados, cancelados ou vencidos são apagados 30 dias depois, na próxima vez que a tela *Equipe* abre. Para apagar os dados de alguém da equipe, remova a pessoa em *Equipe* (o e-mail ainda fica no convite que ela usou até essa limpeza).
 - **Fotos enviadas:** as fotos de *Disparar mensagem* ficam em `data/uploads/` e são apagadas **7 dias depois** de não terem mais nenhum envio ativo (agendado ou repetido) que as use.
 - **Retenção:** eventos, leituras e cliques são apagados depois do prazo de *Ajustes → Privacidade dos grupos* (padrão 90 dias; a limpeza roda ao iniciar e a cada 6 h). Sessões vencidas também.
 - **Exclusão por titular:** `POST /api/privacidade/apagar-participante` com `{ "id": "5511999999999" }` apaga tudo daquela pessoa.
@@ -147,5 +159,5 @@ Conferido uma vez contra a Central de Afiliados real (02/11/2026): a lista de pr
 ## Cuidados
 
 - A conexão com o WhatsApp é **não oficial**. Há risco de o número ser restringido. Mantenha as pausas em *Ajustes* e evite volume alto.
-- A pasta `data` guarda a sessão do seu WhatsApp, números de telefone dos avisos, fotos enviadas e segredos das conexões. Não compartilhe nem envie para a nuvem.
-- O programa só ouve em `127.0.0.1`. Num servidor, quem expõe é o Nginx com HTTPS, e o painel exige senha.
+- A pasta `data` guarda a sessão do seu WhatsApp, números de telefone dos avisos, e-mails da equipe, fotos enviadas e segredos das conexões. Não compartilhe nem envie para a nuvem.
+- O programa só ouve em `127.0.0.1`. Num servidor, quem expõe é o Nginx com HTTPS, e o painel exige login.

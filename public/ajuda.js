@@ -77,8 +77,9 @@ const TIPS = {
   // conexões e equipe
   'conexoes': 'Onde ficam as lojas e a extensão que geram os seus links de afiliado. Só o Mercado Livre funciona hoje; as outras guardam os dados para quando forem implementadas.',
   'conexoes.segredo': 'A chave fica guardada no seu computador e não volta para esta tela. Preencha só se quiser trocar. Só o Dono vê estes campos.',
-  'equipe': 'Quem pode entrar no painel. Operador usa todas as telas; Dono também convida, remove pessoas e muda papéis. Esta tela vem na próxima entrega.',
-  'equipe.convite': 'Não enviamos e-mail: copie o link e mande pelo WhatsApp. Vale 7 dias e só pode ser usado uma vez.',
+  'equipe': 'Quem pode entrar no painel, cada pessoa com o próprio e-mail e senha. Operador usa todas as telas, menos Equipe. Só o Dono convida, remove pessoas, muda papéis, desconecta o WhatsApp, gera novo token da extensão, apaga dados antes do prazo e vê as chaves das conexões.',
+  'equipe.convite': 'Não enviamos e-mail: copie o link e mande pelo WhatsApp. Vale 7 dias e só pode ser usado uma vez. “Copiar link” na lista gera um link novo e o anterior para de funcionar.',
+  'equipe.ativar': 'Enquanto o painel não tem login, qualquer pessoa no seu computador abre tudo. Ative o login para criar a sua conta de Dono e convidar a equipe.',
   // etiquetas, templates, histórico
   'etiquetas': 'Etiquetas são os nomes criados em “Administrar etiquetas” na Central de Afiliados. Cada disparo usa uma; é o que diz de quem é a comissão. Escreva exatamente igual. Fica em Conexões > Mercado Livre.',
   'templates': 'Modelos de mensagem. Clique nos campos para inserir; a prévia mostra como fica no WhatsApp. {LINK} é obrigatório. *negrito* e ~riscado~ funcionam.',
@@ -161,9 +162,9 @@ const AJUDA = [
   { id: 'numeros', titulo: 'Números de WhatsApp', rota: '#numeros', oque: 'Conecta o número que envia (como “aparelho conectado”).',
     passos: ['Clique em “Conectar WhatsApp” e leia o QR em Aparelhos conectados, no celular.', 'Depois de conectar, a lista de grupos aparece em “Grupos”.', 'Se o número cair, conecte de novo por aqui.'],
     dica: 'Prefira um número que você não dependa. A conexão é não oficial e pode ser restringida com volume alto.' },
-  { id: 'equipe', titulo: 'Equipe', rota: '#equipe', oque: 'Vai mostrar quem pode entrar no painel e permitir convidar pessoas. Vem na próxima entrega; por enquanto a tela mostra “Em construção”.',
-    passos: ['O Operador usa todas as telas, menos Equipe.', 'O Dono também convida, remove pessoas e muda papéis.', 'O convite será um link para copiar e mandar pelo WhatsApp.'],
-    dica: 'Só o Dono vê esta tela no menu.' },
+  { id: 'equipe', titulo: 'Equipe', rota: '#equipe', oque: 'Convida pessoas para usar o painel, cada uma com o próprio e-mail e senha, sem passar a sua. Só o Dono vê esta tela.',
+    passos: ['Se o painel ainda não pede login, preencha “Proteja o painel” para criar a sua conta de Dono.', 'Em “Convidar pessoa”, digite o e-mail, escolha o papel (Operador ou Dono) e clique em “Criar convite”.', 'Copie o link e mande pelo WhatsApp. Não enviamos e-mail.', 'A pessoa abre o link, escreve o nome e cria a senha. Depois disso, ela entra com o e-mail e essa senha.', 'Para mudar o papel ou tirar o acesso, use a lista “Pessoas”. Convite que não vai ser usado: “Cancelar convite”.'],
+    dica: 'O convite vale 7 dias e só pode ser usado uma vez. “Copiar link” na lista gera um link novo e o anterior para de funcionar.' },
   { id: 'historico', titulo: 'Histórico', rota: '#historico', oque: 'Registro de tudo o que saiu e do que falhou, com o motivo.',
     passos: ['Filtre por “Só erros” quando algo não sair.', 'Erros comuns: extensão desconectada, WhatsApp desconectado, Central sem sessão.'],
     dica: 'Os avisos mostram ofertas e fontes puladas, sem travar o envio.' },
@@ -187,10 +188,12 @@ const GLOSSARIO = [
   ['Evasão', 'Quem entra e sai logo: no mesmo dia ou em até 7 dias.'],
   ['Enquete', 'Pergunta com 2 a 12 opções para o grupo votar, enviada em Disparar mensagem.'],
   ['Dono', 'Quem administra a conta: convida, remove pessoas, muda papéis e vê as chaves das conexões.'],
-  ['Operador', 'Quem usa o painel no dia a dia. Acessa todas as telas, menos Equipe.'],
+  ['Operador', 'Quem usa o painel no dia a dia. Acessa todas as telas, menos Equipe. Não desconecta o WhatsApp, não gera novo token da extensão nem apaga dados antes do prazo.'],
+  ['Convite', 'Link que o Dono cria em Equipe para alguém criar a própria senha e entrar no painel. Vale 7 dias e só pode ser usado uma vez.'],
   ['Extensão', 'Complemento do Chrome que fala com a Central de Afiliados usando a sua sessão. Nada de cookie sai do navegador.'],
 ];
 function paginaAjuda() {
+  // Para o Operador o cartão da Equipe some, como o item do menu (podeEquipe é de app.js, que carrega depois).
   document.getElementById('pagina').innerHTML = `<div class="topo"><div><h1>Ajuda</h1><p class="sub">Como cada ferramenta funciona, em ordem de uso. Os ícones <span class="q" tabindex="0" data-tip="Isso! Passe o mouse ou toque nos “?” pelo painel para ver explicações curtas.">?</span> pelo painel dão explicações curtas no lugar.</p></div></div>
     <div class="card"><h2>Comece por aqui</h2><ol class="passos passos-ajuda">
       <li><b>Números de WhatsApp</b>: conecte o número pelo QR. A lista aparece em <b>Grupos</b>.</li>
@@ -201,7 +204,7 @@ function paginaAjuda() {
       <li><b>Disparar mensagem</b>: avisos e enquetes, agora ou agendados.</li>
       <li><b>Relatórios e avisos</b>: escolha quem recebe o resumo diário e os avisos.</li>
       <li>Acompanhe o <b>Histórico</b> e a <b>Visão Geral</b>.</li></ol></div>
-    <div class="ajuda-grade">${AJUDA.map((a) => `<article class="card ajuda-card" id="ajuda-${a.id}"><h2>${a.titulo}</h2><p class="sub">${a.oque}</p>
+    <div class="ajuda-grade">${AJUDA.filter((a) => a.id !== 'equipe' || typeof podeEquipe !== 'function' || podeEquipe()).map((a) => `<article class="card ajuda-card" id="ajuda-${a.id}"><h2>${a.titulo}</h2><p class="sub">${a.oque}</p>
       <p class="rotulo-ajuda">Como usar</p><ol class="passos">${a.passos.map((p) => `<li>${p}</li>`).join('')}</ol>
       <p class="dica-ajuda"><b>Dica:</b> ${a.dica}</p><a class="btn" href="${a.rota}">Abrir ${a.titulo}</a></article>`).join('')}</div>
     <div class="card"><h2>Glossário</h2><dl class="glossario">${GLOSSARIO.map(([t, d]) => `<dt>${t}</dt><dd>${d}</dd>`).join('')}</dl></div>`;

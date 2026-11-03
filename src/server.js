@@ -2,7 +2,7 @@ import express from 'express';
 import path from 'node:path';
 import { DATA_DIR, PORT, DRY_RUN, FAST, ROOT, PUBLIC_HOST, PANEL_PASSWORD } from './config.js';
 import { openDb, getSetting, setSetting, parseRule, nz, MAX_SOURCES } from './db.js';
-import { createAuth, createLimiter, parseCookies, safeEqual, SESSION_MS } from './auth.js';
+import { createAuth, createLimiter, parseCookies, safeEqual, soDono, SESSION_MS } from './auth.js';
 import * as privacidade from './privacidade.js';
 import { pseudonimo, migrarPseudonimos, limparAntigos, chaveIp, RETENCAO_PADRAO_DIAS } from './privacidade.js';
 import { createWhatsApp } from './whatsapp.js';
@@ -12,7 +12,7 @@ import * as mlPadrao from './ml.js';
 import { montarRotas as rotasEnvios } from './envios.js';
 import { montarRotas as rotasAvisos, lerConfig as configAvisos, viradaMin, limitePadrao, mascararNumero } from './avisos.js';
 import { montarRotas as rotasConexoes } from './conexoes.js';
-import { montarRotas as rotasEquipe } from './equipe.js';
+import { montarRotas as rotasEquipe, montarRotasPublicas as rotasEquipePublicas } from './equipe.js';
 import { renderTemplate, SAMPLE_OFFER, PLACEHOLDERS } from './template.js';
 import { CATEGORIAS, ORDENS, POR_PAGINA } from './afiliados.js';
 import { overview, resumo, evasaoDoDia, periodRange, startOfDay, dayOf } from './analytics.js';
@@ -21,8 +21,9 @@ import { addLog } from './db.js';
 import crypto from 'node:crypto';
 
 const LOCAL_HOST = /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i;
-// Páginas e rotas que funcionam sem login.
-const PUBLIC_PATHS = new Set(['/login.html', '/login.js', '/style.css', '/logo.svg', '/icon-192.png', '/healthz', '/favicon.ico', '/api/login']);
+// Páginas e rotas que funcionam sem login (as rotas /api daqui são montadas antes do middleware de sessão).
+const PUBLIC_PATHS = new Set(['/login.html', '/login.js', '/convite.html', '/convite.js', '/style.css', '/logo.svg', '/icon-192.png', '/healthz', '/favicon.ico',
+  '/api/login', '/api/login/modo', '/api/convite/info', '/api/convite/aceitar']);
 // Política de conteúdo: só scripts do próprio painel; estilos inline e Google Fonts liberados; nada de frames.
 // Imagens: as do painel e as fotos de produto do CDN do Mercado Livre (os mesmos hosts de IMAGEM_PERMITIDA, src/ml.js).
 const CSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https://*.mlstatic.com; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'";
@@ -36,6 +37,7 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
   app.use((req, res, next) => (req.path === '/api/ext/result' ? next() : jsonPequeno(req, res, next)));
 
   const auth = createAuth({ db, password: panelPassword });
+  const exigeDono = soDono(auth); // Operador recebe 403; sem login no painel, passa
   const loginLimiter = createLimiter({ max: 5, windowMs: 15 * 60 * 1000 });       // por IP (/64 no IPv6)
   const loginGlobal = createLimiter({ max: 50, windowMs: 15 * 60 * 1000 });        // todas as origens juntas
   const extLimiter = createLimiter({ max: 20, windowMs: 15 * 60 * 1000 });
@@ -126,6 +128,9 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
   const cookieOpts = (req) => ({ httpOnly: true, sameSite: 'strict', secure: req.secure || !!publicHost, path: '/' });
   const cookieName = (req) => (req.secure ? '__Host-sid' : 'sid'); // __Host-: só com HTTPS, sem Domain, Path=/
   const sidDe = (req) => { const c = parseCookies(req.headers.cookie); return c['__Host-sid'] || c.sid; };
+  const gravarCookie = (req, res, sid) => res.cookie(cookieName(req), sid, { ...cookieOpts(req), maxAge: SESSION_MS });
+  // legado: existe a conta sem e-mail (o Dono migrado da senha única); o e-mail fica opcional e, em branco, entra essa conta
+  app.get('/api/login/modo', (req, res) => res.json({ modo: auth.enabled() ? auth.modo() : 'email' }));
   app.post('/api/login', async (req, res) => {
     if (!auth.enabled()) return res.json({ ok: true });
     const ip = chaveIp(req.ip);
@@ -139,11 +144,11 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
     // a tentativa é contada ANTES de calcular o hash: uma rajada simultânea não passa pelo freio
     loginLimiter.fail(ip); loginGlobal.fail('todos'); loginsEmAndamento++;
     let sid;
-    try { sid = await auth.login(String(req.body?.senha ?? '').slice(0, 200), ip); } finally { loginsEmAndamento--; }
-    if (!sid) return res.status(401).json({ erro: 'Senha incorreta' });
+    try { sid = await auth.login(String(req.body?.email ?? '').slice(0, 200), String(req.body?.senha ?? '').slice(0, 200), ip); } finally { loginsEmAndamento--; }
+    if (!sid) return res.status(401).json({ erro: 'E-mail ou senha incorretos.' }); // a mesma para e-mail desconhecido e senha errada
     loginLimiter.reset(ip); sucessoRecente.set(ip, Date.now());
     if (sucessoRecente.size > 1000) for (const [k, t] of sucessoRecente) if (Date.now() - t > 24 * 3600000) sucessoRecente.delete(k);
-    res.cookie(cookieName(req), sid, { ...cookieOpts(req), maxAge: SESSION_MS });
+    gravarCookie(req, res, sid);
     res.json({ ok: true });
   });
   app.post('/api/logout', (req, res) => {
@@ -152,10 +157,15 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
     res.json({ ok: true });
   });
 
-  // ---------- exige sessão em tudo o que vem abaixo (painel e API) ----------
+  // ---------- convite: info e aceite (públicos, com freio próprio) ----------
+  rotasEquipePublicas(app, { db, auth, gravarCookie });
+
+  // ---------- exige sessão em tudo o que vem abaixo (painel e API); req.user = a pessoa da sessão ----------
   app.use((req, res, next) => {
+    req.user = null; // sem login no painel: ninguém (e soDono deixa passar)
     if (!auth.enabled() || PUBLIC_PATHS.has(req.path) || req.path.startsWith('/g/')) return next();
-    if (auth.sessionFrom(sidDe(req))) return next();
+    const sessao = auth.sessionFrom(sidDe(req));
+    if (sessao) { req.user = sessao.user; return next(); }
     if (req.path.startsWith('/api/')) return res.status(401).json({ erro: 'Faça login para continuar' });
     res.redirect(302, '/login.html');
   });
@@ -165,7 +175,7 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
     try { res.json(await fn(req, res) ?? { ok: true }); } catch (e) { res.status(400).json({ erro: e.message }); }
   };
   // ---------- estado geral ----------
-  app.get('/api/state', wrap(() => ({
+  app.get('/api/state', wrap((req) => ({
     whatsapp: wa.state(), extensao: links.status(), simulacao: DRY_RUN,
     ajustes: {
       delay_group_s: Number(getSetting(db, 'delay_group_s', 6)),
@@ -177,7 +187,7 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
     },
     ext_token: getSetting(db, 'ext_token'), porta: PORT,
     endereco_publico: enderecoPublico, auth: auth.enabled(),
-    usuario: null, // a etapa 7 troca pela pessoa da sessão
+    usuario: req.user ? { ...req.user, precisa_completar: !req.user.email } : null, // null: painel sem login
     conta_nome: getSetting(db, 'conta_nome', ''),
     placeholders: PLACEHOLDERS,
     afiliados: { categorias: CATEGORIAS, ordens: ORDENS, por_pagina: POR_PAGINA }, max_fontes: MAX_SOURCES,
@@ -199,10 +209,10 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
 
   // ---------- WhatsApp ----------
   app.post('/api/wa/connect', wrap(async () => { await wa.connect(); }));
-  app.post('/api/wa/logout', wrap(async (req) => { await wa.logout({ apagarEventos: !!req.body?.apagar_eventos }); }));
+  app.post('/api/wa/logout', exigeDono, wrap(async (req) => { await wa.logout({ apagarEventos: !!req.body?.apagar_eventos }); }));
   // ---------- privacidade: rotação do token da extensão, limpeza e exclusão por titular ----------
-  app.post('/api/ajustes/token', wrap(() => { setSetting(db, 'ext_token', crypto.randomBytes(24).toString('hex')); })); // fora de /api/ext/: passa pelo Host/Origin e pelo login
-  app.post('/api/privacidade/limpar', wrap(() => limparAntigos(db, Number(getSetting(db, 'retencao_dias', RETENCAO_PADRAO_DIAS)))));
+  app.post('/api/ajustes/token', exigeDono, wrap(() => { setSetting(db, 'ext_token', crypto.randomBytes(24).toString('hex')); })); // fora de /api/ext/: passa pelo Host/Origin e pelo login
+  app.post('/api/privacidade/limpar', exigeDono, wrap(() => limparAntigos(db, Number(getSetting(db, 'retencao_dias', RETENCAO_PADRAO_DIAS)))));
   app.post('/api/privacidade/apagar-participante', wrap((req) => {
     const id = String(req.body?.id || '').trim().slice(0, 80); if (!id) throw new Error('Informe o número (com DDI) ou o pseudônimo.');
     return privacidade.apagarParticipante(db, id);
@@ -438,8 +448,7 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
   app.get('/api/simulados', wrap(() => wa.simulated.slice(-50).map((m) => (String(m.jid).endsWith('@g.us') ? m : { ...m, jid: mascararNumero(m.jid) }))));
 
   // ---------- features novas: cada módulo monta as próprias rotas, todas depois do Host/Origin e do login ----------
-  const soDono = (req, res, next) => next(); // por enquanto deixa passar: a etapa 7 troca por soDono(auth) de src/auth.js
-  const ctx = { db, wa, links, scheduler, auth, wrap, soDono, dataDir, ml, enderecoPublico };
+  const ctx = { db, wa, links, scheduler, auth, wrap, soDono: exigeDono, dataDir, ml, enderecoPublico, publicHost, gravarCookie, sidDe };
   for (const montar of [rotasEnvios, rotasAvisos, rotasConexoes, rotasEquipe]) montar(app, ctx);
 
   // Erros de parsing (JSON inválido, corpo grande demais) e inesperados: resposta curta, sem stack nem caminhos.
@@ -478,7 +487,7 @@ if (import.meta.url === `file://${process.argv[1].replace(/\\/g, '/')}` || proce
       console.error('ERRO: PUBLIC_HOST está definido mas o painel não tem senha. Defina PANEL_PASSWORD (ou rode npm run senha) antes de expor o painel.');
       process.exit(1);
     }
-    console.warn('AVISO: painel sem senha (só localhost). Para proteger, defina PANEL_PASSWORD ou rode: npm run senha');
+    console.warn('AVISO: painel sem login (só localhost). Para proteger, use "Ativar login" em Conta → Equipe, defina PANEL_PASSWORD ou rode: npm run senha');
   }
 
   if (DRY_RUN) wa.connect();

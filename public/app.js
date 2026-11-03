@@ -6,10 +6,19 @@ const zap = (t) => esc(t).replace(/\*([^*\n]+)\*/g, '<strong>$1</strong>').repla
 const S = { st: null, tags: [], templates: [], groups: [], rules: [], blocks: [] };
 let ultimoQr = null; let editando = null;
 
+// Ações que só o Dono faz (o servidor responde 403 com este texto ao Operador). No lugar do botão escondido, uma dica.
+const SO_DONO = 'Só o Dono pode fazer isso.';
+const SO_DONO_DICA = { desconectar: 'Só o Dono pode desconectar o WhatsApp.', limpar: 'Só o Dono pode apagar agora o que passou do prazo.' };
 async function api(path, method = 'GET', body) {
   const r = await fetch('/api' + path, { method, headers: body ? { 'content-type': 'application/json' } : {}, body: body ? JSON.stringify(body) : undefined });
   const j = await r.json().catch(() => ({}));
   if (r.status === 401) { location.replace('/login.html'); throw new Error('Sessão expirada. Entre de novo.'); }
+  if (r.status === 403 && (!j.erro || j.erro === SO_DONO)) {
+    // Perdeu a permissão (o Dono mudou o papel desta pessoa): avisa e redesenha o menu e a tela com o papel atual.
+    aviso(SO_DONO, true);
+    if (path !== '/state') atualizarEstado().catch(() => {});
+    throw new Error(SO_DONO);
+  }
   if (!r.ok) throw new Error(j.erro || 'Erro ' + r.status);
   return j;
 }
@@ -318,7 +327,7 @@ function paginaNumeros() {
   const w = S.st.whatsapp; let corpo;
   if (w.status === 'open') {
     corpo = `<div class="card"><h2>Conectado</h2><p class="sub">Número: ${esc(String(w.me || '').split(':')[0].split('@')[0])}. ${S.groups.length} ${S.groups.length === 1 ? 'grupo encontrado' : 'grupos encontrados'}, listados em <a href="#grupos">Grupos</a>.</p>
-      <div class="acoes" style="border:0;padding:0"><button id="desconectar" class="perigo">Desconectar</button></div></div>`;
+      <div class="acoes" style="border:0;padding:0">${podeEquipe() ? '<button id="desconectar" class="perigo">Desconectar</button>' : `<p class="dica" style="margin:0">${SO_DONO_DICA.desconectar}</p>`}</div></div>`;
   } else if (w.status === 'qr') {
     corpo = `<div class="card qr"><h2>Leia o QR no celular</h2><img src="${w.qr}" alt="QR Code para conectar o WhatsApp">
       <ol class="passos"><li>Abra o WhatsApp Business no celular.</li><li>Toque nos três pontos e em “Aparelhos conectados”.</li><li>Toque em “Conectar um aparelho” e aponte para este QR.</li></ol>
@@ -380,9 +389,9 @@ function paginaAjustes() {
       <div><a class="btn" href="#conexoes" style="text-decoration:none;display:inline-block">Ver em Conexões</a></div></div>
     <div class="card" style="display:grid;gap:14px"><div><h2>Privacidade dos grupos ${q('ajustes.privacidade')}</h2><p class="sub">Entradas, saídas e leituras são guardadas com um pseudônimo por pessoa (não o número) e apagadas depois do prazo abaixo. Cliques do rotacionador também.</p></div>
       <div class="grade"><label class="campo">Guardar por (dias)<input id="ret" type="number" min="0" max="3650" value="${a.retencao_dias ?? 90}"><small>0 = guardar para sempre (não recomendado).</small></label></div>
-      <div class="linha"><button class="pri" id="sr">Salvar</button><button id="limpar-agora">Apagar o que já passou do prazo</button></div></div>`;
+      <div class="linha"><button class="pri" id="sr">Salvar</button>${podeEquipe() ? '<button id="limpar-agora">Apagar o que já passou do prazo</button>' : `<small class="dica">${SO_DONO_DICA.limpar}</small>`}</div></div>`;
   $('#sr').onclick = tentar(async () => { await api('/ajustes', 'PUT', { retencao_dias: $('#ret').value }); await atualizarEstado(); aviso('Salvo'); });
-  $('#limpar-agora').onclick = tentar(async () => { const r = await api('/privacidade/limpar', 'POST'); aviso(`Apagados: ${r.eventos ?? 0} eventos, ${r.leituras ?? 0} leituras, ${r.cliques ?? 0} cliques`); });
+  if ($('#limpar-agora')) $('#limpar-agora').onclick = tentar(async () => { const r = await api('/privacidade/limpar', 'POST'); aviso(`Apagados: ${r.eventos ?? 0} eventos, ${r.leituras ?? 0} leituras, ${r.cliques ?? 0} cliques`); });
   $('#sa').onclick = tentar(async () => { await api('/ajustes', 'PUT', { delay_group_s: $('#dg').value, delay_offer_s: $('#do').value }); await atualizarEstado(); aviso('Pausas salvas'); });
   const exemploTitulo = tentar(async () => { const r = await api('/templates/preview', 'POST', { body: '{TITULO_PRODUTO}', amostra: { title: 'Fones De Ouvido Usb-c Tipo C Com Microfone Integrado Som Estéreo Alta Qualidade Controle Chamadas Compatível Com iPhone 15 16 17 Android Samsung Premium' } }); $('#tm-ex').textContent = 'Exemplo: “' + r.texto + '”'; });
   exemploTitulo();
@@ -406,7 +415,8 @@ const ROTAS = {
 const ALIASES = { regras: 'disparo-automatico', whatsapp: 'numeros', etiquetas: 'conexoes' };
 // Telas de duas colunas (formulário à esquerda, acompanhamento à direita) usam main.larga.
 const ROTAS_LARGAS = new Set(['disparo-manual', 'disparar-mensagem']);
-// Equipe é só do Dono. Sem usuários (painel de senha única, antes da etapa de Equipe) usuario é null e ela aparece.
+// Equipe é só do Dono. Sem login (auth desligada) usuario é null e o painel se comporta como Dono.
+// O mesmo critério esconde do Operador: Desconectar (Números), Apagar agora (Ajustes) e Gerar novo token (Conexões).
 const podeEquipe = () => !S.st?.usuario || S.st.usuario.papel === 'dono';
 /** Rota que está aberta: resolve os nomes antigos e manda rota desconhecida (ou Equipe para o Operador) para a Visão Geral. */
 function rotaAtual() {
@@ -453,8 +463,12 @@ function pintarConta() {
   if (!podeEquipe() && location.hash === '#equipe') ir();
 }
 async function atualizarEstado(forcar) {
-  const antes = S.st?.whatsapp || {};
+  const antes = S.st?.whatsapp || {}; const papelAntes = S.st?.usuario?.papel; const hashAntes = location.hash;
   S.st = await api('/state'); faixa(); pintarConta();
+  // O Dono trocou o papel desta pessoa: redesenha a página aberta (botões só do Dono aparecem ou somem).
+  // Se era a Equipe, pintarConta já levou para a Visão Geral (o endereço mudou).
+  const papel = S.st.usuario?.papel;
+  if (papelAntes && papel && papel !== papelAntes) { if (location.hash === hashAntes) ir(); return; }
   const w = S.st.whatsapp; const r = rotaAtual();
   const mudou = antes.status !== w.status;
   if ((r === 'numeros' && (forcar || mudou || antes.qr !== w.qr)) || (r === 'grupos' && (forcar || mudou))) {
