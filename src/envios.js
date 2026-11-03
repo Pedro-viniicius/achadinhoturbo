@@ -11,6 +11,10 @@
 // Amazon (plano espelhamento-amazon, decisão 6): sem etiqueta; o link é sempre .../dp/<ASIN>?tag=<tag de Conexões>,
 // montado na hora do envio. Do painel vêm só ajustes de título, preços, cupom, frete e foto (por upload, nunca por URL);
 // a imagem por URL e o link são sempre do servidor. `payload.origem` diz se veio do Disparo manual ou de um espelho.
+// Shopee (plano integracao-shopee, decisão 6; ADR-003): sem etiqueta; dados pela Open API ou à mão (como a Amazon).
+// O link (https://s.shopee.com.br/…, da conta do dono: API primeiro, extensão de reserva) é gerado AO CRIAR o envio,
+// a partir do endereço do produto sem parâmetros, e guardado no payload: qualquer falha recusa sem gravar nada, e o
+// envio (inclusive o agendado) não depende de rede para o link. O preparar só confere o link guardado.
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -19,6 +23,7 @@ import express from 'express';
 import { addLog, getSetting } from './db.js';
 import * as lojasPadrao from './lojas.js';
 import { LinkNaoResolvido } from './amazon.js';
+import { ErroShopee, LinkShopeeNaoResolvido, LINK_SHOPEE, RE_ID_AFILIADO, extrairIds } from './shopee.js';
 import { montarEnquete } from './whatsapp.js';
 import { renderTemplate, discountPct } from './template.js';
 import { sleep, jitter } from './util.js';
@@ -60,6 +65,14 @@ const CAUSA_DA_API = {
   sem_credenciais: 'sem_credenciais', sem_tag: 'sem_tag', sem_acesso: 'sem_acesso', credenciais_invalidas: 'sem_acesso',
   tag_invalida: 'sem_acesso', cota: 'cota', nao_encontrado: 'indisponivel', indisponivel: 'indisponivel',
 };
+// Shopee (plano integracao-shopee, decisão 6)
+const SEM_SHOPEE = 'A integração com a Shopee não está disponível neste servidor.';
+const SEM_ID_SHOPEE = 'Falta o ID de afiliado da Shopee. Cadastre em Conexões → Shopee antes de disparar.';
+const SEM_LINK_SHOPEE = 'Não tenho como gerar o seu link de afiliado da Shopee agora. Abra o Chrome com a extensão e entre no portal de afiliados da Shopee, ou ligue a API em Conexões.';
+const LINK_EXEMPLO_SHOPEE = 'https://s.shopee.com.br/(gerado ao disparar)';
+// ErroShopee.tipo que o Identificar devolve como `causa` (o resto vira 'indisponivel')
+const CAUSAS_SHOPEE = new Set(['sem_credenciais', 'credencial_recusada', 'conta_restrita', 'sem_acesso', 'cota', 'nao_encontrado', 'indisponivel']);
+const chaveShopee = (ids) => `SHOPEE:${ids.shopId}.${ids.itemId}`;
 const urlDoAsin = (asin) => `https://www.amazon.com.br/dp/${asin}`;
 /** Link com a tag mascarada, para as prévias do painel (CA7): a tag só vai inteira ao WhatsApp. */
 const mascararTag = (link) => String(link).replace(/([?&]tag=)[^&#]*/, '$1•••');
@@ -288,11 +301,11 @@ function origemDoLog(tipo, p) {
  * Fila de envios. `dir` é a pasta de dados (as fotos enviadas ficam em <dir>/uploads); `fast` zera as pausas (testes).
  * O agendador chama recuperar() ao iniciar e processarPendentes() a cada tick e depois de cada regra, e passa
  * `acordar` (pede um tick já): é por ele que o "agora" sai. Sem agendador, o "agora" chama processarPendentes().
- * `amazon`: cliente de src/amazon.js (createAmazon); sem ele, oferta da Amazon é recusada. `lojas`: o módulo
- * src/lojas.js (injetável nos testes). O Identificar do Disparo manual (identificar) usa os mesmos ml/amazon/lojas
- * do envio.
+ * `amazon`: cliente de src/amazon.js (createAmazon); sem ele, oferta da Amazon é recusada. `shopee`: cliente de
+ * src/shopee.js (createShopee); sem ele, oferta da Shopee é recusada. `lojas`: o módulo src/lojas.js (injetável nos
+ * testes). O Identificar do Disparo manual (identificar) usa os mesmos ml/amazon/shopee/lojas do envio.
  */
-export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acordar = null, amazon = null, lojas = lojasPadrao } = {}) {
+export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acordar = null, amazon = null, shopee = null, lojas = lojasPadrao } = {}) {
   const pastaFotos = dir ? path.join(dir, 'uploads') : null;
   const pausaEntreGrupos = () => (fast ? 0 : Number(getSetting(db, 'delay_group_s', 6)));
   // o modo em que o serviço de links vai gerar o link (src/links.js): simulação = links falsos, sem extensão
@@ -414,11 +427,114 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
     };
   }
 
+  /** ID de afiliado da Shopee salvo em Conexões (só a coluna `config`: nenhum segredo é lido). → texto ou '' */
+  function idAfiliadoShopee() {
+    const linha = db.prepare("SELECT config FROM conexoes WHERE plataforma = 'shopee'").get();
+    const id = lerJson(linha?.config, null)?.id_afiliado;
+    return typeof id === 'string' && RE_ID_AFILIADO.test(id.trim()) ? id.trim() : '';
+  }
+
+  /**
+   * Por onde o link da Shopee sairia agora (sem rede): 'api' (API útil: configurada e sem recusa conhecida),
+   * 'extensao' (extensão on-line, ou links simulados) ou null. O modo direto do ML não vale: fora da simulação, sem
+   * API, só a extensão gera o link.
+   */
+  function caminhoLinkShopee() {
+    let api = false;
+    try { api = typeof shopee?.apiUtil === 'function' && shopee.apiUtil() === true; } catch { api = false; }
+    if (api) return 'api';
+    if (modoLink() === 'fake' || links?.status?.()?.online === true) return 'extensao';
+    return null;
+  }
+
+  /**
+   * Ids e dados do produto da Shopee (lojas.lerProduto). A falha da API não impede o disparo manual: o dono preenche.
+   * → { ids: { shopId, itemId, urlProduto }, produto (campos nulos se a API não respondeu), extra, causa }.
+   * Link que não chega a um produto → LinkShopeeNaoResolvido { causa: 'invalido' | 'nao_produto' }. ErroShopee sem
+   * os ids (o teto de acessos barrou o resolvedor) segue adiante, com a frase fixa dele.
+   */
+  async function produtoShopee(url) {
+    try {
+      const o = await lojas.lerProduto('shopee', url, { ml, amazon, shopee });
+      const ids = { shopId: o.shopId, itemId: o.itemId, urlProduto: o.urlProduto };
+      return { ids, produto: { ...soCamposDaOferta(o), key: chaveShopee(ids) }, extra: o.extra ?? null, causa: null };
+    } catch (e) {
+      if (e instanceof LinkShopeeNaoResolvido) throw e;
+      const vazio = (ids, causa) => ({ ids, produto: { ...soCamposDaOferta(null), key: chaveShopee(ids) }, extra: null, causa });
+      if (e instanceof ErroShopee && e.ids) return vazio(e.ids, CAUSAS_SHOPEE.has(e.tipo) ? e.tipo : 'indisponivel');
+      if (e instanceof ErroShopee) throw e;
+      // erro que não é da Shopee: só o nome (nada de URL, ID ou segredo). Se o link já traz o produto, o dono
+      // preenche (R6); senão, não há como saber qual é o produto.
+      console.error('[envios] dados da Shopee:', e?.name || 'erro');
+      const ids = extrairIds(url);
+      if (ids) return vazio(ids, 'indisponivel');
+      throw new LinkShopeeNaoResolvido('invalido');
+    }
+  }
+
+  /**
+   * Link de afiliado da Shopee para o endereço do produto (lojas.linkAfiliado: API primeiro, extensão de reserva,
+   * ID do longLink conferido). Erro da Shopee sai com a mensagem fixa; o da extensão, limpo e com contexto.
+   */
+  async function linkShopee(urlProduto) {
+    let link;
+    try {
+      link = await lojas.linkAfiliado('shopee', { urlProduto }, { shopee, links, idAfiliado: idAfiliadoShopee() });
+    } catch (e) {
+      if (e instanceof ErroShopee || e instanceof LinkShopeeNaoResolvido) throw e;
+      throw new Error(`Não consegui gerar o seu link de afiliado da Shopee: ${limparErro(e?.message)}`);
+    }
+    if (typeof link !== 'string' || !LINK_SHOPEE.test(link)) throw new ErroShopee('link_falhou');
+    return link;
+  }
+
+  /**
+   * Oferta da Shopee do disparo manual: ids, dados da API, os ajustes do painel e o link de afiliado, gerado por
+   * último (só depois de a oferta estar válida). → campos do payload (a `url` passa a ser o endereço sem parâmetros)
+   */
+  async function ofertaShopee(url, ajustes) {
+    const { ids, produto, causa } = await produtoShopee(url);
+    if (causa === 'nao_encontrado') throw new ErroShopee('nao_encontrado'); // fora do programa: sem comissão
+    const offer = aplicarAjustes(produto, ajustes);
+    if (!offer.title) throw new Error(causa ? 'Não consegui buscar os dados na Shopee: preencha o título do produto.' : 'Preencha o título do produto.');
+    const link = await linkShopee(ids.urlProduto);
+    return {
+      url: ids.urlProduto, shop_id: ids.shopId, item_id: ids.itemId, link_afiliado: link,
+      fonte_dados: !causa && igualAApi(produto, offer, ajustes) ? 'api' : 'manual',
+      ...(ajustes.upload ? { upload: ajustes.upload } : {}), offer,
+    };
+  }
+
+  /**
+   * Identificar da Shopee → { loja, motivo:null, editavel:true, produto, causa, extra, link_via, causa_link,
+   * pode_disparar, texto, template_id, etiqueta:null }. Os dados são lidos mesmo sem ID ou caminho para o link
+   * (a tela mostra os dois avisos). Link que não chega a um produto → causa 'invalido'|'nao_produto', produto null.
+   */
+  async function identificarShopee(url, loja, template) {
+    if (!shopee) throw new Error(SEM_SHOPEE);
+    const base = {
+      loja, motivo: null, editavel: true, produto: null, causa: null, extra: null,
+      link_via: null, causa_link: null, pode_disparar: false, texto: null, template_id: template.id, etiqueta: null,
+    };
+    let dados = null;
+    try { dados = await produtoShopee(url); } catch (e) { base.causa = e?.causa === 'nao_produto' ? 'nao_produto' : 'invalido'; }
+    // depois da leitura: ela atualiza o que se sabe do acesso à API
+    const linkVia = caminhoLinkShopee();
+    const causaLink = !idAfiliadoShopee() ? 'sem_id' : linkVia ? null : 'sem_link';
+    if (!dados) return { ...base, link_via: linkVia, causa_link: causaLink };
+    const { produto, extra, causa } = dados;
+    return {
+      ...base, produto, extra, causa, link_via: linkVia, causa_link: causaLink,
+      pode_disparar: causa !== 'nao_encontrado' && !causaLink,
+      texto: renderTemplate(template.body, { ...produto, link: LINK_EXEMPLO_SHOPEE }, tplOpts(db)),
+    };
+  }
+
   /**
    * POST /api/disparo/identificar: loja do link e, se integrada, o produto e o texto com o template.
    * Amazon: { loja, motivo:null, editavel:true, produto, causa, texto (tag mascarada), template_id, etiqueta:null,
    * tag_salva }. Sem tag → causa 'sem_tag' sem acessar a rede; link que não chega a um produto → 'invalido' ou
-   * 'nao_produto' (produto null); API fora → produto com os campos nulos e a causa.
+   * 'nao_produto' (produto null); API fora → produto com os campos nulos e a causa. Shopee: identificarShopee.
    */
   async function identificarLink(corpo) {
     const url = typeof corpo?.url === 'string' ? corpo.url.trim() : '';
@@ -429,6 +545,7 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
       return { loja, motivo: new LojaNaoConectada(loja).message, produto: null, texto: null, template_id: null, etiqueta: null };
     }
     const template = templateDe(db, corpo.template_id);
+    if (loja.id === 'shopee') return identificarShopee(url, loja, template);
     if (loja.id === 'amazon') {
       if (!amazon) throw new Error(SEM_AMAZON);
       const base = { loja, motivo: null, editavel: true, produto: null, causa: null, texto: null, template_id: template.id, etiqueta: null, tag_salva: true };
@@ -472,6 +589,12 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
         if (!amazon) throw new Error(SEM_AMAZON);
         if (!temTagAmazon()) throw new Error(SEM_TAG);
         conteudo.ajustes = validarAjustes(b.ajustes);
+      } else if (loja.id === 'shopee') {
+        // a Shopee não tem etiqueta: o link sai com o ID de afiliado de Conexões, pela API ou pela extensão (CA3)
+        if (!shopee) throw new Error(SEM_SHOPEE);
+        if (!idAfiliadoShopee()) throw new Error(SEM_ID_SHOPEE);
+        if (!caminhoLinkShopee()) throw new Error(SEM_LINK_SHOPEE);
+        conteudo.ajustes = validarAjustes(b.ajustes);
       } else conteudo.etiqueta = etiquetaDe(db, b.tag_id);
     } else conteudo = tipo === 'mensagem' ? validarMensagem(b) : validarEnquete(b);
     // 2. grupos e horário
@@ -490,7 +613,8 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
         throw new Error('A extensão do Chrome não está conectada: abra o Chrome com a extensão para gerar o link de afiliado.');
       }
     }
-    // 3. o que depende de rede: o produto (Mercado Livre, ou link resolvido e API da Amazon) e a prévia do link
+    // 3. o que depende de rede: o produto (Mercado Livre, ou link resolvido e API da Amazon ou da Shopee), o link de
+    // afiliado da Shopee e a prévia do link. Qualquer falha aqui também acontece antes do INSERT: nada é gravado.
     let payload;
     if (tipo === 'oferta') {
       const { url, loja, etiqueta, template } = conteudo;
@@ -500,6 +624,7 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
         origem: { tipo: 'manual' },
       };
       if (loja.id === 'amazon') payload = { ...base, ...(await ofertaAmazon(url, conteudo.ajustes)) };
+      else if (loja.id === 'shopee') payload = { ...base, ...(await ofertaShopee(url, conteudo.ajustes)) };
       else {
         const lida = await lerOfertaComUrl(loja.id, url, { ml, amazon, lojas });
         payload = { ...base, url: lida.url, offer: lida.offer };
@@ -537,22 +662,26 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
   async function preparar(tipo, p) {
     if (tipo === 'oferta') {
       const ehAmazon = p.loja === 'amazon';
+      const ehShopee = p.loja === 'shopee';
       // a etiqueta é a escolhida ao criar, pelo nome: se ela for apagada e outra herdar o id, a comissão não muda de dono.
-      // Só o Mercado Livre tem etiqueta; a Amazon usa a tag de Conexões da hora do envio.
-      const etiqueta = ehAmazon ? null : p.etiqueta || (Number.isInteger(p.tag_id) && db.prepare('SELECT name FROM tags WHERE id = ?').get(p.tag_id)?.name);
-      if (!ehAmazon && !etiqueta) throw new Error('a etiqueta foi apagada');
+      // Só o Mercado Livre tem etiqueta; a Amazon usa a tag de Conexões da hora do envio e a Shopee, o link gerado ao criar.
+      const semEtiqueta = ehAmazon || ehShopee;
+      const etiqueta = semEtiqueta ? null : p.etiqueta || (Number.isInteger(p.tag_id) && db.prepare('SELECT name FROM tags WHERE id = ?').get(p.tag_id)?.name);
+      if (!semEtiqueta && !etiqueta) throw new Error('a etiqueta foi apagada');
       // o template é o mesmo id e a mesma criação (renomear ou editar não muda created_at; apagar e recriar muda)
       const tpl = Number.isInteger(p.template_id) && db.prepare('SELECT body, created_at FROM templates WHERE id = ?').get(p.template_id);
       if (!tpl || (p.template_criado_em != null && tpl.created_at !== p.template_criado_em)) throw new Error('o template foi apagado');
       let link;
       try {
+        // Shopee: o link gerado ao criar (API ou extensão), conferido de novo; nada de rede nem de link montado aqui
+        if (ehShopee && !(typeof p.link_afiliado === 'string' && LINK_SHOPEE.test(p.link_afiliado))) throw new Error('o link da Shopee guardado no envio não é válido');
         if (ehAmazon && !amazon) throw new Error(SEM_AMAZON);
         // sem ASIN válido no payload, nada de resolver link na hora do envio: só o ASIN gravado ao criar vale
         if (ehAmazon && !RE_ASIN.test(String(p.asin ?? ''))) throw new Error('o produto da Amazon está sem ASIN');
         // Amazon: sempre https://www.amazon.com.br/dp/<ASIN>?tag=<tag>, montado do ASIN (nunca o link que veio)
-        link = ehAmazon
-          ? await lojas.linkAfiliado('amazon', { url: urlDoAsin(p.asin), asin: p.asin }, { links, amazon })
-          : await lojas.linkAfiliado(p.loja, { url: p.url, tag: etiqueta }, { links, amazon });
+        if (ehShopee) link = p.link_afiliado;
+        else if (ehAmazon) link = await lojas.linkAfiliado('amazon', { url: urlDoAsin(p.asin), asin: p.asin }, { links, amazon });
+        else link = await lojas.linkAfiliado(p.loja, { url: p.url, tag: etiqueta }, { links, amazon });
       } catch (e) {
         throw new Error(`link de afiliado não gerado: ${e?.message || 'erro desconhecido'}`);
       }
@@ -565,7 +694,8 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
         try { foto = await fs.promises.readFile(path.join(pastaFotos, m[0])); } catch { throw new Error('a foto não foi encontrada (foi apagada?)'); }
         mimetype = MIME[m[1]];
       } else if (p.enviar_foto !== false && p.offer?.image && lojas.imagemPermitida(p.loja, p.offer.image)) foto = p.offer.image;
-      const ok = ehAmazon ? 'Enviado com a tag de associado da Amazon' : `Enviado com a etiqueta ${etiqueta}`;
+      const ok = ehAmazon ? 'Enviado com a tag de associado da Amazon'
+        : ehShopee ? 'Enviado com o link de afiliado da Shopee' : `Enviado com a etiqueta ${etiqueta}`;
       return {
         async enviar(jid) {
           if (foto) {
@@ -1042,7 +1172,7 @@ function extensaoDaFoto(req) {
 export function montarRotas(app, ctx) {
   const { wrap } = ctx;
   const fila = () => ctx.scheduler.envios;
-  // o Identificar usa o ml, o amazon e o lojas da fila de envios: os mesmos que vão ler o produto e montar o link
+  // o Identificar usa o ml, o amazon, o shopee e o lojas da fila de envios: os mesmos que vão ler o produto e montar o link
   app.post('/api/disparo/identificar', wrap((req) => fila().identificar(req.body)));
   app.get('/api/envios', wrap((req) => fila().painel(String(req.query.tipo ?? 'oferta'))));
   app.post('/api/envios', wrap((req) => fila().criar(req.body, { userId: req.user?.id ?? null })));

@@ -1,4 +1,4 @@
-// Testes do servidor HTTP: login, sessão, Host/Origin, token da extensão, cabeçalhos e a Amazon ligada.
+// Testes do servidor HTTP: login, sessão, Host/Origin, token da extensão, cabeçalhos e a Amazon e a Shopee ligadas.
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -9,6 +9,7 @@ import { openDb } from '../src/db.js';
 import { buildApp, criarServicos } from '../src/server.js';
 import { createWhatsApp } from '../src/whatsapp.js';
 import { createLinkService } from '../src/links.js';
+import { IMAGEM_SHOPEE, URL_API as URL_API_SHOPEE } from '../src/shopee.js';
 
 const HOST = 'disparador.exemplo.com.br';
 const SENHA = 'senha-de-teste-123';
@@ -17,20 +18,23 @@ const pastas = [];
 after(() => { for (const p of pastas) fs.rmSync(p, { recursive: true, force: true }); });
 const tmp = () => { const p = fs.mkdtempSync(path.join(os.tmpdir(), 'disp-srv-')); pastas.push(p); return p; };
 
-/** fetch padrão do cliente da Amazon nos testes: nenhuma chamada sai para a rede. */
+/** fetch padrão dos clientes da Amazon e da Shopee nos testes: nenhuma chamada sai para a rede. */
 const redeProibida = async () => { throw new Error('rede proibida no teste'); };
 
-/** Sobe pelo mesmo caminho do main de src/server.js: criarServicos (Amazon + agendador) e buildApp. */
-function subir({ publicHost = HOST, panelPassword = SENHA, dir = tmp(), fetch = redeProibida } = {}) {
+/**
+ * Sobe pelo mesmo caminho do main de src/server.js: criarServicos (Amazon, Shopee e agendador) e buildApp.
+ * `modoLink`: o modo do serviço de links ('fake' por padrão; 'extension' para a volta da extensão).
+ */
+function subir({ publicHost = HOST, panelPassword = SENHA, dir = tmp(), fetch = redeProibida, modoLink = 'fake' } = {}) {
   const db = openDb(dir);
   const wa = createWhatsApp({ db, dir, dryRun: true }); wa.connect();
-  const links = createLinkService({ getMode: () => 'fake' });
-  const { amazon, scheduler } = criarServicos({ db, wa, links, fast: true, dir, fetch });
-  const app = buildApp({ db, wa, links, scheduler, amazon, publicHost, panelPassword });
+  const links = createLinkService({ getMode: () => modoLink });
+  const { amazon, shopee, scheduler } = criarServicos({ db, wa, links, fast: true, dir, fetch });
+  const app = buildApp({ db, wa, links, scheduler, amazon, shopee, publicHost, panelPassword });
   return new Promise((ok) => {
     const server = app.listen(0, '127.0.0.1', () => {
       const port = server.address().port;
-      ok({ db, dir, port, amazon, scheduler, fechar: () => new Promise((r) => { server.closeAllConnections?.(); server.close(() => { db.close(); r(); }); }) });
+      ok({ db, dir, port, wa, links, amazon, shopee, scheduler, fechar: () => new Promise((r) => { server.closeAllConnections?.(); server.close(() => { db.close(); r(); }); }) });
     });
   });
 }
@@ -278,5 +282,174 @@ test('S4/R7: "Apagar o que já passou do prazo" (POST /api/privacidade/limpar) t
     const r0 = await req(s.port, '/api/privacidade/limpar', { method: 'POST', headers: { origin } });
     assert.deepEqual([r0.status, r0.json.espelhamento], [200, 0]);
     assert.equal(s.db.prepare('SELECT COUNT(*) AS n FROM espelho_itens').get().n, 3);
+  } finally { await s.fechar(); }
+});
+
+// ---------- Shopee ligada no servidor (plano integracao-shopee, etapa 8; CA4, CA6, CA7) ----------
+const ID_AF_SHOPEE = '98765432101';
+const APP_ID_SHOPEE = '123456789';
+const CHAVE_SHOPEE = 'Senha-Api-SECRETA-q1w2e3';
+const SHOP = '52377417';
+const ITEM = '6309028319';
+const ITEM_FOTO_DE_FORA = '6309028320';
+const URL_PRODUTO_SHOPEE = `https://shopee.com.br/Fone-Bom-Sem-Fio-i.${SHOP}.${ITEM}`;
+const IMG_SHOPEE = 'https://down-br.img.susercontent.com/file/br-11134207-7r98o-abc123';
+
+/**
+ * fetch falso da Open API da Shopee: productOfferV2 devolve o nó do itemId pedido (o ITEM_FOTO_DE_FORA vem com a foto
+ * fora do CDN; a busca do "Testar" devolve o ITEM). Guarda o cabeçalho Authorization de cada chamada.
+ */
+function fetchShopee() {
+  const chamadas = [];
+  const f = async (url, init = {}) => {
+    const u = String(url);
+    chamadas.push({ url: u, metodo: init.method || 'GET', autorizacao: init.headers?.Authorization ?? null });
+    if (u !== URL_API_SHOPEE) throw new Error('rede não prevista no teste');
+    const item = /itemId:(\d+)/.exec(JSON.parse(init.body).query)?.[1] ?? ITEM;
+    const no = {
+      itemId: Number(item), productName: 'Fone Bom Sem Fio', priceMin: '89.90', priceMax: '99.90', priceDiscountRate: 15, sales: 1234,
+      ratingStar: '4.83', imageUrl: item === ITEM_FOTO_DE_FORA ? 'https://evil.example/foto.jpg' : IMG_SHOPEE, shopName: 'Loja Oficial',
+    };
+    return new Response(JSON.stringify({ data: { productOfferV2: { nodes: [no] } } }), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+  f.chamadas = chamadas;
+  return f;
+}
+
+/** Diretivas da CSP: { 'img-src': ["'self'", …], … }. */
+const diretivasCsp = (csp) => Object.fromEntries(String(csp).split(';').map((d) => d.trim().split(/\s+/)).map(([k, ...v]) => [k, v]));
+
+/** Alguma fonte `https://host` ou `https://*.sufixo` aceita a URL? (o curinga da CSP cobre um ou mais rótulos) */
+function cspAceita(fontes, url) {
+  const u = new URL(url);
+  return u.protocol === 'https:' && !u.port && fontes.some((f) => {
+    const m = /^https:\/\/(\*\.)?([a-z0-9.-]+)$/.exec(f);
+    return !!m && (m[1] ? u.hostname.endsWith(`.${m[2]}`) : u.hostname === m[2]);
+  });
+}
+
+test('CA7: a CSP img-src libera os hosts de IMAGEM_SHOPEE (e só eles a mais); nenhum connect-src novo', async () => {
+  const s = await subir();
+  try {
+    const d = diretivasCsp((await req(s.port, '/healthz')).headers['content-security-policy']);
+    assert.deepEqual(d['img-src'], ["'self'", 'data:', 'https://*.mlstatic.com', 'https://*.media-amazon.com', 'https://*.ssl-images-amazon.com',
+      'https://*.images-amazon.com', 'https://*.susercontent.com', 'https://cf.shopee.com.br']);
+    assert.deepEqual(d['connect-src'], ["'self'"]);
+    assert.deepEqual(d['default-src'], ["'self'"]);
+    // a CSP e a regex do servidor dizem a mesma coisa sobre as fotos da Shopee
+    for (const url of [IMG_SHOPEE, 'https://cf.shopee.com.br/file/abc', 'https://a.b.susercontent.com/x']) {
+      assert.ok(IMAGEM_SHOPEE.test(url), `regex: ${url}`); assert.ok(cspAceita(d['img-src'], url), `CSP: ${url}`);
+    }
+    for (const url of ['https://susercontent.com/x', 'https://susercontent.com.evil.com/x', 'https://cf.shopee.com.br.evil.com/x', 'https://shopee.com.br/x', 'https://evil.example/foto.jpg']) {
+      assert.ok(!IMAGEM_SHOPEE.test(url), `regex: ${url}`); assert.ok(!cspAceita(d['img-src'], url), `CSP: ${url}`);
+    }
+  } finally { await s.fechar(); }
+});
+
+test('CA6/CA7: Shopee ligada (criarServicos): um cliente para a fila e Conexões; Identificar pela API; foto só do CDN; senha e assinatura fora das respostas', async () => {
+  const fetch = fetchShopee();
+  const s = await subir({ publicHost: '', panelPassword: '', fetch });
+  try {
+    assert.ok(s.shopee, 'criarServicos cria o cliente da Shopee');
+    assert.equal(s.scheduler.shopee, s.shopee, 'o agendador (fila de envios) recebeu o cliente criado pelo servidor');
+    const origin = `http://127.0.0.1:${s.port}`;
+    const textos = []; // texto cru de toda resposta do painel neste teste
+    const chamar = async (caminho, o = {}) => { const r = await req(s.port, caminho, { ...o, headers: { origin, ...(o.headers || {}) } }); textos.push(r.txt); return r; };
+    const conexaoShopee = async () => (await chamar('/api/conexoes')).json.find((p) => p.id === 'shopee');
+    const identificar = (url) => chamar('/api/disparo/identificar', { method: 'POST', body: { url } });
+
+    let c = await conexaoShopee();
+    assert.deepEqual([c.estado, c.extensao_online], ['falta_configurar', false]);
+    const salvo = await chamar('/api/conexoes/shopee', { method: 'PUT', body: { campos: { id_afiliado: ID_AF_SHOPEE, app_id: APP_ID_SHOPEE, chave: CHAVE_SHOPEE } } });
+    assert.equal(salvo.status, 200, salvo.txt);
+    c = await conexaoShopee();
+    assert.deepEqual([c.estado, c.situacao.acesso, c.config, c.segredos_salvos], ['pronta', 'desconhecido', { id_afiliado: ID_AF_SHOPEE, app_id: APP_ID_SHOPEE }, ['chave']]);
+    assert.equal(fetch.chamadas.length, 0, 'salvar e listar não chamam a API');
+
+    // Identificar: produto pela API, com a credencial lida pelo lerConexao do servidor (segredosDe)
+    let r = await identificar(`${URL_PRODUTO_SHOPEE}?sp_atk=abc&utm_source=an_999`);
+    assert.equal(r.status, 200, r.txt);
+    assert.doesNotMatch(r.txt, /não está disponível neste servidor/);
+    assert.deepEqual([r.json.loja.id, r.json.editavel, r.json.causa, r.json.link_via, r.json.causa_link, r.json.pode_disparar], ['shopee', true, null, 'api', null, true]);
+    assert.deepEqual([r.json.produto.title, r.json.produto.price, r.json.produto.discountPct, r.json.produto.image], ['Fone Bom Sem Fio', 89.9, 15, IMG_SHOPEE]);
+    assert.equal(fetch.chamadas.length, 1);
+    const [chamada] = fetch.chamadas;
+    assert.deepEqual([chamada.url, chamada.metodo], [URL_API_SHOPEE, 'POST']);
+    assert.match(chamada.autorizacao, new RegExp(`^SHA256 Credential=${APP_ID_SHOPEE}, Timestamp=\\d+, Signature=[0-9a-f]{64}$`));
+
+    // CA7: foto fora do CDN da Shopee vira null
+    r = await identificar(`https://shopee.com.br/product/${SHOP}/${ITEM_FOTO_DE_FORA}`);
+    assert.equal(r.status, 200, r.txt);
+    assert.deepEqual([r.json.produto.title, r.json.produto.image], ['Fone Bom Sem Fio', null]);
+
+    // Conexões vê a mesma situação da API que a fila de envios gravou (cliente único) e o Testar usa o mesmo cliente
+    c = await conexaoShopee();
+    assert.deepEqual([c.estado, c.situacao.acesso, c.extensao_online], ['conectada', 'ok', false]);
+    const teste = await chamar('/api/conexoes/shopee/testar', { method: 'POST' });
+    assert.equal(teste.status, 200, teste.txt);
+    assert.deepEqual([teste.json.ok, teste.json.resultado], [true, 'ok']);
+    assert.equal(fetch.chamadas.length, 3);
+
+    // CA6: nenhuma resposta traz a Senha da API nem uma assinatura enviada
+    const assinaturas = fetch.chamadas.map((x) => /Signature=([0-9a-f]{64})/.exec(x.autorizacao)[1]);
+    for (const t of textos) {
+      assert.ok(!t.includes(CHAVE_SHOPEE), 'vazou a Senha da API');
+      for (const a of assinaturas) assert.ok(!t.includes(a), 'vazou a assinatura');
+    }
+  } finally { await s.fechar(); }
+});
+
+test('CA4: Shopee pela extensão de ponta a ponta: poll recebe link_shopee, result com link e longo; longo de outra conta recusa; o da conta do dono chega ao WhatsApp simulado', async () => {
+  const s = await subir({ publicHost: '', panelPassword: '', modoLink: 'extension' });
+  try {
+    const origin = `http://127.0.0.1:${s.port}`;
+    const token = s.db.prepare("SELECT value FROM settings WHERE key = 'ext_token'").get().value;
+    s.db.prepare('INSERT INTO groups (jid, name, size, updated_at) VALUES (?,?,?,?)').run('111@g.us', 'Achadinhos', 10, Date.now());
+    // só o ID de afiliado: sem API, o link sai pela extensão
+    const salvo = await req(s.port, '/api/conexoes/shopee', { method: 'PUT', headers: { origin }, body: { campos: { id_afiliado: ID_AF_SHOPEE } } });
+    assert.equal(salvo.status, 200, salvo.txt);
+    const corpo = { tipo: 'oferta', url: `${URL_PRODUTO_SHOPEE}?sp_atk=abc&xptdk=q`, template_id: 1, group_jids: ['111@g.us'], quando: 'agora', ajustes: { title: 'Fone à mão', price: '89,90' } };
+
+    /**
+     * Uma volta da extensão de verdade, por HTTP: long-poll em /api/ext/poll (marca a extensão on-line), o painel cria o
+     * envio, o pedido chega no poll e a extensão responde em /api/ext/result com `resposta`. → resposta do POST /api/envios
+     */
+    const volta = async (resposta) => {
+      const antes = Date.now();
+      const poll = req(s.port, '/api/ext/poll', { headers: { 'x-token': token } });
+      while (s.links.status().lastPollAt < antes) await new Promise((ok) => setTimeout(ok, 5));
+      const criado = req(s.port, '/api/envios', { method: 'POST', headers: { origin }, body: corpo });
+      // se o envio responder antes de o pedido chegar à extensão, falha já (sem esperar os 20 s do long-poll)
+      const pedido = await Promise.race([poll, criado.then((x) => { throw new Error(`o envio respondeu sem pedir o link à extensão: ${x.status} ${x.txt}`); })]);
+      assert.equal(pedido.status, 200);
+      const { job } = pedido.json;
+      assert.deepEqual([job.type, job.url], ['link_shopee', URL_PRODUTO_SHOPEE], 'a extensão recebe só o endereço do produto, sem parâmetros');
+      const devolvido = await req(s.port, '/api/ext/result', { method: 'POST', headers: { 'x-token': token }, body: { id: job.id, ...resposta } });
+      assert.deepEqual([devolvido.status, devolvido.json], [200, { ok: true }]);
+      return criado;
+    };
+
+    // o longo chega ao servidor: um longLink de outra conta de afiliado recusa o envio, sem gravar nada
+    const outra = await volta({ ok: true, link: 'https://s.shopee.com.br/ExtLink111', longo: `https://shopee.com.br/product/${SHOP}/${ITEM}?utm_source=an_99999999999&utm_medium=affiliates` });
+    assert.deepEqual([outra.status, outra.json.erro], [400, 'O Chrome está logado em outra conta de afiliado da Shopee. Entre na conta do ID …2101 e tente de novo.']);
+    assert.equal(s.db.prepare('SELECT COUNT(*) AS n FROM envios').get().n, 0, 'nada gravado');
+
+    const LINK = 'https://s.shopee.com.br/ExtLink456';
+    const r = await volta({ ok: true, link: LINK, longo: `https://shopee.com.br/product/${SHOP}/${ITEM}?utm_source=an_${ID_AF_SHOPEE}&utm_medium=affiliates&utm_term=xyz` });
+    assert.equal(r.status, 200, r.txt);
+    const t0 = Date.now(); const status = () => s.db.prepare('SELECT status FROM envios WHERE id = ?').get(r.json.id)?.status;
+    while (['pendente', 'enviando'].includes(status())) {
+      assert.ok(Date.now() - t0 < 3000, 'o envio não terminou');
+      await new Promise((ok) => setTimeout(ok, 5));
+    }
+    assert.equal(status(), 'concluido');
+    assert.equal(s.wa.simulated.length, 1);
+    const [msg] = s.wa.simulated;
+    assert.deepEqual([msg.tipo, msg.jid], ['text', '111@g.us'], 'sem API, sem foto: só texto');
+    assert.match(msg.text, /Fone à mão/);
+    assert.ok(msg.text.endsWith(LINK), msg.text);
+    assert.doesNotMatch(msg.text, /utm_|an_|sp_atk/, 'nem o longLink nem os parâmetros do link colado vão para o grupo');
+    const payload = JSON.parse(s.db.prepare('SELECT payload FROM envios WHERE id = ?').get(r.json.id).payload);
+    assert.deepEqual([payload.loja, payload.url, payload.link_afiliado], ['shopee', URL_PRODUTO_SHOPEE, LINK]);
   } finally { await s.fechar(); }
 });

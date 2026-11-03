@@ -467,3 +467,18 @@ a[href="#templates"].dica { display:inline-block; min-height:24px; line-height:2
   .esp-tab td[data-l]::before { content:attr(data-l) ":"; font-weight:600; flex:none; }
   .esp-tab td[data-l] > * { min-width:0; }
 }
+
+/* Shopee (Conexões): aviso com passos, linha da extensão e fieldsets. Só vale dentro de .conexao / .aviso-impl com .aviso-corpo */
+.aviso-impl .aviso-corpo { flex:1 1 auto; min-width:0; display:grid; gap:6px; }
+.aviso-impl .aviso-corpo > p, .aviso-impl .aviso-corpo > details { margin:0; }
+.aviso-impl .passos { margin:0; padding-left:20px; color:var(--text); }
+.aviso-impl .passos li { margin:4px 0; }
+.aviso-impl .aviso-corpo a { color:var(--text); font-weight:600; text-decoration:underline; display:inline-block; min-height:24px; line-height:24px; }
+.aviso-impl .aviso-corpo summary { cursor:pointer; font-weight:600; min-height:24px; line-height:24px; }
+.conexao .ext-linha { margin:0; font-size:14px; color:var(--text); }
+.conexao .ext-linha.off { background:color-mix(in oklab, var(--warn) 16%, var(--surface)); border:1px solid var(--warn); border-radius:10px; padding:8px 12px; }
+.conexao fieldset { min-width:0; }
+.conexao fieldset .dica { margin:0; }
+@media (max-width:600px) { .aviso-impl .aviso-corpo summary { min-height:44px; line-height:44px; } .aviso-impl .aviso-corpo a { line-height:inherit; min-height:24px; display:inline; } }
+.aviso-impl.neutro { border-color:var(--line); background:var(--surface-2); }
+.aviso-impl.neutro::before { content:none; }

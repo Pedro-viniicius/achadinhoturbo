@@ -347,12 +347,13 @@ test('servidor: /api/state traz o usuario da sessão (Dono migrado, sem e-mail) 
   } finally { await s.fechar(); }
 });
 
-test('servidor: a CSP libera as fotos de produto dos CDNs do Mercado Livre e da Amazon (como IMAGEM_PERMITIDA e IMAGEM_AMAZON) e nada mais de fora', async () => {
+test('servidor: a CSP libera as fotos de produto dos CDNs do Mercado Livre, da Amazon e da Shopee (como IMAGEM_PERMITIDA, IMAGEM_AMAZON e IMAGEM_SHOPEE) e nada mais de fora', async () => {
   const s = await subir();
   try {
     const csp = (await req(s.port, '/login.html')).headers['content-security-policy'];
     const img = csp.split(';').map((p) => p.trim()).find((p) => p.startsWith('img-src'));
-    assert.equal(img, "img-src 'self' data: https://*.mlstatic.com https://*.media-amazon.com https://*.ssl-images-amazon.com https://*.images-amazon.com");
+    // os hosts da Shopee são conferidos contra IMAGEM_SHOPEE em test/servidor.test.js
+    assert.equal(img, "img-src 'self' data: https://*.mlstatic.com https://*.media-amazon.com https://*.ssl-images-amazon.com https://*.images-amazon.com https://*.susercontent.com https://cf.shopee.com.br");
     assert.equal(csp.split(';').map((p) => p.trim()).find((p) => p.startsWith('connect-src')), "connect-src 'self'", 'nenhum connect-src de fora');
     assert.ok(mlReal.IMAGEM_PERMITIDA.test('https://http2.mlstatic.com/D_1.jpg') && !mlReal.IMAGEM_PERMITIDA.test('https://evil.com/mlstatic.com/x.jpg'));
     // cada host da Amazon liberado na CSP é um que a regra do servidor aceita para a foto

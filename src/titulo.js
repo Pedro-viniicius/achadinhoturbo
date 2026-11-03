@@ -60,3 +60,17 @@ export function abreviarTitulo(titulo, max = TITULO_MAX_PADRAO) {
   t = t.replace(/\b([A-ZÀ-Ü][A-ZÀ-Ü-]{5,})\b/g, (w) => w[0] + w.slice(1).toLowerCase());
   return t;
 }
+
+/**
+ * Título de uma linha só (espaços e quebras viram um espaço), até `max` caracteres, cortado antes de uma palavra
+ * (sem palavra partida; sem espaço no trecho, corta no limite). Não é texto ou fica vazio → null.
+ * Usado pelos clientes de API das lojas (o painel e src/envios.js têm teto de 200 para o título).
+ */
+export function tituloDeUmaLinha(v, max = 200) {
+  if (typeof v !== 'string' || !(Number.isInteger(max) && max > 0)) return null;
+  const t = v.replace(/\s+/g, ' ').trim();
+  if (!t) return null;
+  if (t.length <= max) return t;
+  const corte = t.slice(0, max + 1).lastIndexOf(' '); // o espaço pode ser o (max+1)º caractere: então o corte é exato
+  return (corte > 0 ? t.slice(0, corte) : t.slice(0, max)).trim();
+}

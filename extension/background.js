@@ -1,7 +1,8 @@
 // Conector da Central de Afiliados (achadinhoturbo): busca pedidos no painel (que roda no seu computador) e
-// os executa de dentro de uma aba da Central de Afiliados do Mercado Livre, com a sua sessão.
-// Dois pedidos: gerar link meli.la com a etiqueta e buscar a lista "Produtos selecionados para você".
-// Só o link e a lista voltam para o painel. Cookies e tokens ficam no navegador.
+// os executa de dentro de uma aba da Central de Afiliados do Mercado Livre ou do portal de afiliados da Shopee,
+// com a sua sessão. Três pedidos: gerar link meli.la com a etiqueta, buscar a lista "Produtos selecionados para
+// você" e gerar o link de afiliado da Shopee (s.shopee.com.br, pelo "Link personalizado" do portal).
+// Só os links e a lista voltam para o painel. Cookies e tokens ficam no navegador, e nada disso vai para o console.
 
 const PADRAO = { servidor: 'http://127.0.0.1:3737', token: '' };
 const ML = 'https://www.mercadolivre.com.br';
@@ -84,6 +85,165 @@ async function gerarLink(job) {
   throw new Error(`${motivo} (etiqueta "${job.tag}")`);
 }
 
+// ---- Shopee: funções puras (início) ----
+// Sem chrome.*, sem rede e sem estado: test/extensao-shopee.test.js extrai este trecho por estes marcadores.
+const SHOPEE_PORTAL = 'https://affiliate.shopee.com.br';
+const SHOPEE_ABA = `${SHOPEE_PORTAL}/offer/custom_link`;
+// Valor do cabeçalho Affiliate-Program-Type do programa "normal". Ponto único: o valor que a página usa ainda não
+// foi extraído (docs/produto/referencias/shopee-api-afiliados.md). Vazio = o cabeçalho não vai. Se o teste com a
+// sessão do dono mostrar que ele é obrigatório, copie aqui o valor da requisição "Obter link" vista no DevTools.
+const SHOPEE_TIPO_PROGRAMA = '';
+const LINK_SHOPEE = /^https:\/\/s\.shopee\.com\.br\/[A-Za-z0-9_-]{3,40}$/; // o mesmo de src/shopee.js e src/links.js
+const MAX_URL_SHOPEE = 2048;
+const SHOPEE_SEM_SESSAO = 'não há sessão de afiliado da Shopee neste Chrome. Entre no portal de afiliados da Shopee (affiliate.shopee.com.br)';
+const SHOPEE_FORMATO = 'o portal de afiliados da Shopee respondeu num formato inesperado';
+const SHOPEE_QUERY = 'query batchGetCustomLink($linkParams: [CustomLinkParam!], $sourceCaller: SourceCaller){ batchCustomLink(linkParams: $linkParams, sourceCaller: $sourceCaller){ shortLink longLink failCode } }';
+
+/** Só aceita o endereço de produto que o servidor monta: https://shopee.com.br/…, sem porta, credenciais nem parâmetros. */
+function urlProdutoShopee(v) {
+  if (typeof v !== 'string' || !v || v.length > MAX_URL_SHOPEE) return null;
+  let u;
+  try { u = new URL(v); } catch { return null; }
+  if (u.protocol !== 'https:' || u.hostname !== 'shopee.com.br' || u.port || u.username || u.password || u.search || u.hash) return null;
+  return u.href === v ? v : null; // só a forma canônica: nada de barras invertidas, espaços ou maiúsculas no host
+}
+
+/** Corpo do POST do "Link personalizado" (o mesmo que a página manda, sem Sub_ids). */
+function corpoLinkShopee(originalLink) {
+  return JSON.stringify({
+    operationName: 'batchGetCustomLink',
+    query: SHOPEE_QUERY,
+    variables: { linkParams: [{ originalLink }], sourceCaller: 'CUSTOM_LINK_CALLER' },
+  });
+}
+
+/** O longLink só serve para o servidor conferir o an_<ID>: https, host da Shopee, sem porta nem credenciais. */
+function longoShopee(v) {
+  if (typeof v !== 'string' || !v || v.length > MAX_URL_SHOPEE) return null;
+  let u;
+  try { u = new URL(v.trim()); } catch { return null; }
+  const host = u.hostname.toLowerCase();
+  if (u.protocol !== 'https:' || !(host === 'shopee.com.br' || host.endsWith('.shopee.com.br')) || u.port || u.username || u.password) return null;
+  return u.href;
+}
+
+/** Algo no JSON diz "não logado"? Só olha códigos e frases conhecidas; nunca devolve o texto do portal. */
+function jsonSemSessao(j) {
+  const COD = /^(401|403|unauthenticated|unauthori[sz]ed|forbidden|not_?login|need_?login)$/i;
+  const FRASE = /not\s?log(?:ged)?\s?in|unauthori[sz]ed|unauthenticated|login required|need login|session (?:expired|invalid)/i;
+  const erros = Array.isArray(j?.errors) ? j.errors.slice(0, 10) : [];
+  return erros.some((e) => COD.test(String(e?.extensions?.code ?? '').slice(0, 40)) || FRASE.test(String(e?.message ?? '').slice(0, 300)))
+    || COD.test(String(j?.code ?? '').slice(0, 40));
+}
+
+/**
+ * Lê o que a aba devolveu ({ semSessao } | { status, texto }) e decide: { semSessao: true } (recarregar e tentar de
+ * novo), { erro } (frase fixa, sem nada do corpo da resposta) ou { link, longo }.
+ */
+function interpretarShopee(res) {
+  if (!res || typeof res !== 'object') return { erro: 'não consegui falar com o portal de afiliados da Shopee' };
+  if (res.semSessao || res.status === 401 || res.status === 403) return { semSessao: true };
+  if (!res.status) return { erro: 'não consegui falar com o portal de afiliados da Shopee' };
+  let j = null;
+  try { j = JSON.parse(res.texto); } catch { /* fica null */ }
+  if (res.status >= 400) return jsonSemSessao(j) ? { semSessao: true } : { erro: `o portal de afiliados da Shopee respondeu HTTP ${Number(res.status) || 0}` };
+  if (!j || typeof j !== 'object') return { erro: SHOPEE_FORMATO };
+  const lista = j.data?.batchCustomLink;
+  const item = Array.isArray(lista) ? lista[0] : null;
+  if (!item || typeof item !== 'object') return jsonSemSessao(j) ? { semSessao: true } : { erro: SHOPEE_FORMATO };
+  const fc = item.failCode;
+  if (fc !== undefined && fc !== null && fc !== 0 && fc !== '0') {
+    const n = Number(fc);
+    return { erro: Number.isSafeInteger(n) ? `a Shopee recusou o link (código ${n})` : 'a Shopee recusou o link' };
+  }
+  const link = typeof item.shortLink === 'string' ? item.shortLink.trim() : '';
+  if (!LINK_SHOPEE.test(link)) return { erro: SHOPEE_FORMATO };
+  return { link, longo: longoShopee(item.longLink) };
+}
+
+/**
+ * Roda DENTRO da aba do portal (mesma origem, com a sessão do dono). Por ser injetada, não enxerga nada de fora:
+ * recebe o corpo pronto e o tipo de programa. Lê o token anti-CSRF do cabeçalho de resposta `csrf-token` de
+ * /api/v3/config/website (na falta dele, do `csrf_token` da configuração) e o manda no cabeçalho `CSRF-token`.
+ * Devolve só { semSessao } | { status, texto } | { status: 0 }; o token não sai daqui.
+ */
+async function chamarPortalShopee(corpo, tipoPrograma) {
+  if (location.origin !== 'https://affiliate.shopee.com.br') return { semSessao: true };
+  const extra = tipoPrograma ? { 'affiliate-program-type': tipoPrograma } : {};
+  // A API não redireciona: um redirecionamento (que com redirect:'manual' vira 'opaqueredirect') é a ida ao login.
+  const naoLogado = (r) => r.status === 401 || r.status === 403 || r.type === 'opaqueredirect';
+  try {
+    const cfg = await fetch(`${location.origin}/api/v3/config/website`, {
+      credentials: 'include', redirect: 'manual', headers: { accept: 'application/json, text/plain, */*', ...extra }, signal: AbortSignal.timeout(20000),
+    });
+    if (naoLogado(cfg)) return { semSessao: true };
+    if (!cfg.ok) return { status: cfg.status, texto: '' };
+    let csrf = cfg.headers.get('csrf-token');
+    if (!csrf) {
+      try { const c = await cfg.json(); csrf = c?.data?.csrf_token ?? c?.csrf_token; } catch { csrf = null; }
+    }
+    const headers = { accept: 'application/json, text/plain, */*', 'content-type': 'application/json', ...extra };
+    if (typeof csrf === 'string' && /^[!-~]{1,512}$/.test(csrf)) headers['csrf-token'] = csrf;
+    const r = await fetch(`${location.origin}/api/v3/gql?q=batchCustomLink`, {
+      method: 'POST', credentials: 'include', redirect: 'manual', headers, body: corpo, signal: AbortSignal.timeout(20000),
+    });
+    if (naoLogado(r)) return { semSessao: true };
+    return { status: r.status, texto: await r.text() };
+  } catch {
+    return { status: 0 };
+  }
+}
+// ---- Shopee: funções puras (fim) ----
+
+let abaShopee = null; // a aba que a extensão abriu para o portal (reaproveitada mesmo se a Shopee a levar ao login)
+
+/** Usa uma aba do portal já aberta (de preferência a do Link personalizado) ou abre uma fixada, em segundo plano. */
+async function abaDaShopee() {
+  const abertas = await chrome.tabs.query({ url: `${SHOPEE_PORTAL}/*` });
+  const pronta = abertas.find((t) => t.url?.startsWith(SHOPEE_ABA) && t.status === 'complete')
+    || abertas.find((t) => t.status === 'complete') || abertas[0];
+  if (pronta) return pronta.id;
+  if (abaShopee !== null) {
+    try { await chrome.tabs.get(abaShopee); return await recarregarShopee(abaShopee); } catch { abaShopee = null; }
+  }
+  const nova = await chrome.tabs.create({ url: SHOPEE_ABA, active: false, pinned: true });
+  abaShopee = nova.id;
+  await esperarCarregar(nova.id);
+  return nova.id;
+}
+
+async function recarregarShopee(tabId) {
+  try {
+    await chrome.tabs.update(tabId, { url: SHOPEE_ABA });
+  } catch {
+    if (abaShopee === tabId) abaShopee = null;
+    return abaDaShopee(); // a aba foi fechada: usa ou abre outra
+  }
+  await esperarCarregar(tabId);
+  return tabId;
+}
+
+/** Gera o link na aba do portal; sem sessão (ou fora do portal, ex.: página de login), recarrega uma vez. */
+async function gerarLinkShopee(job) {
+  const url = urlProdutoShopee(job.url);
+  if (!url) throw new Error('endereço de produto da Shopee recusado pela extensão');
+  const corpo = corpoLinkShopee(url);
+  let tabId = await abaDaShopee();
+  for (let tentativa = 0; tentativa < 2; tentativa++) {
+    let res = null;
+    try {
+      [{ result: res } = {}] = await chrome.scripting.executeScript({ target: { tabId }, world: 'MAIN', func: chamarPortalShopee, args: [corpo, SHOPEE_TIPO_PROGRAMA] });
+    } catch {
+      res = { semSessao: true }; // aba fechada ou fora do portal (a Shopee leva ao login, onde a extensão não entra)
+    }
+    const v = interpretarShopee(res);
+    if (v.erro) throw new Error(v.erro);
+    if (!v.semSessao) return { link: v.link, longo: v.longo };
+    if (tentativa === 0) tabId = await recarregarShopee(tabId);
+  }
+  throw new Error(SHOPEE_SEM_SESSAO);
+}
+
 async function buscarOfertas(job) {
   const paginas = [];
   for (const corpo of job.paginas || []) {
@@ -113,9 +273,9 @@ async function laco() {
       if (!job) continue; // long-poll voltou vazio: pergunta de novo
       let corpo;
       try {
-        corpo = job.type === 'ofertas'
-          ? { id: job.id, ok: true, data: await buscarOfertas(job) }
-          : { id: job.id, ok: true, link: await gerarLink(job) };
+        if (job.type === 'ofertas') corpo = { id: job.id, ok: true, data: await buscarOfertas(job) };
+        else if (job.type === 'link_shopee') corpo = { id: job.id, ok: true, ...(await gerarLinkShopee(job)) };
+        else corpo = { id: job.id, ok: true, link: await gerarLink(job) };
         await status({ ultimoErro: null });
       } catch (e) {
         corpo = { id: job.id, ok: false, error: String(e.message || e) };

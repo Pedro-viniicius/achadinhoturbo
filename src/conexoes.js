@@ -11,11 +11,18 @@
 // Amazon (plano espelhamento-amazon, etapa 7): a tag e a versão da credencial são texto; o ID e o segredo da
 // credencial são segredo. O "Testar" é real (amazon.testar de src/amazon.js, injetado) e a resposta só carrega
 // frases fixas desta tela: nada do que a Amazon devolveu (corpo, token) chega ao navegador. Salvar esquece o token.
+//
+// Shopee (plano integracao-shopee, decisão 5): o ID de afiliado e o AppID são texto; a Senha da API (`chave`) é o
+// único segredo. O cartão leva `estado` (6 valores da spec), `situacao` (da última chamada à API, src/shopee.js) e
+// `extensao_online` (os links saem pela extensão quando a API não serve). AppID igual ao ID de afiliado é recusado
+// (400, nada gravado). O "Testar" é real (shopee.testar, injetado) e responde só com frases fixas por resultado;
+// com a credencial aceita e sem ID de afiliado, o resultado é `sem_id`. Salvar esquece a verificação e o cache.
 
 import { PLATAFORMAS } from './lojas.js';
 import { getSetting } from './db.js';
 import { DRY_RUN } from './config.js';
 import { ErroAmazon, MENSAGENS_AMAZON } from './amazon.js';
+import { ErroShopee, MENSAGENS_SHOPEE, FRASES_TESTE_SHOPEE, RE_ID_AFILIADO as RE_ID_AFILIADO_SHOPEE } from './shopee.js';
 
 /** Erro com status HTTP e mensagem pronta para a tela. Nunca carrega valor vindo do corpo. */
 class ErroConexao extends Error {
@@ -92,6 +99,19 @@ const RESULTADO_DO_ERRO = Object.freeze({
 const CAMPOS_TESTE = ['title', 'price', 'oldPrice', 'discountPct', 'image']; // o que o teste diz que veio da API
 const ACESSOS = ['nao_configurada', 'desconhecido', 'ok', 'sem_acesso', 'credenciais_invalidas', 'tag_invalida', 'cota', 'indisponivel'];
 
+// "Testar" da Shopee: ErroShopee.tipo → resultado (as frases são FRASES_TESTE_SHOPEE, de src/shopee.js).
+const RESULTADO_DO_ERRO_SHOPEE = Object.freeze({
+  sem_credenciais: 'nao_configurada', credencial_recusada: 'recusada', sem_acesso: 'sem_acesso',
+  conta_restrita: 'conta_restrita', cota: 'cota',
+});
+// Resultados que podem vir de shopee.testar(). `sem_id` não está aqui: só este módulo decide (precisa do ID salvo).
+const RESULTADOS_SHOPEE = ['ok', 'nao_configurada', 'recusada', 'sem_acesso', 'conta_restrita', 'cota', 'indisponivel'];
+const CAMPOS_TESTE_SHOPEE = ['itemId', 'productName', 'priceMin', 'priceMax', 'priceDiscountRate', 'sales', 'ratingStar', 'imageUrl', 'shopName'];
+const ACESSOS_SHOPEE = ['nao_configurada', 'desconhecido', 'ok', 'sem_acesso', 'credencial_recusada', 'conta_restrita', 'cota', 'indisponivel'];
+const APPID_IGUAL_AO_ID = 'O AppID e o ID de afiliado são números diferentes. Confira os dois no portal da Shopee.';
+/** Mesmo número com ou sem zeros à esquerda. */
+const semZeros = (v) => (typeof v === 'string' ? v.replace(/^0+/, '') : '');
+
 /** Mensagem de erro do campo, ou ''. Nunca inclui o valor (pode ser um segredo). */
 function validarCampo(c, valor) {
   if (valor.length > c.max) return `${c.rotulo}: até ${c.max} caracteres.`;
@@ -103,11 +123,42 @@ function validarCampo(c, valor) {
 
 /**
  * Regra das conexões. db: banco aberto; links: serviço de links (status da extensão); amazon: createAmazon
- * (situação da API, "Testar" e invalidar o token ao salvar).
+ * (situação da API, "Testar" e invalidar o token ao salvar); shopee: createShopee (o mesmo papel).
  * → { listar(verSegredos), salvar(id, corpo, verSegredos), testar(id) }
  */
-export function createConexoes({ db, links, amazon }) {
+export function createConexoes({ db, links, amazon, shopee }) {
   const linhaDe = (id) => db.prepare(`${SQL_LER} WHERE plataforma = ?`).get(id);
+  const extensaoOnline = () => !!links?.status?.().online;
+
+  /** Situação da API da Shopee para o cartão: só acesso conhecido, número e frase fixa de shopee.js. */
+  function situacaoShopee(temCredencial) {
+    let s = null;
+    try { s = typeof shopee?.situacao === 'function' ? shopee.situacao() : null; } catch (e) {
+      console.error('[conexões] situação da Shopee falhou:', e?.name || 'erro'); // sem e.message
+    }
+    if (!s) return { acesso: temCredencial ? 'desconhecido' : 'nao_configurada', verificado_em: null, motivo: null };
+    return {
+      acesso: ACESSOS_SHOPEE.includes(s.acesso) ? s.acesso : 'desconhecido',
+      verificado_em: Number.isFinite(s.verificado_em) ? s.verificado_em : null,
+      motivo: Object.values(MENSAGENS_SHOPEE).includes(s.motivo) ? s.motivo : null,
+    };
+  }
+
+  /**
+   * Estado do cartão da Shopee (spec, seção 1):
+   * falta_configurar (nada salvo) | so_id (ID sem AppID e Senha: links pela extensão) | pronta (credenciais
+   * ainda não verificadas; também credenciais aceitas sem ID, com a linha de estado avisando) | conectada (acesso
+   * ok e ID salvo) | sem_acesso (10035) | erro_credencial (credencial recusada ou conta restrita).
+   * A recusa da API vale com ou sem ID (R2): sem ID, a tela avisa da falta dele também nesses estados.
+   */
+  function estadoShopee(temId, temCredencial, acesso) {
+    if (!temCredencial) return temId ? 'so_id' : 'falta_configurar';
+    if (acesso === 'sem_acesso') return 'sem_acesso';
+    if (acesso === 'credencial_recusada' || acesso === 'conta_restrita') return 'erro_credencial';
+    if (!temId) return 'pronta';
+    if (acesso === 'ok') return 'conectada';
+    return 'pronta';
+  }
 
   /** Situação da API da Amazon para o cartão: só os campos conhecidos (o motivo é uma frase fixa de amazon.js). */
   function situacaoAmazon(temCredencial) {
@@ -163,6 +214,13 @@ export function createConexoes({ db, links, amazon }) {
       const estado = !config.tag ? 'falta_configurar' : !temCredencial ? 'so_tag' : situacao.acesso === 'ok' ? 'conectada' : 'pronta';
       return { ...comum, estado, situacao, espelhos_ativos: espelhosAtivos(), updated_at: linha?.updated_at ?? null };
     }
+    if (p.id === 'shopee') {
+      const temId = RE_ID_AFILIADO_SHOPEE.test(config.id_afiliado ?? '');
+      const temCredencial = !!config.app_id && nomesSalvos.has('chave');
+      const situacao = situacaoShopee(temCredencial);
+      const estado = estadoShopee(temId, temCredencial, situacao.acesso);
+      return { ...comum, estado, situacao, extensao_online: extensaoOnline(), updated_at: linha?.updated_at ?? null };
+    }
     const completo = p.campos.length > 0 && p.campos.every((c) => (c.tipo === 'segredo' ? nomesSalvos.has(c.nome) : !!config[c.nome]));
     const estado = !p.implementada ? 'nao_implementada' : completo ? 'pronta' : 'falta_configurar';
     return { ...comum, estado, updated_at: linha?.updated_at ?? null };
@@ -196,10 +254,18 @@ export function createConexoes({ db, links, amazon }) {
       if (msg) { erros.push({ campo: c.nome, msg }); continue; }
       (c.tipo === 'segredo' ? segredos : config)[c.nome] = v;
     }
+    if (p.id === 'shopee' && !erros.length) {
+      // Compara o que fica salvo depois do merge: o que veio agora (null apaga) ou o que já estava no banco.
+      const atual = lerJson(linhaDe(p.id)?.config);
+      const final = (nome) => (Object.hasOwn(config, nome) ? config[nome] : atual[nome]);
+      const appId = semZeros(final('app_id')); const idAfiliado = semZeros(final('id_afiliado'));
+      if (appId && appId === idAfiliado) erros.push({ campo: 'app_id', msg: APPID_IGUAL_AO_ID });
+    }
     if (erros.length) throw new ErroConexao(400, erros.map((e) => e.msg).join(' '), { erros });
     if (Object.keys(config).length || Object.keys(segredos).length) {
       db.prepare(SQL_GRAVAR).run({ id: p.id, config: JSON.stringify(config), segredos: JSON.stringify(segredos), agora: Date.now() });
       if (p.id === 'amazon') amazon?.invalidarToken?.(); // credencial ou tag nova: token e situação velhos não valem
+      if (p.id === 'shopee') shopee?.invalidar?.(); // AppID, Senha ou ID novos: verificação e cache velhos não valem
     }
     return visao(p, linhaDe(p.id), verSegredos);
   }
@@ -232,7 +298,32 @@ export function createConexoes({ db, links, amazon }) {
     return { ok, resultado, mensagem, campos };
   }
 
-  /** "Testar": { ok, mensagem } (+ resultado e campos na Amazon). Lojas não implementadas dizem que não existem ainda. */
+  /**
+   * "Testar" da Shopee: uma consulta real à Open API (shopee.testar). Só frases fixas por resultado; nada do que
+   * a Shopee devolveu (corpo, código cru) nem a Senha chegam à resposta. Credencial aceita sem ID de afiliado
+   * salvo → `sem_id` (sucesso parcial: ok falso, a tela mostra em aviso).
+   * → { ok, resultado: 'ok'|'nao_configurada'|'recusada'|'sem_acesso'|'conta_restrita'|'cota'|'indisponivel'|'sem_id', mensagem, campos }
+   */
+  async function testarShopee() {
+    if (typeof shopee?.testar !== 'function') {
+      return { ok: false, resultado: 'indisponivel', mensagem: 'O teste da Shopee não está disponível agora.', campos: [] };
+    }
+    const falha = (resultado) => ({ ok: false, resultado, mensagem: FRASES_TESTE_SHOPEE[resultado], campos: [] });
+    let r;
+    try { r = await shopee.testar(); } catch (e) {
+      if (!(e instanceof ErroShopee)) console.error('[conexões] teste da Shopee falhou:', e?.name || 'erro'); // sem e.message
+      return falha((e instanceof ErroShopee && RESULTADO_DO_ERRO_SHOPEE[e.tipo]) || 'indisponivel');
+    }
+    const vindo = typeof r?.resultado === 'string' && RESULTADOS_SHOPEE.includes(r.resultado) ? r.resultado : 'indisponivel';
+    const ok = vindo === 'ok' && r.ok === true; // nunca sucesso sem os dois sinais
+    if (!ok) return falha(vindo === 'ok' ? 'indisponivel' : vindo);
+    const campos = Array.isArray(r.campos) ? CAMPOS_TESTE_SHOPEE.filter((c) => r.campos.includes(c)) : [];
+    const temId = RE_ID_AFILIADO_SHOPEE.test(lerJson(linhaDe('shopee')?.config).id_afiliado ?? '');
+    if (!temId) return { ok: false, resultado: 'sem_id', mensagem: FRASES_TESTE_SHOPEE.sem_id, campos };
+    return { ok: true, resultado: 'ok', mensagem: FRASES_TESTE_SHOPEE.ok, campos };
+  }
+
+  /** "Testar": { ok, mensagem } (+ resultado e campos na Amazon e na Shopee). Lojas não implementadas dizem que não existem ainda. */
   async function testar(id) {
     const p = plataformaDe(id);
     if (p.id === 'mercadolivre') { const { ok, mensagem } = situacaoML(); return { ok, mensagem }; }
@@ -240,6 +331,7 @@ export function createConexoes({ db, links, amazon }) {
       return { ok: false, mensagem: `${p.nome} ainda não está implementada.${p.campos.length ? ' Os dados ficam salvos para quando a integração existir.' : ''}` };
     }
     if (p.id === 'amazon') return testarAmazon();
+    if (p.id === 'shopee') return testarShopee();
     return { ok: false, mensagem: `O teste de ${p.nome} ainda não está disponível.` }; // nunca sucesso sem testar
   }
 
@@ -261,13 +353,14 @@ const podeVerSegredos = (req) => req.user == null || req.user.papel === 'dono';
 
 /**
  * Rotas de F4, montadas por buildApp depois do login e da checagem Host/Origin.
- * ctx = { db, wa, links, scheduler, auth, wrap, soDono, dataDir, ml, enderecoPublico, amazon }.
+ * ctx = { db, wa, links, scheduler, auth, wrap, soDono, dataDir, ml, enderecoPublico, amazon, shopee }.
  * ctx.amazon é o cliente único do servidor (criarServicos em src/server.js), o mesmo da fila de envios: salvar a
  * conexão invalida o token de todos e o "Testar" usa a mesma fila de 1 chamada/s. Sem ele, o teste da Amazon diz
- * que não está disponível (createConexoes já trata).
+ * que não está disponível (createConexoes já trata). ctx.shopee é o mesmo para a Shopee (cliente único, ligado
+ * pelo servidor): salvar esquece a verificação e o cache de itens dele.
  */
 export function montarRotas(app, ctx) {
-  const conexoes = createConexoes({ db: ctx.db, links: ctx.links, amazon: ctx.amazon ?? null });
+  const conexoes = createConexoes({ db: ctx.db, links: ctx.links, amazon: ctx.amazon ?? null, shopee: ctx.shopee ?? null });
   app.get('/api/conexoes', responder((req) => conexoes.listar(podeVerSegredos(req))));
   app.put('/api/conexoes/:id', ctx.soDono, responder((req) => conexoes.salvar(req.params.id, req.body, podeVerSegredos(req))));
   app.post('/api/conexoes/:id/testar', ctx.soDono, responder((req) => conexoes.testar(req.params.id)));

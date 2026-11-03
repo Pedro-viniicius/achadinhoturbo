@@ -13,6 +13,7 @@ import { montarRotas as rotasEnvios } from './envios.js';
 import { montarRotas as rotasAvisos, lerConfig as configAvisos, viradaMin, limitePadrao, mascararNumero } from './avisos.js';
 import { montarRotas as rotasConexoes, segredosDe } from './conexoes.js';
 import { createAmazon } from './amazon.js';
+import { createShopee } from './shopee.js';
 import { montarRotas as rotasEspelho } from './espelho.js';
 import { montarRotas as rotasEquipe, montarRotasPublicas as rotasEquipePublicas } from './equipe.js';
 import { renderTemplate, SAMPLE_OFFER, SAMPLE_OFFER_AMAZON, PLACEHOLDERS } from './template.js';
@@ -27,26 +28,31 @@ const LOCAL_HOST = /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i;
 const PUBLIC_PATHS = new Set(['/login.html', '/login.js', '/convite.html', '/convite.js', '/style.css', '/logo.svg', '/icon-192.png', '/healthz', '/favicon.ico',
   '/api/login', '/api/login/modo', '/api/convite/info', '/api/convite/aceitar']);
 // Política de conteúdo: só scripts do próprio painel; estilos inline e Google Fonts liberados; nada de frames.
-// Imagens: as do painel e as fotos de produto dos CDNs das lojas: Mercado Livre (IMAGEM_PERMITIDA, src/ml.js) e
-// Amazon (IMAGEM_AMAZON, src/amazon.js; a mesma regra de lojas.imagemPermitida). Nenhum connect-src de fora.
-const CSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https://*.mlstatic.com https://*.media-amazon.com https://*.ssl-images-amazon.com https://*.images-amazon.com; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'";
+// Imagens: as do painel e as fotos de produto dos CDNs das lojas: Mercado Livre (IMAGEM_PERMITIDA, src/ml.js),
+// Amazon (IMAGEM_AMAZON, src/amazon.js) e Shopee (IMAGEM_SHOPEE, src/shopee.js), a mesma regra de
+// lojas.imagemPermitida. Host de foto novo muda a regex da loja, a do painel (public/disparos.js) e esta linha juntas.
+// Nenhum connect-src de fora.
+const CSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https://*.mlstatic.com https://*.media-amazon.com https://*.ssl-images-amazon.com https://*.images-amazon.com https://*.susercontent.com https://cf.shopee.com.br; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'";
 
 /**
  * Serviços com estado que o servidor compartilha: UM cliente da Amazon (um token, uma fila de 1 chamada/s, uma
  * "situação" da API) usado pela fila de envios do agendador, pelo espelho e pelas rotas (Conexões, Identificar do
- * Disparo manual). Aqui também o ouvinte de mensagens do WhatsApp é ligado ao espelho: cada mensagem nova de grupo
- * vai a espelho.receber() (síncrono, sem rede, nunca lança), que grava os itens e acorda o agendador.
+ * Disparo manual), e UM cliente da Shopee (situação da Open API e cache de itens e de links curtos) usado pela fila
+ * de envios e por Conexões. Os dois leem a credencial a cada chamada (segredosDe), nunca guardada. Aqui também o
+ * ouvinte de mensagens do WhatsApp é ligado ao espelho: cada mensagem nova de grupo vai a espelho.receber()
+ * (síncrono, sem rede, nunca lança), que grava os itens e acorda o agendador.
  * O main abaixo e os testes sobem por aqui. `fetch` só nos testes (padrão: o fetch global).
  */
 export function criarServicos({ db, wa, links, fast = FAST, dir = DATA_DIR, ml = mlPadrao, fetch } = {}) {
   const amazon = createAmazon({ db, fetch, lerConexao: () => segredosDe(db, 'amazon') });
-  const scheduler = createScheduler({ db, wa, links, fast, dir, ml, amazon });
+  const shopee = createShopee({ db, fetch, lerConexao: () => segredosDe(db, 'shopee') });
+  const scheduler = createScheduler({ db, wa, links, fast, dir, ml, amazon, shopee });
   wa.onMensagem((m) => scheduler.espelho.receber(m));
-  return { amazon, scheduler };
+  return { amazon, shopee, scheduler };
 }
 
-// amazon: o mesmo cliente do agendador (criarServicos); sem ele, as rotas tratam a Amazon como indisponível.
-export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, panelPassword = PANEL_PASSWORD, dataDir = DATA_DIR, ml = mlPadrao, amazon = scheduler?.amazon ?? null }) {
+// amazon e shopee: os mesmos clientes do agendador (criarServicos); sem eles, as rotas tratam a loja como indisponível.
+export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, panelPassword = PANEL_PASSWORD, dataDir = DATA_DIR, ml = mlPadrao, amazon = scheduler?.amazon ?? null, shopee = scheduler?.shopee ?? null }) {
   const app = express();
   app.disable('x-powered-by');
   app.set('trust proxy', 1); // Nginx na frente: req.ip e req.secure vêm do X-Forwarded-*
@@ -110,8 +116,9 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
     res.status(200).type('application/json').flushHeaders();
     res.end(JSON.stringify({ job: await links.poll(20000) }));
   });
+  // `longo` (só no pedido link_shopee): o longLink, que serve só para conferir o ID de afiliado; links.submit o valida
   app.post('/api/ext/result', extAuth, jsonGrande, (req, res) => {
-    const ok = links.submit(Number(req.body.id), { ok: !!req.body.ok, link: req.body.link, data: req.body.data, error: req.body.error });
+    const ok = links.submit(Number(req.body.id), { ok: !!req.body.ok, link: req.body.link, longo: req.body.longo, data: req.body.data, error: req.body.error });
     res.json({ ok });
   });
 
@@ -482,7 +489,7 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
   app.get('/api/simulados', wrap(() => wa.simulated.slice(-50).map((m) => (String(m.jid).endsWith('@g.us') ? m : { ...m, jid: mascararNumero(m.jid) }))));
 
   // ---------- features novas: cada módulo monta as próprias rotas, todas depois do Host/Origin e do login ----------
-  const ctx = { db, wa, links, scheduler, auth, wrap, soDono: exigeDono, dataDir, ml, amazon, enderecoPublico, publicHost, gravarCookie, sidDe };
+  const ctx = { db, wa, links, scheduler, auth, wrap, soDono: exigeDono, dataDir, ml, amazon, shopee, enderecoPublico, publicHost, gravarCookie, sidDe };
   for (const montar of [rotasEnvios, rotasAvisos, rotasConexoes, rotasEspelho, rotasEquipe]) montar(app, ctx);
 
   // Erros de parsing (JSON inválido, corpo grande demais) e inesperados: resposta curta, sem stack nem caminhos.
@@ -504,9 +511,9 @@ if (import.meta.url === `file://${process.argv[1].replace(/\\/g, '/')}` || proce
   // leitura conta 1× por pessoa por dia de negócio (a virada do dia de Relatórios e avisos), como os relatórios
   const wa = createWhatsApp({ db, dir: DATA_DIR, dryRun: DRY_RUN, pseudo: (id) => pseudonimo(db, id), diaDe: (ts) => dayOf(ts, viradaMin(db)) });
   const links = createLinkService({ getMode: () => (DRY_RUN ? 'fake' : getSetting(db, 'link_mode', 'extension')) });
-  const { amazon, scheduler } = criarServicos({ db, wa, links, fast: FAST, dir: DATA_DIR, ml: mlPadrao });
+  const { amazon, shopee, scheduler } = criarServicos({ db, wa, links, fast: FAST, dir: DATA_DIR, ml: mlPadrao });
   let app;
-  try { app = buildApp({ db, wa, links, scheduler, amazon }); } catch (e) { console.error('ERRO:', e.message); process.exit(1); }
+  try { app = buildApp({ db, wa, links, scheduler, amazon, shopee }); } catch (e) { console.error('ERRO:', e.message); process.exit(1); }
   const retencao = () => {
     try { const r = limparAntigos(db, Number(getSetting(db, 'retencao_dias', RETENCAO_PADRAO_DIAS))); if (r.eventos || r.leituras || r.cliques) console.log(`Retenção: apagados ${r.eventos} eventos, ${r.leituras} leituras, ${r.cliques} cliques antigos.`); } catch (e) { console.error('[retenção]', e.message); }
     // envios avulsos encerrados e fotos sem uso (src/envios.js); uma falha só vai para o log

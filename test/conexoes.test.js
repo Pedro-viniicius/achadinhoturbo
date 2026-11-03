@@ -3,6 +3,9 @@
 // Amazon (plano espelhamento-amazon, etapa 7; CA2 e CA7): 4 estados, situação da API, "Testar" real com um fetch
 // falso injetado no cliente único do servidor (criarServicos; nada sai para a rede) e o ID, o segredo e o token
 // nunca no texto cru das respostas.
+// Shopee (plano integracao-shopee, etapa 6; CA5 e CA6): 6 estados e extensao_online, AppID igual ao ID de afiliado
+// recusado sem gravar, "Testar" real por código (createShopee com fetch falso) e a Senha da API e a assinatura
+// nunca no texto cru das respostas, no log nem no console.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -12,8 +15,10 @@ import http from 'node:http';
 import vm from 'node:vm';
 import { DatabaseSync } from 'node:sqlite';
 import { openDb, setSetting } from '../src/db.js';
-import { createConexoes, segredosDe } from '../src/conexoes.js';
+import express from 'express';
+import { createConexoes, segredosDe, montarRotas } from '../src/conexoes.js';
 import { ErroAmazon, MENSAGENS_AMAZON, URL_GET_ITEMS, ASIN_TESTE } from '../src/amazon.js';
+import { createShopee, ErroShopee, MENSAGENS_SHOPEE, FRASES_TESTE_SHOPEE, URL_API as URL_API_SHOPEE } from '../src/shopee.js';
 import { buildApp, criarServicos } from '../src/server.js';
 import { createWhatsApp } from '../src/whatsapp.js';
 import { createLinkService } from '../src/links.js';
@@ -96,7 +101,12 @@ test('GET /api/conexoes lista as 5 plataformas na ordem do registro, com campos 
       assert.equal(p.updated_at, null);
     }
     const porId = Object.fromEntries(r.json.map((p) => [p.id, p]));
-    assert.deepEqual(porId.shopee.campos.map((c) => [c.nome, c.tipo]), [['app_id', 'texto'], ['chave', 'segredo']]);
+    assert.deepEqual(porId.shopee.campos.map((c) => [c.nome, c.tipo]), [['id_afiliado', 'texto'], ['app_id', 'texto'], ['chave', 'segredo']]);
+    assert.equal(porId.shopee.implementada, true);
+    assert.equal(porId.shopee.estado, 'falta_configurar', 'Shopee sem ID de afiliado');
+    assert.equal(porId.shopee.situacao.acesso, 'nao_configurada');
+    assert.equal(porId.shopee.extensao_online, false);
+    assert.deepEqual(porId.shopee.config, {});
     assert.deepEqual(porId.amazon.campos.map((c) => [c.nome, c.tipo]),
       [['tag', 'texto'], ['credencial_id', 'segredo'], ['credencial_secret', 'segredo'], ['credencial_versao', 'texto']]);
     assert.equal(porId.amazon.implementada, true);
@@ -109,7 +119,7 @@ test('GET /api/conexoes lista as 5 plataformas na ordem do registro, com campos 
     assert.deepEqual(porId.mercadolivre.campos, [], 'ML: a configuração são as etiquetas, não um campo daqui');
     assert.deepEqual(porId.mercadolivre.config, { etiquetas: [] });
     assert.equal(porId.mercadolivre.estado, 'falta_configurar', 'sem etiqueta e sem extensão');
-    for (const id of ['shopee', 'magalu', 'facebook']) {
+    for (const id of ['magalu', 'facebook']) {
       assert.equal(porId[id].implementada, false); assert.equal(porId[id].estado, 'nao_implementada', id);
       assert.deepEqual(porId[id].config, {});
     }
@@ -136,7 +146,7 @@ test('PUT Shopee guarda AppID e chave; a chave nunca aparece no texto cru de nen
       const shopee = get.json.find((p) => p.id === 'shopee');
       assert.deepEqual(shopee.segredos_salvos, ['chave']);
       assert.deepEqual(shopee.config, { app_id: '123456' });
-      assert.equal(shopee.estado, 'nao_implementada');
+      assert.equal(shopee.estado, 'pronta', 'AppID e Senha sem ID de afiliado: credenciais salvas (a linha avisa do ID)');
 
       respostas.push(await api('/conexoes/shopee/testar', { method: 'POST', body: {} }));
       respostas.push(await api('/conexoes/mercadolivre/testar', { method: 'POST', body: {} }));
@@ -150,7 +160,7 @@ test('PUT Shopee guarda AppID e chave; a chave nunca aparece no texto cru de nen
       const recusada = await api('/conexoes/shopee', { method: 'PUT', body: { campos: { chave: chaveRuim } } });
       respostas.push(recusada);
       assert.equal(recusada.status, 400);
-      assert.match(recusada.json.erro, /^Chave secreta: formato inválido/);
+      assert.match(recusada.json.erro, /^Senha da API: formato inválido/);
       assert.deepEqual(recusada.json.erros, [{ campo: 'chave', msg: recusada.json.erro }]);
       // JSON malformado com a chave dentro
       const malformado = await api('/conexoes/shopee', { method: 'PUT', body: `{"campos":{"chave":${CHAVE}}}` });
@@ -276,11 +286,11 @@ test('id desconhecido (inclusive constructor e __proto__) responde 404 no PUT e 
 
 test('testar: lojas não implementadas dizem isso (nunca sucesso falso)', async () => {
   await comSessao(async ({ api }) => {
-    await api('/conexoes/shopee', { method: 'PUT', body: { campos: { app_id: '123' } } });
-    const shopee = await api('/conexoes/shopee/testar', { method: 'POST', body: {} });
-    assert.equal(shopee.status, 200);
-    assert.deepEqual(shopee.json, { ok: false, mensagem: 'Shopee ainda não está implementada. Os dados ficam salvos para quando a integração existir.' });
-    for (const id of ['shopee', 'magalu', 'facebook']) {
+    assert.equal((await api('/conexoes/magalu', { method: 'PUT', body: { campos: { loja: 'minhaloja' } } })).status, 200);
+    const magalu = await api('/conexoes/magalu/testar', { method: 'POST', body: {} });
+    assert.equal(magalu.status, 200);
+    assert.deepEqual(magalu.json, { ok: false, mensagem: 'Magalu ainda não está implementada. Os dados ficam salvos para quando a integração existir.' });
+    for (const id of ['magalu', 'facebook']) {
       const r = await api(`/conexoes/${id}/testar`, { method: 'POST', body: {} });
       assert.equal(r.json.ok, false, id); assert.match(r.json.mensagem, /não está implementada/, id);
     }
@@ -603,6 +613,381 @@ test('segredosDe: só os campos do registro, só texto não vazio; linha corromp
   for (const id of ['constructor', '__proto__', 'x']) assert.throws(() => segredosDe(db, id), /Conexão desconhecida/);
 });
 
+// ------------------------------------------------------------------ Shopee (plano integracao-shopee, etapa 6)
+
+const ID_SHP = '98765432101';
+const APP_SHP = '123456789';
+const SENHA_SHP = 'Senha-API-Shopee-SECRETA-7x9y';
+const SENHA_SHP_NOVA = 'Nova-Senha-API-SECRETA-3k4m';
+const SECRETOS_SHP = [SENHA_SHP, SENHA_SHP_NOVA, 'SECRETA'];
+
+/**
+ * Open API da Shopee falsa. `modo`: { rede } derruba a conexão, { http } responde esse status, { codigo } responde
+ * um erro GraphQL com esse código (HTTP 200); sem nada, um nó de produto. Os erros ecoam a Senha e a assinatura de
+ * propósito: nada disso pode chegar ao painel. `assinaturas` guarda as que chegaram (para varrer as respostas).
+ */
+function apiShopeeFalsa() {
+  const modo = { rede: false, http: 200, codigo: null };
+  const chamadas = []; const assinaturas = [];
+  const fetch = async (url, init = {}) => {
+    const u = String(url);
+    chamadas.push(u);
+    if (u !== URL_API_SHOPEE) throw new Error('rede inesperada no teste');
+    const assinatura = /Signature=([0-9a-f]+)/.exec(init.headers?.Authorization ?? '')?.[1] ?? '';
+    assinaturas.push(assinatura);
+    const eco = `${SENHA_SHP} ${SENHA_SHP_NOVA} ${assinatura}`;
+    if (modo.rede) throw new Error(`conexão recusada ${eco}`);
+    if (modo.http !== 200) return jsonResp(modo.http, { message: eco });
+    if (modo.codigo != null) return jsonResp(200, { errors: [{ message: `erro ${eco}`, extensions: { code: modo.codigo, message: eco } }], data: null });
+    return jsonResp(200, { data: { productOfferV2: { nodes: [{ itemId: 22, productName: 'Celular', priceMin: '999.90', imageUrl: '', shopName: 'Loja' }] } } });
+  };
+  return { modo, chamadas, assinaturas, fetch };
+}
+
+/** Banco temporário + createShopee de verdade (fetch falso, credenciais pelo segredosDe, como o servidor) + createConexoes. */
+function montarShopee(t, { links } = {}) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'disp-cx-s-'));
+  const db = openDb(dir);
+  t.after(() => { db.close(); fs.rmSync(dir, { recursive: true, force: true }); });
+  const api = apiShopeeFalsa();
+  const shopee = createShopee({ db, fetch: api.fetch, lerConexao: () => segredosDe(db, 'shopee') });
+  return { db, dir, api, shopee, conexoes: createConexoes({ db, links, amazon: undefined, shopee }) };
+}
+
+const salvarShopee = (conexoes, campos, verSegredos = true) => conexoes.salvar('shopee', { campos }, verSegredos);
+
+test('Shopee em Conexões: os 6 estados, extensao_online e a situação da última chamada à API (CA5)', async (t) => {
+  let online = false;
+  const { conexoes, api } = montarShopee(t, { links: { status: () => ({ online }) } });
+  const cartao = (verSegredos = true) => conexoes.listar(verSegredos).find((p) => p.id === 'shopee');
+  const testar = () => conexoes.testar('shopee');
+
+  let c = cartao();
+  assert.equal(c.estado, 'falta_configurar');
+  assert.equal(c.extensao_online, false);
+  assert.deepEqual(c.situacao, { acesso: 'nao_configurada', verificado_em: null, motivo: MENSAGENS_SHOPEE.sem_credenciais });
+  assert.ok(!('espelhos_ativos' in c), 'a Shopee não espelha nesta entrega');
+
+  assert.equal(salvarShopee(conexoes, { id_afiliado: ID_SHP }).estado, 'so_id', 'ID sem credencial: links pela extensão');
+  online = true;
+  assert.equal(cartao().extensao_online, true, 'extensão on-line vem de links.status()');
+  assert.equal(cartao().estado, 'so_id', 'so_id com ou sem extensão (a tela só muda a cor)');
+  online = false;
+  assert.equal(cartao().extensao_online, false);
+  assert.equal(salvarShopee(conexoes, { app_id: APP_SHP }).estado, 'so_id', 'AppID sem a Senha ainda não é credencial');
+
+  c = salvarShopee(conexoes, { chave: SENHA_SHP });
+  assert.equal(c.estado, 'pronta', 'ID e credenciais, ainda sem verificação');
+  assert.deepEqual(c.config, { id_afiliado: ID_SHP, app_id: APP_SHP });
+  assert.deepEqual(c.segredos_salvos, ['chave']);
+  assert.deepEqual(c.situacao, { acesso: 'desconhecido', verificado_em: null, motivo: null });
+  assert.equal(api.chamadas.length, 0, 'listar e salvar não chamam a API');
+
+  assert.equal((await testar()).resultado, 'ok');
+  c = cartao();
+  assert.equal(c.estado, 'conectada');
+  assert.equal(c.situacao.acesso, 'ok');
+  assert.equal(typeof c.situacao.verificado_em, 'number');
+
+  // salvar só o ID (AppID e Senha iguais) também esquece a verificação: shopee.invalidar foi chamado
+  assert.equal(salvarShopee(conexoes, { id_afiliado: '18328801340' }).estado, 'pronta');
+
+  const porCodigo = [
+    [10035, 'sem_acesso', 'sem_acesso'],
+    [10020, 'erro_credencial', 'credencial_recusada'],
+    [11002, 'erro_credencial', 'conta_restrita'],
+    [10031, 'erro_credencial', 'conta_restrita'],
+    [10030, 'pronta', 'cota'], // cota não diz nada da credencial
+    [11000, 'pronta', 'indisponivel'],
+  ];
+  for (const [codigo, estado, acesso] of porCodigo) {
+    api.modo.codigo = codigo;
+    await testar();
+    c = cartao();
+    assert.equal(c.estado, estado, String(codigo));
+    assert.equal(c.situacao.acesso, acesso, String(codigo));
+    assert.equal(c.situacao.motivo, MENSAGENS_SHOPEE[acesso], `${codigo}: motivo é a frase fixa`);
+  }
+
+  // credenciais sem ID de afiliado: "Credenciais salvas" (spec), mesmo com a API aceitando
+  api.modo.codigo = null;
+  assert.equal(salvarShopee(conexoes, { id_afiliado: '' }).estado, 'pronta');
+  assert.equal((await testar()).resultado, 'sem_id');
+  assert.equal(cartao().situacao.acesso, 'ok');
+  assert.equal(cartao().estado, 'pronta', 'sem ID não está conectada: os links não saem');
+
+  // Operador vê estado, situação e extensão, mas não os nomes dos segredos
+  const op = cartao(false);
+  assert.ok(!('segredos_salvos' in op));
+  assert.equal(op.estado, 'pronta'); assert.ok(op.situacao); assert.equal(op.extensao_online, false);
+  for (const s of SECRETOS_SHP) assert.ok(!JSON.stringify(conexoes.listar(true)).includes(s));
+});
+
+test('R2: credenciais sem ID de afiliado: a recusa da API aparece no estado (sem_acesso, erro_credencial); aceita continua pronta', async (t) => {
+  const { conexoes, api } = montarShopee(t);
+  const cartao = () => conexoes.listar(true).find((p) => p.id === 'shopee');
+  salvarShopee(conexoes, { app_id: APP_SHP, chave: SENHA_SHP });
+  assert.equal(cartao().estado, 'pronta', 'sem verificação');
+  const casos = [
+    [10035, 'sem_acesso', 'sem_acesso'],
+    [10020, 'erro_credencial', 'credencial_recusada'],
+    [11002, 'erro_credencial', 'conta_restrita'],
+    [10030, 'pronta', 'cota'],
+    [11000, 'pronta', 'indisponivel'],
+    [null, 'pronta', 'ok'], // aceita, mas sem ID os links não saem: não está conectada
+  ];
+  for (const [codigo, estado, acesso] of casos) {
+    api.modo.codigo = codigo;
+    await conexoes.testar('shopee');
+    const c = cartao();
+    assert.deepEqual([c.estado, c.situacao.acesso], [estado, acesso], String(codigo));
+    assert.deepEqual(c.config, { app_id: APP_SHP }, 'continua sem ID');
+  }
+  // com o ID salvo, os mesmos estados de antes
+  api.modo.codigo = 10035;
+  salvarShopee(conexoes, { id_afiliado: ID_SHP });
+  await conexoes.testar('shopee');
+  assert.equal(cartao().estado, 'sem_acesso');
+  api.modo.codigo = null;
+  await conexoes.testar('shopee');
+  assert.equal(cartao().estado, 'conectada');
+  // sem credencial, a situação antiga não vale (só o ID): so_id
+  salvarShopee(conexoes, { app_id: '' });
+  assert.equal(cartao().estado, 'so_id');
+});
+
+test('Shopee: sem links nem cliente injetados o cartão não quebra e o teste diz que não está disponível', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'disp-cx-s-'));
+  const db = openDb(dir);
+  t.after(() => { db.close(); fs.rmSync(dir, { recursive: true, force: true }); });
+  const conexoes = createConexoes({ db });
+  let c = conexoes.listar(true).find((p) => p.id === 'shopee');
+  assert.equal(c.extensao_online, false);
+  assert.deepEqual(c.situacao, { acesso: 'nao_configurada', verificado_em: null, motivo: null });
+  salvarShopee(conexoes, { id_afiliado: ID_SHP, app_id: APP_SHP, chave: SENHA_SHP });
+  c = conexoes.listar(true).find((p) => p.id === 'shopee');
+  assert.equal(c.estado, 'pronta');
+  assert.deepEqual(c.situacao, { acesso: 'desconhecido', verificado_em: null, motivo: null });
+  assert.deepEqual(await conexoes.testar('shopee'), { ok: false, resultado: 'indisponivel', mensagem: 'O teste da Shopee não está disponível agora.', campos: [] });
+});
+
+test('Shopee: AppID igual ao ID de afiliado é recusado com 400 e nada é gravado (CA5)', async (t) => {
+  const { conexoes, dir, shopee } = montarShopee(t);
+  const invalidar = t.mock.method(shopee, 'invalidar');
+  const FRASE = 'O AppID e o ID de afiliado são números diferentes. Confira os dois no portal da Shopee.';
+  const recusa = (campos) => {
+    assert.throws(() => salvarShopee(conexoes, campos), (e) => {
+      assert.equal(e.status, 400, JSON.stringify(campos));
+      assert.equal(e.message, FRASE);
+      assert.deepEqual(e.extra, { erros: [{ campo: 'app_id', msg: FRASE }] }, 'erro de campo no AppID');
+      for (const s of SECRETOS_SHP) assert.ok(!JSON.stringify({ m: e.message, x: e.extra }).includes(s));
+      return true;
+    });
+  };
+
+  recusa({ id_afiliado: ID_SHP, app_id: ID_SHP, chave: SENHA_SHP }); // os dois no mesmo corpo
+  assert.equal(linhaCrua(dir, 'shopee'), null, 'nada gravado, nem a Senha');
+
+  salvarShopee(conexoes, { id_afiliado: ID_SHP });
+  assert.equal(invalidar.mock.callCount(), 1, 'salvar chama shopee.invalidar');
+  recusa({ app_id: ID_SHP, chave: SENHA_SHP }); // AppID igual ao ID já salvo
+  recusa({ app_id: `00${ID_SHP}` }); // o mesmo número com zeros à esquerda
+  assert.deepEqual(linhaCrua(dir, 'shopee').config, { id_afiliado: ID_SHP });
+  assert.deepEqual(linhaCrua(dir, 'shopee').segredos, {}, 'a Senha do corpo recusado não foi gravada');
+
+  salvarShopee(conexoes, { app_id: APP_SHP, chave: SENHA_SHP });
+  recusa({ id_afiliado: APP_SHP.padStart(9, '0') }); // ID novo igual ao AppID já salvo
+  assert.deepEqual(linhaCrua(dir, 'shopee').config, { id_afiliado: ID_SHP, app_id: APP_SHP });
+  assert.equal(invalidar.mock.callCount(), 2, 'recusa não invalida nada');
+
+  // erro de formato vem sozinho (a comparação só roda com os campos válidos)
+  assert.throws(() => salvarShopee(conexoes, { app_id: 'abc', id_afiliado: 'abc' }), (e) => {
+    assert.deepEqual(e.extra.erros.map((x) => x.campo), ['id_afiliado', 'app_id']);
+    assert.ok(!e.message.includes(FRASE));
+    return true;
+  });
+
+  // trocar os dois de lugar no mesmo corpo, ou apagar o ID e usar o número antigo como AppID, é permitido
+  assert.equal(salvarShopee(conexoes, { id_afiliado: APP_SHP.padEnd(11, '7'), app_id: ID_SHP }).estado, 'pronta');
+  assert.deepEqual(salvarShopee(conexoes, { id_afiliado: '', app_id: '55555' }).config, { app_id: '55555' });
+  assert.equal(invalidar.mock.callCount(), 4);
+  // corpo sem nada a gravar não invalida
+  salvarShopee(conexoes, { outro: 'x' });
+  assert.equal(invalidar.mock.callCount(), 4);
+});
+
+test('Shopee testar: chamada real (fetch falso) com resultado por código e frase fixa (CA5, CA6)', async (t) => {
+  const { conexoes, api } = montarShopee(t);
+  const testar = () => conexoes.testar('shopee');
+  const falha = (resultado) => ({ ok: false, resultado, mensagem: FRASES_TESTE_SHOPEE[resultado], campos: [] });
+
+  // sem AppID e Senha não chama a Shopee
+  assert.deepEqual(await testar(), { ok: false, resultado: 'nao_configurada', mensagem: 'Salve o AppID e a Senha da API para testar.', campos: [] });
+  salvarShopee(conexoes, { app_id: APP_SHP, chave: SENHA_SHP });
+  assert.equal(api.chamadas.length, 0);
+
+  // credencial aceita sem ID de afiliado: sucesso parcial, em aviso
+  const campos = ['itemId', 'productName', 'priceMin', 'shopName'];
+  assert.deepEqual(await testar(), { ok: false, resultado: 'sem_id', mensagem: 'Credenciais aceitas, mas falta o ID de afiliado.', campos });
+  salvarShopee(conexoes, { id_afiliado: ID_SHP });
+  assert.deepEqual(await testar(), { ok: true, resultado: 'ok', mensagem: 'Credenciais aceitas pela Shopee.', campos });
+
+  const casos = [
+    [{ codigo: 10020 }, 'recusada'],
+    [{ codigo: 10031 }, 'conta_restrita'], [{ codigo: 10032 }, 'conta_restrita'], [{ codigo: 10033 }, 'conta_restrita'],
+    [{ codigo: 10034 }, 'conta_restrita'], [{ codigo: 11002 }, 'conta_restrita'],
+    [{ codigo: 10035 }, 'sem_acesso'],
+    [{ codigo: 10030 }, 'cota'], [{ http: 429 }, 'cota'],
+    [{ codigo: 11000 }, 'indisponivel'], [{ codigo: 11001 }, 'indisponivel'], [{ codigo: 99999 }, 'indisponivel'],
+    [{ http: 500 }, 'indisponivel'], [{ rede: true }, 'indisponivel'],
+  ];
+  for (const [modo, resultado] of casos) {
+    Object.assign(api.modo, { rede: false, http: 200, codigo: null }, modo);
+    const r = await testar();
+    assert.deepEqual(r, falha(resultado), JSON.stringify(modo));
+    for (const s of [...SECRETOS_SHP, ...api.assinaturas]) assert.ok(!JSON.stringify(r).includes(s), `${JSON.stringify(modo)} sem segredo`);
+  }
+  assert.equal(FRASES_TESTE_SHOPEE.sem_acesso, 'A Shopee ainda não liberou a API para a sua conta. Peça o acesso pelo link acima e tente de novo quando eles responderem. Enquanto isso os links continuam saindo pela extensão.');
+  assert.equal(api.chamadas.length, casos.length + 2);
+  assert.ok(api.chamadas.every((u) => u === URL_API_SHOPEE), 'só o host fixo da API');
+});
+
+test('Shopee testar: só repassa resultado conhecido, frases fixas e nomes de campo da lista; erros viram frase fixa', async (t) => {
+  let volta; let erro = null; let sit = null;
+  const stub = {
+    testar: async () => { if (erro) throw erro; return volta; },
+    situacao: () => { if (sit instanceof Error) throw sit; return sit; },
+    invalidar() {},
+  };
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'disp-cx-s-'));
+  const db = openDb(dir);
+  t.after(() => { db.close(); fs.rmSync(dir, { recursive: true, force: true }); });
+  const conexoes = createConexoes({ db, shopee: stub });
+  salvarShopee(conexoes, { id_afiliado: ID_SHP, app_id: APP_SHP, chave: SENHA_SHP });
+  const falha = (resultado) => ({ ok: false, resultado, mensagem: FRASES_TESTE_SHOPEE[resultado], campos: [] });
+
+  const casos = [
+    [{ ok: true, resultado: 'ok', mensagem: `vazou ${SENHA_SHP}`, campos: ['productName', SENHA_SHP, 'token', 'imageUrl'], assinatura: 'abc' },
+      { ok: true, resultado: 'ok', mensagem: FRASES_TESTE_SHOPEE.ok, campos: ['productName', 'imageUrl'] }],
+    [{ ok: true, resultado: 'sem_acesso' }, falha('sem_acesso')],
+    [{ ok: false, resultado: 'ok' }, falha('indisponivel')],
+    [{ ok: 'true', resultado: 'ok', campos: 'productName' }, falha('indisponivel')],
+    [{ ok: true, resultado: 'sem_id' }, falha('indisponivel')], // sem_id só este módulo decide
+    [{ ok: true, resultado: '__proto__' }, falha('indisponivel')],
+    [{ ok: true, resultado: 'conectadissima' }, falha('indisponivel')],
+    [null, falha('indisponivel')],
+  ];
+  for (const [vindo, saida] of casos) { volta = vindo; assert.deepEqual(await conexoes.testar('shopee'), saida, JSON.stringify(vindo)); }
+
+  const porTipo = {
+    sem_credenciais: 'nao_configurada', credencial_recusada: 'recusada', conta_restrita: 'conta_restrita', sem_acesso: 'sem_acesso',
+    cota: 'cota', nao_encontrado: 'indisponivel', indisponivel: 'indisponivel', sem_id: 'indisponivel', outra_conta: 'indisponivel',
+    link_falhou: 'indisponivel',
+  };
+  assert.deepEqual(Object.keys(porTipo).sort(), Object.keys(MENSAGENS_SHOPEE).sort(), 'todo tipo de ErroShopee tem tradução');
+  for (const [tipo, resultado] of Object.entries(porTipo)) {
+    erro = new ErroShopee(tipo, { codigoApi: 10020 });
+    erro.message = `${erro.message} ${SENHA_SHP}`; // mesmo com segredo na mensagem, a resposta é a frase fixa
+    assert.deepEqual(await conexoes.testar('shopee'), falha(resultado), tipo);
+  }
+  const saidas = [];
+  t.mock.method(console, 'error', (...a) => saidas.push(a.map(String).join(' ')));
+  erro = new TypeError(`quebrou com ${SENHA_SHP}`);
+  assert.deepEqual(await conexoes.testar('shopee'), falha('indisponivel'));
+  assert.deepEqual(saidas, ['[conexões] teste da Shopee falhou: TypeError']);
+
+  // situação vinda do serviço: só acesso conhecido, número e frase fixa; se ela quebrar, o cartão não quebra
+  const cartao = () => conexoes.listar(true).find((p) => p.id === 'shopee');
+  sit = { acesso: 'ok', verificado_em: 5, motivo: `vazou ${SENHA_SHP}`, impressao: 'abc' };
+  assert.deepEqual(cartao().situacao, { acesso: 'ok', verificado_em: 5, motivo: null });
+  assert.equal(cartao().estado, 'conectada');
+  sit = { acesso: 'hackeado', verificado_em: '5', motivo: MENSAGENS_SHOPEE.cota };
+  assert.deepEqual(cartao().situacao, { acesso: 'desconhecido', verificado_em: null, motivo: MENSAGENS_SHOPEE.cota });
+  assert.equal(cartao().estado, 'pronta');
+  sit = new RangeError(`situação quebrou ${SENHA_SHP}`);
+  assert.deepEqual(cartao().situacao, { acesso: 'desconhecido', verificado_em: null, motivo: null });
+  assert.equal(saidas.at(-1), '[conexões] situação da Shopee falhou: RangeError');
+  assert.ok(!saidas.some((l) => l.includes(SENHA_SHP)));
+});
+
+/** Rotas de Conexões num Express mínimo (o servidor só liga a Shopee na etapa 8): ctx.shopee = cliente de verdade. */
+function subirRotasShopee(t) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'disp-cx-s-'));
+  const db = openDb(dir);
+  const api = apiShopeeFalsa();
+  const shopee = createShopee({ db, fetch: api.fetch, lerConexao: () => segredosDe(db, 'shopee') });
+  const app = express();
+  app.use(express.json());
+  montarRotas(app, { db, links: { status: () => ({ online: true }) }, soDono: (_req, _res, next) => next(), shopee });
+  return new Promise((ok) => {
+    const server = app.listen(0, '127.0.0.1', () => {
+      t.after(() => new Promise((r) => { server.closeAllConnections?.(); server.close(() => { db.close(); fs.rmSync(dir, { recursive: true, force: true }); r(); }); }));
+      const port = server.address().port;
+      ok({ db, dir, api, chamar: (caminho, opts) => req(port, '/api' + caminho, opts) });
+    });
+  });
+}
+
+test('Shopee por HTTP: a Senha da API e a assinatura nunca aparecem no texto cru das respostas, no log nem no console (CA6)', async (t) => {
+  const global_ = t.mock.method(globalThis, 'fetch', async () => { throw new Error('fetch global no teste'); });
+  const saidas = [];
+  const originais = {};
+  for (const m of ['log', 'info', 'warn', 'error']) { originais[m] = console[m]; console[m] = (...a) => { saidas.push(a.map(String).join(' ')); originais[m](...a); }; }
+  let api;
+  try {
+    const s = await subirRotasShopee(t);
+    api = s.api;
+    const respostas = [];
+    const chamar = async (caminho, opts) => { const r = await s.chamar(caminho, opts); respostas.push(r); return r; };
+
+    let r = await chamar('/conexoes/shopee', { method: 'PUT', body: { campos: { id_afiliado: ID_SHP, app_id: APP_SHP, chave: SENHA_SHP } } });
+    assert.equal(r.status, 200, r.txt);
+    assert.equal(r.json.estado, 'pronta');
+    assert.equal(r.json.extensao_online, true);
+    assert.deepEqual(linhaCrua(s.dir, 'shopee').segredos, { chave: SENHA_SHP });
+
+    r = await chamar('/conexoes/shopee/testar', { method: 'POST', body: {} });
+    assert.equal(r.status, 200);
+    assert.equal(r.json.resultado, 'ok');
+    assert.equal((await chamar('/conexoes')).json.find((p) => p.id === 'shopee').estado, 'conectada');
+
+    // AppID igual ao ID, com a Senha nova no corpo: 400, nada gravado, nada ecoa
+    r = await chamar('/conexoes/shopee', { method: 'PUT', body: { campos: { app_id: ID_SHP, chave: SENHA_SHP_NOVA } } });
+    assert.equal(r.status, 400);
+    assert.deepEqual(r.json, { erro: 'O AppID e o ID de afiliado são números diferentes. Confira os dois no portal da Shopee.',
+      erros: [{ campo: 'app_id', msg: 'O AppID e o ID de afiliado são números diferentes. Confira os dois no portal da Shopee.' }] });
+    // Senha em formato inválido: o valor recusado não ecoa
+    r = await chamar('/conexoes/shopee', { method: 'PUT', body: { campos: { chave: `${SENHA_SHP_NOVA} com espaço` } } });
+    assert.equal(r.status, 400);
+    assert.match(r.json.erro, /^Senha da API: formato inválido/);
+    assert.deepEqual(linhaCrua(s.dir, 'shopee').segredos, { chave: SENHA_SHP }, 'nada gravado com erro');
+
+    for (const modo of [{ codigo: 10020 }, { codigo: 10035 }, { codigo: 11002 }, { codigo: 10030 }, { http: 429 }, { http: 500 }, { rede: true }]) {
+      Object.assign(api.modo, { rede: false, http: 200, codigo: null }, modo);
+      r = await chamar('/conexoes/shopee/testar', { method: 'POST', body: {} });
+      assert.equal(r.status, 200, JSON.stringify(modo));
+      assert.equal(r.json.ok, false);
+      await chamar('/conexoes');
+    }
+    api.modo.rede = false;
+    r = await chamar('/conexoes/shopee', { method: 'PUT', body: { campos: { chave: SENHA_SHP_NOVA } } });
+    assert.equal(r.status, 200);
+    assert.deepEqual(linhaCrua(s.dir, 'shopee').segredos, { chave: SENHA_SHP_NOVA });
+    await chamar('/conexoes/shopee/testar', { method: 'POST', body: {} });
+    await chamar('/conexoes');
+
+    assert.ok(api.assinaturas.length >= 9 && api.assinaturas.every((a) => /^[0-9a-f]{64}$/.test(a)), 'as chamadas foram assinadas');
+    for (const resp of respostas) {
+      for (const seg of [...SECRETOS_SHP, ...api.assinaturas]) assert.ok(!resp.txt.includes(seg), `resposta ${resp.status} sem segredo: ${resp.txt.slice(0, 160)}`);
+    }
+    const log = JSON.stringify(s.db.prepare('SELECT * FROM log').all());
+    for (const seg of [...SECRETOS_SHP, ...api.assinaturas]) assert.ok(!log.includes(seg), 'segredo fora da tabela log');
+  } finally { Object.assign(console, originais); }
+  for (const seg of [...SECRETOS_SHP, ...api.assinaturas]) assert.ok(!saidas.some((l) => l.includes(seg)), 'segredo fora do console');
+  assert.ok(api.chamadas.every((u) => u === URL_API_SHOPEE), 'só o host fixo da API');
+  assert.equal(global_.mock.callCount(), 0, 'nada passou pelo fetch global');
+});
+
 // ================================================================================ painel (public/conexoes.js) em DOM falso
 /** Carrega public/conexoes.js num vm. `respostas` = { 'METODO /caminho': valor | função }. Nada de rede. */
 function carregarConexoes(respostas) {
@@ -668,7 +1053,7 @@ test('R4 (painel): a falha da última verificação da Amazon aparece em texto n
     assert.match(t.linha.textContent, /^Dados salvos em /, JSON.stringify(situacao));
     assert.ok(!t.linha.classes.has('aviso'));
   }
-  // outra loja nunca mostra motivo da Amazon
-  t.aplicarConexao(t.art, CARTAO_AMAZON({ id: 'shopee', situacao: { acesso: 'sem_acesso', verificado_em: 1, motivo } }));
+  // outra loja nunca mostra motivo da Amazon (a Shopee passou a mostrar o seu: test/shopee-painel.test.js)
+  t.aplicarConexao(t.art, CARTAO_AMAZON({ id: 'magalu', situacao: { acesso: 'sem_acesso', verificado_em: 1, motivo } }));
   assert.match(t.linha.textContent, /^Dados salvos em /);
 });

@@ -3,9 +3,11 @@
 // As rotas ficam em ROTAS (app.js), que já aplica main.larga às duas. Os grupos usam seletorGrupos() de app.js.
 // Carrega antes de app.js: só define funções e constantes. Os utilitários de app.js ($, $$, esc, zap, S, aviso,
 // mostrarErros, REQ, opcoes, seletorGrupos) e de ajuda.js (q) só são usados quando as páginas abrem.
-// CSP (script-src 'self'; img-src 'self' data: https://*.mlstatic.com + CDN da Amazon): nada inline. A miniatura da foto
-// vem do FileReader (data:); a foto do produto só aparece se vier do CDN do Mercado Livre ou da Amazon (senão, um desenho no lugar).
+// CSP (script-src 'self'; img-src 'self' data: https://*.mlstatic.com + CDN da Amazon e da Shopee): nada inline. A miniatura da foto
+// vem do FileReader (data:); a foto do produto só aparece se vier do CDN do Mercado Livre, da Amazon ou da Shopee (senão, um desenho no lugar).
 // Amazon (plano docs/produto/planos/espelhamento-amazon.md, etapa 10): dadosOferta() é global e também serve ao "Completar" do Histórico.
+// Shopee (plano docs/produto/planos/integracao-shopee.md, etapa 9; spec docs/produto/specs/integracao-shopee.md, seção 2): o fluxo do
+// Identificar é decidido por dispShopeeVeredito() (função pura, testada em test/shopee-painel.test.js).
 
 const TEXTOS_DISPAROS = {
   manual: {
@@ -82,6 +84,43 @@ const TEXTOS_DISPAROS = {
     motivoNaoProduto: 'Cole o link da página do produto.',
     motivoSemTag: 'Cadastre a tag da Amazon em Conexões.',
   },
+  // Shopee no Disparo manual: dados pela API (ou à mão) e o link de afiliado pela extensão do Chrome ou pela API
+  shopee: {
+    nome: 'Shopee',
+    invalido: 'Não reconheci este link da Shopee. Cole o endereço do produto (shopee.com.br/…) ou um link curto, como s.shopee.com.br ou shp.ee.',
+    naoProduto: 'Este link não leva a um produto específico. Cole o link da página do produto.',
+    naoEncontrado: 'A Shopee não encontrou este produto na API de afiliados. Ele pode não participar do programa; sem isso não há comissão. Confira o link ou escolha outro produto.',
+    semId: 'Shopee identificada, mas falta o ID de afiliado.', cadastrarId: 'Cadastre em Conexões.',
+    semLink: 'Não tenho como gerar o seu link de afiliado agora. Abra o Chrome com a extensão e entre no portal de afiliados da Shopee, ou ligue a API em Conexões.',
+    irConexoes: 'Ir para Conexões',
+    motivoInvalido: 'Cole um link de produto da Shopee.',
+    motivoNaoProduto: 'Cole o link da página do produto.',
+    motivoNaoEncontrado: 'Produto fora do programa de afiliados.',
+    motivoSemId: 'Cadastre o ID de afiliado em Conexões.',
+    motivoSemLink: 'Falta um caminho para o link: Chrome com a extensão ou API.',
+    motivoGeral: 'Não dá para disparar este link da Shopee.',
+    dadosLidos: 'Dados lidos da Shopee.',
+    faltou: (lista) => `A Shopee não trouxe ${lista}. Preencha abaixo; o que ficar vazio some da mensagem.`,
+    // Falha dos dados (API): aviso + campos em branco. `link(via)` é o trecho do link; some se não há caminho (aí vale sem_link).
+    api: {
+      sem_credenciais: { base: 'A busca automática de dados da Shopee não está ligada (faltam o AppID e a Senha da API). Preencha o título e o preço abaixo', link: (via) => `o link já sai com o seu ID de afiliado, ${via}` },
+      sem_acesso: { base: 'A Shopee ainda não liberou a API para a sua conta. Preencha o título e o preço abaixo', link: (via) => `o link sai ${via}` },
+      credencial_recusada: { base: 'A Shopee não aceitou o AppID ou a Senha da API salvos. Confira em Conexões e use “Testar”. Preencha os dados abaixo', link: (via) => `o link sai ${via}` },
+      conta_restrita: { base: 'A Shopee recusou o acesso da API a esta conta. Fale com o suporte de afiliados da Shopee. Preencha os dados abaixo', link: (via) => `o link sai ${via}` },
+      cota: { base: 'A Shopee limitou as consultas por agora. Preencha à mão ou tente de novo em alguns minutos' },
+      indisponivel: { base: 'Não consegui buscar os dados na Shopee agora. Preencha o título e o preço abaixo', link: () => 'o link já sai com o seu ID de afiliado' },
+    },
+    pelaExtensao: 'pelo Chrome', pelaApi: 'pela API',
+    faixa: (min, max) => `Este produto tem variações de ${dispBrl(min)} a ${dispBrl(max)}. Usei o menor preço; ajuste se precisar.`,
+    loja: (nome) => `Loja: ${nome}`,
+    vendidos: (n) => `${Number(n).toLocaleString('pt-BR')} ${n === 1 ? 'vendido' : 'vendidos'}`,
+    nota: (n) => `nota ${String(n).replace('.', ',')} de 5`,
+    etiqueta: (final) => `O link curto de afiliado da Shopee é gerado na hora de disparar ou agendar, pela API ou pela extensão do Chrome, com o ID${final ? ` …${final}` : ' de afiliado'} (de <a href="#conexoes">Conexões</a> &gt; Shopee).`,
+    viaExtensao: 'Vai sair pela extensão do Chrome.', viaApi: 'Vai sair pela API da Shopee.',
+    previaShopee: 'Mostra os dados acima. O link de afiliado é gerado na hora do envio.',
+    linkPrevia: 'https://s.shopee.com.br/(gerado ao disparar)',
+    gerando: 'Gerando o seu link…',
+  },
   // Seção "Dados da oferta" (dadosOferta)
   dados: {
     titulo: 'Dados da oferta',
@@ -89,6 +128,7 @@ const TEXTOS_DISPAROS = {
     preco: 'Preço atual', precoAntigo: 'Preço antigo',
     precoAntigoDica: 'Se for menor ou igual ao atual, a linha de preço antigo some.',
     desconto: 'Desconto', descontoDica: 'Calculado dos dois preços.',
+    descontoInformado: (fonte) => `Informado pela ${fonte}.`,
     cupom: 'Cupom (opcional)', frete: 'Frete', freteGratis: 'Frete grátis',
     foto: 'Foto',
     semFoto: 'Sem foto: a mensagem sai só com texto.',
@@ -157,6 +197,8 @@ const DISP_ATUALIZA_MS = 6000;
 const DISP_IMG_ML = /^https:\/\/([a-z0-9-]+\.)+mlstatic\.com\//i;
 // CDN da Amazon (alinhado a IMAGEM_AMAZON de src/amazon.js; a CSP do servidor libera os mesmos hosts).
 const DISP_IMG_AMAZON = /^https:\/\/([\w-]+\.)+(media-amazon\.com|ssl-images-amazon\.com|images-amazon\.com)\//i;
+// CDN da Shopee (igual a IMAGEM_SHOPEE de src/shopee.js, flags inclusas: test/shopee-painel.test.js confere; a CSP do servidor libera os mesmos hosts).
+const DISP_IMG_SHOPEE = /^https:\/\/(([\w-]+\.)+susercontent\.com|cf\.shopee\.com\.br)\//i;
 // Desenho de sacola no lugar da foto do produto quando ela não vem ou vem de outro site.
 const DISP_IMG_VAZIA = 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 72 72"><g fill="none" stroke="#8C88A6" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 28h28l-2.5 24h-23z"/><path d="M29 28v-3a7 7 0 0 1 14 0v3"/></g></svg>');
 
@@ -339,8 +381,8 @@ function dispAcompanhar(rota, passo) {
 }
 
 // ---------- "Dados da oferta" (Amazon): título, preços, cupom, frete e foto editáveis ----------
-/** Foto do produto que a tela pode mostrar: CDN do Mercado Livre ou da Amazon; o resto vira o desenho de sacola. */
-const dispImgSegura = (url) => (DISP_IMG_ML.test(url || '') || DISP_IMG_AMAZON.test(url || '') ? url : DISP_IMG_VAZIA);
+/** Foto do produto que a tela pode mostrar: CDN do Mercado Livre, da Amazon ou da Shopee; o resto vira o desenho de sacola. */
+const dispImgSegura = (url) => (DISP_IMG_ML.test(url || '') || DISP_IMG_AMAZON.test(url || '') || DISP_IMG_SHOPEE.test(url || '') ? url : DISP_IMG_VAZIA);
 /** Se a foto do CDN não carregar (bloqueada ou fora do ar), troca pelo desenho de sacola. Chame depois de pôr as `img[data-img]`. */
 function dispLigarImgs(raiz) {
   $$('img[data-img]', raiz).forEach((img) => { img.onerror = () => { img.onerror = null; img.src = DISP_IMG_VAZIA; }; });
@@ -374,18 +416,22 @@ let dispSeqDados = 0;
  *   erros()     [{ msg, el }] do que impede o envio (título vazio, preço ilegível, foto ainda subindo);
  *   editado()   true se o dono mexeu em algo desde a criação (ou desde o último definir());
  *   definir(v)  troca todos os valores (zera o "editado").
+ * `opcoes` (opcional, Shopee): { descontoInformado, fonte, notaPreco }. `descontoInformado` é o inteiro que a loja informou
+ * (a Shopee não traz preço antigo, só o percentual): vale enquanto os preços forem os da loja e é descartado quando o dono
+ * mexe num preço; com `fonte` ("Shopee"), a dica do Desconto diz "Informado pela Shopee." ou "Calculado dos dois preços.".
+ * `notaPreco` é uma frase fixa sob o Preço atual (faixa de variações).
  */
-function dadosOferta(valores = {}, aoMudar = () => {}) {
+function dadosOferta(valores = {}, aoMudar = () => {}, opcoes = {}) {
   const T = TEXTOS_DISPAROS; const D = T.dados; const n = ++dispSeqDados;
   const el = document.createElement('fieldset'); el.dataset.dados = '';
   el.innerHTML = `<legend>${D.titulo}</legend>
     <label class="campo"><span>${D.tituloCampo} ${REQ}</span><input name="title" maxlength="200" autocomplete="off"></label>
     <div class="grade eq-campos">
-      <label class="campo"><span>${D.preco}</span><input name="price" type="text" inputmode="decimal" autocomplete="off" placeholder="89,90"></label>
-      <label class="campo"><span>${D.precoAntigo}</span><input name="oldPrice" type="text" inputmode="decimal" autocomplete="off" placeholder="149,90" aria-describedby="do${n}-antigo"><small id="do${n}-antigo">${D.precoAntigoDica}</small></label>
+      <label class="campo"><span>${D.preco}</span><input name="price" type="text" inputmode="decimal" autocomplete="off" placeholder="89,90"${opcoes.notaPreco ? ` aria-describedby="do${n}-faixa"` : ''}>${opcoes.notaPreco ? `<small id="do${n}-faixa" data-faixa>${esc(opcoes.notaPreco)}</small>` : ''}</label>
+      <label class="campo"><span>${D.precoAntigo}</span><input name="oldPrice" type="text" inputmode="decimal" autocomplete="off" ${opcoes.fonte ? '' : ' placeholder="149,90"'} aria-describedby="do${n}-antigo"><small id="do${n}-antigo">${D.precoAntigoDica}</small></label>
     </div>
     <div class="grade dados-tres">
-      <label class="campo"><span>${D.desconto}</span><input name="desconto" type="text" readonly aria-describedby="do${n}-desc"><small id="do${n}-desc">${D.descontoDica}</small></label>
+      <label class="campo"><span>${D.desconto}</span><input name="desconto" type="text" readonly aria-describedby="do${n}-desc"><small id="do${n}-desc" data-desc-dica>${D.descontoDica}</small></label>
       <label class="campo"><span>${D.cupom}</span><input name="coupon" maxlength="30" autocomplete="off"></label>
       <div class="campo"><span id="do${n}-frete">${D.frete}</span>
         <label class="linha opcao-chk"><input type="checkbox" name="freeShipping" aria-describedby="do${n}-frete"> ${D.freteGratis}</label></div>
@@ -399,24 +445,31 @@ function dadosOferta(valores = {}, aoMudar = () => {}) {
   const campo = (nome) => el.elements.namedItem(nome);
   const inTitulo = campo('title'); const inPreco = campo('price'); const inAntigo = campo('oldPrice'); const inDesc = campo('desconto');
   const inCupom = campo('coupon'); const chkFrete = campo('freeShipping'); const inArq = campo('arquivo');
+  const descDica = $('[data-desc-dica]', el);
   const mini = $('[data-mini]', el); const miniImg = $('img', mini); const escolherBox = $('[data-escolher-box]', el); const estado = $('[data-foto-estado]', el);
   // foto: modo 'api' (a que a API trouxe, só por URL), 'upload' (a que o dono subiu) ou 'nenhuma'
   let foto = { modo: 'nenhuma', url: '', dataUrl: '', id: null, subindo: false }; let seq = 0; let editado = false;
   // desconto que a API informou (savings.percentage) e os preços a que ele se refere: vale enquanto os preços não mudam
   // (como o servidor, src/envios.js aplicarAjustes); mexeu num preço, o desconto é recalculado
-  let base = { price: null, oldPrice: null, discountPct: 0 };
+  let base = { price: null, oldPrice: null, discountPct: 0, informado: false };
 
   const preco = (inp) => { const v = dispLerPreco(inp.value); return Number.isNaN(v) ? null : v; };
-  const ler = () => {
+  const lerPrecos = () => {
     const p = preco(inPreco); const a = preco(inAntigo); const antigo = p != null && a != null && a > p ? a : null;
-    const intacto = p === base.price && antigo === base.oldPrice; // preços iguais aos da API
+    return { p, antigo, intacto: p === base.price && antigo === base.oldPrice }; // intacto: preços iguais aos da API
+  };
+  const ler = () => {
+    const { p, antigo, intacto } = lerPrecos();
     return {
       title: inTitulo.value.trim(), price: p, oldPrice: antigo, discountPct: intacto ? base.discountPct : dispDesconto(p, antigo),
       coupon: inCupom.value.trim(), freeShipping: chkFrete.checked,
       image: foto.modo === 'api' ? foto.url : null, upload: foto.modo === 'upload' ? foto.id : null, semFoto: foto.modo === 'nenhuma',
     };
   };
-  const pintarDesconto = () => { const d = ler().discountPct; inDesc.value = d > 0 ? `${d}%` : '—'; };
+  const pintarDesconto = () => {
+    const d = ler().discountPct; inDesc.value = d > 0 ? `${d}%` : '—';
+    if (opcoes.fonte && descDica) descDica.textContent = base.informado && lerPrecos().intacto ? D.descontoInformado(opcoes.fonte) : D.descontoDica;
+  };
   const pintarFoto = (msg = '', erro = false) => {
     const tem = foto.modo !== 'nenhuma';
     mini.hidden = !tem; escolherBox.hidden = tem;
@@ -467,10 +520,11 @@ function dadosOferta(valores = {}, aoMudar = () => {}) {
     inCupom.value = String(v.coupon ?? '').slice(0, 30); chkFrete.checked = !!v.freeShipping;
     const img = typeof v.image === 'string' && v.image ? v.image : '';
     foto = { modo: img ? 'api' : 'nenhuma', url: img, dataUrl: '', id: null, subindo: false };
-    const d = Number(v.discountPct);
-    base = { price: null, oldPrice: null, discountPct: 0 };
+    const d = Number(opcoes.descontoInformado ?? v.discountPct);
+    base = { price: null, oldPrice: null, discountPct: 0, informado: false };
     const b = ler(); // preços como o campo os interpreta (ida e volta do arredondamento)
-    base = { price: b.price, oldPrice: b.oldPrice, discountPct: Number.isFinite(d) && d > 0 && d < 100 ? Math.round(d) : b.discountPct };
+    const valido = Number.isFinite(d) && d > 0 && d < 100;
+    base = { price: b.price, oldPrice: b.oldPrice, discountPct: valido ? Math.round(d) : b.discountPct, informado: !!opcoes.fonte && valido };
     pintarDesconto(); pintarFoto();
   };
   definir(valores);
@@ -490,6 +544,72 @@ function dadosOferta(valores = {}, aoMudar = () => {}) {
       return erros;
     },
   };
+}
+
+// ---------- Shopee: o que a tela mostra depois do Identificar (funções puras) ----------
+const DISP_HOSTS_SHOPEE_CURTOS = ['s.shopee.com.br', 'shp.ee', 'shope.ee'];
+/** Link curto da Shopee: o servidor precisa seguir o redirecionamento antes de buscar o produto ("Resolvendo o link…"). */
+function dispPareceShopeeCurto(url) {
+  try { return DISP_HOSTS_SHOPEE_CURTOS.includes(new URL(url).hostname.toLowerCase()); } catch { return false; }
+}
+/** "Vai sair pelo Chrome" / "pela API" para o trecho dos avisos; '' se não há caminho para o link. */
+const dispShopeeVia = (via) => (via === 'api' ? TEXTOS_DISPAROS.shopee.pelaApi : via === 'extensao' ? TEXTOS_DISPAROS.shopee.pelaExtensao : '');
+/**
+ * Aviso de falha dos dados (a API não respondeu): texto da tabela de estados + o trecho do link conforme `link_via`
+ * ("o link sai pelo Chrome", "pela API"; some se não há caminho). Causa desconhecida vale como `indisponivel`.
+ */
+function dispShopeeAvisoApi(causa, via, semPreencher = false) {
+  const A = TEXTOS_DISPAROS.shopee.api; const e = Object.hasOwn(A, causa) ? A[causa] : A.indisponivel;
+  const v = dispShopeeVia(via);
+  const base = semPreencher ? e.base.replace(/\. Preencha o título e o preço abaixo$/, '') : e.base; // o segundo aviso (ID ou link) já explica o resto
+  return `${base}${e.link && v ? `; ${e.link(v)}` : ''}.`;
+}
+/** "Loja: X · 1.234 vendidos · nota 4,8 de 5": cada pedaço só se vier; vazio se nada veio. */
+function dispShopeeLinhaLoja(p, extra) {
+  const A = TEXTOS_DISPAROS.shopee; const partes = [];
+  const nome = typeof extra?.loja_nome === 'string' ? extra.loja_nome.trim() : '';
+  if (nome) partes.push(A.loja(nome));
+  const vendas = Number(p?.sold);
+  if (p?.sold != null && Number.isFinite(vendas) && vendas >= 0) partes.push(A.vendidos(vendas));
+  const nota = Number(extra?.nota);
+  if (extra?.nota != null && Number.isFinite(nota) && nota >= 0 && nota <= 5) partes.push(A.nota(nota));
+  return partes.join(' · ');
+}
+/** Nota da faixa de preço (variações): só se o preço máximo for maior que o atual. */
+function dispShopeeFaixa(p, extra) {
+  const min = Number(p?.price); const max = Number(extra?.preco_max);
+  return p?.price != null && extra?.preco_max != null && Number.isFinite(min) && Number.isFinite(max) && max > min ? TEXTOS_DISPAROS.shopee.faixa(min, max) : '';
+}
+/**
+ * Tabela de estados do Identificar da Shopee (spec, seção 2). `r` = resposta de POST /api/disparo/identificar.
+ * Só bloqueiam: `invalido`, `nao_produto`, `nao_encontrado`, `causa_link` (`sem_id`, `sem_link`) e `pode_disparar` falso.
+ * Falha dos dados (sem API) é aviso + campos em branco. → {
+ *   tipo      'invalido' | 'nao_produto' | 'nao_encontrado' | 'api' | 'parcial' | 'completo'
+ *   dados     mostra "Dados da oferta"
+ *   mensagem  texto do cartão principal; destaque: é um aviso (cartão amarelo) e não o cartão do produto
+ *   link      null | { causa, texto, acao }: segundo aviso (falta o ID ou o caminho do link)
+ *   bloqueio  frase ao lado do botão desabilitado ('' = pode disparar)
+ *   via       "Vai sair pela …" quando dá para disparar }
+ */
+function dispShopeeVeredito(r) {
+  const A = TEXTOS_DISPAROS.shopee; r = r || {};
+  const causa = typeof r.causa === 'string' ? r.causa : null;
+  const bloqueado = (tipo, mensagem, bloqueio) => ({ tipo, dados: false, mensagem, destaque: true, link: null, bloqueio, via: '' });
+  if (causa === 'nao_produto') return bloqueado('nao_produto', A.naoProduto, A.motivoNaoProduto);
+  if (causa === 'nao_encontrado') return bloqueado('nao_encontrado', A.naoEncontrado, A.motivoNaoEncontrado);
+  const p = r.produto && typeof r.produto === 'object' ? r.produto : null;
+  if (causa === 'invalido' || !p) return bloqueado('invalido', A.invalido, A.motivoInvalido);
+  const link = r.causa_link === 'sem_id' ? { causa: 'sem_id', texto: A.semId, acao: A.cadastrarId }
+    : r.causa_link ? { causa: 'sem_link', texto: A.semLink, acao: A.irConexoes } : null;
+  const bloqueio = link ? (link.causa === 'sem_id' ? A.motivoSemId : A.motivoSemLink) : r.pode_disparar === true ? '' : A.motivoGeral;
+  const via = bloqueio ? '' : r.link_via === 'api' ? A.viaApi : r.link_via === 'extensao' ? A.viaExtensao : '';
+  const semDados = !p.title && p.price == null;
+  if (causa || semDados) {
+    return { tipo: 'api', dados: true, mensagem: dispShopeeAvisoApi(causa || 'indisponivel', r.link_via, !!link), destaque: true, link, bloqueio, via };
+  }
+  const falta = [!p.title && 'o título', p.price == null && 'o preço', !p.image && 'a foto', p.sold == null && 'as vendas'].filter(Boolean);
+  const mensagem = falta.length ? A.faltou(dispLista(falta)) : link ? A.dadosLidos : TEXTOS_DISPAROS.pronto(r.loja?.nome || A.nome);
+  return { tipo: falta.length ? 'parcial' : 'completo', dados: true, mensagem, destaque: false, link, bloqueio, via };
 }
 
 // ================= Disparo manual (F1) =================
@@ -516,6 +636,7 @@ function paginaDisparoManual() {
           <div class="previa"><div class="chat" style="min-height:0"><div class="balao" id="dm-pv"></div></div><p class="legenda-previa" id="dm-pv-leg"></p></div>
         </div>
         <p class="dica" id="dm-etq-amazon" hidden>${T.amazon.etiqueta} ${q('manual.amazon')}</p>
+        <div id="dm-etq-shopee" hidden style="display:grid;gap:4px"><p class="dica" style="margin:0"><span data-etq-txt></span> ${q('manual.shopee')}</p><p class="dica" data-etq-via style="margin:0"></p></div>
         <label class="campo" id="dm-etq"><span>Etiqueta ${q('manual.etiqueta')}</span>
           ${S.tags.length ? `<select id="dm-tag">${opcoes(S.tags, S.tags[0]?.id)}</select><small>${T.etiquetaDica}</small>`
             : `<select id="dm-tag" disabled><option value="">Nenhuma etiqueta cadastrada</option></select><small>${T.semEtiqueta}</small>`}</label>
@@ -537,39 +658,43 @@ function paginaDisparoManual() {
 
   const form = $('#dm-form'); const inUrl = $('#dm-url'); const btnId = $('#dm-identificar'); const prodEl = $('#dm-prod');
   const selTpl = $('#dm-tpl'); const selTag = $('#dm-tag'); const pv = $('#dm-pv'); const pvLeg = $('#dm-pv-leg');
-  const dadosEl = $('#dm-dados'); const etqEl = $('#dm-etq'); const etqAmazonEl = $('#dm-etq-amazon');
+  const dadosEl = $('#dm-dados'); const etqEl = $('#dm-etq'); const etqAmazonEl = $('#dm-etq-amazon'); const etqShopeeEl = $('#dm-etq-shopee');
   const chkAg = $('#dm-agendar'); const campoHora = $('#dm-hora-campo'); const inHora = $('#dm-hora');
   const btn = $('#dm-disparar'); const motivoEl = $('#dm-motivo'); const kpisEl = $('#dm-kpis'); const histEl = $('#dm-hist');
   // produto: o que a identificação devolveu; texto: a prévia do servidor para o template textoTpl.
-  // Amazon: dados = a seção "Dados da oferta" (dadosOferta); bloqueio = por que não dá para disparar (link inválido, sem tag);
-  // asin só serve à prévia; editou = o dono mexeu nos dados (a prévia deixa de ser a do servidor).
-  const st = { url: '', loja: null, produto: null, texto: '', textoTpl: '', dados: null, bloqueio: '', asin: '', editou: false, identificando: false, enviando: false, ok: '' };
+  // Amazon e Shopee: dados = a seção "Dados da oferta" (dadosOferta); bloqueio = por que não dá para disparar (link inválido, sem tag,
+  // sem caminho para o link); asin só serve à prévia da Amazon; editou = o dono mexeu nos dados (a prévia deixa de ser a do servidor);
+  // via = "Vai sair pela …" (Shopee); seqEtq descarta a leitura do ID de afiliado que chegou depois de o link mudar.
+  const st = { url: '', loja: null, produto: null, texto: '', textoTpl: '', dados: null, bloqueio: '', asin: '', via: '', seqEtq: 0, editou: false, identificando: false, enviando: false, ok: '' };
+  const ehShopee = () => st.loja?.id === 'shopee';
   form.onsubmit = (e) => e.preventDefault(); // Enter num campo nunca dispara
 
   let seqPv = 0;
   const prever = async () => {
     const n = ++seqPv; const tpl = S.templates.find((x) => String(x.id) === selTpl.value);
     if (!tpl) { pv.textContent = ''; pvLeg.textContent = T.semTemplates; return; }
-    if (st.produto && st.texto && st.textoTpl === selTpl.value && !st.editou) { pv.innerHTML = zap(st.texto); pvLeg.textContent = st.dados ? T.amazon.previaAmazon : T.previaProduto; return; }
+    const legenda = () => (st.dados ? (ehShopee() ? T.shopee.previaShopee : T.amazon.previaAmazon) : st.produto ? T.previaProduto : T.previaExemplo);
+    if (st.produto && st.texto && st.textoTpl === selTpl.value && !st.editou) { pv.innerHTML = zap(st.texto); pvLeg.textContent = legenda(); return; }
     const p = st.produto;
     let amostra = null;
-    if (st.dados) { // Amazon: a prévia mostra o que está nos campos; o link é só ilustrativo (tag mascarada)
+    if (st.dados) { // Amazon e Shopee: a prévia mostra o que está nos campos; o link é só ilustrativo (tag mascarada / gerado ao disparar)
       const v = st.dados.valores();
-      amostra = { title: v.title, price: v.price, oldPrice: v.oldPrice, sold: p?.sold ?? null, freeShipping: v.freeShipping, coupon: v.coupon, discountPct: v.discountPct, link: `https://www.amazon.com.br/dp/${st.asin || '…'}?tag=•••` };
+      const link = ehShopee() ? T.shopee.linkPrevia : `https://www.amazon.com.br/dp/${st.asin || '…'}?tag=•••`;
+      amostra = { title: v.title, price: v.price, oldPrice: v.oldPrice, sold: p?.sold ?? null, freeShipping: v.freeShipping, coupon: v.coupon, discountPct: v.discountPct, link };
     } else if (p) {
       amostra = { title: p.title || '', price: p.price ?? null, oldPrice: p.oldPrice ?? null, sold: p.sold ?? null, freeShipping: !!p.freeShipping, coupon: p.coupon || '', discountPct: p.discountPct ?? null };
     }
     try {
       const r = await dispApi('/templates/preview', { method: 'POST', body: { body: tpl.body, ...(amostra ? { amostra } : {}) } });
       if (n !== seqPv) return;
-      pv.innerHTML = zap(r.texto); pvLeg.textContent = st.dados ? T.amazon.previaAmazon : p ? T.previaProduto : T.previaExemplo;
+      pv.innerHTML = zap(r.texto); pvLeg.textContent = legenda();
     } catch { /* fica a prévia anterior */ }
   };
 
   const motivo = () => {
     const agora = !chkAg.checked;
     if (agora && S.st.whatsapp?.status !== 'open') return T.motivoWhats;
-    if (agora && modoExt() && !st.dados && !S.st.extensao?.online) return T.motivoExtensao; // a Amazon não usa a extensão
+    if (agora && modoExt() && !st.dados && !ehShopee() && !S.st.extensao?.online) return T.motivoExtensao; // a Amazon não usa a extensão; na Shopee, quem decide é o servidor (pode_disparar)
     if (st.identificando) return T.motivoIdentificando;
     if (st.bloqueio) return st.bloqueio;
     if (st.loja && !st.loja.implementada) return T.motivoLoja;
@@ -587,8 +712,9 @@ function paginaDisparoManual() {
   const atualizar = () => {
     const m = motivo();
     btn.disabled = st.enviando || !!m;
-    btn.textContent = st.enviando ? T.enviando : chkAg.checked ? T.agendarEnvio : T.disparar;
-    if (st.enviando) motivoEl.textContent = T.enviando;
+    const gerando = st.enviando && ehShopee(); // a Shopee gera o link na hora (pode levar até 90 s)
+    btn.textContent = st.enviando ? (gerando ? T.shopee.gerando : T.enviando) : chkAg.checked ? T.agendarEnvio : T.disparar;
+    if (st.enviando) motivoEl.textContent = gerando ? T.shopee.gerando : T.enviando;
     else if (st.ok) motivoEl.innerHTML = `<span class="nivel-ok">✓ ${esc(st.ok)}</span>`;
     else motivoEl.textContent = m || resumo();
   };
@@ -596,22 +722,35 @@ function paginaDisparoManual() {
   // ----- identificar -----
   const hostAmazon = /(^|\.)(amazon(\.[a-z]{2,3}){1,2}|amazon|amzn\.(to|com)|a\.co)$/i;
   const pareceAmazon = (url) => { try { return hostAmazon.test(new URL(url).hostname); } catch { return false; } };
-  const mostrarEtiqueta = () => { const amz = !!st.dados; etqEl.hidden = amz; etqAmazonEl.hidden = !amz; };
+  /** Etiqueta do ML (select) × texto fixo da Amazon × texto fixo da Shopee (o ID de afiliado só aparece pelos 4 últimos dígitos). */
+  const mostrarEtiqueta = () => {
+    const editavel = !!st.dados; const shp = editavel && ehShopee();
+    etqEl.hidden = editavel; etqAmazonEl.hidden = !editavel || shp; etqShopeeEl.hidden = !shp;
+    if (shp) { // o ID vem de Conexões (config é texto, não segredo); sem resposta, a frase sai sem o final
+      const n = ++st.seqEtq; const via = st.via;
+      const pintar = (final) => { $('[data-etq-txt]', etqShopeeEl).innerHTML = T.shopee.etiqueta(final); $('[data-etq-via]', etqShopeeEl).textContent = via; };
+      pintar('');
+      dispApi('/conexoes').then((lista) => {
+        const id = String((Array.isArray(lista) ? lista.find((x) => x?.id === 'shopee') : null)?.config?.id_afiliado ?? '');
+        if (n === st.seqEtq && /^[0-9]{5,20}$/.test(id)) pintar(id.slice(-4));
+      }).catch(() => {});
+    }
+  };
   const limparProduto = () => {
     st.url = ''; st.loja = null; st.produto = null; st.texto = ''; st.textoTpl = '';
-    clearTimeout(st.tPrever); st.dados = null; st.bloqueio = ''; st.asin = ''; st.editou = false;
-    prodEl.innerHTML = ''; dadosEl.innerHTML = ''; mostrarEtiqueta();
+    clearTimeout(st.tPrever); st.dados = null; st.bloqueio = ''; st.asin = ''; st.via = ''; st.seqEtq++; st.editou = false;
+    prodEl.innerHTML = ''; prodEl.removeAttribute('style'); dadosEl.innerHTML = ''; mostrarEtiqueta();
     inUrl.classList.remove('invalido'); inUrl.removeAttribute('aria-invalid');
   };
   const pintarFalha = (msg) => { prodEl.innerHTML = `<div class="card-prod aviso" role="alert"><div class="info"><span>${esc(msg)}</span></div></div>`; };
   /** Cartão do produto com a foto do CDN permitido (Mercado Livre ou Amazon); qualquer outra vira o desenho de sacola. */
-  const cartaoProduto = (p, loja, dica) => {
+  const cartaoProduto = (p, loja, dica, linhaLoja = '') => {
     const temPreco = p.price != null && p.price !== '';
     const preco = temPreco ? `<span class="preco">${dispBrl(p.price)}${Number(p.oldPrice) > Number(p.price) ? `<s>${dispBrl(p.oldPrice)}</s>` : ''}</span>` : '';
     prodEl.innerHTML = `<div class="card-prod"><img src="${esc(dispImgSegura(p.image))}" data-img alt="${esc(p.title || 'Produto')}" width="72" height="72">
       <div class="info"><span class="titulo" title="${esc(p.title || '')}">${esc(p.title || 'Produto sem título')}</span>${preco}
         <span class="chip">${esc(loja.nome || '')}</span>
-        <span class="dica">${esc(dica)}</span></div></div>`;
+        <span class="dica">${esc(dica)}</span>${linhaLoja ? `<span class="dica" style="overflow-wrap:anywhere">${esc(linhaLoja)}</span>` : ''}</div></div>`;
     dispLigarImgs(prodEl);
     return temPreco;
   };
@@ -644,6 +783,26 @@ function paginaDisparoManual() {
     });
     dadosEl.innerHTML = ''; dadosEl.appendChild(st.dados.el); mostrarEtiqueta();
   };
+  /**
+   * Shopee: o veredito (dispShopeeVeredito) decide tudo. Falha dos dados vira aviso + campos em branco; só bloqueiam link
+   * inválido, não é produto, fora do programa, falta o ID de afiliado e falta caminho para o link.
+   */
+  const pintarShopee = (r) => {
+    const loja = r.loja; const v = dispShopeeVeredito(r); const p = v.dados ? r.produto : null;
+    if (!v.dados) { st.produto = null; st.texto = ''; bloquear(v.mensagem, v.bloqueio); st.via = ''; mostrarEtiqueta(); return; }
+    if (v.destaque) prodEl.innerHTML = `<div class="card-prod aviso" role="status"><div class="info"><span>${esc(v.mensagem)}</span></div></div>`;
+    else cartaoProduto(p, loja, v.mensagem, dispShopeeLinhaLoja(p, r.extra));
+    if (v.link) { // segundo aviso, logo abaixo: falta o ID de afiliado ou um caminho para o link
+      prodEl.style.display = 'grid'; prodEl.style.gap = '8px';
+      prodEl.insertAdjacentHTML('beforeend', `<div class="card-prod aviso" role="alert"><div class="info"><span>${esc(v.link.texto)} <a href="#conexoes">${esc(v.link.acao)}</a></span></div></div>`);
+    }
+    st.bloqueio = v.bloqueio; st.via = v.via;
+    const informado = Number(p.discountPct) > 0 && p.oldPrice == null ? Math.round(Number(p.discountPct)) : null;
+    st.dados = dadosOferta(p, () => { // prévia ao vivo, com um pequeno atraso enquanto o dono digita
+      st.editou = true; clearTimeout(st.tPrever); st.tPrever = setTimeout(prever, 250); atualizar();
+    }, { descontoInformado: informado, fonte: loja.nome || T.shopee.nome, notaPreco: dispShopeeFaixa(p, r.extra) });
+    dadosEl.innerHTML = ''; dadosEl.appendChild(st.dados.el); mostrarEtiqueta();
+  };
   const pintarProduto = (r) => {
     const loja = r.loja;
     if (!loja.implementada) {
@@ -651,6 +810,7 @@ function paginaDisparoManual() {
       prodEl.innerHTML = `<div class="card-prod aviso"><div class="info"><span>${esc(txt)} <a href="#conexoes">${T.configureConexoes}</a></span></div></div>`;
       return;
     }
+    if (loja.id === 'shopee') { pintarShopee(r); return; }
     if (r.editavel ?? loja.id === 'amazon') { pintarAmazon(r); return; }
     const p = r.produto;
     if (!p) { pintarFalha(r.motivo || T.semProduto); return; }
@@ -664,7 +824,7 @@ function paginaDisparoManual() {
     const voltarFoco = document.activeElement === btnId;
     limparProduto(); dispErros(form, []);
     st.identificando = true; btnId.disabled = true; btnId.textContent = T.identificando; atualizar();
-    if (pareceAmazon(url)) prodEl.innerHTML = `<div class="card-prod" role="status"><div class="info"><span>${T.resolvendo}</span></div></div>`; // link curto precisa de redirecionamento
+    if (pareceAmazon(url) || dispPareceShopeeCurto(url)) prodEl.innerHTML = `<div class="card-prod" role="status"><div class="info"><span>${T.resolvendo}</span></div></div>`; // link curto precisa de redirecionamento
     try {
       const tplId = selTpl.value;
       const r = await dispApi('/disparo/identificar', { method: 'POST', body: { url, template_id: Number(tplId) || null, tag_id: Number(selTag.value) || null } });
@@ -733,7 +893,10 @@ function paginaDisparoManual() {
     st.enviando = true; const soltar = dispTravar(form); form.setAttribute('aria-busy', 'true'); atualizar();
     let ok = false;
     try { await dispApi('/envios', { method: 'POST', body: corpo }); ok = true; }
-    catch (e) { dispErros(form, [{ msg: e.message }], T.naoEnviou); }
+    catch (e) {
+      dispErros(form, [{ msg: e.message }], T.naoEnviou);
+      if (ehShopee()) { const box = $('.erros', form); if (box) { box.tabIndex = -1; box.focus(); } } // falha ao gerar o link: o foco vai para o erro
+    }
     finally { st.enviando = false; soltar(); form.removeAttribute('aria-busy'); }
     if (ok) {
       const msg = corpo.quando === 'agendado' ? T.agendadoPara(`hoje às ${hhmm}`) : T.disparoIniciado(n);

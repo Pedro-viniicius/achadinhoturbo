@@ -1,17 +1,25 @@
 // Ponto único de loja: descobre de que loja é um link e, para as lojas já integradas, lê o
-// produto e gera o link de afiliado. Hoje funcionam o Mercado Livre e a Amazon. As outras lojas
+// produto e gera o link de afiliado. Hoje funcionam o Mercado Livre, a Amazon e a Shopee. As outras lojas
 // aparecem em Conexões (campos que já podem ser salvos) e são recusadas com LojaNaoConectada.
 //
 // SSRF: identificar() só olha o hostname e nunca acessa a rede. O Mercado Livre lê a página (resolveOffer, que
-// segue só hosts do ML); a Amazon só resolve o link pelos redirecionamentos e consulta a API oficial (as duas
-// coisas em src/amazon.js, injetado). A imagem só passa se vier do CDN da própria loja (imagemPermitida).
+// segue só hosts do ML); a Amazon e a Shopee só resolvem o link pelos redirecionamentos e consultam a API oficial
+// (src/amazon.js e src/shopee.js, injetados). A imagem só passa se vier do CDN da própria loja (imagemPermitida).
 //
 // Amazon (plano espelhamento-amazon, etapa 7): o link enviado é sempre https://www.amazon.com.br/dp/<ASIN>?tag=<tag>
 // (montarLink de amazon.js, com a tag de Conexões na hora da chamada): o slug, os parâmetros de rastreio e a tag
 // de terceiro do link de origem nunca seguem adiante.
+//
+// Shopee (plano integracao-shopee, decisão 4; ADR-003): o link enviado é sempre o shortLink https://s.shopee.com.br/…
+// gerado pela conta do dono (Open API quando útil, extensão do Chrome de reserva) a partir do endereço do produto
+// sem parâmetros. Nunca o link colado, nunca montado à mão. Se o longLink da extensão trouxer outro an_<ID>, recusa.
+// O link confiável fica guardado no cliente da Shopee por 7 dias (shopee.guardarLink, por produto e ID de afiliado):
+// o mesmo produto não pede outro link à API nem à extensão a cada disparo (S2). Confiável = veio da API, ou da
+// extensão com um longLink cujo an_<ID> é o ID salvo; sem essa prova, o link vale só para o disparo atual.
 
 import { IMAGEM_PERMITIDA, offerKey } from './ml.js';
 import { IMAGEM_AMAZON, ErroAmazon, LinkNaoResolvido, extrairAsin } from './amazon.js';
+import { IMAGEM_SHOPEE, ErroShopee, LinkShopeeNaoResolvido, LINK_SHOPEE, RE_ID_AFILIADO, extrairIds, afiliadoDoLongLink } from './shopee.js';
 import { brl } from './template.js';
 
 const MAX_URL = 4096;
@@ -56,14 +64,17 @@ const LISTA = [
     ],
   },
   {
-    id: 'shopee', nome: 'Shopee', implementada: false,
-    descricao: 'Programa de Afiliados da Shopee, pela API de afiliados (AppID e chave secreta).',
+    // O ID de afiliado e o AppID são texto (não protegem nada: o ID vai em todo link). Só a Senha da API é segredo.
+    id: 'shopee', nome: 'Shopee', implementada: true,
+    descricao: 'Programa de Afiliados da Shopee. O link curto de afiliado sai pela extensão do Chrome ou pela API; com a API, o painel também busca título, preço e foto do produto.',
     hosts: ['shopee.com.br', 's.shopee.com.br', 'shp.ee', 'shope.ee'],
     campos: [
+      { nome: 'id_afiliado', rotulo: 'ID de afiliado', tipo: 'texto', max: 20, padrao: RE_ID_AFILIADO.source,
+        ajuda: 'Só números. Ex.: 98765432101. É o número da sua conta de afiliado da Shopee. Vai nos seus links e define de quem é a comissão. Não é o AppID e não é a tag da Amazon.' },
       { nome: 'app_id', rotulo: 'AppID', tipo: 'texto', max: 20, padrao: '^[0-9]{1,20}$',
-        ajuda: 'Número do aplicativo no painel de afiliados da Shopee.' },
-      { nome: 'chave', rotulo: 'Chave secreta', tipo: 'segredo', max: 128, padrao: '^[!-~]{8,128}$',
-        ajuda: 'A chave não volta para o navegador. Deixe em branco para manter a chave atual.' },
+        ajuda: 'Número do aplicativo, mostrado na página da API de Afiliados da Shopee. Diferente do ID de afiliado.' },
+      { nome: 'chave', rotulo: 'Senha da API', tipo: 'segredo', max: 128, padrao: '^[!-~]{8,128}$',
+        ajuda: 'A senha fica guardada no seu computador e não volta para esta tela. Deixe em branco para manter a salva.' },
     ],
   },
   {
@@ -130,7 +141,7 @@ function exigirLoja(id, url) {
 }
 
 /** CDN de imagem de cada loja integrada. Sem protótipo: id vindo de fora não acha 'constructor'. */
-const IMAGENS = Object.freeze(Object.assign(Object.create(null), { mercadolivre: IMAGEM_PERMITIDA, amazon: IMAGEM_AMAZON }));
+const IMAGENS = Object.freeze(Object.assign(Object.create(null), { mercadolivre: IMAGEM_PERMITIDA, amazon: IMAGEM_AMAZON, shopee: IMAGEM_SHOPEE }));
 
 /**
  * A foto do produto pode seguir adiante? Só https do CDN da própria loja (o envio baixa essa URL no servidor).
@@ -174,14 +185,107 @@ async function lerProdutoAmazon(url, amazon) {
   return { ...oferta, key: `ASIN:${asin}`, asin, image: imagemSegura('amazon', oferta.image) };
 }
 
+function exigirShopee(shopee, ...metodos) {
+  if (!shopee || metodos.some((m) => typeof shopee[m] !== 'function')) throw new Error('Serviço da Shopee indisponível.');
+}
+
+/** ErroShopee novo (nunca o mesmo objeto que outro chamador recebeu) com os ids já resolvidos. */
+function erroComIds(e, ids) {
+  const novo = e instanceof ErroShopee
+    ? new ErroShopee(e.tipo, { status: e.status, codigoApi: e.codigoApi })
+    : new ErroShopee('indisponivel');
+  novo.ids = { ...ids };
+  return novo;
+}
+
+/**
+ * Ids do produto da Shopee: do próprio link (sem rede) ou, para encurtador, de shopee.resolver (só redirecionamentos
+ * de hosts da Shopee). O resultado é refeito por extrairIds a partir do urlProduto: o que vem do resolvedor
+ * injetado também precisa ser um endereço de produto da Shopee. Falha → LinkShopeeNaoResolvido.
+ */
+async function idsShopee(url, shopee) {
+  let ids = extrairIds(url);
+  if (!ids) {
+    exigirShopee(shopee, 'resolver');
+    ids = await shopee.resolver(url);
+  }
+  const v = extrairIds(ids?.urlProduto);
+  if (!v) throw new LinkShopeeNaoResolvido('invalido');
+  return v;
+}
+
+/**
+ * Shopee: ids (extrairIds ou shopee.resolver) e shopee.lerItem. Erros:
+ * - LinkShopeeNaoResolvido { causa: 'invalido' | 'nao_produto' } quando o link não chega a um produto;
+ * - ErroShopee { tipo, ids } quando a API não respondeu ou não devolveu o produto ('nao_encontrado'). Os `ids`
+ *   ({ shopId, itemId, urlProduto }) vão junto para quem chama seguir com os campos vazios.
+ */
+async function lerProdutoShopee(url, shopee) {
+  exigirShopee(shopee, 'lerItem');
+  const ids = await idsShopee(url, shopee);
+  let oferta;
+  try { oferta = await shopee.lerItem(ids.shopId, ids.itemId); } catch (e) { throw erroComIds(e, ids); }
+  if (!oferta) throw erroComIds(new ErroShopee('nao_encontrado'), ids);
+  const extra = oferta.extra && typeof oferta.extra === 'object' ? { ...oferta.extra } : null;
+  return {
+    ...oferta, extra, key: `SHOPEE:${ids.shopId}.${ids.itemId}`, shopId: ids.shopId, itemId: ids.itemId,
+    urlProduto: ids.urlProduto, image: imagemSegura('shopee', oferta.image),
+  };
+}
+
+/** Link já guardado no cliente da Shopee para o produto e o ID (shopee.linkGuardado), ou null. */
+function linkGuardadoShopee(shopee, urlProduto, id) {
+  if (typeof shopee?.linkGuardado !== 'function') return null;
+  const l = shopee.linkGuardado(urlProduto, id);
+  return typeof l === 'string' && LINK_SHOPEE.test(l) ? l : null;
+}
+
+/**
+ * Link de afiliado da Shopee (ver o topo do arquivo). Ordem: ID de afiliado salvo (senão ErroShopee 'sem_id', sem
+ * rede) → endereço do produto sem parâmetros → link guardado para o produto e o ID (até 7 dias) → API
+ * (shopee.gerarLink) se shopee.apiUtil() → senão, ou se a API falhar, a extensão (links.requestLinkShopee). O link
+ * final precisa casar LINK_SHOPEE ('link_falhou'), e o an_<ID> do longLink, quando vem, precisa ser o ID salvo
+ * ('outra_conta'). Só o link confiável é guardado (shopee.guardarLink): o da API, ou o da extensão com o an_<ID>
+ * do longLink conferido. Link da extensão sem longLink (ou sem an_) sai neste disparo, mas não é guardado.
+ */
+async function linkAfiliadoShopee(base, { shopee, links, idAfiliado }) {
+  const id = typeof idAfiliado === 'string' ? idAfiliado.trim() : '';
+  if (!RE_ID_AFILIADO.test(id)) throw new ErroShopee('sem_id');
+  const { urlProduto } = await idsShopee(base, shopee);
+  const guardado = linkGuardadoShopee(shopee, urlProduto, id);
+  if (guardado) return guardado;
+  let link = null;
+  let longo = null;
+  let daApi = false;
+  if (typeof shopee?.apiUtil === 'function' && typeof shopee.gerarLink === 'function' && shopee.apiUtil()) {
+    try { link = await shopee.gerarLink(urlProduto); } catch { link = null; } // os dois caminhos são da conta do dono
+    daApi = link != null;
+  }
+  if (link == null) {
+    if (typeof links?.requestLinkShopee !== 'function') throw new Error('Serviço de links indisponível.');
+    const r = await links.requestLinkShopee({ url: urlProduto });
+    link = r?.link;
+    longo = r?.longo ?? null;
+  }
+  if (typeof link !== 'string' || !LINK_SHOPEE.test(link)) throw new ErroShopee('link_falhou');
+  const dono = afiliadoDoLongLink(longo);
+  if (dono && dono !== id) throw new ErroShopee('outra_conta', { final: id.slice(-4) });
+  const confiavel = daApi || dono === id;
+  if (confiavel && typeof shopee?.guardarLink === 'function') shopee.guardarLink(urlProduto, id, link);
+  return link;
+}
+
 /**
  * Lê título, preço e foto do produto. Mercado Livre: ml.resolveOffer (injetado). Amazon: amazon (createAmazon,
- * injetado) → { key: 'ASIN:<ASIN>', asin, title, price, oldPrice, discountPct, image, … }.
+ * injetado) → { key: 'ASIN:<ASIN>', asin, title, price, oldPrice, discountPct, image, … }. Shopee: shopee
+ * (createShopee, injetado) → { key: 'SHOPEE:<shop>.<item>', shopId, itemId, urlProduto, title, price, oldPrice:null,
+ * discountPct, sold, image, extra: { loja_nome, nota, preco_max }, … }.
  * A imagem fora do CDN da loja vira null: o envio busca essa URL no servidor.
  */
-export async function lerProduto(id, url, { ml, amazon } = {}) {
+export async function lerProduto(id, url, { ml, amazon, shopee } = {}) {
   const limpo = exigirLoja(id, url);
   if (id === 'amazon') return lerProdutoAmazon(limpo, amazon);
+  if (id === 'shopee') return lerProdutoShopee(limpo, shopee);
   if (!ml?.resolveOffer) throw new Error('Leitura de produtos do Mercado Livre indisponível.');
   const offer = await ml.resolveOffer({ key: offerKey(limpo), url: limpo });
   return { ...offer, image: imagemSegura('mercadolivre', offer?.image) };
@@ -194,8 +298,11 @@ export async function lerProduto(id, url, { ml, amazon } = {}) {
  *   `asin` (já resolvido pelo servidor, ex.: o do payload do envio), do próprio link ou, para encurtador, de
  *   amazon.resolver. `tag` é ignorada: a tag é a de Conexões. Sem tag salva → ErroAmazon('sem_tag'), com a
  *   mensagem fixa (nunca carrega ID, segredo nem token).
+ * - Shopee: o shortLink https://s.shopee.com.br/… (linkAfiliadoShopee). Parte de `urlProduto` (o endereço já
+ *   resolvido pelo servidor, ex.: o do payload) ou de `url`; `idAfiliado` é o ID salvo em Conexões. `tag` é ignorada.
  */
-export async function linkAfiliado(id, { url, tag, asin } = {}, { links, amazon } = {}) {
+export async function linkAfiliado(id, { url, tag, asin, urlProduto } = {}, { links, amazon, shopee, idAfiliado } = {}) {
+  if (id === 'shopee') return linkAfiliadoShopee(exigirLoja(id, urlProduto ?? url), { shopee, links, idAfiliado });
   const limpo = exigirLoja(id, url);
   if (id === 'amazon') {
     exigirAmazon(amazon, 'montarLink');

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { PLATAFORMAS, identificar, LojaNaoConectada, lerProduto, linkAfiliado, previaDoLink, imagemPermitida } from '../src/lojas.js';
 import { createLinkService } from '../src/links.js';
 import { createAmazon, ErroAmazon, LinkNaoResolvido, HOSTS_AMAZON, MENSAGENS_AMAZON } from '../src/amazon.js';
+import { createShopee, ErroShopee, LinkShopeeNaoResolvido, HOSTS_SHOPEE, MENSAGENS_SHOPEE, URL_API, RE_ID_AFILIADO } from '../src/shopee.js';
 
 const IMG = 'https://http2.mlstatic.com/D_NQ_NP_123-O.jpg';
 const URL_ML = 'https://produto.mercadolivre.com.br/MLB-1234567890-fone-bom-_JM';
@@ -19,6 +20,12 @@ function mlFalso(extra = {}) {
   };
 }
 
+// Rede bloqueada no arquivo inteiro (etapa 1 da Shopee): o último teste prova que o fetch global nunca foi chamado.
+const fetchOriginal = globalThis.fetch;
+let chamadasGlobais = 0;
+test.before(() => { globalThis.fetch = async () => { chamadasGlobais++; throw new Error('rede proibida no teste'); }; });
+test.after(() => { globalThis.fetch = fetchOriginal; });
+
 /** Troca o fetch global por um que falha e conta, para provar que nada acessou a rede. */
 async function semRede(fn) {
   const original = globalThis.fetch; let chamadas = 0;
@@ -27,15 +34,15 @@ async function semRede(fn) {
   return chamadas;
 }
 
-test('lojas: registro com as 5 plataformas, campos da tela Conexões e ML e Amazon implementados', () => {
+test('lojas: registro com as 5 plataformas, campos da tela Conexões e ML, Amazon e Shopee implementados', () => {
   const lista = Object.values(PLATAFORMAS);
   assert.deepEqual(lista.map((p) => p.id), ['mercadolivre', 'amazon', 'shopee', 'magalu', 'facebook']);
-  assert.deepEqual(lista.filter((p) => p.implementada).map((p) => p.id), ['mercadolivre', 'amazon']);
+  assert.deepEqual(lista.filter((p) => p.implementada).map((p) => p.id), ['mercadolivre', 'amazon', 'shopee']);
   const campos = Object.fromEntries(lista.map((p) => [p.id, p.campos.map((c) => `${c.nome}:${c.tipo}`)]));
   assert.deepEqual(campos, {
     mercadolivre: ['etiqueta:texto'],
     amazon: ['tag:texto', 'credencial_id:segredo', 'credencial_secret:segredo', 'credencial_versao:texto'],
-    shopee: ['app_id:texto', 'chave:segredo'], magalu: ['loja:texto'], facebook: [],
+    shopee: ['id_afiliado:texto', 'app_id:texto', 'chave:segredo'], magalu: ['loja:texto'], facebook: [],
   });
   for (const p of lista) {
     assert.ok(p.nome && p.descricao && p.hosts.length, `${p.id} sem nome, descrição ou hosts`);
@@ -53,6 +60,10 @@ test('lojas: registro com as 5 plataformas, campos da tela Conexões e ML e Amaz
   for (const v of ['3.1', '3.2', '3.3']) assert.ok(re('amazon', 'credencial_versao').test(v), v);
   for (const v of ['3.0', '3.4', '2.1', '3.10', '31', '']) assert.ok(!re('amazon', 'credencial_versao').test(v), v);
   assert.ok(re('shopee', 'app_id').test('11312345678') && !re('shopee', 'app_id').test('abc'));
+  for (const v of ['98765432101', '12345', '1'.repeat(20)]) assert.ok(re('shopee', 'id_afiliado').test(v), v);
+  for (const v of ['1234', '1'.repeat(21), 'seunome-20', '183 288', 'an_98765432101', '']) assert.ok(!re('shopee', 'id_afiliado').test(v), v);
+  assert.deepEqual(PLATAFORMAS.shopee.campos.map((c) => c.rotulo), ['ID de afiliado', 'AppID', 'Senha da API']);
+  assert.ok(re('shopee', 'chave').test('Senha!#$%&*1') && !re('shopee', 'chave').test('curta') && !re('shopee', 'chave').test('com espaço no meio'));
   assert.ok(re('mercadolivre', 'etiqueta').test('minha_etiqueta') && !re('mercadolivre', 'etiqueta').test('a b'));
   // id vindo da requisição não acha propriedade herdada, e o registro não muda em tempo de execução
   for (const id of ['constructor', '__proto__', 'toString', 'hasOwnProperty']) assert.equal(PLATAFORMAS[id], undefined, id);
@@ -79,6 +90,13 @@ test('lojas: identificar reconhece cada loja pelo host e pelo encurtador', () =>
   assert.deepEqual(identificar(URL_ML), { id: 'mercadolivre', nome: 'Mercado Livre', implementada: true });
   assert.deepEqual(identificar('https://amzn.to/3xYz'), { id: 'amazon', nome: 'Amazon', implementada: true });
   assert.deepEqual(identificar('https://link.amazon/aBc12XyZ'), { id: 'amazon', nome: 'Amazon', implementada: true });
+  assert.deepEqual(identificar('https://shp.ee/abc'), { id: 'shopee', nome: 'Shopee', implementada: true });
+});
+
+test('lojas: todo host que identificar dá como Shopee é um host que o resolvedor de shopee.js aceita seguir', () => {
+  const aceito = (h) => HOSTS_SHOPEE.some((x) => h === x || h.endsWith(`.${x}`));
+  for (const h of PLATAFORMAS.shopee.hosts) assert.ok(aceito(h), h);
+  for (const h of HOSTS_SHOPEE) assert.equal(identificar(`https://${h}/x`)?.id, 'shopee', h);
 });
 
 test('lojas: todo host que identificar dá como Amazon é um host que o resolvedor de amazon.js aceita seguir', () => {
@@ -116,7 +134,8 @@ test('lojas: identificar e as recusas não acessam a rede', async () => {
     identificar(URL_ML); identificar('https://amzn.to/x'); identificar('https://evil.com/');
     await assert.rejects(previaDoLink('https://example.com/pagina', { ml }));
     await assert.rejects(previaDoLink('https://amzn.to/x', { ml }), /só funciona com links do Mercado Livre/);
-    await assert.rejects(lerProduto('shopee', 'https://shp.ee/x', { ml }), LojaNaoConectada);
+    await assert.rejects(lerProduto('magalu', 'https://www.magazinevoce.com.br/x', { ml }), LojaNaoConectada);
+    await assert.rejects(lerProduto('shopee', 'https://shp.ee/x', { ml }), /Serviço da Shopee indisponível/);
     await assert.rejects(lerProduto('amazon', 'https://amzn.to/x', { ml }), /Serviço da Amazon indisponível/);
   });
   assert.equal(chamadas, 0);
@@ -148,14 +167,14 @@ test('lojas: lerProduto recusa loja desconhecida e link de outra loja sem chamar
   assert.equal(ml.chamadas.length, 0);
 });
 
-test('lojas: Shopee, Magalu e Facebook lançam LojaNaoConectada com o nome na mensagem', async () => {
+test('lojas: Magalu e Facebook lançam LojaNaoConectada com o nome na mensagem', async () => {
   const ml = mlFalso();
   const links = { chamadas: 0, async requestLink() { this.chamadas++; return 'https://meli.la/x'; } };
-  const err = await lerProduto('shopee', 'https://s.shopee.com.br/x', { ml }).catch((e) => e);
+  const err = await lerProduto('magalu', 'https://www.magazinevoce.com.br/x', { ml }).catch((e) => e);
   assert.ok(err instanceof LojaNaoConectada && err instanceof Error);
-  assert.equal(err.message, 'Shopee identificada, mas ainda não está conectada. Configure em Conexões.');
-  assert.deepEqual(err.loja, { id: 'shopee', nome: 'Shopee', implementada: false });
-  const outras = { shopee: ['Shopee', 'https://s.shopee.com.br/x'], magalu: ['Magalu', 'https://www.magazinevoce.com.br/x'], facebook: ['Facebook', 'https://fb.com/x'] };
+  assert.equal(err.message, 'Magalu identificada, mas ainda não está conectada. Configure em Conexões.');
+  assert.deepEqual(err.loja, { id: 'magalu', nome: 'Magalu', implementada: false });
+  const outras = { magalu: ['Magalu', 'https://www.magazinevoce.com.br/x'], facebook: ['Facebook', 'https://fb.com/x'] };
   for (const [id, [nome, url]] of Object.entries(outras)) {
     await assert.rejects(lerProduto(id, url, { ml }), (e) => e instanceof LojaNaoConectada && e.message.startsWith(nome) && e.loja.id === id);
     await assert.rejects(linkAfiliado(id, { url, tag: 'seunome-20' }, { links }), (e) => e instanceof LojaNaoConectada && e.loja.id === id);
@@ -353,4 +372,309 @@ test('CA7: linkAfiliado da Amazon sem tag falha com ErroAmazon sem_tag, sem rede
     for (const s of [ID_CRED, SEGREDO_CRED, 'IDSECRETO', 'Super-Secreto']) assert.ok(!tudo.includes(s), s);
   }
   assert.equal(f.chamadas.length, 0);
+});
+
+// ------------------------------------------------------------------ Shopee (plano integracao-shopee, etapa 1)
+
+const SHOP = '52377417';
+const ITEM = '6309028319';
+const URL_SHOPEE = `https://shopee.com.br/Apple-Iphone-11-128GB-Local-Set-i.${SHOP}.${ITEM}`;
+const CURTO = 'https://s.shopee.com.br/9fMB7wrS3r';
+const IMG_SHOPEE = 'https://down-br.img.susercontent.com/file/br-11134207-abc';
+const ID_AFILIADO = '98765432101';
+const SENHA_API = 'Senha-Api-SECRETA-q1w2e3';
+const longoDe = (id) => `${URL_SHOPEE}?utm_campaign=-&utm_medium=affiliates&utm_source=an_${id}&utm_term=dxyz`;
+
+/** Stub de createShopee: guarda as chamadas; cada método responde pelo que o teste mandar. */
+function shopeeFalso({ ids = { shopId: SHOP, itemId: ITEM, urlProduto: URL_SHOPEE }, oferta = {}, erroItem = null, erroLink = null,
+  apiUtil = false, link = 'https://s.shopee.com.br/ApiLink1', erroGerar = null } = {}) {
+  const chamadas = { resolver: [], lerItem: [], gerarLink: [] };
+  return {
+    chamadas,
+    async resolver(url) { chamadas.resolver.push(url); if (erroLink) throw erroLink; return ids; },
+    async lerItem(s, i) {
+      chamadas.lerItem.push([s, i]);
+      if (erroItem) throw erroItem;
+      if (oferta === null) return null;
+      return { key: `SHOPEE:${s}.${i}`, shopId: s, itemId: i, title: 'iPhone 11', price: 1299.9, oldPrice: null, discountPct: 15, sold: 10,
+        image: IMG_SHOPEE, freeShipping: false, coupon: null, extra: { loja_nome: 'Loja', nota: 4.8, preco_max: 1499 }, ...oferta };
+    },
+    apiUtil: () => apiUtil,
+    async gerarLink(u) { chamadas.gerarLink.push(u); if (erroGerar) throw erroGerar; return link; },
+  };
+}
+
+/** Stub do serviço de links com requestLinkShopee (a etapa 2 implementa o real). */
+function linksShopee({ link = CURTO, longo = longoDe(ID_AFILIADO), erro = null } = {}) {
+  const chamadas = [];
+  return {
+    chamadas,
+    async requestLinkShopee(arg) { chamadas.push(arg); if (erro) throw erro; return { link, longo }; },
+    async requestLink() { throw new Error('não é para o ML'); },
+  };
+}
+
+test('lojas Shopee: lerProduto lê ids do link (sem rede) ou do resolvedor e devolve key SHOPEE:<shop>.<item> (CA1, CA2)', async () => {
+  const shopee = shopeeFalso();
+  let oferta;
+  const rede = await semRede(async () => { oferta = await lerProduto('shopee', ` ${URL_SHOPEE}?sp_atk=x&utm_source=an_1 `, { shopee, ml: mlFalso() }); });
+  assert.equal(rede, 0);
+  assert.deepEqual(shopee.chamadas.resolver, [], 'link de produto não passa pelo resolvedor');
+  assert.deepEqual(shopee.chamadas.lerItem, [[SHOP, ITEM]]);
+  assert.equal(oferta.key, `SHOPEE:${SHOP}.${ITEM}`);
+  assert.equal(oferta.shopId, SHOP); assert.equal(oferta.itemId, ITEM);
+  assert.equal(oferta.urlProduto, URL_SHOPEE, 'sem a query do link colado');
+  assert.equal(oferta.title, 'iPhone 11'); assert.equal(oferta.price, 1299.9); assert.equal(oferta.discountPct, 15);
+  assert.equal(oferta.oldPrice, null); assert.equal(oferta.image, IMG_SHOPEE);
+  assert.deepEqual(oferta.extra, { loja_nome: 'Loja', nota: 4.8, preco_max: 1499 });
+
+  // encurtador: passa pelo resolvedor; o resultado é refeito a partir do urlProduto
+  const curto = shopeeFalso();
+  assert.equal((await lerProduto('shopee', CURTO, { shopee: curto })).itemId, ITEM);
+  assert.deepEqual(curto.chamadas.resolver, [CURTO]);
+  // resolvedor que devolve algo que não é endereço de produto da Shopee não chega à API
+  for (const ids of [{ shopId: SHOP, itemId: ITEM, urlProduto: 'https://evil.com/x-i.1.2' }, { shopId: '1', itemId: '2' }, null]) {
+    const torto = shopeeFalso({ ids });
+    await assert.rejects(lerProduto('shopee', CURTO, { shopee: torto }), (e) => e instanceof LinkShopeeNaoResolvido && e.causa === 'invalido');
+    assert.equal(torto.chamadas.lerItem.length, 0);
+  }
+  const naoProduto = shopeeFalso({ erroLink: new LinkShopeeNaoResolvido('nao_produto') });
+  await assert.rejects(lerProduto('shopee', CURTO, { shopee: naoProduto }), (e) => e.causa === 'nao_produto');
+  // serviço ausente e link de outra loja
+  await assert.rejects(lerProduto('shopee', URL_SHOPEE, {}), /Serviço da Shopee indisponível/);
+  await assert.rejects(lerProduto('shopee', CURTO, { shopee: { lerItem() {} } }), /Serviço da Shopee indisponível/);
+  await assert.rejects(lerProduto('shopee', 'https://shopee.com.br.evil.com/x-i.1.2', { shopee: shopeeFalso() }), /não é da loja Shopee/);
+});
+
+test('lojas Shopee: foto fora do CDN da Shopee vira null; imagemPermitida(shopee) (CA7)', async () => {
+  const fora = ['https://evil.com/x.jpg', 'http://down-br.img.susercontent.com/file/x', 'https://susercontent.com.evil.com/x', IMG, IMG_AMZ,
+    'file:///etc/passwd', null, 42, ''];
+  for (const img of fora) {
+    assert.equal((await lerProduto('shopee', URL_SHOPEE, { shopee: shopeeFalso({ oferta: { image: img } }) })).image, null, String(img));
+    assert.equal(imagemPermitida('shopee', img), false, String(img));
+  }
+  for (const img of [IMG_SHOPEE, 'https://cf.shopee.com.br/file/abc']) {
+    assert.equal(imagemPermitida('shopee', img), true, img);
+    assert.equal(imagemPermitida('amazon', img), false);
+    assert.equal(imagemPermitida('mercadolivre', img), false);
+  }
+});
+
+test('lojas Shopee: erro da API vira ErroShopee novo com os ids; nao_encontrado quando não há produto', async () => {
+  for (const tipo of ['sem_credenciais', 'credencial_recusada', 'conta_restrita', 'sem_acesso', 'cota', 'indisponivel']) {
+    const original = new ErroShopee(tipo, { status: 200, codigoApi: 10035 });
+    const e = await lerProduto('shopee', URL_SHOPEE, { shopee: shopeeFalso({ erroItem: original }) }).catch((x) => x);
+    assert.ok(e instanceof ErroShopee, tipo);
+    assert.equal(e.tipo, tipo); assert.equal(e.message, MENSAGENS_SHOPEE[tipo]); assert.equal(e.codigoApi, 10035);
+    assert.deepEqual(e.ids, { shopId: SHOP, itemId: ITEM, urlProduto: URL_SHOPEE });
+    assert.notEqual(e, original); assert.equal(original.ids, undefined);
+  }
+  const nulo = await lerProduto('shopee', URL_SHOPEE, { shopee: shopeeFalso({ oferta: null }) }).catch((x) => x);
+  assert.ok(nulo instanceof ErroShopee); assert.equal(nulo.tipo, 'nao_encontrado'); assert.equal(nulo.ids.itemId, ITEM);
+  const cru = await lerProduto('shopee', URL_SHOPEE, { shopee: shopeeFalso({ erroItem: new Error(`falhou com ${SENHA_API}`) }) }).catch((x) => x);
+  assert.ok(cru instanceof ErroShopee); assert.equal(cru.tipo, 'indisponivel');
+  assert.ok(!`${cru.message} ${cru.stack}`.includes(SENHA_API));
+});
+
+test('lojas Shopee: linkAfiliado pela API quando útil, sem extensão e a partir do endereço sem parâmetros (CA4)', async () => {
+  const shopee = shopeeFalso({ apiUtil: true });
+  const links = linksShopee();
+  const rede = await semRede(async () => {
+    const link = await linkAfiliado('shopee', { url: `${URL_SHOPEE}?utm_source=an_999&x=1`, tag: 'ignorada' }, { shopee, links, idAfiliado: ID_AFILIADO });
+    assert.equal(link, 'https://s.shopee.com.br/ApiLink1');
+  });
+  assert.equal(rede, 0);
+  assert.deepEqual(shopee.chamadas.gerarLink, [URL_SHOPEE]);
+  assert.equal(links.chamadas.length, 0, 'API útil: a extensão não é chamada');
+  // urlProduto (o do payload) tem preferência sobre url
+  await linkAfiliado('shopee', { url: CURTO, urlProduto: URL_SHOPEE }, { shopee, links, idAfiliado: ID_AFILIADO });
+  assert.deepEqual(shopee.chamadas.resolver, [], 'urlProduto já resolvido: nada de resolver');
+});
+
+test('lojas Shopee: linkAfiliado pela extensão sem API e como reserva quando a API falha; confere o an_<ID> (CA4)', async () => {
+  // sem API útil: direto para a extensão, com o endereço sem parâmetros (link curto resolvido antes)
+  const semApi = shopeeFalso({ apiUtil: false });
+  const links = linksShopee();
+  assert.equal(await linkAfiliado('shopee', { url: CURTO }, { shopee: semApi, links, idAfiliado: ` ${ID_AFILIADO} ` }), CURTO);
+  assert.deepEqual(links.chamadas, [{ url: URL_SHOPEE }]);
+  assert.deepEqual(semApi.chamadas.gerarLink, []);
+  assert.deepEqual(semApi.chamadas.resolver, [CURTO]);
+  // sem serviço da Shopee nenhum, link de produto: a extensão basta
+  assert.equal(await linkAfiliado('shopee', { url: URL_SHOPEE }, { links: linksShopee(), idAfiliado: ID_AFILIADO }), CURTO);
+
+  // API falha (qualquer erro): cai para a extensão
+  for (const erroGerar of [new ErroShopee('sem_acesso'), new ErroShopee('indisponivel'), new Error('x')]) {
+    const falha = shopeeFalso({ apiUtil: true, erroGerar });
+    const l = linksShopee();
+    assert.equal(await linkAfiliado('shopee', { url: URL_SHOPEE }, { shopee: falha, links: l, idAfiliado: ID_AFILIADO }), CURTO);
+    assert.equal(falha.chamadas.gerarLink.length, 1); assert.equal(l.chamadas.length, 1);
+  }
+  // longLink sem an_ não tem como conferir: aceita (premissa do plano)
+  assert.equal(await linkAfiliado('shopee', { url: URL_SHOPEE }, { links: linksShopee({ longo: null }), idAfiliado: ID_AFILIADO }), CURTO);
+  assert.equal(await linkAfiliado('shopee', { url: URL_SHOPEE }, { links: linksShopee({ longo: URL_SHOPEE }), idAfiliado: ID_AFILIADO }), CURTO);
+
+  // Chrome em outra conta: recusa com a frase da spec (4 últimos dígitos do ID salvo)
+  for (const longo of [longoDe('99999999999'), `${longoDe(ID_AFILIADO)}&utm_source=an_123`]) {
+    const e = await linkAfiliado('shopee', { url: URL_SHOPEE }, { links: linksShopee({ longo }), idAfiliado: ID_AFILIADO }).catch((x) => x);
+    assert.ok(e instanceof ErroShopee, longo); assert.equal(e.tipo, 'outra_conta');
+    assert.equal(e.message, 'O Chrome está logado em outra conta de afiliado da Shopee. Entre na conta do ID …2101 e tente de novo.');
+  }
+  // erro da extensão segue adiante; link que não é s.shopee.com.br nunca sai
+  await assert.rejects(linkAfiliado('shopee', { url: URL_SHOPEE }, { links: linksShopee({ erro: new Error('não há sessão de afiliado da Shopee neste Chrome') }), idAfiliado: ID_AFILIADO }),
+    /não há sessão de afiliado/);
+  for (const link of ['https://meli.la/abc', 'https://s.shopee.com.br.evil.com/abc', `${CURTO}?x=1`, null, URL_SHOPEE]) {
+    const e = await linkAfiliado('shopee', { url: URL_SHOPEE }, { links: linksShopee({ link }), idAfiliado: ID_AFILIADO }).catch((x) => x);
+    assert.ok(e instanceof ErroShopee, String(link)); assert.equal(e.tipo, 'link_falhou');
+  }
+  await assert.rejects(linkAfiliado('shopee', { url: URL_SHOPEE }, { idAfiliado: ID_AFILIADO }), /Serviço de links indisponível/);
+});
+
+test('lojas Shopee: linkAfiliado sem ID de afiliado salvo falha com sem_id antes de qualquer chamada', async () => {
+  const shopee = shopeeFalso({ apiUtil: true });
+  const links = linksShopee();
+  const rede = await semRede(async () => {
+    for (const idAfiliado of [undefined, '', '   ', '1234', 'seunome-20', 98765432101]) {
+      const e = await linkAfiliado('shopee', { url: CURTO }, { shopee, links, idAfiliado }).catch((x) => x);
+      assert.ok(e instanceof ErroShopee, String(idAfiliado)); assert.equal(e.tipo, 'sem_id');
+      assert.equal(e.message, 'Falta o ID de afiliado da Shopee em Conexões.');
+    }
+  });
+  assert.equal(rede, 0);
+  assert.deepEqual(shopee.chamadas, { resolver: [], lerItem: [], gerarLink: [] });
+  assert.equal(links.chamadas.length, 0);
+  await assert.rejects(linkAfiliado('shopee', { url: 'https://evil.com/x-i.1.2' }, { links, idAfiliado: ID_AFILIADO }), /não é da loja Shopee/);
+  await assert.rejects(linkAfiliado('shopee', {}, { links, idAfiliado: ID_AFILIADO }), /não é da loja Shopee/);
+});
+
+test('lojas Shopee: ponta a ponta com createShopee (fetch falso): link curto resolvido, dados e link pela API', async () => {
+  const conexao = { id_afiliado: ID_AFILIADO, app_id: '123456789', chave: SENHA_API };
+  const f = fetchFalso((url) => {
+    if (url === CURTO) return new Response(null, { status: 302, headers: { location: `${URL_SHOPEE}?utm_source=an_${ID_AFILIADO}` } });
+    throw new Error(`rede inesperada: ${url}`);
+  });
+  // a API responde por um fetch próprio (o fetchFalso deste arquivo não vê o corpo)
+  const api = async (url, init) => {
+    if (url !== URL_API) return f(url, init);
+    const { query } = JSON.parse(init.body);
+    if (query.startsWith('mutation')) return Response.json({ data: { generateShortLink: { shortLink: 'https://s.shopee.com.br/ApiOk42' } } });
+    return Response.json({ data: { productOfferV2: { nodes: [{ itemId: Number(ITEM), productName: 'iPhone 11', priceMin: '1299.90', priceMax: '1299.90',
+      priceDiscountRate: 0, sales: 5, ratingStar: '4.9', imageUrl: IMG_SHOPEE, shopName: 'Loja' }] } } });
+  };
+  const shopee = createShopee({ fetch: api, lerConexao: () => conexao });
+  const links = linksShopee();
+  const rede = await semRede(async () => {
+    const oferta = await lerProduto('shopee', CURTO, { shopee });
+    assert.equal(oferta.title, 'iPhone 11'); assert.equal(oferta.price, 1299.9); assert.equal(oferta.discountPct, 0);
+    assert.equal(oferta.image, IMG_SHOPEE); assert.equal(oferta.urlProduto, URL_SHOPEE);
+    assert.equal(shopee.apiUtil(), true);
+    assert.equal(await linkAfiliado('shopee', { urlProduto: oferta.urlProduto }, { shopee, links, idAfiliado: ID_AFILIADO }), 'https://s.shopee.com.br/ApiOk42');
+  });
+  assert.equal(rede, 0);
+  assert.deepEqual(f.chamadas.map((c) => [c.metodo, c.url]), [['GET', CURTO]]);
+  assert.equal(links.chamadas.length, 0);
+  // conta sem acesso (10035): dados com erro e link pela extensão
+  const semAcesso = createShopee({ fetch: async () => Response.json({ errors: [{ extensions: { code: 10035 } }] }), lerConexao: () => conexao });
+  const e = await lerProduto('shopee', URL_SHOPEE, { shopee: semAcesso }).catch((x) => x);
+  assert.equal(e.tipo, 'sem_acesso'); assert.equal(e.ids.urlProduto, URL_SHOPEE);
+  assert.equal(semAcesso.apiUtil(), false);
+  assert.equal(await linkAfiliado('shopee', { urlProduto: URL_SHOPEE }, { shopee: semAcesso, links, idAfiliado: ID_AFILIADO }), CURTO);
+  assert.deepEqual(links.chamadas, [{ url: URL_SHOPEE }]);
+});
+
+test('lojas Shopee: previaDoLink continua só do Mercado Livre', async () => {
+  const ml = mlFalso();
+  await assert.rejects(previaDoLink(URL_SHOPEE, { ml }), /só funciona com links do Mercado Livre/);
+  assert.equal(ml.chamadas.length, 0);
+});
+
+test('S2: o link da Shopee (da API ou da extensão) é guardado por produto e ID por 7 dias e não é gerado de novo a cada disparo', async () => {
+  const rel = { t: 1_700_000_000_000 };
+  const conexao = { id_afiliado: ID_AFILIADO, app_id: '123456789', chave: SENHA_API };
+  let acesso = 'ok';
+  let n = 0;
+  const mutacoes = [];
+  const api = async (url, init) => {
+    assert.equal(url, URL_API);
+    mutacoes.push(JSON.parse(init.body).query);
+    if (acesso !== 'ok') return Response.json({ errors: [{ extensions: { code: 10035 } }] });
+    return Response.json({ data: { generateShortLink: { shortLink: `https://s.shopee.com.br/Api${++n}x` } } });
+  };
+  const shopee = createShopee({ fetch: api, agora: () => rel.t, lerConexao: () => conexao });
+  const links = linksShopee();
+  const gerar = (u = URL_SHOPEE, id = ID_AFILIADO, l = links) => linkAfiliado('shopee', { urlProduto: u }, { shopee, links: l, idAfiliado: id });
+
+  // pela API: o segundo disparo do mesmo produto (inclusive em outro formato de endereço) não chama a API
+  assert.equal(await gerar(), 'https://s.shopee.com.br/Api1x');
+  assert.equal(await gerar(), 'https://s.shopee.com.br/Api1x');
+  assert.equal(await gerar(`https://shopee.com.br/product/${SHOP}/${ITEM}`), 'https://s.shopee.com.br/Api1x');
+  assert.equal(mutacoes.length, 1);
+  // outro produto e outro ID de afiliado geram o próprio link
+  assert.equal(await gerar(`https://shopee.com.br/outro-i.${SHOP}.123`), 'https://s.shopee.com.br/Api2x');
+  assert.equal(await gerar(URL_SHOPEE, '18328801340'), 'https://s.shopee.com.br/Api3x');
+  assert.equal(mutacoes.length, 3);
+  assert.equal(await gerar(), 'https://s.shopee.com.br/Api1x', 'o do ID anterior continua guardado para ele');
+  // passados 7 dias, gera de novo
+  rel.t += 7 * 24 * 3600 * 1000;
+  assert.equal(await gerar(), 'https://s.shopee.com.br/Api4x');
+  // salvar a conexão (invalidar) esquece
+  shopee.invalidar();
+  assert.equal(await gerar(), 'https://s.shopee.com.br/Api5x');
+  assert.equal(mutacoes.length, 5);
+  assert.equal(links.chamadas.length, 0, 'API útil: a extensão nunca foi chamada');
+
+  // pela extensão (API sem acesso): o link também fica guardado e a extensão é chamada uma vez
+  acesso = 'sem_acesso';
+  shopee.invalidar();
+  await assert.rejects(shopee.gerarLink(URL_SHOPEE)); // a API diz 10035: apiUtil passa a ser false
+  assert.equal(shopee.apiUtil(), false);
+  const ext = linksShopee({ link: CURTO });
+  assert.equal(await gerar(URL_SHOPEE, ID_AFILIADO, ext), CURTO);
+  assert.equal(await gerar(URL_SHOPEE, ID_AFILIADO, ext), CURTO);
+  assert.deepEqual(ext.chamadas, [{ url: URL_SHOPEE }]);
+  assert.equal(mutacoes.length, 6, 'nem a API foi tentada de novo');
+
+  // extensão sem longLink, ou com longLink sem an_: o link sai, mas não é guardado (a conta não foi conferida)
+  for (const longo of [null, URL_SHOPEE, `${URL_SHOPEE}?utm_source=outro&utm_medium=affiliates`]) {
+    shopee.invalidar();
+    await assert.rejects(shopee.gerarLink(URL_SHOPEE));
+    const semProva = linksShopee({ link: CURTO, longo });
+    assert.equal(await gerar(URL_SHOPEE, ID_AFILIADO, semProva), CURTO, String(longo));
+    assert.equal(await gerar(URL_SHOPEE, ID_AFILIADO, semProva), CURTO);
+    assert.equal(semProva.chamadas.length, 2, `${longo}: dois disparos, dois pedidos à extensão`);
+    assert.equal(shopee.linkGuardado(URL_SHOPEE, ID_AFILIADO), null);
+  }
+  // com o longLink do dono: um pedido só
+  shopee.invalidar();
+  await assert.rejects(shopee.gerarLink(URL_SHOPEE));
+  const comProva = linksShopee({ link: CURTO, longo: longoDe(ID_AFILIADO) });
+  await gerar(URL_SHOPEE, ID_AFILIADO, comProva); await gerar(URL_SHOPEE, ID_AFILIADO, comProva);
+  assert.equal(comProva.chamadas.length, 1);
+
+  // o que não passou nas conferências não é guardado: outra conta e link fora do formato pedem de novo
+  shopee.invalidar();
+  await assert.rejects(shopee.gerarLink(URL_SHOPEE));
+  const outra = linksShopee({ longo: longoDe('99999999999') });
+  for (let i = 0; i < 2; i++) assert.equal((await gerar(URL_SHOPEE, ID_AFILIADO, outra).catch((e) => e)).tipo, 'outra_conta');
+  assert.equal(outra.chamadas.length, 2);
+  const torto = linksShopee({ link: 'https://meli.la/abc' });
+  for (let i = 0; i < 2; i++) assert.equal((await gerar(URL_SHOPEE, ID_AFILIADO, torto).catch((e) => e)).tipo, 'link_falhou');
+  assert.equal(torto.chamadas.length, 2);
+  assert.equal(shopee.linkGuardado(URL_SHOPEE, ID_AFILIADO), null);
+
+  // um linkGuardado que devolva algo fora de s.shopee.com.br nunca sai: gera de novo
+  const adulterado = { ...shopeeFalso({ apiUtil: true }), linkGuardado: () => 'https://evil.example/x', guardarLink: () => true };
+  assert.equal(await linkAfiliado('shopee', { urlProduto: URL_SHOPEE }, { shopee: adulterado, links, idAfiliado: ID_AFILIADO }), 'https://s.shopee.com.br/ApiLink1');
+  assert.equal(adulterado.chamadas.gerarLink.length, 1);
+  // sem ID válido, nem olha o guardado (sem_id antes de tudo)
+  assert.equal((await gerar(URL_SHOPEE, '1234').catch((e) => e)).tipo, 'sem_id');
+});
+
+test('R5: o padrão do ID de afiliado da tela Conexões é o RE_ID_AFILIADO de shopee.js', () => {
+  const campo = PLATAFORMAS.shopee.campos.find((c) => c.nome === 'id_afiliado');
+  assert.equal(campo.padrao, RE_ID_AFILIADO.source);
+  assert.equal(campo.padrao, '^[0-9]{5,20}$');
+});
+
+test('lojas: o fetch global nunca foi chamado (CA8)', () => {
+  assert.equal(chamadasGlobais, 0);
 });

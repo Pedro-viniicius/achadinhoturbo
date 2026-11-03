@@ -1,5 +1,7 @@
 // Conexões (#conexoes; os endereços antigos #etiquetas e a extensão de Ajustes vieram para cá).
 // Mercado Livre: etiquetas de afiliado + extensão do Chrome. Amazon: tag, credencial da API e teste (4 estados do selo).
+// Shopee (plano integracao-shopee, etapa 9): ID de afiliado, AppID e Senha da API em dois fieldset, linha da extensão,
+// aviso "Antes de usar", 6 selos e teste por `resultado`. As funções `cx*` são puras (testadas em test/shopee-painel.test.js).
 // Carrega antes de app.js: só define funções. Os utilitários de app.js e paineis.js ($, $$, esc, api,
 // aviso, tentar, mostrarErros, REQ, S, atualizarEstado, podeEquipe, dataHora) só são usados quando as funções rodam.
 
@@ -39,6 +41,39 @@ const TEXTOS_CONEXOES = {
     tag_invalida: 'A tag não pertence a esta credencial/loja.',
     indisponivel: 'A Amazon não respondeu agora. Tente de novo em alguns minutos.',
   },
+  // Shopee: o link sai pela extensão do Chrome ou pela API; os dados do produto, só pela API (plano integracao-shopee)
+  shopee: {
+    conectada: 'Conectada', soId: 'Só com o ID', semAcessoSelo: 'Sem acesso à API', credenciaisSalvas: 'Credenciais salvas', recusada: 'Credencial recusada',
+    extOn: '✓ Extensão do Chrome conectada. Os links da Shopee saem por ela, com o Chrome logado no portal de afiliados.',
+    extOff: '! Extensão do Chrome desconectada. Abra o Chrome com a extensão e entre no portal de afiliados da Shopee, ou ligue a API abaixo.',
+    antesTitulo: 'Antes de usar: deixe o Chrome pronto e, se quiser a busca automática, peça a API.',
+    antesTituloSemAcesso: 'A Shopee ainda não liberou a API para a sua conta.',
+    passo1: '<b>Para os links:</b> deixe o Chrome logado no portal de afiliados da Shopee e recarregue a extensão em <code>chrome://extensions</code> (é preciso a versão 1.3.0 ou mais nova; ela ganhou uma permissão nova).',
+    passo2: '<b>Para buscar título, preço e foto sozinha:</b> peça acesso à <a href="https://affiliate.shopee.com.br/open_api" target="_blank" rel="noopener">Open API de Afiliados (abre em outra aba)</a> ou, se o botão “Aplicar” estiver desabilitado, ao <a href="https://help.shopee.com.br/portal/webform/bbce78695c364ba18c9cbceb74ec9091" target="_blank" rel="noopener">formulário de atendimento da Shopee (abre em outra aba)</a>.',
+    passo3: 'A Shopee responde em até 3 dias úteis. Quando liberarem, a mesma página mostra o AppID e a Senha da API. Copie os dois para os campos abaixo.',
+    fecho: 'Sem a API você já dispara: só precisa preencher título e preço à mão.',
+    comoConfigurar: 'Como configurar',
+    legendConta: 'Sua conta de afiliado', legendApi: 'Acesso à API',
+    ctxApi: 'Estes dois só existem depois que a Shopee liberar a API. Pode deixar em branco: os links já saem pela extensão.',
+    semAppIdSenha: 'Para testar, salve o AppID e a Senha da API. Eles aparecem depois que a Shopee liberar a API.',
+    nadaSalvo: 'Nada salvo ainda.',
+    faltaId: 'Falta o ID de afiliado. Sem ele os links não saem.',
+    idTagAmazon: 'O ID de afiliado da Shopee tem só números. O que você digitou parece uma tag da Amazon: ela vai em Conexões > Amazon.',
+    idFormato: 'ID de afiliado: use só números, como 98765432101.',
+    appIdFormato: 'AppID: use só números.',
+    appIdIgual: 'O AppID e o ID de afiliado são números diferentes. Confira os dois no portal da Shopee.',
+    // resultado do teste, por `resultado` (a frase vem daqui; nunca repete ID, AppID nem Senha)
+    teste: {
+      ok: 'Credenciais aceitas pela Shopee.',
+      recusada: 'A Shopee não aceitou o AppID ou a Senha da API. Confira se copiou os dois por inteiro, sem espaços, se o aplicativo está ativo no painel de afiliados e se a data e a hora do computador estão certas.',
+      sem_acesso: 'A Shopee ainda não liberou a API para a sua conta. Peça o acesso pelo link acima e tente de novo quando eles responderem. Enquanto isso os links continuam saindo pela extensão.',
+      conta_restrita: 'A Shopee recusou o acesso desta conta (acesso negado, ID de afiliado inválido, conta com restrição ou credenciais de outra conta). Fale com o suporte de afiliados da Shopee.',
+      nao_configurada: 'Salve o AppID e a Senha da API para testar.',
+      cota: 'A Shopee limitou as consultas por agora. Tente de novo em alguns minutos.',
+      indisponivel: 'A Shopee não respondeu agora. Tente de novo em alguns minutos.',
+      sem_id: 'Credenciais aceitas, mas falta o ID de afiliado.',
+    },
+  },
 };
 
 function paginaConexoes({ rolarPara } = {}) {
@@ -77,6 +112,9 @@ function paginaConexoes({ rolarPara } = {}) {
 
 /** Selo do cartão e linha de estado da extensão. Também chamada por atualizarEstado (app.js) a cada 3 s nesta página. */
 function pintarEstadoML() {
+  const cx = $('#cx-shopee'); // a linha da extensão e o selo da Shopee acompanham a extensão, como o cartão do Mercado Livre
+  const ult = cx && cxUltimo.get(cx);
+  if (ult && S.st?.extensao && ult.extensao_online !== S.st.extensao.online) pintarSeloConexao(cx, { ...ult, extensao_online: S.st.extensao.online });
   const selo = $('#ml-selo'); const linha = $('#ml-estado'); if (!selo || !linha) return;
   const e = S.st.extensao; const direto = S.st.ajustes.link_mode === 'direct';
   const ok = S.tags.length > 0 && e.online && !direto;
@@ -134,8 +172,9 @@ async function outrasLojas() {
 /**
  * Classe e texto do selo para o `estado` que o servidor manda. Texto sempre visível (nunca só cor).
  * A Amazon tem 4 estados: falta_configurar, so_tag (aviso), pronta ("Credencial salva", neutro) e conectada.
+ * A Shopee tem 6 (`p` é o cartão: `so_id` fica verde se a extensão está on-line, senão em aviso).
  */
-function pillConexao(estado, id) {
+function pillConexao(estado, id, p = {}) {
   if (id === 'amazon') {
     const a = {
       falta_configurar: ['falta', TEXTOS_CONEXOES.falta], so_tag: ['pendente', TEXTOS_CONEXOES.soTag],
@@ -143,55 +182,171 @@ function pillConexao(estado, id) {
     }[estado];
     if (a) return a;
   }
+  if (id === 'shopee') {
+    const Sh = TEXTOS_CONEXOES.shopee;
+    const tabela = {
+      falta_configurar: ['falta', TEXTOS_CONEXOES.falta], so_id: [p.extensao_online === true ? 'pronta' : 'pendente', Sh.soId],
+      sem_acesso: ['pendente', Sh.semAcessoSelo], pronta: ['', Sh.credenciaisSalvas],
+      conectada: ['conectado', Sh.conectada], erro_credencial: ['erro', Sh.recusada],
+    };
+    if (Object.hasOwn(tabela, estado)) return tabela[estado];
+  }
   return {
     conectado: ['conectado', TEXTOS_CONEXOES.conectado], conectada: ['conectado', TEXTOS_CONEXOES.conectado],
     pronta: ['pronta', TEXTOS_CONEXOES.pronta], falta_configurar: ['falta', TEXTOS_CONEXOES.falta],
   }[estado] || ['impl', TEXTOS_CONEXOES.impl];
 }
 
+// ---------- Shopee: peças puras do cartão ----------
+/** Linha da extensão (spec, item 3): texto com "✓" ou "!" e se está desconectada (`off`). */
+function cxExtLinha(p) {
+  const on = p?.extensao_online === true;
+  return { texto: on ? TEXTOS_CONEXOES.shopee.extOn : TEXTOS_CONEXOES.shopee.extOff, off: !on };
+}
+
+/**
+ * Aviso "Antes de usar" (`.aviso-impl` com `.aviso-corpo` e `.passos`). Visível até a Shopee estar `conectada`;
+ * depois fica recolhido em <details> "Como configurar". Em `sem_acesso` o título diz que a Shopee ainda não liberou.
+ */
+function cxAvisoShopee(p) {
+  const T = TEXTOS_CONEXOES.shopee;
+  const titulo = p?.estado === 'sem_acesso' ? T.antesTituloSemAcesso : T.antesTitulo;
+  const corpo = `<p><b>${esc(titulo)}</b></p>
+    <ol class="passos"><li>${T.passo1}</li><li>${T.passo2}</li><li>${T.passo3}</li></ol>
+    <p>${T.fecho}</p>`;
+  const miolo = p?.estado === 'conectada' ? `<details><summary>${T.comoConfigurar}</summary>${corpo}</details>` : corpo;
+  return `<div class="aviso-impl${p?.estado === 'conectada' ? ' neutro' : ''}"><div class="aviso-corpo">${miolo}</div></div>`;
+}
+
+/** "Testar" só com AppID e Senha da API salvos (Shopee); nas outras lojas, depois de salvar algo. Operador não vê os segredos salvos: o servidor decide. */
+function cxTestarBloqueado(p) {
+  if (p?.id !== 'shopee') return !p?.updated_at;
+  const salvos = Array.isArray(p.segredos_salvos) ? p.segredos_salvos : null;
+  return !(p.config?.app_id && (salvos === null || salvos.includes('chave')));
+}
+
+/** Falha da última verificação (frase fixa do servidor) em Amazon e Shopee; '' se não houve falha. */
+function cxFalhaVerificacao(p) {
+  if (!['amazon', 'shopee'].includes(p?.id) || !p.situacao) return '';
+  return ['ok', 'desconhecido', 'nao_configurada'].includes(p.situacao.acesso) ? '' : p.situacao.motivo || '';
+}
+
+/** Linha de estado do cartão: { texto, aviso }. A falha da verificação fica visível ao recarregar, em texto e não só no selo. */
+function cxLinhaEstado(p) {
+  const T = TEXTOS_CONEXOES; const shopee = p?.id === 'shopee';
+  const base = p.updated_at ? T.salvoEm(p.updated_at) : shopee ? T.shopee.nadaSalvo : T.nadaSalvo;
+  const falha = cxFalhaVerificacao(p);
+  const faltaId = shopee && ['pronta', 'sem_acesso', 'erro_credencial'].includes(p.estado) && !p.config?.id_afiliado ? T.shopee.faltaId : '';
+  const dica = shopee && cxTestarBloqueado(p) ? T.shopee.semAppIdSenha : '';
+  return { texto: [falha, faltaId, base, dica].filter(Boolean).join(' '), aviso: !!(falha || faltaId) };
+}
+
+/** Frase do resultado do "Testar": { frase, ok, aviso }. Shopee: sempre a da tela por `resultado`; nunca repete ID, AppID nem Senha. */
+function cxFraseTeste(p, r) {
+  const T = TEXTOS_CONEXOES; r = r || {};
+  if (p?.id === 'shopee') {
+    const frase = Object.hasOwn(T.shopee.teste, r.resultado) ? T.shopee.teste[r.resultado] : r.mensagem || '';
+    return { frase, ok: !!r.ok, aviso: !r.ok };
+  }
+  // Na Amazon a frase vem de `resultado` (texto fixo da tela). No sucesso vale a do servidor (frase fixa), que pode
+  // trazer a dica de cadastrar a tag; sem `resultado` conhecido, também a mensagem do servidor.
+  const fraseTela = p?.id === 'amazon' && !r.ok ? T.testeAmazon[r.resultado] : null;
+  return { frase: fraseTela || r.mensagem || T.testeAmazon[r.resultado] || '', ok: !!r.ok, aviso: !r.ok };
+}
+
+const cxSemZeros = (v) => String(v ?? '').replace(/^0+/, '');
+/** Erro de um campo da Shopee antes de enviar (nunca repete o valor). Segredo e limites: erroCampoConexao. */
+function cxErroCampoShopee(c, v) {
+  const T = TEXTOS_CONEXOES.shopee;
+  let re = null; try { re = c.padrao ? new RegExp(c.padrao) : null; } catch { /* o servidor confere */ }
+  if (c.nome === 'id_afiliado') {
+    if (re ? re.test(v) : /^[0-9]{5,20}$/.test(v)) return '';
+    return /[A-Za-z-]/.test(v) ? T.idTagAmazon : T.idFormato; // letras ou traço: o engano mais provável é a tag da Amazon
+  }
+  if (c.nome === 'app_id' && /[^0-9]/.test(v)) return T.appIdFormato;
+  return erroCampoConexao(c, v);
+}
+/** AppID e ID de afiliado são números diferentes (o servidor também recusa, com 400). */
+function cxCruzaShopee(campos) {
+  const id = cxSemZeros(campos?.id_afiliado); const app = cxSemZeros(campos?.app_id);
+  return id && app && id === app ? TEXTOS_CONEXOES.shopee.appIdIgual : '';
+}
+/** Elemento que leva o foco quando o servidor recusa o AppID igual ao ID (a mensagem é fixa). */
+const cxElDoErro = (form, msg) => (String(msg || '').includes('O AppID e o ID de afiliado') ? form.elements.namedItem('app_id') : undefined);
+
+/** Os dois fieldset da Shopee: o que identifica a conta × o que é credencial da API. Cada campo leva a sua ajuda (`?`). */
+function cxFormShopee(p, campos) {
+  const T = TEXTOS_CONEXOES.shopee; const id = esc(p.id);
+  const um = (nome, opcoes) => { const c = campos.find((x) => x.nome === nome); return c ? campoConexao(p, c, opcoes) : ''; };
+  return `<fieldset><legend>${T.legendConta}</legend>${um('id_afiliado', { numerico: true, tip: 'conexoes.shopee.id' })}</fieldset>
+      <fieldset><legend>${T.legendApi}</legend><p class="dica" id="cx-${id}-ctx" data-ctx-api>${T.ctxApi}</p>
+        ${um('app_id', { numerico: true, tip: 'conexoes.shopee.appid' })}${um('chave', { tip: 'conexoes.shopee.senha' })}</fieldset>`;
+}
+
 function cartaoConexao(p) {
   const id = esc(p.id); const campos = Array.isArray(p.campos) ? p.campos : [];
   const amazon = p.id === 'amazon' && p.implementada;
-  const aviso = amazon
-    ? `<div class="aviso-impl"><p>${TEXTOS_CONEXOES.amazonPreRequisito} <a href="${TEXTOS_CONEXOES.amazonDocs}" target="_blank" rel="noopener">${TEXTOS_CONEXOES.amazonComoConseguir}</a></p></div>
+  const shopee = p.id === 'shopee' && p.implementada;
+  const ext = cxExtLinha(p);
+  const aviso = shopee
+    ? `<p class="ext-linha${ext.off ? ' off' : ''}" role="status" data-ext><span data-ext-txt>${ext.texto}</span> ${q('conexoes.shopee.extensao')}</p>
+      <div data-antes>${cxAvisoShopee(p)}</div>`
+    : amazon
+      ? `<div class="aviso-impl"><p>${TEXTOS_CONEXOES.amazonPreRequisito} <a href="${TEXTOS_CONEXOES.amazonDocs}" target="_blank" rel="noopener">${TEXTOS_CONEXOES.amazonComoConseguir}</a></p></div>
       <p class="dica" data-espelhos role="status" hidden></p>`
-    : p.implementada ? '' : `<div class="aviso-impl"><p>${campos.length ? TEXTOS_CONEXOES.avisoImpl : TEXTOS_CONEXOES.avisoImplSemCampos}</p></div>`;
+      : p.implementada ? '' : `<div class="aviso-impl"><p>${campos.length ? TEXTOS_CONEXOES.avisoImpl : TEXTOS_CONEXOES.avisoImplSemCampos}</p></div>`;
   const desc = amazon ? TEXTOS_CONEXOES.amazonDesc : p.descricao;
   const form = !campos.length ? '' : `<form novalidate>
-      ${campos.map((c) => campoConexao(p, c)).join('')}
+      ${shopee ? cxFormShopee(p, campos) : campos.map((c) => campoConexao(p, c)).join('')}
       <div class="acoes"><button type="submit" class="pri">Salvar</button><button type="button" data-testar aria-describedby="cx-${id}-estado">Testar</button></div>
       <p class="estado-linha" id="cx-${id}-estado" role="status"></p>
     </form>`;
   return `<article class="card conexao" id="cx-${id}" aria-labelledby="cx-${id}-h">
-    <header class="cab"><h2 id="cx-${id}-h">${esc(p.nome || p.id)}${amazon ? ' ' + q('conexoes.amazon') : ''}</h2><span class="estado-pill"></span></header>
+    <header class="cab"><h2 id="cx-${id}-h">${esc(p.nome || p.id)}${amazon ? ' ' + q('conexoes.amazon') : shopee ? ' ' + q('conexoes.shopee') : ''}</h2><span class="estado-pill"></span></header>
     ${desc ? `<p class="desc">${esc(desc)}</p>` : ''}
     ${aviso}${form}
   </article>`;
 }
 
-/** Um campo do registro. Sem `value` no segredo (nunca vem do servidor) e sem maxlength (cortaria a chave colada sem avisar). */
-function campoConexao(p, c) {
+/**
+ * Um campo do registro. Sem `value` no segredo (nunca vem do servidor) e sem maxlength (cortaria a chave colada sem avisar).
+ * `opcoes`: numerico (inputmode=numeric) e tip (chave do `?` de ajuda; o segredo usa 'conexoes.segredo' por padrão).
+ */
+function campoConexao(p, c, opcoes = {}) {
   const id = `cx-${esc(p.id)}-${esc(c.nome)}`;
   const dica = c.ajuda ? `<small class="dica" id="${id}-dica">${esc(c.ajuda)}</small>` : '';
   const desc = c.ajuda ? ` aria-describedby="${id}-dica"` : '';
+  const modo = opcoes.numerico ? ' inputmode="numeric"' : '';
   if (c.tipo === 'segredo') {
     // new-password: o Chrome não preenche aqui a senha do painel que ele guardou
-    return `<label class="campo"><span>${esc(c.rotulo)} ${q('conexoes.segredo')}</span>
+    return `<label class="campo"><span>${esc(c.rotulo)} ${q(opcoes.tip || 'conexoes.segredo')}</span>
       <input type="password" name="${esc(c.nome)}" id="${id}" autocomplete="new-password" spellcheck="false"${desc}>${dica}</label>`;
   }
-  return `<label class="campo"><span>${esc(c.rotulo)}</span>
-    <input type="text" name="${esc(c.nome)}" id="${id}" autocomplete="off" spellcheck="false"${desc}>${dica}</label>`;
+  return `<label class="campo"><span>${esc(c.rotulo)}${opcoes.tip ? ' ' + q(opcoes.tip) : ''}</span>
+    <input type="text" name="${esc(c.nome)}" id="${id}"${modo} autocomplete="off" spellcheck="false"${desc}>${dica}</label>`;
 }
 
-/** Selo do cartão e, na Amazon, a nota dos espelhamentos que dependem só do texto da origem. */
+/** Selo do cartão e, na Amazon, a nota dos espelhamentos que dependem só do texto da origem; na Shopee, a linha da extensão e o aviso. */
+const cxUltimo = new WeakMap(); // último `p` pintado em cada cartão (pintarEstadoML repinta com a extensão atual)
 function pintarSeloConexao(art, p) {
-  const [cls, txt] = pillConexao(p.estado, p.id);
+  cxUltimo.set(art, p);
+  const [cls, txt] = pillConexao(p.estado, p.id, p);
   const selo = $('.cab .estado-pill', art); selo.className = 'estado-pill ' + cls; selo.textContent = txt;
+  if (p.id === 'shopee') pintarTopoShopee(art, p);
   const nota = $('[data-espelhos]', art); if (!nota) return;
   const n = Number(p.espelhos_ativos) || 0;
   const mostrar = p.estado === 'so_tag' && n > 0;
   nota.hidden = !mostrar;
   nota.innerHTML = mostrar ? `${esc(TEXTOS_CONEXOES.espelhosEmUso(n))} <a href="#disparo-automatico">${TEXTOS_CONEXOES.verEspelhamentos}</a>` : '';
+}
+
+/** Repinta a linha da extensão (só o texto: a região role=status continua a mesma) e o aviso "Antes de usar" (muda com o estado). */
+function pintarTopoShopee(art, p) {
+  const linha = $('[data-ext]', art); const txt = $('[data-ext-txt]', art); const antes = $('[data-antes]', art);
+  const e = cxExtLinha(p);
+  if (txt && txt.textContent !== e.texto) txt.textContent = e.texto;
+  if (linha) linha.classList.toggle('off', e.off);
+  if (antes) { const html = cxAvisoShopee(p); if (antes.dataset?.html !== html) { antes.innerHTML = html; if (antes.dataset) antes.dataset.html = html; } }
 }
 
 /** Põe no cartão o que o servidor respondeu: selo, valores de texto, placeholder do segredo e linha de estado. */
@@ -206,12 +361,15 @@ function aplicarConexao(art, p) {
       el.placeholder = !salvos ? TEXTOS_CONEXOES.segredoSoDono : salvos.includes(c.nome) ? TEXTOS_CONEXOES.segredoSalvo : '';
     } else el.value = p.config?.[c.nome] ?? '';
   }
-  $('[data-testar]', form).disabled = !p.updated_at; // "Testar" só depois de salvar; a linha abaixo diz por quê
+  $('[data-testar]', form).disabled = cxTestarBloqueado(p); // "Testar" só depois de salvar; a linha abaixo diz por quê
+  if (p.id === 'shopee') { // a linha de contexto do fieldset da API só vale enquanto não há credenciais salvas
+    const ctx = $('[data-ctx-api]', form);
+    if (ctx) ctx.hidden = !!(p.config?.app_id && salvos?.includes('chave'));
+  }
   const linha = $('.estado-linha', form); linha.classList.remove('aviso');
-  linha.textContent = p.updated_at ? TEXTOS_CONEXOES.salvoEm(p.updated_at) : TEXTOS_CONEXOES.nadaSalvo;
-  // Amazon: a falha da última verificação (frase fixa do servidor) continua visível ao recarregar, em texto e não só no selo
-  const falha = p.id === 'amazon' && p.situacao && !['ok', 'desconhecido', 'nao_configurada'].includes(p.situacao.acesso) ? p.situacao.motivo : '';
-  if (falha) { linha.textContent = `${falha} ${linha.textContent}`; linha.classList.add('aviso'); }
+  const { texto, aviso } = cxLinhaEstado(p);
+  linha.textContent = texto;
+  if (aviso) linha.classList.add('aviso');
 }
 
 /** Erro de um campo, igual ao que o servidor confere (max e padrao do registro). Nunca repete o valor. */
@@ -229,8 +387,12 @@ function lerFormConexao(form, p) {
     const el = form.elements.namedItem(c.nome); if (!el || el.disabled) continue;
     const v = String(el.value || '').trim();
     if (c.tipo === 'segredo' && !v) continue;
-    const msg = v ? erroCampoConexao(c, v) : '';
+    const msg = v ? (p.id === 'shopee' ? cxErroCampoShopee(c, v) : erroCampoConexao(c, v)) : '';
     if (msg) erros.push({ msg, el }); else campos[c.nome] = v;
+  }
+  if (p.id === 'shopee' && !erros.length) {
+    const msg = cxCruzaShopee(campos);
+    if (msg) erros.push({ msg, el: form.elements.namedItem('app_id') });
   }
   return { campos, erros };
 }
@@ -250,19 +412,16 @@ function ligarConexao(art, p) {
       aviso(`${atual.nome}: dados salvos`);
     } catch (e) {
       linha.textContent = '';
-      mostrarErros(form, [{ msg: e.message }]);
+      mostrarErros(form, [{ msg: e.message, el: cxElDoErro(form, e.message) }]);
     } finally { salvar.disabled = false; salvar.textContent = 'Salvar'; }
   };
   testar.onclick = async () => {
     testar.disabled = true; testar.textContent = 'Testando…';
     try {
       const r = await api('/conexoes/' + encodeURIComponent(atual.id) + '/testar', 'POST', {});
-      // Na Amazon a frase vem de `resultado` (texto fixo da tela). No sucesso vale a do servidor (frase fixa), que pode
-      // trazer a dica de cadastrar a tag; sem `resultado` conhecido, também a mensagem do servidor.
-      const fraseTela = atual.id === 'amazon' && !r.ok ? TEXTOS_CONEXOES.testeAmazon[r.resultado] : null;
-      const frase = fraseTela || r.mensagem || TEXTOS_CONEXOES.testeAmazon[r.resultado] || '';
-      linha.classList.toggle('aviso', !r.ok);
-      if (r.ok) linha.innerHTML = `<span class="nivel-ok">✓ ${esc(frase)}</span>`; else linha.textContent = frase;
+      const { frase, ok, aviso: emAviso } = cxFraseTeste(atual, r);
+      linha.classList.toggle('aviso', emAviso);
+      if (ok) linha.innerHTML = `<span class="nivel-ok">✓ ${esc(frase)}</span>`; else linha.textContent = frase;
       if (r.resultado) { // o teste muda o estado (Conectada ou não): relê o cartão sem apagar a frase do teste
         const lista = await api('/conexoes').catch(() => null);
         const nova = Array.isArray(lista) ? lista.find((x) => x?.id === atual.id) : null;
@@ -270,6 +429,6 @@ function ligarConexao(art, p) {
       }
     } catch (e) {
       linha.textContent = e.message; linha.classList.add('aviso');
-    } finally { testar.disabled = !atual.updated_at; testar.textContent = 'Testar'; }
+    } finally { testar.disabled = cxTestarBloqueado(atual); testar.textContent = 'Testar'; }
   };
 }

@@ -32,14 +32,16 @@ export function alignToWindow(ts, start, end) {
  * Agendador único: regras, envios avulsos (F1/F2), espelhamento da Amazon e avisos (F3) passam pelo mesmo tick,
  * para não dobrar a taxa de mensagens. `dir` é a pasta de dados (fotos dos envios). `amazon`: o cliente único de
  * src/amazon.js (createAmazon, criado em src/server.js); sem ele, a fila de envios recusa oferta da Amazon e o
- * espelho marca os itens com o motivo. O espelho só decide: o que ele manda sair vai pela fila de envios.
+ * espelho marca os itens com o motivo. `shopee`: o cliente único de src/shopee.js (createShopee, também criado em
+ * src/server.js), só para a fila de envios (o espelho não trata a Shopee); sem ele, a fila recusa oferta da Shopee.
+ * O espelho só decide: o que ele manda sair vai pela fila de envios.
  */
-export function createScheduler({ db, wa, links, ml = mlDefault, fast = false, dir = null, amazon = null }) {
+export function createScheduler({ db, wa, links, ml = mlDefault, fast = false, dir = null, amazon = null, shopee = null }) {
   const running = new Set();
   let timer = null; let primeiro = null; let ticking = false; let recuperacao = null;
   let acordado = false; // um "agora" chegou com o tick em andamento: ele passa nos envios de novo antes de terminar
   // O "agora" não envia por conta própria: grava pendente e acorda o tick, que manda um envio de cada vez (S14)
-  const envios = createEnvios({ db, wa, links, ml, fast, dir, acordar, amazon });
+  const envios = createEnvios({ db, wa, links, ml, fast, dir, acordar, amazon, shopee });
   const avisos = createAvisos({ db, wa });
   // receber() (ouvinte do WhatsApp) e cada envio que o espelho cria chamam acordar(): a oferta sai neste tick
   const espelho = createEspelho({ db, wa, amazon, envios, acordar });
@@ -197,7 +199,7 @@ export function createScheduler({ db, wa, links, ml = mlDefault, fast = false, d
   }
 
   return {
-    runRule, previewOffers, tick, envios, avisos, amazon, espelho,
+    runRule, previewOffers, tick, envios, avisos, amazon, shopee, espelho,
     start() {
       if (timer) return;
       // o que ficou 'enviando' (envios) ou 'processando' (espelho) quando o serviço caiu volta antes do primeiro tick

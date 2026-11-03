@@ -49,9 +49,14 @@
 // Segurança: o token só vive na closure de createAmazon; as mensagens de erro são fixas por tipo (nunca corpo
 // de resposta, URL, ID, segredo ou token); o módulo não escreve no console. Hosts de rede fixos: o do token
 // (por versão da credencial), o do GetItems e os de HOSTS_AMAZON no resolvedor.
+//
+// O resolvedor (saltos, https, porta, timeout, User-Agent, cache e junção de pedidos) e o leitor de corpo com teto
+// são os de src/rede.js (plano integracao-shopee, etapa 5): aqui ficam só o que é da Amazon (hosts, ASIN, frases).
 
 import { createHash } from 'node:crypto';
 import { discountPct } from './template.js';
+import { tituloDeUmaLinha } from './titulo.js';
+import { resolverPorRedirecionamento, lerCorpoLimitado, FalhaDeLink, paraUrl, hostDaLista, MAX_URL } from './rede.js';
 
 export const HOSTS_AMAZON = Object.freeze(['link.amazon', 'amzn.to', 'amzn.com', 'a.co', 'amazon.com.br', 'amazon.com']);
 const HOSTS_PRODUTO = ['amazon.com.br', 'amazon.com']; // onde o caminho pode trazer o ASIN
@@ -72,18 +77,11 @@ export const RECURSOS = Object.freeze(['itemInfo.title', 'images.primary.large',
 /** ASIN usado pelo testar() (o da referência do dono). 404 dele também prova o acesso. */
 export const ASIN_TESTE = 'B0FG2MD49G';
 
-const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36';
-const MAX_URL = 2048;
-const MAX_SALTOS = 5;
-const TIMEOUT_LINK = 8000;
 const TIMEOUT_API = 15000;
 const INTERVALO_API = 1000;            // 1 chamada/s (cota de credencial nova)
 const LOTE = 10;                       // ASINs por GetItems
 const CACHE_ITEM_MS = 15 * 60 * 1000;
 const CACHE_ITEM_MAX = 1000;
-const CACHE_LINK_MS = 60 * 60 * 1000;
-const CACHE_LINK_MAX = 500;
-const CACHE_INVALIDO_MS = 10 * 60 * 1000; // cache negativo curto do resolvedor (S6)
 const MAX_CORPO = 2 * 1024 * 1024;
 const RE_ASIN = /^[A-Z0-9]{10}$/;
 const RE_TAG = /^[A-Za-z0-9_-]{2,64}$/;
@@ -132,20 +130,6 @@ export class ErroAmazon extends Error {
 
 // ------------------------------------------------------------------------------------------ ASIN e link
 
-const hostDaLista = (host, lista) => lista.some((h) => host === h || host.endsWith(`.${h}`));
-
-/** URL a partir de texto (aceita sem esquema: 'amzn.to/x'); null se inválida, grande demais ou com credenciais. */
-function paraUrl(entrada) {
-  if (typeof entrada !== 'string') return null;
-  const s = entrada.trim();
-  if (!s || s.length > MAX_URL) return null;
-  let u;
-  try { u = new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(s) ? s : `https://${s}`); } catch { return null; }
-  if (u.protocol !== 'https:' && u.protocol !== 'http:') return null;
-  if (u.username || u.password) return null;
-  return u;
-}
-
 const RE_CAMINHOS = [
   /(?:^|\/)dp\/([A-Z0-9]{10})(?=\/|$)/i,              // /dp/<ASIN> e /<slug>/dp/<ASIN>
   /(?:^|\/)gp\/product\/([A-Z0-9]{10})(?=\/|$)/i,
@@ -154,7 +138,7 @@ const RE_CAMINHOS = [
 ];
 
 function asinDaUrl(u) {
-  if (!u || !hostDaLista(u.hostname.toLowerCase(), HOSTS_PRODUTO)) return null;
+  if (!u || !hostDaLista(u.hostname, HOSTS_PRODUTO)) return null;
   for (const re of RE_CAMINHOS) {
     const m = re.exec(u.pathname);
     if (m) return m[1].toUpperCase();
@@ -170,114 +154,25 @@ export function extrairAsin(url) {
   return asinDaUrl(paraUrl(url));
 }
 
-/** URL que o resolvedor aceita seguir: host da lista, sem porta; http vira https. null se não serve. */
-function urlSeguivel(u) {
-  if (!u || (u.protocol !== 'https:' && u.protocol !== 'http:') || u.username || u.password || u.port !== '') return null;
-  if (!hostDaLista(u.hostname.toLowerCase(), HOSTS_AMAZON)) return null;
-  if (u.protocol === 'http:') u.protocol = 'https:';
-  return u;
-}
+const CACHE_LINKS = new Map(); // url de entrada → resultado ou causa (só para quem chama resolverLink direto)
 
-const semQuery = (u) => `${u.origin}${u.pathname}`;
-const CACHE_LINKS = new Map(); // url de entrada → { valor | causa, ate } (só para quem chama resolverLink direto)
-const EM_VOO_LINKS = new WeakMap(); // cache → Map(url de entrada → promessa), para juntar pedidos simultâneos
-
-function lembrar(cache, chave, registro) {
-  if (!cache) return;
-  cache.delete(chave);
-  cache.set(chave, registro);
-  while (cache.size > CACHE_LINK_MAX) cache.delete(cache.keys().next().value);
-}
+/** Página de uma loja da Amazon (2xx) sem ASIN: busca, lista ou loja → 'nao_produto'. */
+const paginaDaLoja = (u) => hostDaLista(u.hostname, HOSTS_PRODUTO);
 
 /**
- * Resolve um link da Amazon (inclusive encurtador) até o ASIN, sem ler página.
- * opts.fetch: fetch injetado (padrão: o global, na hora da chamada); opts.cache: Map (padrão: o do módulo;
- * null desliga o cache e a junção de pedidos simultâneos); opts.agora: relógio.
+ * Resolve um link da Amazon (inclusive encurtador) até o ASIN, sem ler página (resolverPorRedirecionamento de
+ * src/rede.js com HOSTS_AMAZON). opts.fetch: fetch injetado (padrão: o global, na hora da chamada); opts.cache: Map
+ * (padrão: o do módulo; null desliga o cache e a junção de pedidos simultâneos); opts.agora: relógio.
  */
 export async function resolverLink(url, { fetch: f, cache = CACHE_LINKS, agora = Date.now } = {}) {
-  const inicial = urlSeguivel(paraUrl(url));
-  if (!inicial) throw new LinkNaoResolvido('invalido');
-  const direto = asinDaUrl(inicial);
-  if (direto) return { asin: direto, urlFinal: semQuery(inicial) };
-
-  const chave = inicial.href;
-  const salvo = cache?.get(chave);
-  if (salvo && salvo.ate > agora()) {
-    if (salvo.causa) throw new LinkNaoResolvido(salvo.causa);
-    return { ...salvo.valor };
-  }
-
-  let emVoo = null;
-  if (cache) {
-    emVoo = EM_VOO_LINKS.get(cache);
-    if (!emVoo) { emVoo = new Map(); EM_VOO_LINKS.set(cache, emVoo); }
-  }
-  let promessa = emVoo?.get(chave);
-  if (!promessa) {
-    promessa = seguirLink(inicial, f ?? globalThis.fetch).then((valor) => {
-      lembrar(cache, chave, { valor, ate: agora() + CACHE_LINK_MS });
-      return valor;
-    }, (e) => {
-      const causa = e instanceof LinkNaoResolvido ? e.causa : 'invalido';
-      if (e?.[PASSAGEIRA]) cache?.delete(chave); // tenta de novo na próxima chamada
-      else lembrar(cache, chave, { causa, ate: agora() + (causa === 'invalido' ? CACHE_INVALIDO_MS : CACHE_LINK_MS) });
-      throw new LinkNaoResolvido(causa);
-    });
-    if (emVoo) {
-      const p = promessa;
-      emVoo.set(chave, p);
-      const limpar = () => { if (emVoo.get(chave) === p) emVoo.delete(chave); };
-      p.then(limpar, limpar);
-    }
-  }
   try {
-    return { ...(await promessa) };
+    const { valor, urlFinal } = await resolverPorRedirecionamento(url, {
+      hosts: HOSTS_AMAZON, extrair: asinDaUrl, paginaSemValor: paginaDaLoja, fetch: f, cache, agora,
+    });
+    return { asin: valor, urlFinal };
   } catch (e) {
-    throw new LinkNaoResolvido(e?.causa); // erro novo por chamador (nada compartilhado entre eles)
+    throw new LinkNaoResolvido(e instanceof FalhaDeLink ? e.causa : 'invalido'); // frases da Amazon, nunca a URL
   }
-}
-
-/**
- * Marca interna (nunca sai de resolverLink) da falha que pode passar sozinha: fetch que lançou (rede, timeout)
- * ou 5xx. Não entra no cache negativo. 429 e 4xx ficam no cache (repetir não ajuda e só gera mais GETs).
- */
-const PASSAGEIRA = Symbol('passageira');
-const falhaPassageira = () => Object.assign(new LinkNaoResolvido('invalido'), { [PASSAGEIRA]: true });
-
-/** Segue os saltos a partir de `inicial` (já validada e sem ASIN). → { asin, urlFinal } ou LinkNaoResolvido. */
-async function seguirLink(inicial, doFetch) {
-  let atual = inicial;
-  for (let salto = 0; salto < MAX_SALTOS; salto++) {
-    let r;
-    try {
-      r = await doFetch(atual.href, {
-        method: 'GET', redirect: 'manual', signal: AbortSignal.timeout(TIMEOUT_LINK),
-        headers: { 'User-Agent': USER_AGENT, 'Accept-Language': 'pt-BR' },
-      });
-    } catch { throw falhaPassageira(); }
-    try { await r?.body?.cancel?.(); } catch { /* corpo já fechado */ }
-    const status = Number(r?.status) || 0;
-    if (status >= 500 && status < 600) throw falhaPassageira();
-
-    if (status >= 300 && status < 400) {
-      const location = r.headers?.get?.('location');
-      if (!location) throw new LinkNaoResolvido('invalido');
-      let prox;
-      try { prox = new URL(location, atual); } catch { throw new LinkNaoResolvido('invalido'); }
-      prox = urlSeguivel(prox);
-      if (!prox || prox.href.length > MAX_URL) throw new LinkNaoResolvido('invalido');
-      const asin = asinDaUrl(prox);
-      if (asin) return { asin, urlFinal: semQuery(prox) };
-      atual = prox;
-      continue;
-    }
-    // Chegou a uma página (sem redirecionar). Numa loja da Amazon sem ASIN é busca, lista ou loja.
-    if (status >= 200 && status < 300 && hostDaLista(atual.hostname.toLowerCase(), HOSTS_PRODUTO)) {
-      throw new LinkNaoResolvido('nao_produto');
-    }
-    throw new LinkNaoResolvido('invalido');
-  }
-  throw new LinkNaoResolvido('invalido'); // saltos demais
 }
 
 // ------------------------------------------------------------------------------------------------ API
@@ -286,16 +181,6 @@ const numeroPositivo = (v) => { const n = Number(v); return Number.isFinite(n) &
 
 // Mesmo teto do título no painel (maxlength) e em src/envios.js (MAX_TITULO): título maior aqui sairia como 'manual' sem o dono mexer.
 const MAX_TITULO = 200;
-
-/** Título de uma linha só, até MAX_TITULO, cortado antes de uma palavra (sem palavra partida). Sem texto → null. */
-function tituloDoItem(v) {
-  if (typeof v !== 'string') return null;
-  const t = v.replace(/\s+/g, ' ').trim();
-  if (!t) return null;
-  if (t.length <= MAX_TITULO) return t;
-  const corte = t.slice(0, MAX_TITULO + 1).lastIndexOf(' '); // o espaço pode ser o 201º caractere: então o corte é exato
-  return (corte > 0 ? t.slice(0, corte) : t.slice(0, MAX_TITULO)).trim();
-}
 
 /** Oferta a partir de um item do GetItems (parser tolerante: campo ausente vira null, nunca lança). */
 export function ofertaDoItem(item) {
@@ -312,7 +197,7 @@ export function ofertaDoItem(item) {
   const tipoDisp = listing?.availability?.type;
   return {
     key: `ASIN:${asin}`, asin,
-    title: tituloDoItem(titulo),
+    title: tituloDeUmaLinha(titulo, MAX_TITULO),
     price, oldPrice,
     discountPct: Number.isFinite(pct) && pct > 0 && pct < 100 ? Math.round(pct) : discountPct(price, oldPrice),
     image: typeof imagem === 'string' && imagem.length <= MAX_URL && IMAGEM_AMAZON.test(imagem) ? imagem : null,
@@ -366,48 +251,8 @@ function segundosDeEspera(r, corpo) {
   return s == null ? null : Math.min(s, 3600);
 }
 
-async function cancelarCorpo(r) {
-  try { await r?.body?.cancel?.(); } catch { /* corpo já fechado ou travado */ }
-}
-
-/**
- * Corpo da resposta como texto e JSON, com teto de MAX_CORPO bytes: content-length acima do teto é recusado
- * sem ler; sem content-length, lê em stream e para (cancelando) ao passar do teto. Recusado ou falha na
- * leitura → { texto: '', json: null, recusado: true }.
- */
-async function lerCorpo(r) {
-  const vazio = { texto: '', json: null, recusado: true };
-  try {
-    const declarado = r?.headers?.get?.('content-length');
-    if (declarado != null && declarado !== '' && !(Number(declarado) <= MAX_CORPO)) {
-      await cancelarCorpo(r);
-      return vazio;
-    }
-    let t;
-    const leitor = r?.body?.getReader?.();
-    if (leitor) {
-      const partes = [];
-      let total = 0;
-      for (;;) {
-        const { done, value } = await leitor.read();
-        if (done) break;
-        total += value?.byteLength ?? 0;
-        if (total > MAX_CORPO) {
-          try { await leitor.cancel(); } catch { /* já fechado */ }
-          return vazio;
-        }
-        partes.push(value);
-      }
-      t = Buffer.concat(partes).toString('utf8');
-    } else if (r?.body == null && typeof r?.text === 'function') {
-      t = await r.text(); // resposta sem stream (corpo vazio ou objeto simples)
-    } else return vazio;
-    if (typeof t !== 'string' || t.length > MAX_CORPO) return vazio;
-    let json = null;
-    try { json = JSON.parse(t); } catch { /* não é JSON */ }
-    return { texto: t, json, recusado: false };
-  } catch { return vazio; }
-}
+/** Corpo da resposta com teto de MAX_CORPO bytes (lerCorpoLimitado de src/rede.js). */
+const lerCorpo = (r) => lerCorpoLimitado(r, MAX_CORPO);
 
 const ACESSO_DO_TIPO = {
   sem_credenciais: 'nao_configurada', sem_tag: 'nao_configurada', credenciais_invalidas: 'credenciais_invalidas',
