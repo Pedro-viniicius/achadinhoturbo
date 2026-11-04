@@ -264,6 +264,112 @@ test('amazon: resolverLink guarda o resultado em cache por 1 h', async () => {
   assert.equal(f.chamadas.length, 2);
 });
 
+// ------------------------------------------------------------------ link.amazon → amzlinks.in → amazon.com.br
+// Bug de campo: https://link.amazon/B0boeV5q0 responde 302 para https://amzlinks.in/B0boeV5q0, que responde 302 para o
+// link longo do produto. amzlinks.in não é host da Amazon (HOSTS_AMAZON não muda): vale só como salto intermediário.
+const URL_LINK_AMAZON = 'https://link.amazon/B0boeV5q0';
+const URL_AMZLINKS = 'https://amzlinks.in/B0boeV5q0';
+const ASIN_IPHONE = 'B0HJB1C68N';
+const LONGO_IPHONE = `https://www.amazon.com.br/Apple-iPhone-Pro-Max-256/dp/${ASIN_IPHONE}?__mk_pt_BR=%C3%85M%C3%85%C5%BD%C3%95%C3%91&tag=desejodemen01-20&linkId=abc123&ascsubtag=xyz&btn_ref=ref1`;
+
+/** link.amazon → amzlinks.in → produto, como o curl real mostrou (o produto responde 200). */
+const cadeiaAmzlinks = (estado = {}) => fetchFalso((url) => {
+  if (url === URL_LINK_AMAZON) return redirecionar(302, URL_AMZLINKS);
+  if (url === URL_AMZLINKS) return redirecionar(302, estado.destino ?? LONGO_IPHONE);
+  if (url.startsWith('https://www.amazon.com.br/')) return new Response('<html>', { status: 200 });
+  return assert.fail(`rede não prevista: ${url}`);
+});
+
+test('amazon: resolverLink segue link.amazon → amzlinks.in → produto e devolve o ASIN com a URL sem query', async () => {
+  const f = cadeiaAmzlinks();
+  const r = await resolverLink(URL_LINK_AMAZON, { fetch: f, cache: null });
+  assert.deepEqual(r, { asin: ASIN_IPHONE, urlFinal: `https://www.amazon.com.br/Apple-iPhone-Pro-Max-256/dp/${ASIN_IPHONE}` });
+  assert.doesNotMatch(JSON.stringify(r), /desejodemen|linkId|ascsubtag|btn_ref|__mk_pt_BR|tag=/);
+  assert.deepEqual(f.chamadas.map((c) => c.url), [URL_LINK_AMAZON, URL_AMZLINKS], 'só dois GETs; parou no Location com ASIN');
+  for (const { init } of f.chamadas) { assert.equal(init.method, 'GET'); assert.equal(init.redirect, 'manual'); }
+});
+
+test('amazon: resolverLink aceita amzlinks.in vindo de outro encurtador (amzn.to), recusa subdomínio dele sem buscá-lo e cacheia o resultado', async () => {
+  const f = fetchFalso((url, init, n) => (n === 1 ? redirecionar(301, 'https://amzlinks.in/abc') : redirecionar(302, LONGO_IPHONE)));
+  assert.equal((await resolverLink('https://amzn.to/abc', { fetch: f, cache: new Map() })).asin, ASIN_IPHONE);
+  assert.deepEqual(f.chamadas.map((c) => c.url), ['https://amzn.to/abc', 'https://amzlinks.in/abc']);
+
+  // S1: amzlinks.in é de terceiro; só o host exato vale como salto. Subdomínio é 'invalido' e nunca é buscado.
+  for (const destino of ['https://x.amzlinks.in/abc', 'https://a.b.amzlinks.in/abc', 'https://X.AMZLINKS.IN/abc']) {
+    const s = fetchFalso((url, init, n) => (n === 1 ? redirecionar(301, destino) : redirecionar(302, LONGO_IPHONE)));
+    const e = await capturarErro(() => resolverLink('https://amzn.to/abc', { fetch: s, cache: null }));
+    assert.ok(e instanceof LinkNaoResolvido, destino);
+    assert.equal(e.causa, 'invalido', destino);
+    assert.deepEqual(s.chamadas.map((c) => c.url), ['https://amzn.to/abc'], `não buscou ${destino}`);
+  }
+
+  const cache = new Map();
+  const g = cadeiaAmzlinks();
+  await resolverLink(URL_LINK_AMAZON, { fetch: g, cache });
+  await resolverLink(URL_LINK_AMAZON, { fetch: g, cache });
+  assert.equal(g.chamadas.length, 2, 'a segunda chamada saiu do cache');
+});
+
+test('amazon: amzlinks.in colado direto continua inválido, sem nenhuma chamada de rede (só vale como salto)', async () => {
+  const nunca = fetchFalso(() => assert.fail('não deveria acessar a rede'));
+  for (const url of [URL_AMZLINKS, 'amzlinks.in/B0boeV5q0', 'http://amzlinks.in/x', 'https://x.amzlinks.in/x']) {
+    const e = await capturarErro(() => resolverLink(url, { fetch: nunca, cache: null }));
+    assert.ok(e instanceof LinkNaoResolvido, url);
+    assert.equal(e.causa, 'invalido', url);
+  }
+  assert.equal(nunca.chamadas.length, 0);
+  assert.equal(extrairAsin(URL_AMZLINKS), null);
+});
+
+test('amazon: salto em amzlinks.in que vai para fora, para http:// ou para porta explícita é inválido e o destino nunca é buscado', async () => {
+  for (const destino of ['https://evil.example/x', 'https://amzlinks.in.evil.example/x', 'https://amzlinks.in:8443/x',
+    'http://evil.example/dp/B0HJB1C68N', 'https://169.254.169.254/latest/meta-data', 'gopher://amzlinks.in/x']) {
+    const f = fetchFalso((url) => (url === URL_LINK_AMAZON ? redirecionar(302, URL_AMZLINKS) : redirecionar(302, destino)));
+    const e = await capturarErro(() => resolverLink(URL_LINK_AMAZON, { fetch: f, cache: null }));
+    assert.ok(e instanceof LinkNaoResolvido, destino);
+    assert.equal(e.causa, 'invalido', destino);
+    assert.deepEqual(f.chamadas.map((c) => c.url), [URL_LINK_AMAZON, URL_AMZLINKS], `foi até o salto e parou, sem buscar ${destino}`);
+  }
+});
+
+test('amazon: amzlinks.in sem Location, em 200 ou fora do ar é inválido (nunca nao_produto); 5xx não entra no cache', async () => {
+  const casos = [() => redirecionar(302, null), () => new Response('<html>', { status: 200 }), () => new Response('x', { status: 404 }),
+    () => new Response('erro', { status: 503 }), () => { throw new TypeError('fetch failed'); }];
+  for (const handler of casos) {
+    const f = fetchFalso((url) => (url === URL_LINK_AMAZON ? redirecionar(302, URL_AMZLINKS) : handler()));
+    const e = await capturarErro(() => resolverLink(URL_LINK_AMAZON, { fetch: f, cache: null }));
+    assert.equal(e.causa, 'invalido');
+    assert.equal(f.chamadas.length, 2, 'o salto em amzlinks.in foi tentado');
+  }
+  const cache = new Map(); let ok = false;
+  const f = fetchFalso((url) => (url === URL_LINK_AMAZON ? redirecionar(302, URL_AMZLINKS) : ok ? redirecionar(302, LONGO_IPHONE) : new Response('erro', { status: 503 })));
+  await capturarErro(() => resolverLink(URL_LINK_AMAZON, { fetch: f, cache }));
+  ok = true;
+  assert.equal((await resolverLink(URL_LINK_AMAZON, { fetch: f, cache })).asin, ASIN_IPHONE, 'a falha passageira não ficou guardada');
+});
+
+test('amazon: o limite de 5 saltos vale contando o salto em amzlinks.in', async () => {
+  const loop = fetchFalso((url, init, n) => redirecionar(301, `https://amzlinks.in/s${n}`));
+  const e = await capturarErro(() => resolverLink('https://link.amazon/inicio', { fetch: loop, cache: null }));
+  assert.equal(e.causa, 'invalido');
+  assert.equal(loop.chamadas.length, 5);
+
+  const g = fetchFalso((url, init, n) => redirecionar(302, n < 5 ? `https://amzlinks.in/s${n}` : LONGO_IPHONE));
+  assert.equal((await resolverLink('https://link.amazon/ok', { fetch: g, cache: null })).asin, ASIN_IPHONE);
+  assert.equal(g.chamadas.length, 5);
+});
+
+test('amazon: a lista de hosts da Amazon não ganhou amzlinks.in (ele é só salto)', () => {
+  assert.ok(!HOSTS_AMAZON.some((h) => h.includes('amzlinks')));
+  assert.deepEqual([...HOSTS_AMAZON], ['link.amazon', 'amzn.to', 'amzn.com', 'a.co', 'amazon.com.br', 'amazon.com']);
+});
+
+test('amazon: createAmazon.resolver (o que lojas e envios usam) atravessa o amzlinks.in', async () => {
+  const f = cadeiaAmzlinks();
+  const amazon = createAmazon({ db: completo(), fetch: f, esperar: async () => {} });
+  assert.deepEqual(await amazon.resolver(URL_LINK_AMAZON), { asin: ASIN_IPHONE, urlFinal: `https://www.amazon.com.br/Apple-iPhone-Pro-Max-256/dp/${ASIN_IPHONE}` });
+});
+
 // ------------------------------------------------------------------------------------------ createAmazon
 test('amazon: token OAuth e GetItems com URL, cabeçalhos e corpo do contrato; parser do offersV2', async () => {
   const db = completo(); const rel = relogio();

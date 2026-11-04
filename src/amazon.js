@@ -8,6 +8,9 @@
 // - resolverLink(url, { fetch, cache?, agora? }) → { asin, urlFinal }. URL que já traz o ASIN volta sem rede.
 //   Senão segue até 5 saltos, só com GET (o HEAD dá 404 no link.amazon), redirect:'manual', corpo cancelado
 //   sem leitura, timeout de 8 s, e só enquanto o host está em HOSTS_AMAZON, sempre em https e sem porta.
+//   Exceção: SALTOS_AMAZON (amzlinks.in, para onde o link.amazon redireciona) é aceito só como salto
+//   intermediário e só no host exato, sem subdomínio (hostsDeSalto de src/rede.js): colado direto é 'invalido' sem
+//   rede e nunca dá o ASIN.
 //   urlFinal é origem + caminho, sem query: a tag de terceiro e o rastreio (crid, dib, sr, qid, linkId,
 //   ascsubtag…) são descartados. Falha → LinkNaoResolvido { codigo/causa: 'invalido' | 'nao_produto' }.
 //   Cache (Map passado em `cache`; null desliga): sucesso e 'nao_produto' por 1 h; 'invalido' depois de tentar a
@@ -48,7 +51,7 @@
 //
 // Segurança: o token só vive na closure de createAmazon; as mensagens de erro são fixas por tipo (nunca corpo
 // de resposta, URL, ID, segredo ou token); o módulo não escreve no console. Hosts de rede fixos: o do token
-// (por versão da credencial), o do GetItems e os de HOSTS_AMAZON no resolvedor.
+// (por versão da credencial), o do GetItems e os de HOSTS_AMAZON (mais SALTOS_AMAZON, só como salto) no resolvedor.
 //
 // O resolvedor (saltos, https, porta, timeout, User-Agent, cache e junção de pedidos) e o leitor de corpo com teto
 // são os de src/rede.js (plano integracao-shopee, etapa 5): aqui ficam só o que é da Amazon (hosts, ASIN, frases).
@@ -59,6 +62,9 @@ import { tituloDeUmaLinha } from './titulo.js';
 import { resolverPorRedirecionamento, lerCorpoLimitado, FalhaDeLink, paraUrl, hostDaLista, MAX_URL } from './rede.js';
 
 export const HOSTS_AMAZON = Object.freeze(['link.amazon', 'amzn.to', 'amzn.com', 'a.co', 'amazon.com.br', 'amazon.com']);
+// Redirecionador de terceiro (Button, não Amazon) no meio da cadeia (link.amazon → amzlinks.in → amazon.com.br).
+// Só como salto e só o host exato: subdomínio de terceiro não é aceito (src/rede.js compara por igualdade).
+const SALTOS_AMAZON = Object.freeze(['amzlinks.in']);
 const HOSTS_PRODUTO = ['amazon.com.br', 'amazon.com']; // onde o caminho pode trazer o ASIN
 // Só subdomínios (m.media-amazon.com, images-na.ssl-images-amazon.com): o domínio raiz fica fora porque a CSP do
 // painel (src/server.js) libera só https://*.media-amazon.com e afins, e a foto não apareceria na prévia.
@@ -161,13 +167,13 @@ const paginaDaLoja = (u) => hostDaLista(u.hostname, HOSTS_PRODUTO);
 
 /**
  * Resolve um link da Amazon (inclusive encurtador) até o ASIN, sem ler página (resolverPorRedirecionamento de
- * src/rede.js com HOSTS_AMAZON). opts.fetch: fetch injetado (padrão: o global, na hora da chamada); opts.cache: Map
+ * src/rede.js com HOSTS_AMAZON e SALTOS_AMAZON como salto). opts.fetch: fetch injetado (padrão: o global, na hora da chamada); opts.cache: Map
  * (padrão: o do módulo; null desliga o cache e a junção de pedidos simultâneos); opts.agora: relógio.
  */
 export async function resolverLink(url, { fetch: f, cache = CACHE_LINKS, agora = Date.now } = {}) {
   try {
     const { valor, urlFinal } = await resolverPorRedirecionamento(url, {
-      hosts: HOSTS_AMAZON, extrair: asinDaUrl, paginaSemValor: paginaDaLoja, fetch: f, cache, agora,
+      hosts: HOSTS_AMAZON, hostsDeSalto: SALTOS_AMAZON, extrair: asinDaUrl, paginaSemValor: paginaDaLoja, fetch: f, cache, agora,
     });
     return { asin: valor, urlFinal };
   } catch (e) {

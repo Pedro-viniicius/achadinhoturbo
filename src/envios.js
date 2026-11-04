@@ -396,7 +396,10 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
     }
   }
 
-  /** ASIN do link (encurtador: segue os redirecionamentos, só hosts da Amazon). Falha → LinkNaoResolvido. */
+  /**
+   * ASIN do link (encurtador: segue os redirecionamentos, só hosts da Amazon, mais o amzlinks.in de terceiro só como
+   * salto e só no host exato). Falha → LinkNaoResolvido.
+   */
   async function asinDoLink(url) {
     try { return (await amazon.resolver(url)).asin; } catch (e) {
       throw e instanceof LinkNaoResolvido ? e : new LinkNaoResolvido('invalido');

@@ -1,10 +1,16 @@
 // Política de rede compartilhada pelas lojas (plano integracao-shopee, decisão 1; ADR-003). Sem raspar HTML.
 //
-// - resolverPorRedirecionamento(url, { hosts, extrair, paginaSemValor, fetch, cache, agora }) → { valor, urlFinal }.
+// - resolverPorRedirecionamento(url, { hosts, hostsDeSalto, extrair, paginaSemValor, fetch, cache, agora }) →
+//   { valor, urlFinal }.
 //   Resolve um link (inclusive encurtador) até o valor que a loja precisa (ASIN, ids do produto…), só pelos
 //   redirecionamentos:
 //   - URL de entrada e cada Location: http ou https (http vira https), sem porta, sem credenciais, até 2048
 //     caracteres e com o host em `hosts` (host exato ou subdomínio com ponto). Fora disso: 'invalido', sem rede.
+//   - hostsDeSalto (padrão []): hosts de terceiros aceitos SÓ como salto intermediário, num Location (ex.: o
+//     amzlinks.in, para onde o link.amazon redireciona). Mesma regra acima (https, sem porta, sem credenciais),
+//     mas SÓ o host exato: subdomínio não vale (é de terceiro; quem controla o DNS de um subdomínio poderia
+//     apontá-lo para um IP interno). Nunca valem como URL de entrada, o valor nunca é extraído deles e, se não
+//     redirecionarem (2xx, 4xx, 3xx sem Location), é 'invalido', nunca 'nao_produto'. Contam no limite de saltos.
 //   - Só GET, redirect:'manual', corpo cancelado sem leitura, timeout de 8 s por salto, até 5 saltos. Lê apenas o
 //     status e o Location.
 //   - extrair(u: URL) → valor | null (sem rede). Se a própria entrada já traz o valor, volta sem rede.
@@ -13,7 +19,8 @@
 //   - urlFinal = origem + caminho, sem query nem fragmento (rastreio e tag de terceiro ficam para trás).
 //   - Falha → FalhaDeLink { causa: 'invalido' | 'nao_produto' } com mensagem genérica; cada loja embrulha na sua
 //     classe e nas suas frases.
-//   - Cache (Map passado em `cache`; sem ele, nada é guardado): sucesso e 'nao_produto' por 1 h; 'invalido' por
+//   - Cache (Map passado em `cache`; sem ele, nada é guardado; a chave é só a URL de entrada, então cada conjunto
+//     de opções usa o seu próprio Map): sucesso e 'nao_produto' por 1 h; 'invalido' por
 //     10 min; a falha passageira (rede, timeout, 5xx) não entra, e a próxima chamada tenta de novo. Pedidos
 //     simultâneos pela mesma URL com o mesmo cache dividem um só caminho de rede. Cada chamador recebe cópia.
 // - lerCorpoLimitado(r, max) → { texto, json, recusado }. content-length acima de `max` é recusado sem ler; sem
@@ -60,10 +67,13 @@ export function paraUrl(entrada) {
   return u;
 }
 
-/** URL que o resolvedor aceita seguir: host da lista, sem porta nem credenciais; http vira https. null se não serve. */
-function urlSeguivel(u, hosts) {
+/**
+ * URL que o resolvedor aceita seguir: host em `hosts` (exato ou subdomínio) ou em `hostsDeSalto` (só exato; o
+ * hostname do URL já vem em minúsculas), sem porta nem credenciais; http vira https. null se não serve.
+ */
+function urlSeguivel(u, hosts, hostsDeSalto = []) {
   if (!u || (u.protocol !== 'https:' && u.protocol !== 'http:') || u.username || u.password || u.port !== '') return null;
-  if (!hostDaLista(u.hostname, hosts)) return null;
+  if (!hostDaLista(u.hostname, hosts) && !hostsDeSalto.some((h) => u.hostname === h)) return null;
   if (u.protocol === 'http:') u.protocol = 'https:';
   return u;
 }
@@ -91,9 +101,10 @@ function extrairSeguro(extrair, u) {
 }
 
 /** Resolve o link só pelos redirecionamentos (ver o contrato no topo do arquivo). */
-export async function resolverPorRedirecionamento(url, { hosts, extrair, paginaSemValor = () => false, fetch: f, cache = null, agora = Date.now } = {}) {
+export async function resolverPorRedirecionamento(url, { hosts, hostsDeSalto = [], extrair, paginaSemValor = () => false, fetch: f, cache = null, agora = Date.now } = {}) {
   if (!Array.isArray(hosts) || !hosts.length || typeof extrair !== 'function') throw new FalhaDeLink('invalido');
-  const inicial = urlSeguivel(paraUrl(url), hosts);
+  if (!Array.isArray(hostsDeSalto)) throw new FalhaDeLink('invalido');
+  const inicial = urlSeguivel(paraUrl(url), hosts); // host de salto nunca é entrada
   if (!inicial) throw new FalhaDeLink('invalido');
   const direto = extrairSeguro(extrair, inicial);
   if (direto != null) return { valor: copia(direto), urlFinal: semQuery(inicial) };
@@ -112,7 +123,7 @@ export async function resolverPorRedirecionamento(url, { hosts, extrair, paginaS
   }
   let promessa = emVoo?.get(chave);
   if (!promessa) {
-    promessa = seguir(inicial, { hosts, extrair, paginaSemValor, doFetch: f ?? globalThis.fetch }).then((r) => {
+    promessa = seguir(inicial, { hosts, hostsDeSalto, extrair, paginaSemValor, doFetch: f ?? globalThis.fetch }).then((r) => {
       lembrar(cache, chave, { ...r, ate: agora() + CACHE_LINK_MS });
       return r;
     }, (e) => {
@@ -137,8 +148,10 @@ export async function resolverPorRedirecionamento(url, { hosts, extrair, paginaS
 }
 
 /** Segue os saltos a partir de `inicial` (já validada e sem o valor). → { valor, urlFinal } ou FalhaDeLink. */
-async function seguir(inicial, { hosts, extrair, paginaSemValor, doFetch }) {
+async function seguir(inicial, { hosts, hostsDeSalto, extrair, paginaSemValor, doFetch }) {
   let atual = inicial;
+  // host só de salto (fora de `hosts`): não fornece o valor e não pode terminar a cadeia
+  const soSalto = (u) => !hostDaLista(u.hostname, hosts);
   for (let salto = 0; salto < MAX_SALTOS; salto++) {
     let r;
     try {
@@ -156,14 +169,15 @@ async function seguir(inicial, { hosts, extrair, paginaSemValor, doFetch }) {
       if (!location) throw new FalhaDeLink('invalido');
       let prox;
       try { prox = new URL(location, atual); } catch { throw new FalhaDeLink('invalido'); }
-      prox = urlSeguivel(prox, hosts);
+      prox = urlSeguivel(prox, hosts, hostsDeSalto);
       if (!prox || prox.href.length > MAX_URL) throw new FalhaDeLink('invalido');
-      const valor = extrairSeguro(extrair, prox);
+      const valor = soSalto(prox) ? null : extrairSeguro(extrair, prox);
       if (valor != null) return { valor, urlFinal: semQuery(prox) };
       atual = prox;
       continue;
     }
     // Chegou a uma página (sem redirecionar): sem o valor, é busca, lista ou loja naquele host.
+    if (soSalto(atual)) throw new FalhaDeLink('invalido');
     let semValor = false;
     try { semValor = !!paginaSemValor(atual); } catch { /* trata como inválido */ }
     if (status >= 200 && status < 300 && semValor) throw new FalhaDeLink('nao_produto');

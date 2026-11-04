@@ -74,6 +74,66 @@ test('rede: entrada e Location fora da lista, com porta, credenciais ou longos d
   assert.equal(loop.chamadas.length, 5);
 });
 
+test('rede: hostsDeSalto vale só como salto intermediário e só no host exato; sem a opção (padrão []) o host de salto é recusado como antes', async () => {
+  const salto = ['salto.test'];
+  // como entrada, o host de salto é inválido e nunca vai à rede (nem como subdomínio)
+  const nunca = fetchFalso(() => assert.fail('não deveria acessar a rede'));
+  for (const url of ['https://salto.test/abc', 'salto.test/abc', 'http://salto.test/abc', 'https://x.salto.test/abc']) {
+    const e = await capturarErro(() => resolverPorRedirecionamento(url, opcoes(nunca, { hostsDeSalto: salto })));
+    assert.equal(e.causa, 'invalido', url);
+  }
+  assert.equal(nunca.chamadas.length, 0);
+
+  // sem a opção, o Location para o host de salto continua recusado, sem buscá-lo
+  const sem = fetchFalso(() => redirecionar(302, 'https://salto.test/abc'));
+  assert.equal((await capturarErro(() => resolverPorRedirecionamento('https://curto.test/x', opcoes(sem)))).causa, 'invalido');
+  assert.equal(sem.chamadas.length, 1);
+  const vazio = fetchFalso(() => redirecionar(302, 'https://salto.test/abc'));
+  assert.equal((await capturarErro(() => resolverPorRedirecionamento('https://curto.test/x', opcoes(vazio, { hostsDeSalto: [] })))).causa, 'invalido');
+  assert.equal(vazio.chamadas.length, 1);
+
+  // com a opção, o salto é seguido (só o host exato, inclusive em maiúsculas, que o URL normaliza) e o valor sai do destino final
+  for (const host of ['salto.test', 'SALTO.test']) {
+    const f = fetchFalso((url, init, n) => (n === 1 ? redirecionar(302, `https://${host}/abc`) : redirecionar(302, 'https://loja.test/p/9?rastreio=1')));
+    assert.deepEqual(await resolverPorRedirecionamento('https://curto.test/x', opcoes(f, { hostsDeSalto: salto })), { valor: { id: '9' }, urlFinal: 'https://loja.test/p/9' });
+    assert.deepEqual(f.chamadas.map((c) => c.url), ['https://curto.test/x', 'https://salto.test/abc']);
+  }
+  // S1: subdomínio do host de salto é recusado (quem controla o DNS dele poderia apontá-lo para um IP interno) e nunca é buscado
+  for (const destino of ['https://x.salto.test/abc', 'https://a.b.salto.test/abc', 'https://salto.test./abc']) {
+    const f = fetchFalso((url, init, n) => (n === 1 ? redirecionar(302, destino) : redirecionar(302, 'https://loja.test/p/9')));
+    assert.equal((await capturarErro(() => resolverPorRedirecionamento('https://curto.test/x', opcoes(f, { hostsDeSalto: salto })))).causa, 'invalido', destino);
+    assert.deepEqual(f.chamadas.map((c) => c.url), ['https://curto.test/x'], `não buscou ${destino}`);
+  }
+  // o host de salto não abre porta: fora da lista, porta, http (vira https só nos hosts aceitos) e credenciais seguem recusados
+  for (const destino of ['https://evil.test/p/1', 'https://salto.test:8443/x', 'https://salto.test.evil.test/x', 'https://u:p@salto.test/x']) {
+    const f = fetchFalso((url, init, n) => (n === 1 ? redirecionar(302, 'https://salto.test/abc') : redirecionar(302, destino)));
+    assert.equal((await capturarErro(() => resolverPorRedirecionamento('https://curto.test/x', opcoes(f, { hostsDeSalto: salto })))).causa, 'invalido', destino);
+    assert.deepEqual(f.chamadas.map((c) => c.url), ['https://curto.test/x', 'https://salto.test/abc'], `não buscou ${destino}`);
+  }
+  // 200 no host de salto não é produto nem nao_produto: é inválido; o limite de 5 saltos inclui os saltos novos
+  const pagina = fetchFalso((url, init, n) => (n === 1 ? redirecionar(302, 'https://salto.test/abc') : new Response('<html>', { status: 200 })));
+  assert.equal((await capturarErro(() => resolverPorRedirecionamento('https://curto.test/x', opcoes(pagina, { hostsDeSalto: salto })))).causa, 'invalido');
+  const loop = fetchFalso((url, init, n) => redirecionar(301, `https://salto.test/s${n}`));
+  assert.equal((await capturarErro(() => resolverPorRedirecionamento('https://curto.test/x', opcoes(loop, { hostsDeSalto: salto })))).causa, 'invalido');
+  assert.equal(loop.chamadas.length, 5);
+});
+
+test('rede: o host de salto nunca fornece o valor nem vira nao_produto, mesmo com extrair e paginaSemValor que o aceitariam', async () => {
+  const tudo = { extrair: (u) => { const m = /^\/p\/(\d+)$/.exec(u.pathname); return m ? { id: m[1] } : null; }, paginaSemValor: () => true };
+  // Location no host de salto com caminho de produto: segue adiante em vez de parar com o valor dali
+  const f = fetchFalso((url, init, n) => (n === 1 ? redirecionar(302, 'https://salto.test/p/1') : redirecionar(302, 'https://loja.test/p/2')));
+  assert.deepEqual(await resolverPorRedirecionamento('https://curto.test/x', opcoes(f, { hostsDeSalto: ['salto.test'], ...tudo })),
+    { valor: { id: '2' }, urlFinal: 'https://loja.test/p/2' });
+  assert.equal(f.chamadas.length, 2);
+  // 200 no host de salto: invalido, mesmo com paginaSemValor dizendo que é página da loja
+  const pagina = fetchFalso((url, init, n) => (n === 1 ? redirecionar(302, 'https://salto.test/busca') : new Response('ok', { status: 200 })));
+  assert.equal((await capturarErro(() => resolverPorRedirecionamento('https://curto.test/x', opcoes(pagina, { hostsDeSalto: ['salto.test'], ...tudo })))).causa, 'invalido');
+  // hostsDeSalto que não é lista: invalido, sem rede
+  const nunca = fetchFalso(() => assert.fail('não deveria acessar a rede'));
+  assert.equal((await capturarErro(() => resolverPorRedirecionamento('https://curto.test/x', opcoes(nunca, { hostsDeSalto: 'salto.test' })))).causa, 'invalido');
+  assert.equal(nunca.chamadas.length, 0);
+});
+
 test('rede: 2xx em página sem valor é nao_produto; extrair ou paginaSemValor que lançam viram null/invalido', async () => {
   const f = fetchFalso((url, init, n) => (n === 1 ? redirecionar(302, 'https://loja.test/busca') : new Response('ok', { status: 200 })));
   const e = await capturarErro(() => resolverPorRedirecionamento('https://curto.test/x', opcoes(f)));

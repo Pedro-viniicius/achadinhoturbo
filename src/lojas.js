@@ -210,8 +210,8 @@ function exigirAmazon(amazon, ...metodos) {
 }
 
 /**
- * Amazon: resolve o link até o ASIN (amazon.resolver: só redirecionamentos de hosts da Amazon, sem ler página) e
- * consulta a API (amazon.lerItem). Erros:
+ * Amazon: resolve o link até o ASIN (amazon.resolver: só redirecionamentos de hosts da Amazon, mais o amzlinks.in de
+ * terceiro só como salto e só no host exato, sem ler página) e consulta a API (amazon.lerItem). Erros:
  * - LinkNaoResolvido { causa: 'invalido' | 'nao_produto' } quando o link não chega a um ASIN;
  * - ErroAmazon { tipo, asin } quando a API não respondeu ou não achou o produto ('nao_encontrado'). O `asin` vai
  *   junto para quem chama poder seguir com os campos vazios (o link limpo só precisa dele).

@@ -172,6 +172,15 @@ test('shopee: resolver só segue hosts da Shopee, sem porta nem credenciais, e p
   assert.equal(loop.chamadas.length, 5);
 });
 
+test('shopee: resolver não aceita amzlinks.in como salto (o salto extra é só da Amazon) nem como entrada', async () => {
+  const nunca = fetchFalso(() => assert.fail('não deveria acessar a rede'));
+  assert.equal((await capturarErro(() => createShopee({ fetch: nunca }).resolver('https://amzlinks.in/abc'))).causa, 'invalido');
+  assert.equal(nunca.chamadas.length, 0);
+  const f = fetchFalso(() => redirecionar(302, 'https://amzlinks.in/abc'));
+  assert.equal((await capturarErro(() => createShopee({ fetch: f }).resolver(CURTO))).causa, 'invalido');
+  assert.equal(f.chamadas.length, 1, 'não seguiu para amzlinks.in');
+});
+
 test('shopee: resolver: página da Shopee sem produto é nao_produto; 200 no encurtador, 404, 5xx e rede são invalido (CA1)', async () => {
   const busca = fetchFalso((url, init, n) => (n === 1 ? redirecionar(302, 'https://shopee.com.br/search?keyword=fone') : new Response('<html>', { status: 200 })));
   const e1 = await capturarErro(() => createShopee({ fetch: busca }).resolver(CURTO));

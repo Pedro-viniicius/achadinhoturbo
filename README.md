@@ -107,7 +107,7 @@ Em *Disparos → Disparo manual* você manda uma oferta específica sem criar re
 
 Precisa da **tag de associado** salva em *Conexões → Amazon*. Sem ela o botão de disparar fica desabilitado: o link da Amazon sempre sai com a sua tag. A extensão do Chrome não é usada.
 
-1. Cole o link e clique em **Identificar**. Aceita `amazon.com.br/dp/…`, `amazon.com.br/<nome>/dp/…`, `link.amazon`, `amzn.to`, `amzn.com` e `a.co`. O programa abre o link curto seguindo os redirecionamentos (só em endereços da Amazon, sem ler a página) até achar o código do produto (o **ASIN**) e consulta a API oficial, se houver acesso.
+1. Cole o link e clique em **Identificar**. Aceita `amazon.com.br/dp/…`, `amazon.com.br/<nome>/dp/…`, `link.amazon`, `amzn.to`, `amzn.com` e `a.co`. O programa abre o link curto seguindo os redirecionamentos (só em endereços da Amazon e, no meio do caminho, no `amzlinks.in`, que o `link.amazon` usa; sem ler a página; o `amzlinks.in` é um redirecionador de terceiro, não da Amazon, e só vale nesse endereço exato, nunca num subdomínio dele nem colado direto) até achar o código do produto (o **ASIN**) e consulta a API oficial, se houver acesso.
 2. A seção **Dados da oferta** vem preenchida e dá para editar: título (até 200 caracteres), preço atual, preço antigo (só vale se for maior que o atual; senão a linha "De" some), cupom (até 30 caracteres), **frete grátis** e a **foto** (trocar por JPG ou PNG de até 5 MB, ou remover; sem foto a mensagem sai só com texto). O desconto é calculado dos dois preços.
 3. A prévia mostra a mensagem com o template escolhido, com a tag escondida (`tag=•••`). O link que vai ao grupo é sempre `https://www.amazon.com.br/dp/<ASIN>?tag=<sua tag>`, montado na hora do envio.
 4. Se a API não responder (sem credencial, conta sem acesso, limite de consultas ou instabilidade), a tela diz o motivo e deixa os campos em branco para você preencher; o **título é obrigatório**. Link que não leva a um produto (busca, lista, loja) ou que não abre é recusado com a explicação.
@@ -214,7 +214,7 @@ Fila única de envios (pausas de Ajustes) ──► grupos de destino (nunca o d
 
 Em palavras:
 
-1. O programa lê o link da mensagem (aceita `amazon.com.br/dp/…`, `amazon.com.br/<nome>/dp/…`, `link.amazon`, `amzn.to`, `amzn.com` e `a.co`, com ou sem parâmetros e até sem `https://`). Se for link curto, abre-o **só** em endereços da Amazon, seguindo os redirecionamentos, até achar o código do produto (o **ASIN**). Não lê a página.
+1. O programa lê o link da mensagem (aceita `amazon.com.br/dp/…`, `amazon.com.br/<nome>/dp/…`, `link.amazon`, `amzn.to`, `amzn.com` e `a.co`, com ou sem parâmetros e até sem `https://`). Se for link curto, abre-o **só** em endereços da Amazon (e no `amzlinks.in`, um redirecionador de terceiro, não da Amazon, aceito apenas no meio do caminho e só nesse endereço exato, sem subdomínio), seguindo os redirecionamentos, até achar o código do produto (o **ASIN**). Não lê a página.
 2. Confere a repetição (veja [Não repetir a mesma oferta](#não-repetir-a-mesma-oferta)).
 3. Junta os dados (veja [De onde vêm os dados](#de-onde-vêm-os-dados)), confere as palavras bloqueadas e, com título e preço, monta a mensagem com o template e coloca o envio **na fila de envios**. Os dados são consultados **na hora de enviar**: uma oferta que esperou a janela abrir sai com o preço atual.
 4. A mensagem sai como **imagem com legenda** quando há foto (a que a Amazon devolve, só de endereços de imagem da própria Amazon). Sem API não há foto: a mensagem sai só com texto. Se a foto não carregar, também sai só com texto.
@@ -308,7 +308,7 @@ Compre aqui: https://www.amazon.com.br/dp/B0FG2MD49G
 Estas duas decisões **ainda são suas** e a equipe não as tomou por você:
 
 1. **Licença da Creators API e Operating Agreement da Amazon.** A equipe **não leu** esses termos. Falta conferir se eles permitem guardar preços por alguns minutos (o programa guarda os dados da API em memória por até 15 minutos por produto) e usar esses dados em mensagens de WhatsApp. Confira antes de depender da API em produção.
-2. **User-Agent de navegador para abrir o link curto.** Para o `link.amazon` devolver o redirecionamento, o programa se apresenta como um navegador comum (Chrome) ao abrir o link, só em endereços da Amazon e sem ler a página. Se você não quiser esse comportamento, diga: sem ele, link curto pode não resolver e só links longos (`…/dp/<ASIN>`) funcionam.
+2. **User-Agent de navegador para abrir o link curto.** Para o `link.amazon` devolver o redirecionamento, o programa se apresenta como um navegador comum (Chrome) ao abrir o link, só em endereços da Amazon (e no `amzlinks.in`, redirecionador de terceiro que o `link.amazon` usa, quando aparece no meio do caminho e só nesse endereço exato) e sem ler a página. Se você não quiser esse comportamento, diga: sem ele, link curto pode não resolver e só links longos (`…/dp/<ASIN>`) funcionam.
 
 O endereço da API (`creatorsapi.amazon`) e os nomes dos campos da resposta vêm da documentação da Amazon e **nunca foram conferidos contra a Amazon real**: o botão **Testar** é quem confirma isso na sua conta.
 

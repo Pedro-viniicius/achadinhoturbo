@@ -217,7 +217,7 @@ docsCapitulo({
       blocos: [
         { passos: [
           'Alguém posta uma mensagem com link da Amazon no grupo de origem. O painel recebe só o grupo, a hora e o texto, nunca quem postou.',
-          'Ele lê o link. Se for curto, segue os redirecionamentos só em endereços da Amazon até achar o código do produto (ASIN). Não lê a página da Amazon.',
+          'Ele lê o link. Se for curto, segue os redirecionamentos só em endereços da Amazon (e no `amzlinks.in`, um redirecionador de terceiro, não da Amazon, aceito só no meio do caminho e só nesse endereço exato) até achar o código do produto (ASIN). Não lê a página da Amazon.',
           'Confere se o produto já saiu há menos horas que o prazo de “não repetir”. A regra vale por espelhamento: dois espelhamentos podem enviar o mesmo produto.',
           'Junta os dados: a API tem prioridade e o texto da origem completa o que faltar, campo a campo.',
           'Confere as palavras bloqueadas no título e no texto.',

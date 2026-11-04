@@ -928,6 +928,11 @@ const IMG_AMAZON = 'https://m.media-amazon.com/images/I/71abcDEF.jpg';
 const URL_CURTO = 'https://amzn.to/3AbCdEf';
 const URL_LONGO = `https://www.amazon.com.br/Fone-Bluetooth-XYZ/dp/${ASIN}?tag=terceiro-20&crid=XYZ123&linkId=abc&ascsubtag=q`;
 const URL_BUSCA = 'https://amzn.to/busca1';
+// link.amazon → amzlinks.in → produto (cadeia real do bug do link.amazon/B0boeV5q0)
+const URL_LINK_AMAZON = 'https://link.amazon/B0boeV5q0';
+const URL_AMZLINKS = 'https://amzlinks.in/B0boeV5q0';
+const ASIN_AMZLINKS = 'B0HJB1C68N';
+const URL_LONGO_AMZLINKS = `https://www.amazon.com.br/Apple-iPhone-Pro-Max-256/dp/${ASIN_AMZLINKS}?__mk_pt_BR=%C3%85M&tag=desejodemen01-20&linkId=abc&ascsubtag=xyz&btn_ref=r1`;
 const LINK_LIMPO = `https://www.amazon.com.br/dp/${ASIN}?tag=${TAG}`;
 const SEGREDOS = [CRED_ID, SEGREDO, TOKEN];
 
@@ -947,6 +952,8 @@ function fetchAmazon(estado) {
     chamadas.push({ url: u, metodo: init.method || 'GET' });
     if (u === URL_CURTO) return new Response(null, { status: 301, headers: { location: URL_LONGO } });
     if (u === URL_BUSCA) return new Response(null, { status: 302, headers: { location: 'https://www.amazon.com.br/s?k=fone' } });
+    if (u === URL_LINK_AMAZON) return new Response(null, { status: 302, headers: { location: URL_AMZLINKS } });
+    if (u === URL_AMZLINKS) return new Response(null, { status: 302, headers: { location: URL_LONGO_AMZLINKS } });
     if (u === 'https://www.amazon.com.br/s?k=fone') return new Response('<html>busca</html>', { status: 200 });
     if (u === 'https://api.amazon.com/auth/o2/token') return respJson(200, { access_token: TOKEN, token_type: 'bearer', expires_in: 3600 });
     if (u === 'https://creatorsapi.amazon/catalog/v1/getItems') {
@@ -1000,6 +1007,35 @@ test('CA6: identificar Amazon com link curto (amzn.to pelo fetch falso, só GET)
     ]);
     semSegredo(r.txt, 'identificar');
     assert.equal(erros.mock.callCount(), 0);
+  } finally { await s.fechar(); }
+});
+
+test('CA6: identificar Amazon com link.amazon que passa por amzlinks.in: reconhece o produto, sem causa "invalido", só GET e link limpo', async (t) => {
+  const erros = t.mock.method(console, 'error', () => {});
+  const s = await subirAmazon();
+  try {
+    const r = await s.post('/api/disparo/identificar', { url: URL_LINK_AMAZON, template_id: 1 });
+    assert.equal(r.status, 200, r.txt);
+    assert.equal(r.json.causa, null, `causa: ${r.json.causa}`);
+    assert.equal(r.json.loja.id, 'amazon');
+    assert.equal(r.json.produto.key, `ASIN:${ASIN_AMZLINKS}`);
+    assert.equal(r.json.produto.title, 'Fone Bluetooth XYZ');
+    assert.ok(r.json.texto.endsWith(`Compre aqui: https://www.amazon.com.br/dp/${ASIN_AMZLINKS}?tag=•••`), r.json.texto);
+    assert.doesNotMatch(r.json.texto, /desejodemen|linkId|ascsubtag|btn_ref|__mk_pt_BR|amzlinks/);
+    assert.deepEqual(s.fetchF.chamadas.map((c) => `${c.metodo} ${c.url}`), [
+      `GET ${URL_LINK_AMAZON}`, `GET ${URL_AMZLINKS}`, 'POST https://api.amazon.com/auth/o2/token', 'POST https://creatorsapi.amazon/catalog/v1/getItems',
+    ]);
+    semSegredo(r.txt, 'identificar amzlinks');
+    assert.equal(erros.mock.callCount(), 0);
+  } finally { await s.fechar(); }
+});
+
+test('CA6: amzlinks.in colado no Disparo manual não é reconhecido como Amazon e não vai à rede', async () => {
+  const s = await subirAmazon();
+  try {
+    const r = await s.post('/api/disparo/identificar', { url: URL_AMZLINKS, template_id: 1 });
+    assert.equal(r.status, 400, r.txt);
+    assert.equal(s.fetchF.chamadas.length, 0);
   } finally { await s.fechar(); }
 });
 
