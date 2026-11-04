@@ -2,6 +2,8 @@
 // Mercado Livre: etiquetas de afiliado + extensão do Chrome. Amazon: tag, credencial da API e teste (4 estados do selo).
 // Shopee (plano integracao-shopee, etapa 9): ID de afiliado, AppID e Senha da API em dois fieldset, linha da extensão,
 // aviso "Antes de usar", 6 selos e teste por `resultado`. As funções `cx*` são puras (testadas em test/shopee-painel.test.js).
+// Catálogo do Etiqueta (plano fonte-catalogo-etiqueta, etapa 6): cartão próprio no fim do arquivo (`cxCat*`, testadas
+// em test/catalogo-conexoes-painel.test.js); cartaoConexao, aplicarConexao e ligarConexao desviam para ele.
 // Carrega antes de app.js: só define funções. Os utilitários de app.js e paineis.js ($, $$, esc, api,
 // aviso, tentar, mostrarErros, REQ, S, atualizarEstado, podeEquipe, dataHora) só são usados quando as funções rodam.
 
@@ -73,6 +75,54 @@ const TEXTOS_CONEXOES = {
       indisponivel: 'A Shopee não respondeu agora. Tente de novo em alguns minutos.',
       sem_id: 'Credenciais aceitas, mas falta o ID de afiliado.',
     },
+  },
+  // Catálogo do Etiqueta (plano fonte-catalogo-etiqueta, etapa 6; spec, seção 1). Não é loja: é fonte de ofertas.
+  catalogo: {
+    sub: 'Fonte de ofertas',
+    desc: 'O Etiqueta é o seu outro programa de ofertas, que roda neste computador. O painel lê as ofertas dele, que já vêm com o seu link de afiliado, e usa como fonte nos disparos automáticos. Não tem relação com as etiquetas do Mercado Livre.',
+    legend: 'Como falar com o Etiqueta',
+    rotuloEndereco: 'Endereço do Etiqueta', rotuloCaminho: 'Arquivo do token',
+    dicaEndereco: 'Onde o servidor do Etiqueta está rodando (python3 servidor.py). Só vale endereço deste computador: localhost ou 127.0.0.1. Já vem preenchido com o padrão.',
+    dicaCaminho: 'Caminho do arquivo api_token.txt que está na pasta do Etiqueta. Cole o <b>caminho</b>, nunca o conteúdo: o painel lê o arquivo e o token não passa por esta tela.', // HTML fixo
+    placeholderCaminho: '/home/ufla/Documentos/mensagensParaEnviar/api_token.txt',
+    enderecoPadrao: 'http://127.0.0.1:8765', // só se o servidor não mandar endereco_padrao
+    soDono: 'Só o Dono muda esta conexão.',
+    salvos: 'Catálogo: dados salvos',
+    semSalvar: 'Salve o endereço e o caminho do arquivo do token para testar.',
+    mudou: 'Você mudou os campos. Salve antes de testar.',
+    verificadoEm: (ms) => `Verificado em ${dataHora(ms)}.`,
+    // selos (spec, tabela "Selo e estados"): [classe de .estado-pill, texto]
+    selos: {
+      falta_configurar: ['falta', 'Falta configurar'], salva: ['', 'Salvo, ainda não testado'], conectada: ['conectado', 'Conectada'],
+      token_recusado: ['erro', 'Token recusado'], indisponivel: ['pendente', 'Indisponível'], sem_arquivo: ['erro', 'Arquivo do token não encontrado'],
+    },
+    // resultado do "Testar" e da última verificação, por `resultado`. Nunca repete o token nem o conteúdo do arquivo;
+    // o endereço e o caminho são os salvos (do dono). Saem sempre como texto (textContent ou esc()).
+    teste: {
+      ok: (n) => `Conectado. ${cxCatPlural(n.total, 'oferta', 'ofertas')} em ${cxCatPlural(n.categorias, 'categoria', 'categorias')}.`,
+      token_recusado: () => 'O Etiqueta recusou o token. Se você trocou o arquivo do token, reinicie o servidor.py do Etiqueta (ele lê o arquivo só ao ligar) e teste de novo.',
+      desligada: () => 'O Etiqueta está no ar, mas a API dele está desligada. Falta o arquivo api_token.txt (ou ele é inválido) na pasta do Etiqueta. O terminal do servidor.py diz o motivo. Depois de corrigir, reinicie-o e teste de novo.',
+      fora_do_ar: (_n, cfg) => `Não consegui falar com o Etiqueta${cfg.endereco ? ` em ${cfg.endereco}` : ''}. Confira se ele está ligado (python3 servidor.py) e se o endereço e a porta estão certos.`,
+      sem_arquivo: (_n, cfg) => `Não encontrei o arquivo do token${cfg.caminho_token ? ` em ${cfg.caminho_token}` : ''}. Confira o caminho, e se este programa tem permissão para ler o arquivo.`,
+      arquivo_invalido: () => 'O arquivo do token está vazio ou fora do formato (32 ou mais letras, números, _ e -). Gere o token de novo no Etiqueta.',
+      resposta_inesperada: () => 'O Etiqueta respondeu algo que não esperávamos. Tente de novo; se continuar, veja o terminal do servidor.py.',
+      nao_configurada: () => 'Salve o endereço e o caminho do token para testar.',
+    },
+    // validação no cliente (o servidor confere de novo); nenhuma frase repete o valor digitado
+    enderecoVazio: 'Informe o endereço do Etiqueta. O padrão é http://127.0.0.1:8765.',
+    enderecoFormato: 'Use só o endereço deste computador, como http://127.0.0.1:8765 (sem o que vem depois da porta).',
+    caminhoVazio: 'Informe o caminho do arquivo do token.',
+    pareceToken: 'Isto parece o token, não o caminho do arquivo. Cole o caminho (por exemplo, …/api_token.txt). Se você colou o token em algum lugar, gere outro no Etiqueta.',
+    caminhoInvalido: 'Caminho inválido.',
+    caminhoFormato: 'Caminho inválido. Use o caminho completo do arquivo, começando por / ou ~/.',
+    // categorias da última verificação (só em `conectada`)
+    resumo: (total, nCats, l) => `${cxCatPlural(total, 'oferta', 'ofertas')} em ${cxCatPlural(nCats, 'categoria', 'categorias')}. Mercado Livre: ${cxCatNum(l.ml)} · Amazon: ${cxCatNum(l.amazon)} · Shopee: ${cxCatNum(l.shopee)}.`,
+    tituloCats: (n) => `Categorias do Etiqueta (${cxCatNum(n)})`,
+    caption: 'Categorias do Etiqueta e total de ofertas por loja',
+    regiao: 'Tabela de categorias do Etiqueta',
+    colunas: ['Categoria', 'Total', 'Mercado Livre', 'Amazon', 'Shopee'],
+    semOfertas: 'O Etiqueta está conectado, mas ainda não tem ofertas. Colete ofertas nele e teste de novo.',
+    nota: 'Esta lista é a da última verificação. Se o Etiqueta ganhar categorias novas, clique em “Testar” para atualizar.',
   },
 };
 
@@ -191,6 +241,10 @@ function pillConexao(estado, id, p = {}) {
     };
     if (Object.hasOwn(tabela, estado)) return tabela[estado];
   }
+  if (id === 'catalogo') { // 6 estados (spec, seção 1); estado desconhecido cai no genérico abaixo
+    const tabela = TEXTOS_CONEXOES.catalogo.selos;
+    if (Object.hasOwn(tabela, estado)) return tabela[estado];
+  }
   return {
     conectado: ['conectado', TEXTOS_CONEXOES.conectado], conectada: ['conectado', TEXTOS_CONEXOES.conectado],
     pronta: ['pronta', TEXTOS_CONEXOES.pronta], falta_configurar: ['falta', TEXTOS_CONEXOES.falta],
@@ -284,6 +338,7 @@ function cxFormShopee(p, campos) {
 }
 
 function cartaoConexao(p) {
+  if (p?.id === 'catalogo' && p.implementada) return cartaoCatalogo(p);
   const id = esc(p.id); const campos = Array.isArray(p.campos) ? p.campos : [];
   const amazon = p.id === 'amazon' && p.implementada;
   const shopee = p.id === 'shopee' && p.implementada;
@@ -351,6 +406,7 @@ function pintarTopoShopee(art, p) {
 
 /** Põe no cartão o que o servidor respondeu: selo, valores de texto, placeholder do segredo e linha de estado. */
 function aplicarConexao(art, p) {
+  if (p?.id === 'catalogo' && p.implementada) return aplicarCatalogo(art, p);
   pintarSeloConexao(art, p);
   const form = $('form', art); if (!form) return;
   const salvos = Array.isArray(p.segredos_salvos) ? p.segredos_salvos : null;
@@ -398,6 +454,7 @@ function lerFormConexao(form, p) {
 }
 
 function ligarConexao(art, p) {
+  if (p?.id === 'catalogo' && p.implementada) return ligarCatalogo(art, p);
   const form = $('form', art); if (!form) return;
   let atual = p;
   const linha = $('.estado-linha', form); const salvar = $('[type=submit]', form); const testar = $('[data-testar]', form);
@@ -430,5 +487,242 @@ function ligarConexao(art, p) {
     } catch (e) {
       linha.textContent = e.message; linha.classList.add('aviso');
     } finally { testar.disabled = cxTestarBloqueado(atual); testar.textContent = 'Testar'; }
+  };
+}
+
+// ---------- Catálogo do Etiqueta (plano fonte-catalogo-etiqueta, etapa 6; spec, seção 1) ----------
+// Endereço e caminho do arquivo do token são texto comum (o token nunca passa por esta tela). O servidor manda
+// `estado` (6 selos), `situacao` (resultado da última chamada, já invalidada por um "Salvar" mais novo),
+// `verificacao` (categorias do último "Testar"), `config` (só o que passa na regra do PUT) e `endereco_padrao`.
+// Todo texto que veio do Etiqueta (nome de categoria) passa por esc(); o resto vai por textContent.
+// O Operador (sem `segredos_salvos` na resposta, como nas outras lojas) vê selo e categorias, com os campos travados.
+// As funções `cxCat*` são puras (testadas em test/catalogo-conexoes-painel.test.js).
+
+/** Mesmas regras de src/lojas.js (RE_ENDERECO_CATALOGO, RE_CAMINHO_TOKEN); o teste confere que não divergiram. */
+const CX_CAT_RE_ENDERECO = /^http:\/\/(localhost|127\.0\.0\.1):([1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])$/;
+const CX_CAT_RE_CAMINHO = /^(~\/|\/)[^\u0000-\u001f\u007f]{1,500}$/;
+/** "Caminho" que é o próprio token (32+ de A-Za-z0-9_-, com / ou ~/ na frente ou não), como o PUT de src/conexoes.js. */
+const CX_CAT_PARECE_TOKEN = /^(~\/|\/)?[A-Za-z0-9_-]{32,}$/;
+const CX_CAT_LOJAS = ['ml', 'amazon', 'shopee']; // ordem das colunas: Mercado Livre, Amazon, Shopee
+
+/** Inteiro ≥ 0 vindo do servidor, ou 0. */
+function cxCatInt(v) { return Number.isSafeInteger(v) && v >= 0 ? v : 0; }
+/** Número com separador de milhar (3.853). */
+function cxCatNum(v) { return cxCatInt(v).toLocaleString('pt-BR'); }
+function cxCatPlural(v, um, varios) { const n = cxCatInt(v); return `${cxCatNum(n)} ${n === 1 ? um : varios}`; }
+
+/** Operador: o servidor não manda `segredos_salvos` para quem não é Dono (PUT e Testar são só do Dono). */
+function cxCatSoLeitura(p) { return !Array.isArray(p?.segredos_salvos); }
+
+/** "Testar" só com endereço e caminho salvos, e só para o Dono. Usa o que está salvo, não o que está digitado. */
+function cxCatTestarBloqueado(p) { return cxCatSoLeitura(p) || !(p?.config?.endereco && p?.config?.caminho_token); }
+
+/** Os campos na tela diferem do que está salvo (com os dois salvos: senão a linha já pede para salvar). */
+function cxCatMudou(p, valores) {
+  const salvo = p?.config || {};
+  if (!valores || !salvo.endereco || !salvo.caminho_token) return false;
+  return String(valores.endereco ?? '').trim() !== salvo.endereco || String(valores.caminho_token ?? '').trim() !== salvo.caminho_token;
+}
+
+/**
+ * Erros do formulário antes de enviar: [{ campo, msg, limpar }]. `limpar` = o caminho parece o token: o campo é
+ * esvaziado e a frase não ecoa o valor (nenhuma frase ecoa). A checagem do token vem antes de tamanho e formato.
+ */
+function cxCatErros(valores) {
+  const T = TEXTOS_CONEXOES.catalogo; const erros = [];
+  const endereco = String(valores?.endereco ?? '').trim(); const caminho = String(valores?.caminho_token ?? '').trim();
+  if (!endereco) erros.push({ campo: 'endereco', msg: T.enderecoVazio });
+  else if (!CX_CAT_RE_ENDERECO.test(endereco)) erros.push({ campo: 'endereco', msg: T.enderecoFormato });
+  if (!caminho) erros.push({ campo: 'caminho_token', msg: T.caminhoVazio });
+  else if (CX_CAT_PARECE_TOKEN.test(caminho)) erros.push({ campo: 'caminho_token', msg: T.pareceToken, limpar: true });
+  else if (caminho.length > 500 || /[\u0000-\u001f\u007f]/.test(caminho)) erros.push({ campo: 'caminho_token', msg: T.caminhoInvalido });
+  else if (!CX_CAT_RE_CAMINHO.test(caminho)) erros.push({ campo: 'caminho_token', msg: T.caminhoFormato });
+  return erros;
+}
+
+/** Campo de um 400 do servidor (a frase é fixa e pode juntar os dois campos; o primeiro citado leva o foco). */
+function cxCatCampoDoErro(msg) {
+  const m = String(msg || '');
+  if (/^Endereço/.test(m)) return 'endereco';
+  if (/Isto parece o token|Caminho|Arquivo do token/.test(m)) return 'caminho_token';
+  return '';
+}
+/** O 400 do servidor diz que o caminho é o token: o campo é limpo também. */
+function cxCatErroDeToken(msg) { return String(msg || '').includes('Isto parece o token'); }
+
+/**
+ * Frase de um `resultado` (Testar ou última verificação): a da tela; desconhecido → a frase fixa do servidor, ou
+ * "respondeu algo que não esperávamos". `n` = { total, categorias }, `cfg` = config salva (endereço e caminho).
+ */
+function cxCatFrase(resultado, cfg = {}, n = {}, mensagem = '') {
+  const T = TEXTOS_CONEXOES.catalogo.teste;
+  if (typeof resultado === 'string' && Object.hasOwn(T, resultado)) return T[resultado](n, cfg || {});
+  return typeof mensagem === 'string' && mensagem ? mensagem : T.resposta_inesperada();
+}
+
+/** Resultado do "Testar": { frase, ok, aviso }. Sucesso só com `ok` e `resultado: 'ok'` juntos. */
+function cxCatFraseTeste(p, r) {
+  r = r || {};
+  const ok = r.ok === true && r.resultado === 'ok';
+  const n = { total: r.total, categorias: Array.isArray(r.categorias) ? r.categorias.length : 0 };
+  const resultado = r.resultado === 'ok' && !ok ? 'resposta_inesperada' : r.resultado;
+  return { frase: cxCatFrase(resultado, p?.config, n, r.mensagem), ok, aviso: !ok };
+}
+
+/**
+ * Linha de estado do cartão: { frase, verificado, ok, aviso }. Com campos mudados e não salvos, avisa para salvar;
+ * sem os dois salvos, diz por que o "Testar" está travado; com uma verificação, a frase do resultado e a hora.
+ */
+function cxCatLinha(p, valores) {
+  const T = TEXTOS_CONEXOES.catalogo; const vazia = { frase: '', verificado: '', ok: false, aviso: false };
+  if (cxCatMudou(p, valores) && !cxCatSoLeitura(p)) return { ...vazia, frase: T.mudou, aviso: true };
+  const salvo = !!(p?.config?.endereco && p?.config?.caminho_token);
+  if (!salvo) return { ...vazia, frase: cxCatSoLeitura(p) ? TEXTOS_CONEXOES.shopee.nadaSalvo : T.semSalvar };
+  const s = p.situacao || {};
+  if (typeof s.resultado === 'string' && s.resultado) {
+    const cats = Array.isArray(p.verificacao?.categorias) ? p.verificacao.categorias : [];
+    const frase = cxCatFrase(s.resultado, p.config, { total: p.verificacao?.total, categorias: cats.length }, s.mensagem);
+    const ok = s.resultado === 'ok';
+    return { frase, verificado: Number.isFinite(s.verificado_em) && s.verificado_em > 0 ? T.verificadoEm(s.verificado_em) : '', ok, aviso: !ok };
+  }
+  return { ...vazia, frase: p.updated_at ? TEXTOS_CONEXOES.salvoEm(p.updated_at) : '' };
+}
+
+/** HTML da linha: sucesso com "✓" em .nivel-ok, falha com "!" (a classe .aviso fica com quem pinta). Tudo escapado. */
+function cxCatLinhaHtml(l) {
+  const extra = l.verificado ? ` ${esc(l.verificado)}` : '';
+  if (l.ok) return `<span class="nivel-ok">✓ ${esc(l.frase)}</span>${extra}`;
+  return `${l.aviso ? '! ' : ''}${esc(l.frase)}${extra}`;
+}
+
+/**
+ * Categorias da última verificação (só em `conectada`): linha-resumo com a soma por loja e a tabela com rolagem
+ * interna (região com foco). O nome da categoria é texto cru do Etiqueta: sempre esc(), na célula e no `title`.
+ */
+function cxCatCategorias(p) {
+  if (p?.estado !== 'conectada') return '';
+  const T = TEXTOS_CONEXOES.catalogo; const v = p.verificacao || {};
+  const cats = (Array.isArray(v.categorias) ? v.categorias : []).filter((c) => c && typeof c.nome === 'string' && c.nome);
+  if (!cats.length) return `<p class="dica">${esc(T.semOfertas)}</p>`;
+  const soma = { ml: 0, amazon: 0, shopee: 0 };
+  for (const c of cats) for (const l of CX_CAT_LOJAS) soma[l] += cxCatInt(c.lojas?.[l]);
+  const total = Number.isSafeInteger(v.total) && v.total >= 0 ? v.total : cats.reduce((s, c) => s + cxCatInt(c.total), 0);
+  const [cCat, ...cNums] = T.colunas;
+  const linhas = cats.map((c) => `<tr><th scope="row"><span class="cat-nome" title="${esc(c.nome)}">${esc(c.nome)}</span></th>`
+    + `<td class="num">${cxCatNum(c.total)}</td>${CX_CAT_LOJAS.map((l) => `<td class="num">${cxCatNum(c.lojas?.[l])}</td>`).join('')}</tr>`).join('');
+  return `<p class="cat-resumo">${esc(T.resumo(total, cats.length, soma))}</p>
+    <details open><summary>${esc(T.tituloCats(cats.length))}</summary>
+      <div class="tabela cat-tabela" tabindex="0" role="region" aria-label="${esc(T.regiao)}">
+        <table><caption class="sr-only">${esc(T.caption)}</caption>
+          <thead><tr><th scope="col">${esc(cCat)}</th>${cNums.map((n) => `<th scope="col" class="num">${esc(n)}</th>`).join('')}</tr></thead>
+          <tbody>${linhas}</tbody></table>
+      </div>
+    </details>
+    <p class="dica">${esc(T.nota)}</p>`;
+}
+
+/** Cartão do Catálogo (string pura). Sem `value=` no HTML: os valores salvos entram por aplicarCatalogo. */
+function cartaoCatalogo(p) {
+  const T = TEXTOS_CONEXOES.catalogo; const so = cxCatSoLeitura(p);
+  const soId = so ? ' cx-catalogo-sodono' : '';
+  return `<article class="card conexao conexao-catalogo" id="cx-catalogo" aria-labelledby="cx-catalogo-h">
+    <header class="cab"><div><h2 id="cx-catalogo-h">${esc(p.nome || 'Catálogo do Etiqueta')} ${q('conexoes.catalogo')}</h2><p class="sub">${T.sub}</p></div><span class="estado-pill"></span></header>
+    <p class="desc">${T.desc}</p>
+    <form novalidate>
+      <fieldset><legend>${T.legend}</legend>
+        ${so ? `<p class="dica" id="cx-catalogo-sodono">${T.soDono}</p>` : ''}
+        <label class="campo"><span>${T.rotuloEndereco} ${q('conexoes.catalogo.endereco')}</span>
+          <input type="text" name="endereco" id="cx-catalogo-endereco" inputmode="url" autocomplete="off" spellcheck="false" aria-describedby="cx-catalogo-endereco-dica${soId}">
+          <small class="dica" id="cx-catalogo-endereco-dica">${T.dicaEndereco}</small></label>
+        <label class="campo"><span>${T.rotuloCaminho} ${q('conexoes.catalogo.token')}</span>
+          <input type="text" class="mono" name="caminho_token" id="cx-catalogo-caminho_token" autocomplete="off" spellcheck="false" placeholder="${esc(T.placeholderCaminho)}" aria-describedby="cx-catalogo-caminho_token-dica${soId}">
+          <small class="dica" id="cx-catalogo-caminho_token-dica">${T.dicaCaminho}</small></label>
+      </fieldset>
+      <div class="acoes"><button type="submit" class="pri">Salvar</button><button type="button" data-testar aria-describedby="cx-catalogo-estado${soId}">Testar</button></div>
+      <p class="estado-linha" id="cx-catalogo-estado" role="status"></p>
+    </form>
+    <div data-cats></div>
+  </article>`;
+}
+
+/** Valores digitados no formulário (aparados). */
+function cxCatValores(form) {
+  const v = (n) => String(form.elements.namedItem(n)?.value ?? '').trim();
+  return { endereco: v('endereco'), caminho_token: v('caminho_token') };
+}
+
+/** Escreve a linha de estado só quando muda (é role=status: não anuncia de novo a cada tecla). */
+function pintarLinhaCatalogo(linha, l) {
+  if (!linha) return;
+  const html = cxCatLinhaHtml(l);
+  if (linha.dataset.linha === html) return;
+  linha.innerHTML = html; linha.dataset.linha = html;
+  linha.classList.toggle('aviso', !!l.aviso);
+}
+
+/** Repinta as categorias só quando mudam (o <details> não fecha nem rola sozinho). */
+function pintarCategoriasCatalogo(art, p) {
+  const el = $('[data-cats]', art); if (!el) return;
+  const html = cxCatCategorias(p);
+  if (el.dataset.html !== html) { el.innerHTML = html; el.dataset.html = html; }
+}
+
+/** Põe no cartão o que o servidor respondeu: selo, valores salvos (endereço padrão se não há), travas, linha e categorias. */
+function aplicarCatalogo(art, p) {
+  pintarSeloConexao(art, p);
+  pintarCategoriasCatalogo(art, p);
+  const form = $('form', art); if (!form) return;
+  const so = cxCatSoLeitura(p);
+  const end = form.elements.namedItem('endereco'); const cam = form.elements.namedItem('caminho_token');
+  if (end) { end.value = p.config?.endereco || p.endereco_padrao || TEXTOS_CONEXOES.catalogo.enderecoPadrao; end.disabled = so; }
+  if (cam) { cam.value = p.config?.caminho_token || ''; cam.disabled = so; }
+  const salvar = $('[type=submit]', form); if (salvar) salvar.disabled = so;
+  const testar = $('[data-testar]', form); if (testar) testar.disabled = cxCatTestarBloqueado(p);
+  pintarLinhaCatalogo($('.estado-linha', form), cxCatLinha(p, cxCatValores(form)));
+}
+
+function ligarCatalogo(art, p) {
+  const form = $('form', art); if (!form) return;
+  const T = TEXTOS_CONEXOES.catalogo; let atual = p;
+  const linha = $('.estado-linha', form); const salvar = $('[type=submit]', form); const testar = $('[data-testar]', form);
+  const campo = (n) => form.elements.namedItem(n);
+  const limparCaminho = () => { const c = campo('caminho_token'); if (c) c.value = ''; };
+  // Campos diferentes do salvo: a linha avisa que o "Testar" usa o que está salvo (handler no próprio form).
+  form.oninput = () => pintarLinhaCatalogo(linha, cxCatLinha(atual, cxCatValores(form)));
+  form.onsubmit = async (ev) => {
+    ev.preventDefault();
+    if (cxCatSoLeitura(atual)) return; // Operador: campos travados; o servidor também recusa com 403
+    const valores = cxCatValores(form);
+    const erros = cxCatErros(valores);
+    if (erros.some((e) => e.limpar)) limparCaminho(); // o token não fica num campo de texto visível
+    if (mostrarErros(form, erros.map((e) => ({ msg: e.msg, el: campo(e.campo) })))) return;
+    salvar.disabled = true; salvar.textContent = 'Salvando…';
+    pintarLinhaCatalogo(linha, { frase: 'Salvando…', verificado: '', ok: false, aviso: false });
+    try {
+      atual = await api('/conexoes/catalogo', 'PUT', { campos: valores });
+      aplicarCatalogo(art, atual);
+      aviso(T.salvos);
+    } catch (e) {
+      if (cxCatErroDeToken(e.message)) limparCaminho();
+      pintarLinhaCatalogo(linha, { frase: '', verificado: '', ok: false, aviso: false });
+      const nome = cxCatCampoDoErro(e.message);
+      mostrarErros(form, [{ msg: e.message, el: nome ? campo(nome) : undefined }]);
+    } finally { salvar.disabled = cxCatSoLeitura(atual); salvar.textContent = 'Salvar'; }
+  };
+  testar.onclick = async () => {
+    if (cxCatTestarBloqueado(atual)) return;
+    testar.disabled = true; testar.textContent = 'Testando…';
+    pintarLinhaCatalogo(linha, { frase: 'Testando…', verificado: '', ok: false, aviso: false });
+    try {
+      const r = await api('/conexoes/catalogo/testar', 'POST', {});
+      // o teste muda o selo e as categorias: relê o cartão sem apagar a frase do teste
+      const lista = await api('/conexoes').catch(() => null);
+      const nova = Array.isArray(lista) ? lista.find((x) => x?.id === 'catalogo') : null;
+      if (nova) { atual = nova; pintarSeloConexao(art, atual); pintarCategoriasCatalogo(art, atual); }
+      const { frase, ok, aviso: emAviso } = cxCatFraseTeste(atual, r);
+      pintarLinhaCatalogo(linha, { frase, verificado: '', ok, aviso: emAviso });
+    } catch (e) {
+      pintarLinhaCatalogo(linha, { frase: e.message, verificado: '', ok: false, aviso: true });
+    } finally { testar.disabled = cxCatTestarBloqueado(atual); testar.textContent = 'Testar'; }
   };
 }

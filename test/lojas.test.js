@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { PLATAFORMAS, identificar, LojaNaoConectada, lerProduto, linkAfiliado, previaDoLink, imagemPermitida } from '../src/lojas.js';
+import {
+  PLATAFORMAS, identificar, LojaNaoConectada, lerProduto, linkAfiliado, previaDoLink, imagemPermitida,
+  RE_ENDERECO_CATALOGO, RE_CAMINHO_TOKEN, ENDERECO_CATALOGO_PADRAO, PARECE_TOKEN, ARQUIVO_TOKEN, caminhoDoArquivoDoToken,
+} from '../src/lojas.js';
 import { createLinkService } from '../src/links.js';
 import { createAmazon, ErroAmazon, LinkNaoResolvido, HOSTS_AMAZON, MENSAGENS_AMAZON } from '../src/amazon.js';
 import { createShopee, ErroShopee, LinkShopeeNaoResolvido, HOSTS_SHOPEE, MENSAGENS_SHOPEE, URL_API, RE_ID_AFILIADO } from '../src/shopee.js';
@@ -34,18 +37,20 @@ async function semRede(fn) {
   return chamadas;
 }
 
-test('lojas: registro com as 5 plataformas, campos da tela Conexões e ML, Amazon e Shopee implementados', () => {
+test('lojas: registro com as 6 plataformas, campos da tela Conexões e ML, Amazon, Shopee e Catálogo implementados', () => {
   const lista = Object.values(PLATAFORMAS);
-  assert.deepEqual(lista.map((p) => p.id), ['mercadolivre', 'amazon', 'shopee', 'magalu', 'facebook']);
-  assert.deepEqual(lista.filter((p) => p.implementada).map((p) => p.id), ['mercadolivre', 'amazon', 'shopee']);
+  assert.deepEqual(lista.map((p) => p.id), ['mercadolivre', 'amazon', 'shopee', 'magalu', 'facebook', 'catalogo']);
+  assert.deepEqual(lista.filter((p) => p.implementada).map((p) => p.id), ['mercadolivre', 'amazon', 'shopee', 'catalogo']);
   const campos = Object.fromEntries(lista.map((p) => [p.id, p.campos.map((c) => `${c.nome}:${c.tipo}`)]));
   assert.deepEqual(campos, {
     mercadolivre: ['etiqueta:texto'],
     amazon: ['tag:texto', 'credencial_id:segredo', 'credencial_secret:segredo', 'credencial_versao:texto'],
     shopee: ['id_afiliado:texto', 'app_id:texto', 'chave:segredo'], magalu: ['loja:texto'], facebook: [],
+    catalogo: ['endereco:texto', 'caminho_token:texto'],
   });
   for (const p of lista) {
-    assert.ok(p.nome && p.descricao && p.hosts.length, `${p.id} sem nome, descrição ou hosts`);
+    // o Catálogo é fonte de ofertas, não loja: nenhum link é dele (hosts vazio)
+    assert.ok(p.nome && p.descricao && (p.id === 'catalogo' ? p.hosts.length === 0 : p.hosts.length), `${p.id} sem nome, descrição ou hosts`);
     for (const c of p.campos) {
       assert.ok(c.rotulo && c.ajuda && Number.isInteger(c.max) && c.max > 0, `${p.id}.${c.nome} incompleto`);
       assert.match(c.padrao, /^\^.*\$$/, `${p.id}.${c.nome}: padrão precisa de ^ e $`);
@@ -70,6 +75,66 @@ test('lojas: registro com as 5 plataformas, campos da tela Conexões e ML, Amazo
   assert.throws(() => { PLATAFORMAS.amazon.implementada = false; }, TypeError);
   assert.throws(() => { PLATAFORMAS.amazon.hosts.push('evil.com'); }, TypeError);
   assert.throws(() => { PLATAFORMAS.shopee.hosts.push('evil.com'); }, TypeError);
+  assert.throws(() => { PLATAFORMAS.catalogo.hosts.push('evil.com'); }, TypeError);
+});
+
+test('lojas Catálogo (CA2, CA8): nome da spec, sem segredo, endereço só deste computador e caminho (não o token)', () => {
+  const p = PLATAFORMAS.catalogo;
+  assert.equal(p.nome, 'Catálogo do Etiqueta');
+  assert.deepEqual(p.hosts, []);
+  assert.ok(p.campos.every((c) => c.tipo === 'texto'), 'nenhum segredo: o token fica no arquivo do dono');
+  const re = (nome) => new RegExp(p.campos.find((c) => c.nome === nome).padrao);
+  assert.equal(re('endereco').source, RE_ENDERECO_CATALOGO.source, 'o campo usa a regra exportada');
+  assert.equal(re('caminho_token').source, RE_CAMINHO_TOKEN.source);
+  assert.equal(ENDERECO_CATALOGO_PADRAO, 'http://127.0.0.1:8765', 'o Etiqueta só escuta em 127.0.0.1 (localhost pode virar ::1)');
+  for (const v of ['http://localhost:8765', 'http://127.0.0.1:8765', 'http://localhost:1', 'http://127.0.0.1:65535', ENDERECO_CATALOGO_PADRAO]) {
+    assert.ok(re('endereco').test(v), v);
+  }
+  for (const v of ['https://localhost:8765', 'http://localhost', 'http://localhost:', 'http://localhost:8765/', 'http://localhost:8765/api',
+    'http://localhost:8765?x=1', 'http://user:senha@localhost:8765', 'http://localhost.evil.com:8765', 'http://127.0.0.2:8765',
+    'http://[::1]:8765', 'http://0.0.0.0:8765', 'http://192.168.0.10:8765', 'http://LOCALHOST:8765', 'http://localhost:0',
+    'http://localhost:65536', 'http://localhost:99999', 'http://localhost:08765', 'localhost:8765', ' http://localhost:8765', '']) {
+    assert.ok(!re('endereco').test(v), v);
+  }
+  for (const v of ['/home/ufla/Documentos/mensagensParaEnviar/api_token.txt', '~/Documentos/x/api_token.txt', '/a', '~/a',
+    '/pasta com espaço/ç/token.txt', '/' + 'a'.repeat(500)]) {
+    assert.ok(re('caminho_token').test(v), v.slice(0, 40));
+  }
+  for (const v of ['api_token.txt', 'Documentos/api_token.txt', '~api_token.txt', '/', '~/', 'C:\\token.txt', '/a\nb', '/a\u0000b',
+    '/a\u007fb', '/a\tb', '/' + 'a'.repeat(501), 'abcdefghijklmnopqrstuvwxyz0123456789_-ABCD']) {
+    assert.ok(!re('caminho_token').test(v), JSON.stringify(v).slice(0, 40));
+  }
+  const max = Object.fromEntries(p.campos.map((c) => [c.nome, c.max]));
+  assert.deepEqual(max, { endereco: 40, caminho_token: 500 });
+});
+
+test('lojas Catálogo (S1, R9): o arquivo do token é só o api_token.txt; PARECE_TOKEN é a regra única do token colado', () => {
+  assert.equal(ARQUIVO_TOKEN, 'api_token.txt');
+  for (const v of ['/home/u/Documentos/mensagensParaEnviar/api_token.txt', '~/api_token.txt', '/api_token.txt', '/pasta com espaço/api_token.txt']) {
+    assert.equal(caminhoDoArquivoDoToken(v), true, v);
+  }
+  for (const v of ['api_token.txt', '/home/u/token.txt', '/home/u/api_token.txt/', '/home/u/xapi_token.txt', '/home/u/api_token.txt.bak',
+    '/home/u/API_TOKEN.TXT', '/home/u/data/wa_auth/creds.json', '', null, 42]) {
+    assert.equal(caminhoDoArquivoDoToken(v), false, String(v));
+  }
+  for (const v of ['a'.repeat(32), `/${'a'.repeat(32)}`, `~/${'a'.repeat(32)}`]) assert.ok(PARECE_TOKEN.test(v), v);
+  for (const v of ['a'.repeat(31), '/home/u/api_token.txt']) assert.ok(!PARECE_TOKEN.test(v), v);
+});
+
+test('lojas Catálogo: nenhum link é do Catálogo; ler, gerar link e foto recusam a "loja" catalogo sem rede', async () => {
+  const chamadas = await semRede(async () => {
+    for (const url of ['http://localhost:8765', 'http://127.0.0.1:8765/api/v1/ofertas', URL_ML, 'https://amzn.to/x', 'https://s.shopee.com.br/x']) {
+      assert.notEqual(identificar(url)?.id, 'catalogo', url);
+    }
+    assert.equal(identificar('http://localhost:8765'), null, 'endereço do Etiqueta não é link de loja');
+    const ml = mlFalso();
+    await assert.rejects(lerProduto('catalogo', 'http://localhost:8765/x', { ml }), /não é da loja Catálogo do Etiqueta/);
+    await assert.rejects(lerProduto('catalogo', URL_ML, { ml }), /não é da loja Catálogo do Etiqueta/);
+    await assert.rejects(linkAfiliado('catalogo', { url: URL_ML, tag: 'etq' }, { links: { requestLink: async () => 'https://meli.la/x' } }), /não é da loja/);
+    assert.equal(ml.chamadas.length, 0);
+    assert.equal(imagemPermitida('catalogo', IMG), false);
+  });
+  assert.equal(chamadas, 0);
 });
 
 test('lojas: identificar reconhece cada loja pelo host e pelo encurtador', () => {

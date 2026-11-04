@@ -10,6 +10,7 @@ import { buildApp, criarServicos } from '../src/server.js';
 import { createWhatsApp } from '../src/whatsapp.js';
 import { createLinkService } from '../src/links.js';
 import { IMAGEM_SHOPEE, URL_API as URL_API_SHOPEE } from '../src/shopee.js';
+import { ERROS_FONTE } from '../src/catalogo.js';
 
 const HOST = 'disparador.exemplo.com.br';
 const SENHA = 'senha-de-teste-123';
@@ -29,12 +30,12 @@ function subir({ publicHost = HOST, panelPassword = SENHA, dir = tmp(), fetch = 
   const db = openDb(dir);
   const wa = createWhatsApp({ db, dir, dryRun: true }); wa.connect();
   const links = createLinkService({ getMode: () => modoLink });
-  const { amazon, shopee, scheduler } = criarServicos({ db, wa, links, fast: true, dir, fetch });
-  const app = buildApp({ db, wa, links, scheduler, amazon, shopee, publicHost, panelPassword });
+  const { amazon, shopee, catalogo, catalogoItens, scheduler } = criarServicos({ db, wa, links, fast: true, dir, fetch });
+  const app = buildApp({ db, wa, links, scheduler, amazon, shopee, catalogo, catalogoItens, publicHost, panelPassword });
   return new Promise((ok) => {
     const server = app.listen(0, '127.0.0.1', () => {
       const port = server.address().port;
-      ok({ db, dir, port, wa, links, amazon, shopee, scheduler, fechar: () => new Promise((r) => { server.closeAllConnections?.(); server.close(() => { db.close(); r(); }); }) });
+      ok({ db, dir, port, wa, links, amazon, shopee, catalogo, catalogoItens, scheduler, fechar: () => new Promise((r) => { server.closeAllConnections?.(); server.close(() => { db.close(); r(); }); }) });
     });
   });
 }
@@ -451,5 +452,301 @@ test('CA4: Shopee pela extensão de ponta a ponta: poll recebe link_shopee, resu
     assert.doesNotMatch(msg.text, /utm_|an_|sp_atk/, 'nem o longLink nem os parâmetros do link colado vão para o grupo');
     const payload = JSON.parse(s.db.prepare('SELECT payload FROM envios WHERE id = ?').get(r.json.id).payload);
     assert.deepEqual([payload.loja, payload.url, payload.link_afiliado], ['shopee', URL_PRODUTO_SHOPEE, LINK]);
+  } finally { await s.fechar(); }
+});
+
+// ---------------------------------------------------------------------------------------------
+// Catálogo do Etiqueta ligado no servidor (plano fonte-catalogo-etiqueta, etapa 5; CA1, CA2, CA3, CA6, CA8).
+// Nenhum teste fala com o Etiqueta real: um Etiqueta falso em porta aleatória de 127.0.0.1 e um token falso num
+// arquivo temporário; o fetch dos clientes só alcança essa porta.
+
+const TOKEN_FALSO = 'tokenFalsoDoTeste_0123456789abcdefABCDEF-xyz';
+const CATEGORIAS_ETIQUETA = [
+  { nome: 'Perfumes e Perfumaria', total: 120, lojas: { amazon: 70, ml: 30, shopee: 20 } },
+  { nome: 'Casa <b>& Cozinha</b>', total: 45, lojas: { amazon: 0, ml: 45, shopee: 0 } },
+];
+
+/** Etiqueta falso (HTTP de verdade, 127.0.0.1, porta aleatória): só GET /api/v1/categorias com o Bearer esperado. */
+async function etiquetaFalso() {
+  const estado = { token: TOKEN_FALSO, pedidos: [] };
+  const server = http.createServer((rq, rs) => {
+    estado.pedidos.push({ url: rq.url, method: rq.method, headers: { ...rq.headers } });
+    const json = (status, corpo) => { rs.writeHead(status, { 'content-type': 'application/json; charset=utf-8' }); rs.end(JSON.stringify(corpo)); };
+    if (rq.headers.authorization !== `Bearer ${estado.token}`) return json(401, { error: 'token ausente ou inválido' });
+    if (rq.method === 'GET' && rq.url === '/api/v1/categorias') return json(200, { versao: 1, categorias: CATEGORIAS_ETIQUETA, total: 165 });
+    json(404, { error: 'rota não encontrada' });
+  });
+  await new Promise((ok) => server.listen(0, '127.0.0.1', ok));
+  const porta = server.address().port;
+  const endereco = `http://127.0.0.1:${porta}`;
+  // o fetch dos clientes (Amazon, Shopee, Catálogo) só alcança o Etiqueta falso
+  const fetch = async (url, init) => {
+    if (!String(url).startsWith(`${endereco}/`)) throw new Error('rede proibida no teste');
+    return globalThis.fetch(url, init);
+  };
+  return { estado, endereco, fetch, fechar: () => new Promise((ok) => { server.closeAllConnections?.(); server.close(ok); }) };
+}
+
+/** Token falso num arquivo temporário (nunca o arquivo real do Etiqueta). → caminho */
+function arquivoDeToken(dir, conteudo = `${TOKEN_FALSO}\n`) {
+  // o nome do arquivo do Etiqueta (S1), numa pasta própria dentro da pasta de dados do teste
+  const caminho = path.join(fs.mkdtempSync(path.join(dir, 'etiqueta-')), 'api_token.txt');
+  fs.writeFileSync(caminho, conteudo, { mode: 0o600 });
+  return caminho;
+}
+
+/** Texto de todas as linhas de todas as tabelas do banco (para conferir que o token não foi gravado). */
+function textoDoBanco(db) {
+  const tabelas = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((t) => t.name);
+  return tabelas.map((t) => JSON.stringify(db.prepare(`SELECT * FROM "${t}"`).all())).join('\n');
+}
+
+/** Regra com fonte catálogo pela API. → id */
+async function criarRegraCatalogo(s, h, { nome = 'Catálogo', config = { lojas: ['amazon'], ordem: 'atualizacao' }, mais = {} } = {}) {
+  const r = await req(s.port, '/api/rules', { method: 'POST', headers: h, body: { name: nome, enabled: false, template_id: 1, group_jids: [], sources: [{ type: 'catalogo', config }], ...mais } });
+  assert.equal(r.status, 200, r.txt);
+  return r.json.id;
+}
+
+const ITEM_AMAZON = { title: 'Perfume de teste', price: 99.9, oldPrice: 150, discountPct: 33, image: null, categoria: 'Perfumes e Perfumaria' };
+const inserirItem = (db, ruleId, chave, status, { loja = 'amazon', motivos = '[]' } = {}) => Number(db.prepare(`INSERT INTO catalogo_itens (rule_id, chave, loja, status, motivos, oferta, criado_em)
+  VALUES (?,?,?,?,?,?,?)`).run(ruleId, chave, loja, status, motivos, JSON.stringify(ITEM_AMAZON), Date.now()).lastInsertRowid);
+const inserirCursor = (db, ruleId, filtro = 'f'.repeat(16), cursor = 'c200') => db.prepare('INSERT INTO catalogo_cursores (rule_id, filtro, cursor, pronto, atualizado_em) VALUES (?,?,?,1,?)').run(ruleId, filtro, cursor, Date.now());
+const itensDe = (db, ruleId) => db.prepare('SELECT chave, status FROM catalogo_itens WHERE rule_id = ? ORDER BY chave').all(ruleId).map((l) => `${l.chave}:${l.status}`);
+const cursoresDe = (db, ruleId) => db.prepare('SELECT COUNT(*) AS n FROM catalogo_cursores WHERE rule_id = ?').get(ruleId).n;
+
+test('catálogo (CA1, CA6): regra aceita a fonte catalogo, normalizada no servidor; só Amazon/Shopee salva sem etiqueta', async () => {
+  const s = await subir();
+  try {
+    const h = { cookie: sidDe(await login(s.port)), origin: `http://127.0.0.1:${s.port}` };
+    const id = await criarRegraCatalogo(s, h, { config: { categorias: ['Perfumes e Perfumaria'], lojas: ['amazon', 'shopee'], q: ' air fryer ', desconto_min: '30', ordem: 'desconto', extra: 'ignorado' } });
+    const regra = (await req(s.port, '/api/rules', { headers: h })).json.find((r) => r.id === id);
+    assert.equal(regra.tag_id, null, 'sem etiqueta padrão: as fontes só trazem Amazon e Shopee');
+    assert.equal(regra.source_type, 'catalogo');
+    assert.deepEqual(regra.sources, [{ type: 'catalogo', config: { categorias: ['Perfumes e Perfumaria'], lojas: ['amazon', 'shopee'], q: 'air fryer', desconto_min: 30, ordem: 'desconto' }, tag_id: null }]);
+    // vazio vira o padrão (todas as categorias e lojas, Novidades), junto com outras fontes
+    const outra = await req(s.port, '/api/rules', { method: 'POST', headers: h, body: { name: 'Mista', tag_id: null, template_id: 1, sources: [{ type: 'search', config: { query: 'fone' } }, { type: 'catalogo', tag_id: 7 }] } });
+    assert.equal(outra.status, 200, outra.txt);
+    const mista = (await req(s.port, '/api/rules', { headers: h })).json.find((r) => r.id === outra.json.id);
+    // Novidades ainda sem a primeira leitura: primeira_leitura (S3, só na listagem; não é gravado)
+    assert.deepEqual(mista.sources[1], { type: 'catalogo', config: { categorias: [], lojas: [], q: '', desconto_min: null, ordem: 'atualizacao' }, tag_id: 7, primeira_leitura: true });
+    assert.ok(!s.db.prepare('SELECT sources FROM rules WHERE id = ?').get(outra.json.id).sources.includes('primeira_leitura'));
+  } finally { await s.fechar(); }
+});
+
+test('catálogo (CA2, CA8): fonte inválida dá 400 com a frase fixa de ERROS_FONTE, o campo e a fonte, sem repetir o valor recebido', async () => {
+  const s = await subir();
+  try {
+    const h = { cookie: sidDe(await login(s.port)), origin: `http://127.0.0.1:${s.port}` };
+    const MAU = '<img src=x onerror=alert(1)>';
+    const casos = [
+      ['categorias', { categorias: Array.from({ length: 21 }, (_, i) => `${MAU}${i}`) }],
+      ['categoria', { categorias: [MAU, MAU] }],
+      ['categoria', { categorias: [`${MAU}${'x'.repeat(200)}`] }],
+      ['categoria', { categorias: MAU }],
+      ['lojas', { lojas: [MAU] }],
+      ['lojas', { lojas: ['amazon', 'amazon'] }],
+      ['q', { q: Array.from({ length: 11 }, () => MAU).join(',') }],
+      ['q', { q: `${MAU},,` }],
+      ['desconto_min', { desconto_min: 100 }],
+      ['desconto_min', { desconto_min: MAU }],
+      ['ordem', { ordem: MAU }],
+    ];
+    for (const [campo, config] of casos) {
+      const r = await req(s.port, '/api/rules', { method: 'POST', headers: h, body: { name: 'R', template_id: 1, sources: [{ type: 'search', config: { query: 'fone' } }, { type: 'catalogo', config }] } });
+      assert.equal(r.status, 400, `${campo}: ${r.txt}`);
+      assert.deepEqual(r.json, { erro: ERROS_FONTE[campo], campo, fonte: 2 }, `${campo}: ${JSON.stringify(config).slice(0, 60)}`);
+      assert.ok(!r.txt.includes('onerror'), `${campo}: o valor recebido não volta na resposta`);
+    }
+    // PUT valida igual, e o formato antigo (source_type) também
+    const id = await criarRegraCatalogo(s, h);
+    const put = await req(s.port, `/api/rules/${id}`, { method: 'PUT', headers: h, body: { name: 'R', template_id: 1, sources: [{ type: 'catalogo', config: { ordem: 'qualquer' } }] } });
+    assert.deepEqual([put.status, put.json], [400, { erro: ERROS_FONTE.ordem, campo: 'ordem', fonte: 1 }]);
+    const antigo = await req(s.port, '/api/rules', { method: 'POST', headers: h, body: { name: 'R', template_id: 1, source_type: 'catalogo', source_config: { lojas: 'ml' } } });
+    assert.deepEqual([antigo.status, antigo.json], [400, { erro: ERROS_FONTE.lojas, campo: 'lojas', fonte: 1 }]);
+    assert.equal(s.db.prepare('SELECT COUNT(*) AS n FROM rules').get().n, 1, 'nada gravado nas recusas');
+    // erro das outras fontes continua sem campo
+    const busca = await req(s.port, '/api/rules', { method: 'POST', headers: h, body: { name: 'R', template_id: 1, sources: [{ type: 'search', config: {} }] } });
+    assert.deepEqual(busca.json, { erro: 'Fonte 1: a busca está sem a palavra-chave.' });
+  } finally { await s.fechar(); }
+});
+
+test('catálogo (CA2, CA8): Testar pelo servidor real contra um Etiqueta falso; categorias e /api/state sem rede; o token não aparece em resposta, banco, URL nem console', async () => {
+  const etq = await etiquetaFalso();
+  const s = await subir({ fetch: etq.fetch });
+  const saida = [];
+  const escrever = { out: process.stdout.write, err: process.stderr.write };
+  process.stdout.write = function (c, ...a) { saida.push(String(c)); return escrever.out.call(this, c, ...a); };
+  process.stderr.write = function (c, ...a) { saida.push(String(c)); return escrever.err.call(this, c, ...a); };
+  const respostas = [];
+  try {
+    const h = { cookie: sidDe(await login(s.port)), origin: `http://127.0.0.1:${s.port}` };
+    const chamar = async (caminho, op = {}) => { const r = await req(s.port, caminho, { ...op, headers: h }); respostas.push(`${caminho} ${r.txt}`); return r; };
+    const caminho = arquivoDeToken(s.dir);
+
+    // antes de configurar: nada de rede; estado nulo, sem categorias
+    let st = (await chamar('/api/state')).json.catalogo;
+    assert.deepEqual({ ...st, situacao: undefined }, { estado: 'falta_configurar', situacao: undefined, falha_desde: null, para_revisar: 0, teto_revisao: 50, regras: [], tag_amazon: false });
+    assert.deepEqual((await chamar('/api/catalogo/categorias')).json, { categorias: [], total: 0, verificado_em: null, estado: 'falta_configurar' });
+
+    const salvo = await chamar('/api/conexoes/catalogo', { method: 'PUT', body: { campos: { endereco: etq.endereco, caminho_token: caminho } } });
+    assert.equal(salvo.status, 200, salvo.txt);
+    assert.equal((await chamar('/api/catalogo/categorias')).json.estado, 'salva');
+    assert.equal(etq.estado.pedidos.length, 0, 'salvar, /api/state e categorias não chamam o Etiqueta');
+
+    // Testar: o cliente do servidor lê o token do arquivo e chama o Etiqueta falso
+    const t = await chamar('/api/conexoes/catalogo/testar', { method: 'POST', body: {} });
+    assert.equal(t.status, 200, t.txt);
+    assert.deepEqual([t.json.ok, t.json.resultado, t.json.total, t.json.categorias], [true, 'ok', 165, CATEGORIAS_ETIQUETA]);
+    assert.equal(etq.estado.pedidos.length, 1);
+    const [pedido] = etq.estado.pedidos;
+    assert.deepEqual([pedido.method, pedido.url], ['GET', '/api/v1/categorias']);
+    assert.equal(pedido.headers.authorization, `Bearer ${TOKEN_FALSO}`);
+    assert.equal(pedido.headers.origin, undefined, 'nunca manda Origin ao Etiqueta');
+    assert.ok(!pedido.url.includes(TOKEN_FALSO), 'token fora da URL');
+
+    const cats = (await chamar('/api/catalogo/categorias')).json;
+    assert.deepEqual([cats.categorias, cats.total, cats.estado], [CATEGORIAS_ETIQUETA, 165, 'conectada']);
+    assert.ok(Number.isFinite(cats.verificado_em));
+    st = (await chamar('/api/state')).json.catalogo;
+    assert.deepEqual([st.estado, st.situacao.resultado, st.falha_desde], ['conectada', 'ok', null]);
+    assert.equal(etq.estado.pedidos.length, 1, 'categorias e /api/state leem a última verificação, sem chamar o Etiqueta');
+
+    // token recusado: falha_desde aparece no /api/state (o mesmo cliente do Testar e do agendador)
+    etq.estado.token = 'outroTokenQueOEtiquetaEspera_0123456789';
+    const recusado = await chamar('/api/conexoes/catalogo/testar', { method: 'POST', body: {} });
+    assert.deepEqual([recusado.json.ok, recusado.json.resultado], [false, 'token_recusado']);
+    st = (await chamar('/api/state')).json.catalogo;
+    assert.equal(st.estado, 'token_recusado');
+    assert.ok(Number.isFinite(st.falha_desde), 'falha_desde para o chip "Catálogo indisponível"');
+    assert.equal(st.falha_desde, s.catalogo.situacao().falha_desde, 'é o mesmo cliente criado por criarServicos');
+    assert.deepEqual((await chamar('/api/catalogo/categorias')).json.categorias, CATEGORIAS_ETIQUETA, 'teste que falha mantém as categorias anteriores');
+
+    // o resto do que o painel lê
+    for (const c of ['/api/conexoes', '/api/catalogo/itens', '/api/rules', '/api/log', '/api/state']) assert.equal((await chamar(c)).status, 200, c);
+
+    const tudo = respostas.join('\n');
+    assert.ok(tudo.includes(caminho), 'o caminho do arquivo aparece (é do dono)');
+    assert.ok(!tudo.includes(TOKEN_FALSO), 'o token não aparece em nenhuma resposta de /api');
+    assert.ok(!textoDoBanco(s.db).includes(TOKEN_FALSO), 'o token não foi gravado no banco');
+    assert.ok(!saida.join('').includes(TOKEN_FALSO), 'o token não foi para o console');
+  } finally {
+    process.stdout.write = escrever.out; process.stderr.write = escrever.err;
+    await s.fechar(); await etq.fechar();
+  }
+});
+
+test('catálogo (CA3): apagar a regra apaga os itens e os cursores dela (e só dela); id reaproveitado começa limpo; "Limpar já enviadas" apaga só os enviados', async () => {
+  const s = await subir();
+  try {
+    const h = { cookie: sidDe(await login(s.port)), origin: `http://127.0.0.1:${s.port}` };
+    const a = await criarRegraCatalogo(s, h, { nome: 'A' });
+    const b = await criarRegraCatalogo(s, h, { nome: 'B' });
+    for (const id of [a, b]) {
+      inserirItem(s.db, id, 'ASIN:B0AAAAAAA1', 'enviado');
+      inserirItem(s.db, id, 'ASIN:B0AAAAAAA2', 'revisao', { motivos: '["desconto_100"]' });
+      inserirItem(s.db, id, 'ASIN:B0AAAAAAA3', 'descartado');
+      inserirCursor(s.db, id);
+      s.db.prepare('INSERT INTO sent_offers (rule_id, offer_key, sent_at) VALUES (?,?,?)').run(id, 'ASIN:B0AAAAAAA1', Date.now());
+    }
+    const st = (await req(s.port, '/api/state', { headers: h })).json.catalogo;
+    assert.equal(st.para_revisar, 2);
+    assert.deepEqual(st.regras, [{ rule_id: a, para_revisar: 1, cheia: false }, { rule_id: b, para_revisar: 1, cheia: false }]);
+
+    assert.equal((await req(s.port, `/api/rules/${a}/reset-sent`, { method: 'POST', headers: h, body: {} })).status, 200);
+    assert.deepEqual(itensDe(s.db, a), ['ASIN:B0AAAAAAA2:revisao', 'ASIN:B0AAAAAAA3:descartado'], 'revisão e descartadas ficam');
+    assert.equal(s.db.prepare('SELECT COUNT(*) AS n FROM sent_offers WHERE rule_id = ?').get(a).n, 0);
+    assert.equal(cursoresDe(s.db, a), 1, '"Limpar já enviadas" não mexe no cursor');
+    assert.equal(itensDe(s.db, b).length, 3, 'a outra regra não muda');
+
+    // apaga a regra de maior id: o SQLite devolve o mesmo id para a próxima regra
+    assert.equal((await req(s.port, `/api/rules/${b}`, { method: 'DELETE', headers: h })).status, 200);
+    assert.deepEqual([itensDe(s.db, b), cursoresDe(s.db, b)], [[], 0], 'itens e cursores da regra apagada somem');
+    assert.deepEqual([itensDe(s.db, a).length, cursoresDe(s.db, a)], [2, 1], 'os da outra regra ficam');
+    const nova = await criarRegraCatalogo(s, h, { nome: 'Nova' });
+    assert.equal(nova, b, 'o id foi reaproveitado');
+    assert.deepEqual([itensDe(s.db, nova), cursoresDe(s.db, nova)], [[], 0], 'a regra nova não herda nada');
+    assert.equal((await req(s.port, '/api/state', { headers: h })).json.catalogo.para_revisar, 1);
+  } finally { await s.fechar(); }
+});
+
+test('catálogo (CA3): "Reler do começo" põe cursor nulo pronto em cada fonte Novidades; 404 sem regra; 409 com a regra rodando', async () => {
+  const s = await subir();
+  try {
+    const h = { cookie: sidDe(await login(s.port)), origin: `http://127.0.0.1:${s.port}` };
+    const id = await criarRegraCatalogo(s, h, { config: { lojas: ['amazon'] } });
+    inserirCursor(s.db, id, '0123456789abcdef', 'c400'); // cursor de um filtro antigo
+    const primeira = async () => (await req(s.port, '/api/rules', { headers: h })).json.find((x) => x.id === id).sources[0].primeira_leitura;
+    assert.equal(await primeira(), true, 'S3: o cursor do filtro atual ainda não está pronto');
+    const r = await req(s.port, `/api/rules/${id}/catalogo/recomecar`, { method: 'POST', headers: h, body: {} });
+    assert.deepEqual([r.status, r.json], [200, { ok: true, fontes: 1 }]);
+    assert.equal(await primeira(), false, 'pronto: a prévia já lê');
+    const cursores = s.db.prepare('SELECT cursor, pronto FROM catalogo_cursores WHERE rule_id = ?').all(id).map((l) => ({ ...l }));
+    assert.deepEqual(cursores, [{ cursor: null, pronto: 1 }], 'varredura do zero, sem o cursor antigo');
+
+    assert.deepEqual((await req(s.port, '/api/rules/999/catalogo/recomecar', { method: 'POST', headers: h, body: {} })).json, { erro: 'Regra não encontrada.' });
+    assert.equal((await req(s.port, '/api/rules/abc/catalogo/recomecar', { method: 'POST', headers: h, body: {} })).status, 404);
+    const isRunning = s.scheduler.isRunning;
+    s.scheduler.isRunning = (x) => x === id;
+    try {
+      inserirCursor(s.db, id, 'fedcba9876543210', 'c10');
+      const ocupada = await req(s.port, `/api/rules/${id}/catalogo/recomecar`, { method: 'POST', headers: h, body: {} });
+      assert.deepEqual([ocupada.status, ocupada.json], [409, { erro: 'Esta regra está rodando agora. Espere terminar e tente de novo.' }]);
+      assert.equal(cursoresDe(s.db, id), 2, 'nada mudou');
+    } finally { s.scheduler.isRunning = isRunning; }
+  } finally { await s.fechar(); }
+});
+
+test('catálogo (P6): Operador lê categorias, itens e /api/state, mas recebe 403 em Reler do começo, Enviar, Descartar e no Salvar/Testar do cartão', async () => {
+  const s = await subir();
+  try {
+    const sid = sidDe(await login(s.port));
+    const h = { cookie: sid, origin: `http://127.0.0.1:${s.port}` };
+    const id = await criarRegraCatalogo(s, h);
+    const item = inserirItem(s.db, id, 'ASIN:B0AAAAAAA9', 'revisao', { motivos: '["preco_antigo"]' });
+    s.db.prepare("UPDATE users SET papel = 'operador'").run(); // o papel é relido a cada requisição
+    assert.equal((await req(s.port, '/api/state', { headers: h })).json.usuario.papel, 'operador');
+
+    for (const c of ['/api/catalogo/categorias', '/api/catalogo/itens', '/api/state']) assert.equal((await req(s.port, c, { headers: h })).status, 200, c);
+    const escrita = [
+      ['POST', `/api/rules/${id}/catalogo/recomecar`], ['POST', `/api/catalogo/itens/${item}/enviar`], ['POST', `/api/catalogo/itens/${item}/descartar`],
+      ['PUT', '/api/conexoes/catalogo'], ['POST', '/api/conexoes/catalogo/testar'],
+    ];
+    for (const [method, caminho] of escrita) {
+      const r = await req(s.port, caminho, { method, headers: h, body: { campos: { endereco: 'http://127.0.0.1:1' } } });
+      assert.equal(r.status, 403, `${method} ${caminho}: ${r.txt}`);
+    }
+    assert.deepEqual(itensDe(s.db, id), ['ASIN:B0AAAAAAA9:revisao'], 'o item continua esperando o Dono');
+    assert.equal(cursoresDe(s.db, id), 0);
+    assert.equal(s.db.prepare("SELECT COUNT(*) AS n FROM conexoes WHERE plataforma = 'catalogo'").get().n, 0);
+  } finally { await s.fechar(); }
+});
+
+test('catálogo (CA1): o "Enviar" da revisão pelo servidor sai pela fila de envios do agendador (acordar) com a tag da Amazon; /api/state diz se a tag está salva', async () => {
+  const s = await subir({ publicHost: '', panelPassword: '' });
+  try {
+    const h = { origin: `http://127.0.0.1:${s.port}` };
+    s.db.prepare('INSERT INTO groups (jid, name, size, updated_at) VALUES (?,?,?,?)').run('111@g.us', 'Achadinhos', 10, Date.now());
+    const id = await criarRegraCatalogo(s, h, { mais: { group_jids: ['111@g.us'] } });
+    const item = inserirItem(s.db, id, 'ASIN:B0FG2MD49G', 'revisao', { motivos: '["desconto_100"]' });
+    assert.equal((await req(s.port, '/api/state', { headers: h })).json.catalogo.tag_amazon, false);
+    const semTag = await req(s.port, `/api/catalogo/itens/${item}/enviar`, { method: 'POST', headers: h, body: {} });
+    assert.equal(semTag.status, 400, 'sem a tag da Amazon, a revisão não envia');
+
+    s.db.prepare("INSERT INTO conexoes (plataforma, config, segredos, updated_at) VALUES ('amazon', ?, '{}', ?)").run(JSON.stringify({ tag: 'achadinho-20' }), Date.now());
+    assert.equal((await req(s.port, '/api/state', { headers: h })).json.catalogo.tag_amazon, true);
+    const r = await req(s.port, `/api/catalogo/itens/${item}/enviar`, { method: 'POST', headers: h, body: {} });
+    assert.equal(r.status, 200, r.txt);
+    const t0 = Date.now(); const status = () => s.db.prepare('SELECT status FROM envios WHERE id = ?').get(r.json.envio_id)?.status;
+    while (['pendente', 'enviando'].includes(status())) {
+      assert.ok(Date.now() - t0 < 3000, 'o envio não saiu (acordar não chegou ao agendador)');
+      await new Promise((ok) => setTimeout(ok, 5));
+    }
+    assert.equal(status(), 'concluido');
+    assert.equal(s.wa.simulated.length, 1);
+    assert.match(s.wa.simulated[0].text, /https:\/\/www\.amazon\.com\.br\/dp\/B0FG2MD49G\?tag=achadinho-20/);
+    assert.deepEqual(itensDe(s.db, id), ['ASIN:B0FG2MD49G:enviado']);
+    const segundo = await req(s.port, `/api/catalogo/itens/${item}/enviar`, { method: 'POST', headers: h, body: {} });
+    assert.deepEqual([segundo.status, segundo.json], [409, { erro: 'Esta oferta já foi tratada.' }]);
   } finally { await s.fechar(); }
 });

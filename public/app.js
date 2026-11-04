@@ -19,7 +19,8 @@ async function api(path, method = 'GET', body) {
     if (path !== '/state') atualizarEstado().catch(() => {});
     throw new Error(SO_DONO);
   }
-  if (!r.ok) throw new Error(j.erro || 'Erro ' + r.status);
+  // campo/fonte: o 400 da fonte Catálogo diz qual campo de qual fonte recusou (o formulário marca o campo)
+  if (!r.ok) throw Object.assign(new Error(j.erro || 'Erro ' + r.status), { status: r.status, campo: typeof j.campo === 'string' ? j.campo : null, fonte: Number.isInteger(j.fonte) ? j.fonte : null });
   return j;
 }
 function aviso(msg, erro = false) {
@@ -31,14 +32,15 @@ const tentar = (fn) => async (...a) => { try { await fn(...a); } catch (e) { avi
 const REQ = '<b class="req" title="Obrigatório">*</b>';
 /**
  * Mostra, antes do rodapé do formulário (ou no fim do contêiner), um card com o que falta e marca os campos.
- * erros = [{ msg, el? }]. Devolve true se havia erros (então não salve).
+ * erros = [{ msg, el? }]; `titulo` é a frase em negrito do card (padrão "Antes de salvar, falta:").
+ * Devolve true se havia erros (então não salve).
  */
-function mostrarErros(container, erros) {
+function mostrarErros(container, erros, titulo = 'Antes de salvar, falta:') {
   $$('.invalido', container).forEach((e) => e.classList.remove('invalido'));
   let box = $('.erros', container);
   if (!erros.length) { box?.remove(); return false; }
   if (!box) { box = document.createElement('div'); box.className = 'erros'; box.setAttribute('role', 'alert'); const rod = $('.rodape', container); rod ? rod.parentNode.insertBefore(box, rod) : container.appendChild(box); }
-  box.innerHTML = `<b>Antes de salvar, falta:</b><ul>${erros.map((e) => `<li>${esc(e.msg)}</li>`).join('')}</ul>`;
+  box.innerHTML = `<b>${esc(titulo)}</b><ul>${erros.map((e) => `<li>${esc(e.msg)}</li>`).join('')}</ul>`;
   erros.forEach((e) => e.el?.classList.add('invalido'));
   (erros.find((e) => e.el)?.el || box).scrollIntoView({ block: 'center', behavior: 'smooth' });
   erros.find((e) => e.el)?.el?.focus?.();
@@ -77,29 +79,207 @@ function proximo(r) {
 }
 function cartaoRegra(r) {
   const tag = S.tags.find((t) => t.id === r.tag_id); const tpl = S.templates.find((t) => t.id === r.template_id);
-  const fontes = (r.sources?.length ? r.sources : [{ type: r.source_type, config: r.source_config }]).map(resumoFonte);
+  const lista = r.sources?.length ? r.sources : [{ type: r.source_type, config: r.source_config }]; const fontes = lista.map(resumoFonte);
   const fonte = fontes.length === 1 ? fontes[0] : `${fontes.length} fontes intercaladas (${fontes.join('; ')})`;
+  const cat = lista.some((f) => f?.type === 'catalogo') ? fcatCartao(r) : { chips: '', prox: '' }; // revisão e "Catálogo indisponível"
   return `<article class="card regra" data-id="${r.id}">
     <h2><label class="chave" title="Ligar ou pausar"><input type="checkbox" data-act="ligar" ${r.enabled ? 'checked' : ''} aria-label="Disparo automático ativo"><span></span></label>
-      ${esc(r.name)} ${tag ? `<span class="chip etq">${esc(tag.name)}</span>` : '<span class="chip">sem etiqueta</span>'}</h2>
+      ${esc(r.name)} ${tag ? `<span class="chip etq">${esc(tag.name)}</span>` : '<span class="chip">sem etiqueta</span>'}${cat.chips}</h2>
     <p class="res">${r.per_run} ${r.per_run === 1 ? 'oferta' : 'ofertas'} a cada ${r.interval_min} min, das ${esc(r.window_start)} às ${esc(r.window_end)}, para ${r.group_jids.length} ${r.group_jids.length === 1 ? 'grupo' : 'grupos'}.
       Fonte: ${fonte}. Template: ${esc(tpl?.name || '—')}.</p>
-    <div class="prox">${proximo(r)}</div>
+    <div class="prox">${proximo(r)}</div>${cat.prox}
     <div class="acoes">
       <button class="pri" data-act="rodar" ${r.em_andamento ? 'disabled' : ''}>Enviar agora</button>
       <button data-act="ver">Ver ofertas</button><button data-act="editar">Editar</button>
       <button data-act="zerar" class="leve" title="Permite que as ofertas já enviadas saiam de novo">Limpar “já enviadas”</button>
       <button data-act="excluir" class="perigo leve">Excluir</button></div></article>`;
 }
-const resumoFonte = (f) => (f.type === 'afiliados' ? fonteAfiliados(f.config)
+const resumoFonte = (f) => (f.type === 'afiliados' ? fonteAfiliados(f.config) : f.type === 'catalogo' ? fonteCatalogo(f.config)
   : f.type === 'search' ? `busca por “${esc(f.config?.query || '')}”` : `${String(f.config?.items || '').split('\n').filter((l) => /^https?:/i.test(l.trim())).length} links na lista`)
-  + (f.tag_id && S.tags.find((t) => t.id === f.tag_id) ? ` · etiqueta ${esc(S.tags.find((t) => t.id === f.tag_id).name)}` : '');
+  + (f.tag_id && fcatPrecisaEtiqueta([f]) && S.tags.find((t) => t.id === f.tag_id) ? ` · etiqueta ${esc(S.tags.find((t) => t.id === f.tag_id).name)}` : '');
 const categoriasDe = (c = {}) => Array.isArray(c.categorias) ? c.categorias : c.categoria ? [c.categoria] : [];
 function fonteAfiliados(c = {}) {
   const nomes = categoriasDe(c).map((id) => S.st.afiliados?.categorias.find((x) => x.id === id)?.name).filter(Boolean);
   const cats = nomes.length > 3 ? `${nomes.length} categorias` : nomes.map(esc).join(' + ');
   const partes = [c.busca ? `“${esc(c.busca)}”` : '', cats, c.mais_vendidos ? 'mais vendidos' : '', c.ganhos_extras ? 'ganhos extras' : ''].filter(Boolean);
   return `Central de Afiliados${partes.length ? ' (' + partes.join(', ') + ')' : ''}`;
+}
+// ---------- fonte "Catálogo" (app Etiqueta) no Disparo automático ----------
+// Spec: docs/produto/specs/fonte-catalogo-etiqueta.md, seção 2. As categorias vêm de GET /api/catalogo/categorias (as da
+// última verificação em Conexões: abrir o formulário não chama o Etiqueta). Nome de categoria e busca são texto de
+// fora: sempre por esc(). Os textos com <a> abaixo são fixos (nenhum dado de fora entra neles).
+const TEXTOS_REGRA_CATALOGO = {
+  opcao: 'Catálogo (app Etiqueta)', resumo: 'Catálogo do Etiqueta',
+  categorias: 'Categorias do Etiqueta', marcadas: (n) => (n ? `(${n} ${n === 1 ? 'marcada' : 'marcadas'})` : '(todas)'),
+  catDica: 'Nenhuma marcada = todas as categorias. Com várias, vale qualquer uma delas. A lista é a da última vez que você clicou em “Testar” em Conexões; abrir esta tela não atualiza.',
+  catVazia: 'As categorias aparecem depois que o catálogo for conectado e testado em Conexões.', catCarregando: 'Carregando as categorias…',
+  catSumiu: '(não está mais no catálogo)', catZero: '(0 ofertas)', catMax: 'Você pode marcar até 20 categorias.',
+  lojas: 'Lojas', lojasDica: 'Nenhuma marcada = as três lojas.', nomesLoja: { ml: 'Mercado Livre', amazon: 'Amazon', shopee: 'Shopee' },
+  busca: 'Buscar por (opcional)', buscaDica: 'Palavras separadas por vírgula (até 10). Basta uma aparecer no título; não diferencia maiúscula nem acento. Ex.: air fryer, fritadeira.',
+  desconto: 'Desconto mínimo no catálogo (%)',
+  descontoDica: 'De 0 a 99. Vazio = sem mínimo. Vale só para esta fonte; o “Desconto mínimo (%)” em Filtros é o filtro geral do disparo e vale para todas as fontes. Ofertas com 100% de desconto sempre esperam a sua revisão (veja abaixo).',
+  ordem: 'Ordem',
+  // [valor, opção do select, como aparece no resumo do cartão]
+  ordens: [
+    ['atualizacao', 'Novidades (após salvar)', 'novidades'], ['relevancia', 'Mais vendidos', 'mais vendidos'],
+    ['desconto', 'Maior desconto', 'maior desconto'], ['menor_preco', 'Menor preço', 'menor preço'], ['maior_preco', 'Maior preço', 'maior preço'],
+    ['cupom', 'Com cupom primeiro', 'com cupom primeiro'], ['recentes', 'Coletadas há menos tempo', 'coletadas há menos tempo'],
+  ],
+  ordemNovidades: 'Começa a contar quando você salva: envia o que chegar ou for atualizado no catálogo depois disso (uma nova coleta do Etiqueta conta); a mesma oferta nunca sai duas vezes neste disparo. Para mandar o que já existe, use outra ordem ou “Reler do começo”.',
+  ordemOutras: 'Cada envio pega as melhores que ainda não foram enviadas dentro do prazo de repetição.',
+  etiquetaComum: 'Etiqueta desta fonte', etiquetaFonte: 'Etiqueta do Mercado Livre desta fonte',
+  etiquetaNaoSeAplica: 'Não se aplica: os links da Amazon e da Shopee já vêm prontos do catálogo.',
+  conexao: 'O catálogo ainda não está conectado. Conecte em <a href="#conexoes" style="text-decoration:underline">Conexões</a> e use “Testar” para ver as categorias.',
+  conexaoIndisp: (selo) => `O catálogo está indisponível agora (${selo}). Você pode salvar esta fonte; ela volta a enviar quando o Etiqueta responder.`,
+  selos: { indisponivel: 'Indisponível', token_recusado: 'Token recusado' },
+  semML: 'Esta fonte não precisa de etiqueta do Mercado Livre. Se todas as fontes do disparo forem assim, a etiqueta padrão fica opcional.',
+  comShopee: 'Toda oferta da Shopee espera a sua revisão antes de sair: o link curto da Shopee não prova de quem é a conta. Elas aparecem em Histórico &gt; Catálogo, com o botão “Revisar”.',
+  comML: 'Os links do Mercado Livre são gerados de novo, com a etiqueta escolhida acima, pela extensão do Chrome. Com a extensão desligada, essas ofertas esperam e saem sozinhas quando ela voltar; não vão para a revisão.',
+  revisao: 'Ofertas com 100% de desconto, com preço antigo 10 vezes maior que o preço ou cujo link falhe ao ser gerado também esperam a sua revisão. Nada disso sai sozinho.',
+  amazonTag: 'Amazon: o link é montado com a sua tag de Conexões.',
+  amazonSemTag: 'Falta a tag da Amazon. Salve em <a href="#conexoes" style="text-decoration:underline">Conexões &gt; Amazon</a>; sem ela, as ofertas da Amazon esperam.',
+  padraoObrigatoria: 'Etiqueta padrão', padraoOpcional: 'Etiqueta padrão (opcional)', padraoNaoPrecisa: 'Não precisa: as fontes deste disparo só trazem Amazon e Shopee.',
+  reler: 'Reler do começo', relerTitulo: 'Reler o catálogo desde o começo no próximo envio',
+  relerDica: 'Use para mandar o que já estava no catálogo antes de você salvar a regra, ou depois de reorganizar as categorias no Etiqueta.',
+  relerConfirma: 'Na próxima vez, o painel confere o catálogo inteiro de novo, em todas as fontes Catálogo deste disparo. Ofertas já tratadas não são repetidas. Continuar?',
+  relerOk: 'Releitura marcada para o próximo envio.', relerFalhou: 'Não consegui marcar a releitura. Tente de novo.',
+  erroQ: 'Buscar por: até 200 caracteres e 10 palavras, separadas por vírgula, sem palavra vazia.',
+  erroDesconto: 'Desconto mínimo: número inteiro de 0 a 99.', erroCats: 'Escolha no máximo 20 categorias.',
+  chipRevisar: (n) => `${n} para revisar`, chipRevisarTitulo: 'Ver no Histórico as ofertas do catálogo que esperam a sua revisão',
+  chipCheia: (n) => `Revisão cheia (${n})`, cheiaProx: (n) => `${n} ofertas esperam revisão. As novas esperam até você revisar ou descartar.`,
+  chipIndisp: '! Catálogo indisponível', indispProx: (h) => `Catálogo indisponível desde ${h}. As outras fontes seguem.`,
+  esperariaRevisao: 'Esperaria revisão',
+  // prévia ("Ver ofertas") de fonte Novidades que ainda não marcou o ponto de partida (`primeira_leitura` do servidor)
+  primeiraLeitura: 'Primeira leitura: o disparo marca o ponto de partida na primeira execução; a prévia ainda não tem ofertas.',
+  primeiraLeituraOutras: 'Primeira leitura do catálogo: o disparo marca o ponto de partida na primeira execução; por isso a prévia ainda não traz ofertas do catálogo.',
+};
+const FCAT_LOJAS = ['ml', 'amazon', 'shopee'];
+const FCAT_MAX_CATS = 20;
+// Seletor do campo que o servidor recusou (400 com `campo`, src/catalogo.js ERROS_FONTE), dentro da fonte.
+const FCAT_CAMPOS = { categorias: '.fc-cats', categoria: '.fc-cats', lojas: '.fc-lojas', q: '[name=cat_q]', desconto_min: '[name=cat_desc]', ordem: '[name=cat_ordem]' };
+// Categorias da última verificação, lidas ao abrir o formulário (null = ainda carregando).
+const FCAT = { lista: null };
+
+/** A regra precisa da etiqueta do Mercado Livre? A mesma regra do servidor (precisaEtiqueta, src/catalogo.js, D8). */
+function fcatPrecisaEtiqueta(fontes) {
+  if (!Array.isArray(fontes) || !fontes.length) return true;
+  return fontes.some((s) => {
+    if (s?.type !== 'catalogo') return true;
+    const lojas = s.config?.lojas;
+    return !Array.isArray(lojas) || !lojas.length || lojas.includes('ml');
+  });
+}
+const fcatNum = (n) => Number(n || 0).toLocaleString('pt-BR');
+/** Ofertas da categoria nas lojas marcadas (nenhuma = todas). */
+const fcatTotal = (c, lojas) => (lojas.length ? lojas.reduce((s, l) => s + (Number(c?.lojas?.[l]) || 0), 0) : Number(c?.total) || 0);
+/** Total por loja nas categorias marcadas (nenhuma = todas). */
+function fcatTotaisLojas(lista, marcadas) {
+  const cats = (lista || []).filter((c) => !marcadas.length || marcadas.includes(c.nome));
+  return Object.fromEntries(FCAT_LOJAS.map((l) => [l, cats.reduce((s, c) => s + (Number(c.lojas?.[l]) || 0), 0)]));
+}
+/** "às 14:32" de hoje, ou "03/11 14:32". */
+function fcatHora(ms) {
+  const d = new Date(ms); const hm = d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+  return d.toDateString() === new Date().toDateString() ? hm : `${d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' })} ${hm}`;
+}
+/** Resumo da fonte no cartão da regra: "Catálogo do Etiqueta (Perfumes + 2 categorias, Amazon + Shopee, “air fryer”, …)". */
+function fonteCatalogo(c = {}) {
+  const T = TEXTOS_REGRA_CATALOGO; const cats = Array.isArray(c.categorias) ? c.categorias : []; const resto = cats.length - 1;
+  const catsTxt = !cats.length ? '' : cats.length > 3 ? `${cats.length} categorias` : `${esc(cats[0])}${resto ? ` + ${resto} ${resto === 1 ? 'categoria' : 'categorias'}` : ''}`;
+  const lojas = FCAT_LOJAS.filter((l) => Array.isArray(c.lojas) && c.lojas.includes(l)).map((l) => T.nomesLoja[l]).join(' + ');
+  const desc = c.desconto_min != null && c.desconto_min !== '' && Number.isFinite(Number(c.desconto_min)) ? `desconto a partir de ${Number(c.desconto_min)}%` : '';
+  const ordem = T.ordens.find(([id]) => id === (c.ordem || 'atualizacao'))?.[2] || '';
+  const partes = [catsTxt, lojas, c.q ? `“${esc(c.q)}”` : '', desc, ordem].filter(Boolean);
+  return `${T.resumo}${partes.length ? ' (' + partes.join(', ') + ')' : ''}`;
+}
+/**
+ * Caixas das categorias. `lista` = categorias do servidor (null = carregando); `marcadas` = nomes marcados; `lojas` = ids
+ * marcados (os totais são os dessas lojas; categoria com 0 fica desabilitada). Marcada que não está mais na lista
+ * continua marcada, com o aviso; com 20 marcadas, as outras ficam desabilitadas.
+ */
+function fcatCatsHtml(lista, marcadas, lojas) {
+  const T = TEXTOS_REGRA_CATALOGO; const sel = new Set(marcadas); const nomes = new Set((lista || []).map((c) => c.nome));
+  const cheio = sel.size >= FCAT_MAX_CATS;
+  const caixa = (nome, extra, zero) => `<label title="${esc(nome)}"><input type="checkbox" value="${esc(nome)}" ${sel.has(nome) ? 'checked' : ''} ${zero ? 'data-zero' : ''} ${!sel.has(nome) && (zero || cheio) ? 'disabled' : ''}><span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(nome)}</span><small>${extra}</small></label>`;
+  const daLista = (lista || []).map((c) => { const n = fcatTotal(c, lojas); return caixa(c.nome, n ? `(${fcatNum(n)})` : T.catZero, n === 0); });
+  const sumidas = [...sel].filter((n) => !nomes.has(n)).map((n) => caixa(n, lista?.length ? T.catSumiu : '', false));
+  const aviso = lista == null ? T.catCarregando : !lista.length ? T.catVazia : '';
+  return (aviso ? `<p class="dica" style="margin:0;padding:7px 12px">${aviso}</p>` : '') + daLista.join('') + sumidas.join('');
+}
+/** Aviso de conexão do catálogo (A0): só quando não está "conectada". */
+function fcatConexaoHtml(cat = {}) {
+  const T = TEXTOS_REGRA_CATALOGO;
+  if (cat.estado === 'conectada') return '';
+  const selo = Object.hasOwn(T.selos, cat.estado || '') ? T.selos[cat.estado] : '';
+  return `<div class="aviso-impl" role="status"><p>${selo ? esc(T.conexaoIndisp(selo)) : T.conexao}</p></div>`;
+}
+/** Avisos A1 a A5 para as lojas marcadas (nenhuma = as três). `tagAmazon`: há tag da Amazon salva em Conexões. */
+function fcatAvisosHtml(lojas, tagAmazon) {
+  const T = TEXTOS_REGRA_CATALOGO; const tem = (l) => !lojas.length || lojas.includes(l);
+  return [
+    lojas.length && !lojas.includes('ml') ? `<div class="aviso-impl neutro"><p>${T.semML}</p></div>` : '',
+    tem('shopee') ? `<div class="aviso-impl"><p>${T.comShopee}</p></div>` : '',
+    tem('ml') ? `<div class="aviso-impl neutro"><p>${T.comML}</p></div>` : '',
+    tem('amazon') ? (tagAmazon ? `<small class="dica">${T.amazonTag}</small>` : `<div class="aviso-impl"><p>${T.amazonSemTag}</p></div>`) : '',
+    `<small class="dica">${T.revisao} ${q('fonte.catalogo.revisao')}</small>`,
+  ].filter(Boolean).join('');
+}
+/** O que o servidor recusaria na config da fonte (as mesmas regras de limparFonteCatalogo). → [{ msg, campo }] */
+function fcatErros(c = {}) {
+  const T = TEXTOS_REGRA_CATALOGO; const erros = [];
+  if ((c.categorias || []).length > FCAT_MAX_CATS) erros.push({ msg: T.erroCats, campo: 'categorias' });
+  const q = String(c.q ?? '');
+  if (q.trim()) { const termos = q.trim().split(','); if ([...q.trim()].length > 200 || termos.length > 10 || termos.some((t) => !t.trim())) erros.push({ msg: T.erroQ, campo: 'q' }); }
+  const d = c.desconto_min;
+  if (d != null && !(Number.isInteger(d) && d >= 0 && d <= 99)) erros.push({ msg: T.erroDesconto, campo: 'desconto_min' });
+  return erros;
+}
+/** Config da fonte catálogo lida do bloco `.f-catalogo` de uma fonte. Desconto que não é inteiro fica como veio (fcatErros recusa). */
+function fcatLerConfig(el) {
+  const v = (n) => $(`[name=${n}]`, el)?.value ?? ''; const d = String(v('cat_desc')).trim();
+  return {
+    categorias: $$('.fc-cats input:checked', el).map((c) => c.value), lojas: $$('.fc-lojas input:checked', el).map((c) => c.value),
+    q: String(v('cat_q')).trim(), desconto_min: d === '' ? null : /^\d{1,2}$/.test(d) ? Number(d) : d, ordem: v('cat_ordem') || 'atualizacao',
+  };
+}
+/** Refaz as caixas das categorias (com os totais das lojas marcadas), mantendo as marcadas. */
+function fcatPintarCats(el) {
+  const box = $('.fc-cats', el); if (!box) return;
+  box.innerHTML = fcatCatsHtml(FCAT.lista, $$('input:checked', box).map((c) => c.value), $$('.fc-lojas input:checked', el).map((c) => c.value));
+}
+/** Atualiza no lugar o que depende das escolhas: contagem, limite de 20, totais por loja, etiqueta da fonte, avisos e dica da ordem. */
+function fcatAtualizar(el) {
+  const T = TEXTOS_REGRA_CATALOGO; if (!$('.f-catalogo', el)) return;
+  const ehCat = $(`input[name=st${el.dataset.i}]:checked`, el)?.value === 'catalogo';
+  const lojas = $$('.fc-lojas input:checked', el).map((c) => c.value);
+  const caixas = $$('.fc-cats input', el); const marcadas = caixas.filter((c) => c.checked).map((c) => c.value);
+  const cheio = marcadas.length >= FCAT_MAX_CATS;
+  caixas.forEach((c) => { c.disabled = !c.checked && (cheio || c.hasAttribute('data-zero')); });
+  $('.fc-cont', el).textContent = T.marcadas(marcadas.length);
+  const max = $('.fc-max', el); max.textContent = cheio ? T.catMax : ''; max.hidden = !cheio;
+  const tot = fcatTotaisLojas(FCAT.lista, marcadas);
+  $$('[data-total]', el).forEach((s) => { s.textContent = FCAT.lista?.length ? `(${fcatNum(tot[s.dataset.total])})` : ''; });
+  const ordem = $('[name=cat_ordem]', el)?.value; const dica = $('.fc-ordem-dica', el);
+  if (dica) dica.textContent = ordem === 'atualizacao' ? T.ordemNovidades : T.ordemOutras;
+  const naoSeAplica = ehCat && lojas.length > 0 && !lojas.includes('ml');
+  $('.src-tag-rot', el).textContent = ehCat ? T.etiquetaFonte : T.etiquetaComum;
+  $('[name=src_tag]', el).disabled = naoSeAplica; $('.src-tag-na', el).hidden = !naoSeAplica;
+  const cat = S.st?.catalogo || {};
+  $('.fc-conexao', el).innerHTML = fcatConexaoHtml(cat);
+  $('.fc-avisos', el).innerHTML = fcatAvisosHtml(lojas, !!cat.tag_amazon);
+}
+/** Chips e linhas `.prox` do cartão da regra com fonte Catálogo, de /api/state.catalogo. */
+function fcatCartao(r) {
+  const T = TEXTOS_REGRA_CATALOGO; const c = S.st?.catalogo || {};
+  const info = (Array.isArray(c.regras) ? c.regras : []).find((x) => x.rule_id === r.id) || {};
+  const n = Number(info.para_revisar) || 0; const teto = Number(c.teto_revisao) || 50;
+  const chips = [
+    n > 0 && podeEquipe() ? `<a class="chip chip-link chip-toque" href="#historico?tipo=catalogo&amp;regra=${Number(r.id)}&amp;status=revisao" title="${T.chipRevisarTitulo}">${T.chipRevisar(n)}</a>` : '',
+    info.cheia ? `<span class="venc-aviso">${T.chipCheia(teto)}</span>` : '',
+    c.falha_desde ? `<span class="venc-aviso">${T.chipIndisp}</span>` : '',
+  ].filter(Boolean);
+  const prox = [info.cheia ? T.cheiaProx(teto) : '', c.falha_desde ? T.indispProx(fcatHora(c.falha_desde)) : ''].filter(Boolean);
+  return { chips: chips.length ? ' ' + chips.join(' ') : '', prox: prox.map((p) => `<div class="prox">${esc(p)}</div>`).join('') };
 }
 function paginaRegras() {
   $('#pagina').innerHTML = `<div class="topo"><div><h1>Disparo automático ${q('regras')}</h1>
@@ -183,12 +363,27 @@ function seletorGrupos(opts = {}) {
   return { html, ligar, marcados };
 }
 function fonteHtml(f, i, total) {
-  const sc = f.config || {}; const catsSel = new Set(categoriasDe(sc));
+  const sc = f.config || {}; const catsSel = new Set(categoriasDe(sc)); const TC = TEXTOS_REGRA_CATALOGO;
+  const cc = f.type === 'catalogo' ? sc : {}; const ccLojas = Array.isArray(cc.lojas) ? cc.lojas : []; const ccOrdem = cc.ordem || 'atualizacao';
   return `<div class="fonte sub-campo" data-i="${i}" style="margin-bottom:10px"><legend>Fonte ${i + 1}${total > 1 ? '' : ''} ${total > 1 ? `<button type="button" data-rm-fonte class="leve perigo" style="float:right;padding:2px 8px">Remover</button>` : ''}</legend>
-    <div class="grade" style="margin-bottom:8px"><label class="campo"><span>Etiqueta desta fonte ${q('fonte.etiqueta')}</span><select name="src_tag"><option value="">A etiqueta padrão</option>${S.tags.map((t) => `<option value="${t.id}" ${t.id === f.tag_id ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}</select></label></div>
+    <div class="grade" style="margin-bottom:8px"><label class="campo"><span><span class="src-tag-rot">${TC.etiquetaComum}</span> ${q('fonte.etiqueta')}</span><select name="src_tag" aria-describedby="fc${i}-na"><option value="">A etiqueta padrão</option>${S.tags.map((t) => `<option value="${t.id}" ${t.id === f.tag_id ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}</select><small class="src-tag-na" id="fc${i}-na" hidden>${TC.etiquetaNaoSeAplica}</small></label></div>
     <div class="linha">${q('fonte.tipos')}<label><input type="radio" name="st${i}" value="afiliados" ${f.type === 'afiliados' ? 'checked' : ''} style="width:auto"> Central de Afiliados</label>
       <label><input type="radio" name="st${i}" value="list" ${f.type === 'list' ? 'checked' : ''} style="width:auto"> Lista de links</label>
-      <label><input type="radio" name="st${i}" value="search" ${f.type === 'search' ? 'checked' : ''} style="width:auto"> Busca por palavra-chave (experimental)</label></div>
+      <label><input type="radio" name="st${i}" value="search" ${f.type === 'search' ? 'checked' : ''} style="width:auto"> Busca por palavra-chave (experimental)</label>
+      <label><input type="radio" name="st${i}" value="catalogo" ${f.type === 'catalogo' ? 'checked' : ''} style="width:auto"> ${TC.opcao}</label>${q('fonte.catalogo')}</div>
+    <div class="f-catalogo" style="display:grid;gap:10px">
+      <div class="fc-conexao"></div>
+      <fieldset class="sub-campo"><legend>${TC.categorias} ${q('fonte.catalogo.categoria')} <span class="dica fc-cont"></span></legend>
+        <div class="grupos cats fc-cats" role="group" aria-label="${TC.categorias}" aria-describedby="fc${i}-cats">${fcatCatsHtml(FCAT.lista, Array.isArray(cc.categorias) ? cc.categorias : [], ccLojas)}</div>
+        <small id="fc${i}-cats">${TC.catDica}</small> <small class="fc-max nivel-aviso" role="status" hidden></small></fieldset>
+      <fieldset class="sub-campo"><legend>${TC.lojas} ${q('fonte.catalogo.loja')}</legend>
+        <div class="linha fc-lojas">${FCAT_LOJAS.map((l) => `<label><input type="checkbox" value="${l}" ${ccLojas.includes(l) ? 'checked' : ''} style="width:auto"> ${TC.nomesLoja[l]} <span class="dica" data-total="${l}"></span></label>`).join('')}</div>
+        <small>${TC.lojasDica}</small></fieldset>
+      <div class="grade" style="align-items:start">
+        <label class="campo"><span>${TC.busca}</span><input name="cat_q" value="${esc(cc.q || '')}" maxlength="200" autocomplete="off" spellcheck="false" aria-describedby="fc${i}-q" placeholder="Ex.: air fryer, fritadeira"><small id="fc${i}-q">${TC.buscaDica}</small></label>
+        <label class="campo"><span>${TC.desconto}</span><input name="cat_desc" type="number" min="0" max="99" step="1" inputmode="numeric" value="${esc(cc.desconto_min ?? '')}" placeholder="Sem mínimo" aria-describedby="fc${i}-d"><small id="fc${i}-d">${TC.descontoDica}</small></label>
+        <label class="campo"><span>${TC.ordem} ${q('fonte.catalogo.ordem')}</span><select name="cat_ordem" aria-describedby="fc${i}-o">${TC.ordens.map(([v, nome]) => `<option value="${v}" ${v === ccOrdem ? 'selected' : ''}>${nome}</option>`).join('')}</select><small id="fc${i}-o" class="fc-ordem-dica" aria-live="polite"></small></label></div>
+      <div class="fc-avisos" aria-live="polite" style="display:grid;gap:8px"></div></div>
     <div class="f-afiliados"><div class="grade">
       <label class="campo"><span>Buscar por (opcional) ${q('fonte.busca')}</span><input name="af_busca" value="${esc(sc.busca || '')}" placeholder="Ex.: organizador, air fryer"></label>
       <label class="campo">Ordem<select name="af_ordem">${(S.st.afiliados?.ordens || []).map((o) => `<option value="${o.id}" ${o.id === sc.ordem ? 'selected' : ''}>${esc(o.name)}</option>`).join('')}</select></label>
@@ -211,15 +406,19 @@ function formRegra(r) {
   const grupos = seletorGrupos({ selecionados: r.group_jids, blocos: true }); const dlg = $('#dlg');
   const fontes = (r.sources?.length ? r.sources : [{ type: r.source_type || 'afiliados', config: r.source_config || {} }]).map((f) => ({ type: f.type, tag_id: f.tag_id ?? null, config: { ...(f.config || {}) } }));
   const MAXF = S.st.max_fontes || 5;
+  // "Reler do começo" vale para a regra salva (todas as fontes Catálogo dela) e é só do Dono
+  const podeReler = !nova && podeEquipe() && fontes.some((f) => f.type === 'catalogo');
+  FCAT.lista = null; // categorias da última verificação: chegam depois (sem rede até o Etiqueta)
   dlg.innerHTML = `<form method="dialog" id="f" novalidate><h1>${nova ? 'Novo disparo automático' : 'Editar disparo automático'}</h1>
     <div class="grade">
       <label class="campo"><span>Nome ${REQ}</span><input name="name" value="${esc(r.name)}" placeholder="Ex.: Tecnologia" required></label>
-      <label class="campo"><span>Etiqueta padrão ${REQ} ${q('regras.etiqueta')}</span><select name="tag_id">${opcoes(S.tags, r.tag_id, 'Escolha…')}</select>
-        ${S.tags.length ? '' : '<small>Cadastre uma etiqueta em <a href="#conexoes">Conexões</a> (Mercado Livre).</small>'}</label>
+      <label class="campo"><span><span id="tag-obr">${TEXTOS_REGRA_CATALOGO.padraoObrigatoria} ${REQ}</span><span id="tag-opc" hidden>${TEXTOS_REGRA_CATALOGO.padraoOpcional}</span> ${q('regras.etiqueta')}</span><select name="tag_id" aria-describedby="tag-opc-dica">${opcoes(S.tags, r.tag_id, 'Escolha…')}</select>
+        ${S.tags.length ? '' : '<small>Cadastre uma etiqueta em <a href="#conexoes">Conexões</a> (Mercado Livre).</small>'}<small id="tag-opc-dica" hidden>${TEXTOS_REGRA_CATALOGO.padraoNaoPrecisa}</small></label>
       <label class="campo"><span>Template ${REQ} ${q('regras.template')}</span><select name="template_id">${opcoes(S.templates, r.template_id)}</select></label></div>
     <fieldset><legend>De onde vêm as ofertas ${REQ} ${q('regras.fontes')} <span class="dica" id="f-cont"></span></legend>
       <div id="fontes"></div>
-      <div class="linha"><button type="button" id="add-fonte">+ Adicionar fonte</button><small class="dica">Até ${MAXF} fontes por disparo automático. Com mais de uma, as ofertas saem intercaladas (uma de cada fonte por vez). Um grupo também pode estar em vários disparos automáticos.</small></div></fieldset>
+      <div class="linha"><button type="button" id="add-fonte">+ Adicionar fonte</button><small class="dica">Até ${MAXF} fontes por disparo automático. Com mais de uma, as ofertas saem intercaladas (uma de cada fonte por vez). Um grupo também pode estar em vários disparos automáticos.</small></div>
+      ${podeReler ? `<div class="linha" style="margin-top:8px"><button type="button" class="leve" id="fc-reler" title="${TEXTOS_REGRA_CATALOGO.relerTitulo}" aria-describedby="fc-reler-dica fc-reler-estado">${TEXTOS_REGRA_CATALOGO.reler}</button><small class="dica" id="fc-reler-dica">${TEXTOS_REGRA_CATALOGO.relerDica}</small><small id="fc-reler-estado" role="status"></small></div>` : ''}</fieldset>
     <fieldset><legend>Filtros ${q('regras.filtros')}</legend><div class="grade">
       <label class="campo">Preço mínimo (R$)<input name="min_price" type="number" step="0.01" min="0" value="${r.min_price ?? ''}" placeholder="Sem mínimo"></label>
       <label class="campo">Preço máximo (R$)<input name="max_price" type="number" step="0.01" min="0" value="${r.max_price ?? ''}" placeholder="Sem máximo"></label>
@@ -240,22 +439,46 @@ function formRegra(r) {
     $('#add-fonte').hidden = fontes.length >= MAXF;
     $$('.fonte', dlg).forEach((el) => {
       const i = Number(el.dataset.i);
-      const ajusta = () => { const t = $(`input[name=st${i}]:checked`, el).value; $('.f-afiliados', el).hidden = t !== 'afiliados'; $('.f-list', el).hidden = t !== 'list'; $('.f-search', el).hidden = t !== 'search'; };
-      $$(`input[name=st${i}]`, el).forEach((r) => (r.onchange = ajusta)); ajusta();
+      const ajusta = () => { const t = $(`input[name=st${i}]:checked`, el).value; $('.f-afiliados', el).hidden = t !== 'afiliados'; $('.f-list', el).hidden = t !== 'list'; $('.f-search', el).hidden = t !== 'search'; $('.f-catalogo', el).hidden = t !== 'catalogo'; fcatAtualizar(el); };
+      $$(`input[name=st${i}]`, el).forEach((r) => (r.onchange = () => { ajusta(); atualizaPadrao(); })); ajusta();
       const conta = () => { const n = $$('.af-cats input:checked', el).length; $('.af-cont', el).textContent = n ? `(${n} marcadas)` : '(todas)'; };
       $('.af-cats', el).onchange = conta; conta();
+      $('.fc-cats', el).onchange = () => fcatAtualizar(el);
+      $('.fc-lojas', el).onchange = () => { fcatPintarCats(el); fcatAtualizar(el); atualizaPadrao(); };
+      $('[name=cat_ordem]', el).onchange = () => fcatAtualizar(el);
       const rm = $('[data-rm-fonte]', el); if (rm) rm.onclick = () => { lerFontes(); fontes.splice(i, 1); pintaFontes(); };
     });
+    atualizaPadrao();
   };
   const lerFontes = () => {
     $$('.fonte', dlg).forEach((el) => {
       const i = Number(el.dataset.i); const v = (n) => $(`[name=${n}]`, el)?.value ?? ''; const t = $(`input[name=st${i}]:checked`, el).value;
       fontes[i] = { type: t, tag_id: Number(v('src_tag')) || null, config: t === 'afiliados'
         ? { busca: v('af_busca'), categorias: $$('.af-cats input:checked', el).map((c) => c.value), ordem: v('af_ordem'), paginas: Number(v('af_paginas')) || 3, mais_vendidos: !!$('[name=af_mais_vendidos]', el).checked, ganhos_extras: !!$('[name=af_ganhos_extras]', el).checked }
+        : t === 'catalogo' ? fcatLerConfig(el)
         : t === 'list' ? { items: v('items') } : { query: v('query'), sort: v('sort') } };
     });
   };
+  // Etiqueta padrão obrigatória só se alguma fonte precisar dela (catálogo só Amazon/Shopee não precisa).
+  const atualizaPadrao = () => {
+    lerFontes(); const precisa = fcatPrecisaEtiqueta(fontes);
+    $('#tag-obr', dlg).hidden = !precisa; $('#tag-opc', dlg).hidden = precisa; $('#tag-opc-dica', dlg).hidden = precisa;
+  };
   pintaFontes();
+  const form = $('#f', dlg);
+  api('/catalogo/categorias').then((x) => (Array.isArray(x?.categorias) ? x.categorias : [])).catch(() => []).then((lista) => {
+    FCAT.lista = lista;
+    if (!dlg.open || $('#f', dlg) !== form) return; // o dono já fechou ou abriu outro formulário
+    $$('.fonte', dlg).forEach((el) => { fcatPintarCats(el); fcatAtualizar(el); });
+  });
+  const reler = $('#fc-reler', dlg);
+  if (reler) reler.onclick = async () => {
+    if (!confirm(TEXTOS_REGRA_CATALOGO.relerConfirma)) return;
+    const est = $('#fc-reler-estado', dlg); reler.disabled = true;
+    try { await dispApi(`/rules/${r.id}/catalogo/recomecar`, { method: 'POST' }); est.textContent = TEXTOS_REGRA_CATALOGO.relerOk; est.className = 'nivel-ok'; } catch (e) {
+      est.textContent = e.status === 409 ? e.message : TEXTOS_REGRA_CATALOGO.relerFalhou; est.className = 'nivel-erro'; // 409: a regra está rodando agora
+    } finally { reler.disabled = false; }
+  };
   $('#add-fonte').onclick = () => { lerFontes(); if (fontes.length < MAXF) fontes.push({ type: 'afiliados', config: { paginas: 3 } }); pintaFontes(); };
   grupos.ligar(dlg, { contador: $('#cont', dlg), aoBloco: (b) => { if (b.tag_id) $('select[name=tag_id]', dlg).value = b.tag_id; } });
   $('#cancelar').onclick = () => dlg.close();
@@ -271,29 +494,46 @@ function formRegra(r) {
     };
     const erros = [];
     if (!String(corpo.name || '').trim()) erros.push({ msg: 'Dê um nome ao disparo automático.', el: $('[name=name]', dlg) });
-    if (!corpo.tag_id) erros.push({ msg: 'Escolha a etiqueta padrão (cadastre em Conexões > Mercado Livre se ainda não tiver).', el: $('[name=tag_id]', dlg) });
+    if (!corpo.tag_id && fcatPrecisaEtiqueta(fontes)) erros.push({ msg: 'Escolha a etiqueta padrão (cadastre em Conexões > Mercado Livre se ainda não tiver).', el: $('[name=tag_id]', dlg) });
     if (!corpo.template_id) erros.push({ msg: 'Escolha um template.', el: $('[name=template_id]', dlg) });
     fontes.forEach((f, i) => {
       const el = $(`.fonte[data-i="${i}"]`, dlg);
       if (f.type === 'list' && !String(f.config.items || '').split('\n').some((l) => /^https?:/i.test(l.trim()))) erros.push({ msg: `Fonte ${i + 1}: cole ao menos um link de produto.`, el: $('textarea[name=items]', el) });
       if (f.type === 'search' && !String(f.config.query || '').trim()) erros.push({ msg: `Fonte ${i + 1}: digite a palavra-chave da busca.`, el: $('input[name=query]', el) });
+      if (f.type === 'catalogo') fcatErros(f.config).forEach((e) => erros.push({ msg: `Fonte ${i + 1}: ${e.msg}`, el: $(FCAT_CAMPOS[e.campo], el) }));
     });
     if (!corpo.group_jids.length) erros.push({ msg: 'Marque ao menos um grupo que vai receber as ofertas.', el: $('#gr', dlg) });
     if (!(Number(corpo.per_run) >= 1 && Number(corpo.per_run) <= 20)) erros.push({ msg: 'Ofertas por envio: de 1 a 20.', el: $('[name=per_run]', dlg) });
     if (!(Number(corpo.interval_min) >= 1)) erros.push({ msg: 'Intervalo entre envios: ao menos 1 minuto.', el: $('[name=interval_min]', dlg) });
     if (mostrarErros(dlg, erros)) return;
-    try { await api(nova ? '/rules' : `/rules/${r.id}`, nova ? 'POST' : 'PUT', corpo); } catch (e) { mostrarErros(dlg, [{ msg: e.message }]); return; }
+    try { await api(nova ? '/rules' : `/rules/${r.id}`, nova ? 'POST' : 'PUT', corpo); } catch (e) {
+      // 400 da fonte Catálogo: frase fixa do servidor, com o campo e a fonte (1, 2…) para marcar
+      const el = e.fonte && Object.hasOwn(FCAT_CAMPOS, e.campo || '') ? $(`.fonte[data-i="${e.fonte - 1}"] ${FCAT_CAMPOS[e.campo]}`, dlg) : null;
+      mostrarErros(dlg, [{ msg: e.fonte ? `Fonte ${e.fonte}: ${e.message}` : e.message, el }]); return;
+    }
     dlg.close(); aviso(nova ? 'Disparo automático criado' : 'Disparo automático salvo'); await recarregarRegras();
   });
   dlg.showModal();
 }
+/**
+ * Alguma fonte Catálogo da prévia ainda está na primeira leitura (Novidades sem ponto de partida)? O servidor marca a
+ * fonte com `primeira_leitura: true`: na lista `fontes` da resposta de /offers ou, sem ela, nas `sources` da regra.
+ */
+function fcatPrimeiraLeitura(resposta, r) {
+  const fontes = Array.isArray(resposta?.fontes) ? resposta.fontes : Array.isArray(r?.sources) ? r.sources : [];
+  return fontes.some((f) => f?.primeira_leitura === true);
+}
 async function verOfertas(r) {
   const dlg = $('#dlg'); dlg.innerHTML = '<div class="corpo"><h1>Próximas ofertas</h1><p class="dica">Buscando…</p></div>'; dlg.showModal();
   try {
-    const of = await api(`/rules/${r.id}/offers`);
+    const resp = await api(`/rules/${r.id}/offers`);
+    // a resposta é a lista de ofertas ou { ofertas, fontes } (fontes com `primeira_leitura`)
+    const of = Array.isArray(resp) ? resp : Array.isArray(resp?.ofertas) ? resp.ofertas : [];
+    const primeira = fcatPrimeiraLeitura(resp, r);
+    const avisoPrimeira = primeira ? `<div class="aviso-impl neutro" role="status"><p>${of.length ? TEXTOS_REGRA_CATALOGO.primeiraLeituraOutras : TEXTOS_REGRA_CATALOGO.primeiraLeitura}</p></div>` : '';
     dlg.innerHTML = `<div class="corpo"><h1>Próximas ofertas de “${esc(r.name)}”</h1>
-      <p class="dica">É o que sairia no próximo envio, nesta ordem. O link meli.la só é gerado na hora de enviar.</p>
-      ${of.length ? `<div class="chat">${of.map((o) => `<div class="balao">${o.etiqueta ? `<small class="dica" style="display:block;margin-bottom:6px">Fonte ${o.fonte} · etiqueta <b>${esc(o.etiqueta)}</b></small>` : ''}${zap(o.text)}${o.comissao ? `<small class="dica" style="display:block;margin-top:6px">${esc(o.comissao)}${o.destaque ? ' · ' + esc(o.destaque) : ''}</small>` : ''}</div>`).join('')}</div>` : '<div class="vazio">Nenhuma oferta nova dentro dos filtros. Veja o Histórico para o motivo.</div>'}
+      <p class="dica">É o que sairia no próximo envio, nesta ordem. O link meli.la só é gerado na hora de enviar.</p>${avisoPrimeira}
+      ${of.length ? `<div class="chat">${of.map((o) => `<div class="balao">${o.revisao ? `<small class="dica" style="display:block;margin-bottom:6px"><span class="venc-aviso">${TEXTOS_REGRA_CATALOGO.esperariaRevisao}</span> ${esc(hcatMotivos(o.motivos))}</small>` : ''}${o.etiqueta ? `<small class="dica" style="display:block;margin-bottom:6px">Fonte ${o.fonte} · etiqueta <b>${esc(o.etiqueta)}</b></small>` : ''}${zap(o.text)}${o.comissao ? `<small class="dica" style="display:block;margin-top:6px">${esc(o.comissao)}${o.destaque ? ' · ' + esc(o.destaque) : ''}</small>` : ''}</div>`).join('')}</div>` : primeira ? '' : '<div class="vazio">Nenhuma oferta nova dentro dos filtros. Veja o Histórico para o motivo.</div>'}
       <div class="rodape"><button id="fechar" class="pri">Fechar</button></div></div>`;
   } catch (e) {
     dlg.innerHTML = `<div class="corpo"><h1>Não consegui buscar</h1><p>${esc(e.message)}</p><div class="rodape"><button id="fechar" class="pri">Fechar</button></div></div>`;
@@ -368,11 +608,12 @@ function paginaGrupos() {
 }
 
 // ---------- histórico ----------
-// Filtros no endereço: #historico?tipo=espelhamento&regra=3&status=na_fila (tipo: automatico | espelhamento; vazio = tudo).
-// A visão Espelhamento (KPIs, tabela, "Completar") está em espelhamento.js.
+// Filtros no endereço: #historico?tipo=espelhamento&regra=3&status=na_fila (tipo: automatico | espelhamento | catalogo;
+// vazio = tudo). As visões Espelhamento ("Completar") e Catálogo ("Revisar oferta") estão em espelhamento.js.
 async function paginaHistorico(nivel = '', params = null) {
-  const tipo = ['automatico', 'espelhamento'].includes(params?.get('tipo')) ? params.get('tipo') : '';
+  const tipo = ['automatico', 'espelhamento', 'catalogo'].includes(params?.get('tipo')) ? params.get('tipo') : '';
   if (tipo === 'espelhamento') return paginaHistoricoEspelhamento(params);
+  if (tipo === 'catalogo') return paginaHistoricoCatalogo(params);
   const g = ++ESP_H.ger; clearTimeout(paginaHistorico.t); // para a atualização automática da visão Espelhamento, se estava aberta
   // "Disparo automático": o servidor devolve só as linhas de regra (rule_id), no mesmo limite de "Tudo"
   const filtros = [nivel ? `nivel=${nivel}` : '', tipo === 'automatico' ? 'tipo=automatico' : ''].filter(Boolean).join('&');
@@ -482,6 +723,16 @@ function pintarConta() {
   if (podeEquipe() && !item) $('#ng-conta').parentElement.insertAdjacentHTML('beforeend', '<a href="#equipe">Equipe</a>');
   if (!podeEquipe() && item) item.remove();
   if (!podeEquipe() && location.hash === '#equipe') ir();
+  // ofertas do catálogo que esperam revisão, no item Histórico (só o Dono revisa)
+  const hist = $('#rail nav a[href="#historico"]');
+  if (hist) {
+    const n = podeEquipe() ? Number(S.st.catalogo?.para_revisar) || 0 : 0; const txt = n > 0 ? `Histórico (${n})` : 'Histórico';
+    if (hist.textContent !== txt) {
+      hist.textContent = txt;
+      if (n > 0) hist.setAttribute('aria-label', `Histórico, ${n} ${n === 1 ? 'oferta' : 'ofertas'} para revisar`); else hist.removeAttribute('aria-label');
+      if (hist.getAttribute('aria-current') === 'page') $('#menu-atual').textContent = '· ' + txt;
+    }
+  }
 }
 async function atualizarEstado(forcar) {
   const antes = S.st?.whatsapp || {}; const papelAntes = S.st?.usuario?.papel; const hashAntes = location.hash;

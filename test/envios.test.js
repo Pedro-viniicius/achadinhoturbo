@@ -1360,6 +1360,42 @@ test('log: envio que veio de um espelho aparece como "Espelho: <nome>", com o no
   } finally { await s.fechar(); }
 });
 
+test('catálogo (fonte-catalogo-etiqueta, etapa 2): log como "Catálogo: <regra>"; ML do catálogo nunca sai em modo direto, o Disparo manual sai', async () => {
+  const m = montar();
+  const estado = { modo: 'fake' };
+  const envios = createEnvios({ db: m.db, wa: m.wa, links: createLinkService({ getMode: () => estado.modo }), ml: m.ml, fast: true, dir: m.dir });
+  const tpl = m.db.prepare('SELECT created_at FROM templates WHERE id = 1').get().created_at;
+  const base = {
+    url: 'https://produto.mercadolivre.com.br/MLB-1234567890', loja: 'mercadolivre', tag_id: 1, etiqueta: 'etiquetaA', template_id: 1, template_criado_em: tpl,
+    fonte_dados: 'manual', offer: { key: 'MLB1234567890', title: 'Fone Bom', price: 89.9, oldPrice: null, discountPct: null, sold: null, freeShipping: true, coupon: null, image: null },
+  };
+  const gravar = (payload) => Number(m.db.prepare(`INSERT INTO envios (tipo, payload, group_jids, quando, status, next_run_at, created_at)
+    VALUES ('oferta', ?, ?, 'agora', 'pendente', ?, ?)`).run(JSON.stringify(payload), JSON.stringify(['222@g.us']), Date.now(), Date.now()).lastInsertRowid);
+  const doCatalogo = { ...base, origem: { tipo: 'catalogo', rule_id: 4, nome: ' Perfumes \n do catálogo ' } };
+  try {
+    const ok = gravar(doCatalogo);
+    await envios.runEnvio(ok);
+    assert.equal(statusDe(m.db, ok), 'concluido');
+    assert.match(m.wa.simulated[0].text, /Compre aqui: https:\/\/meli\.la\/fake-etiquetaA-\d+$/);
+    assert.deepEqual(linhas(m.db, 'SELECT rule_id, rule_name, group_name, offer_title, message FROM log'),
+      [{ rule_id: null, rule_name: 'Catálogo: Perfumes do catálogo', group_name: 'Tech', offer_title: 'Fone Bom', message: 'Enviado com a etiqueta etiquetaA' }]);
+
+    // modo direto (link comum, sem comissão): o do catálogo vira erro sem enviar; o do Disparo manual segue como sempre
+    estado.modo = 'direct';
+    const recusado = gravar(doCatalogo);
+    await envios.runEnvio(recusado);
+    assert.equal(statusDe(m.db, recusado), 'erro');
+    assert.equal(m.db.prepare('SELECT erro FROM envio_resultados WHERE envio_id = ?').get(recusado).erro,
+      'link de afiliado não gerado: os links do Mercado Livre estão no modo direto (sem comissão)');
+    assert.equal(m.wa.simulated.length, 1, 'nada saiu');
+    const manual = gravar({ ...base, origem: { tipo: 'manual' } });
+    await envios.runEnvio(manual);
+    assert.equal(statusDe(m.db, manual), 'concluido');
+    assert.ok(m.wa.simulated[1].text.endsWith('Compre aqui: https://produto.mercadolivre.com.br/MLB-1234567890'));
+    assert.equal(m.db.prepare('SELECT rule_name FROM log ORDER BY id DESC').get().rule_name, 'Disparo manual');
+  } finally { m.db.close(); }
+});
+
 // ---------------------------------------------------------------------------------------------
 // Shopee no Disparo manual (plano integracao-shopee, etapa 7; CA2, CA3, CA4, CA9). A Shopee é o createShopee de verdade
 // com um fetch falso injetado (encurtador e Open API) e lê a conexão do banco (linha 'shopee' de `conexoes`, a mesma que

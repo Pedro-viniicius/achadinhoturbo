@@ -3,7 +3,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  extrairUrls, lerOfertaDoTexto, lerPreco, normalizar, palavraBloqueada,
+  extrairUrls, lerOfertaDoTexto, lerPreco, normalizar, palavraBloqueada, temCaraDeLink,
   FIXTURES, FIXTURES_ESPERADO, HOSTS_AMAZON, MAX_URL, MAX_URLS, TITULO_MAX,
 } from '../src/oferta-texto.js';
 import { mascararPessoais } from '../src/privacidade.js';
@@ -332,4 +332,9 @@ test('privacidade + oferta-texto: a oferta lida do texto mascarado é a mesma', 
   assert.ok(!mascarado.includes('99999') && !mascarado.includes('zap@'));
   assert.deepEqual(semUrls(lerOfertaDoTexto(mascarado)), FIXTURES_ESPERADO.comCupom);
   assert.deepEqual(lerOfertaDoTexto(mascarado).urls, [LINK_LONGO]);
+});
+
+test('temCaraDeLink (exportada para o catálogo, S2): domínio sem esquema, mesmo depois de "..." ou "+", e menção', () => {
+  for (const v of ['...bit.ly/x', '+bit.ly/x', 'Fone bit.ly/abc', 'veja evil.example', 'http://evil.example', 'fale com @loja', '%bit.ly/x']) assert.equal(temCaraDeLink(v), true, v);
+  for (const v of ['Fone Bluetooth JBL', 'Amazon.com.br', 'Cabo 3.5mm 1.5m', 'R$ 1.299,90', 'PROMO10', 'Casa e Decoração', '']) assert.equal(temCaraDeLink(v), false, v);
 });

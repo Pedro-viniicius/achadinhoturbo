@@ -139,8 +139,14 @@ function textoParaGuardar(texto) {
   return mascararPessoais(t).slice(0, MAX_TEXTO_ORIGEM);
 }
 
-/** Preço digitado no "Completar" (mesma regra do Disparo manual): número ou "1.299,90". Vazio → null. */
-function lerPrecoDigitado(v, rotulo) {
+/** Erro dos validadores de ajustes quando quem chama é o espelho (a rota responde com o status dele). */
+const erroDoEspelho = (mensagem) => new ErroEspelho(400, mensagem);
+
+/**
+ * Preço digitado no "Completar" (mesma regra do Disparo manual): número ou "1.299,90". Vazio → null. `erro(msg)`
+ * cria o erro de quem chama (src/catalogo-itens.js reaproveita com o dele); a frase é a mesma.
+ */
+export function lerPrecoDigitado(v, rotulo, erro = erroDoEspelho) {
   if (v == null || v === '') return null;
   let n = NaN;
   if (typeof v === 'number') n = v;
@@ -151,16 +157,46 @@ function lerPrecoDigitado(v, rotulo) {
     else if (/^\d+(,\d{1,2})?$/.test(t)) n = Number(t.replace(',', '.'));
     else if (/^\d+\.\d{1,2}$/.test(t)) n = Number(t);
   }
-  if (!Number.isFinite(n) || n <= 0 || n > PRECO_MAX) throw new ErroEspelho(400, `${rotulo} inválido: use só números, como 89,90.`);
+  if (!Number.isFinite(n) || n <= 0 || n > PRECO_MAX) throw erro(`${rotulo} inválido: use só números, como 89,90.`);
   return Math.round(n * 100) / 100;
 }
 
-function lerTextoCurto(v, nome, max) {
+/** Texto curto digitado (título, cupom): espaços juntados; vazio → null; acima de `max` → erro com frase fixa. */
+export function lerTextoCurto(v, nome, max, erro = erroDoEspelho) {
   if (v == null) return null;
-  if (typeof v !== 'string') throw new ErroEspelho(400, `O ${nome} precisa ser texto.`);
+  if (typeof v !== 'string') throw erro(`O ${nome} precisa ser texto.`);
   const t = v.replace(/\s+/g, ' ').trim();
-  if (t.length > max) throw new ErroEspelho(400, `O ${nome} passa de ${max} caracteres.`);
+  if (t.length > max) throw erro(`O ${nome} passa de ${max} caracteres.`);
   return t || null;
+}
+
+/**
+ * Ajustes do "Completar" (os mesmos do Disparo manual e do "Revisar oferta" do catálogo). Só estas chaves; image e
+ * link nunca vêm do navegador. `lerFoto(id)`: a da fila de envios (sem ela, foto enviada é recusada); `maxCupom`:
+ * tamanho do cupom (o catálogo aceita mais); `erro(msg)`: o erro de quem chama.
+ */
+export async function validarAjustesOferta(a, { maxCupom = MAX_CUPOM, lerFoto = null, erro = erroDoEspelho } = {}) {
+  if (a == null) return {};
+  if (typeof a !== 'object' || Array.isArray(a)) throw erro('Dados da oferta inválidos.');
+  const r = {};
+  if (Object.hasOwn(a, 'title')) r.title = lerTextoCurto(a.title, 'título', MAX_TITULO, erro);
+  if (Object.hasOwn(a, 'price')) r.price = lerPrecoDigitado(a.price, 'Preço atual', erro);
+  if (Object.hasOwn(a, 'oldPrice')) r.oldPrice = lerPrecoDigitado(a.oldPrice, 'Preço antigo', erro);
+  if (Object.hasOwn(a, 'coupon')) r.coupon = lerTextoCurto(a.coupon, 'cupom', maxCupom, erro);
+  if (Object.hasOwn(a, 'freeShipping') && a.freeShipping != null) {
+    if (typeof a.freeShipping !== 'boolean') throw erro('Frete grátis: marque ou desmarque.');
+    r.freeShipping = a.freeShipping;
+  }
+  if (a.sem_foto != null && typeof a.sem_foto !== 'boolean') throw erro('Foto: envie com ou sem foto.');
+  if (a.sem_foto === true) r.sem_foto = true;
+  if (a.upload != null && a.upload !== '') {
+    const up = typeof a.upload === 'string' ? a.upload : '';
+    if (!UPLOAD_ID.test(up)) throw erro('Escolha a foto de novo.');
+    if (!lerFoto || !(await lerFoto(up))) throw erro('A foto não foi encontrada. Envie de novo.');
+    r.upload = up;
+  }
+  if (r.sem_foto && r.upload) throw erro('Escolha entre trocar a foto e enviar sem foto.');
+  return r;
 }
 
 /**
@@ -518,30 +554,8 @@ export function createEspelho({ db, wa = null, amazon = null, envios = null, aco
     return n;
   }
 
-  /** Ajustes do "Completar" (os mesmos do Disparo manual). Só estas chaves; image e link nunca vêm do navegador. */
-  async function validarAjustes(a) {
-    if (a == null) return {};
-    if (typeof a !== 'object' || Array.isArray(a)) throw new ErroEspelho(400, 'Dados da oferta inválidos.');
-    const r = {};
-    if (Object.hasOwn(a, 'title')) r.title = lerTextoCurto(a.title, 'título', MAX_TITULO);
-    if (Object.hasOwn(a, 'price')) r.price = lerPrecoDigitado(a.price, 'Preço atual');
-    if (Object.hasOwn(a, 'oldPrice')) r.oldPrice = lerPrecoDigitado(a.oldPrice, 'Preço antigo');
-    if (Object.hasOwn(a, 'coupon')) r.coupon = lerTextoCurto(a.coupon, 'cupom', MAX_CUPOM);
-    if (Object.hasOwn(a, 'freeShipping') && a.freeShipping != null) {
-      if (typeof a.freeShipping !== 'boolean') throw new ErroEspelho(400, 'Frete grátis: marque ou desmarque.');
-      r.freeShipping = a.freeShipping;
-    }
-    if (a.sem_foto != null && typeof a.sem_foto !== 'boolean') throw new ErroEspelho(400, 'Foto: envie com ou sem foto.');
-    if (a.sem_foto === true) r.sem_foto = true;
-    if (a.upload != null && a.upload !== '') {
-      const up = typeof a.upload === 'string' ? a.upload : '';
-      if (!UPLOAD_ID.test(up)) throw new ErroEspelho(400, 'Escolha a foto de novo.');
-      if (!envios?.lerFoto || !(await envios.lerFoto(up))) throw new ErroEspelho(400, 'A foto não foi encontrada. Envie de novo.');
-      r.upload = up;
-    }
-    if (r.sem_foto && r.upload) throw new ErroEspelho(400, 'Escolha entre trocar a foto e enviar sem foto.');
-    return r;
-  }
+  /** Ajustes do "Completar" (validarAjustesOferta, com a foto da fila de envios). */
+  const validarAjustes = (a) => validarAjustesOferta(a, { lerFoto: envios?.lerFoto ? (up) => envios.lerFoto(up) : null });
 
   /** Oferta guardada com os ajustes por cima: preço antigo só se maior que o atual; desconto refeito se um preço mudou. */
   function aplicarAjustes(base, a) {

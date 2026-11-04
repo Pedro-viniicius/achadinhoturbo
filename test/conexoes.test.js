@@ -27,7 +27,7 @@ import { PLATAFORMAS } from '../src/lojas.js';
 const SENHA = 'senha-de-teste-123';
 const CHAVE = 'Chave-Shopee-SECRETA-9f8e7d6c';       // segredo salvo
 const CHAVE_NOVA = 'Outra-Chave-SECRETA-1a2b3c4d';   // troca do segredo
-const ORDEM = ['mercadolivre', 'amazon', 'shopee', 'magalu', 'facebook'];
+const ORDEM = ['mercadolivre', 'amazon', 'shopee', 'magalu', 'facebook', 'catalogo'];
 
 /** fetch padrão do cliente da Amazon nos testes: nenhuma chamada sai para a rede. */
 const redeProibida = async () => { throw new Error('rede proibida no teste'); };
@@ -84,7 +84,7 @@ function linhaCrua(dir, id) {
   } finally { db.close(); }
 }
 
-test('GET /api/conexoes lista as 5 plataformas na ordem do registro, com campos e sem valores de segredo', async () => {
+test('GET /api/conexoes lista as 6 plataformas na ordem do registro, com campos e sem valores de segredo', async () => {
   await comSessao(async ({ api }) => {
     const r = await api('/conexoes');
     assert.equal(r.status, 200);
@@ -123,6 +123,14 @@ test('GET /api/conexoes lista as 5 plataformas na ordem do registro, com campos 
       assert.equal(porId[id].implementada, false); assert.equal(porId[id].estado, 'nao_implementada', id);
       assert.deepEqual(porId[id].config, {});
     }
+    assert.equal(porId.catalogo.nome, 'Catálogo do Etiqueta');
+    assert.equal(porId.catalogo.implementada, true);
+    assert.deepEqual(porId.catalogo.campos.map((c) => [c.nome, c.tipo]), [['endereco', 'texto'], ['caminho_token', 'texto']]);
+    assert.equal(porId.catalogo.estado, 'falta_configurar');
+    assert.deepEqual(porId.catalogo.config, {});
+    assert.deepEqual(porId.catalogo.situacao, { resultado: null, verificado_em: null, falha_desde: null, mensagem: null });
+    assert.deepEqual(porId.catalogo.verificacao, { categorias: [], total: 0, verificado_em: null });
+    assert.equal(porId.catalogo.endereco_padrao, 'http://127.0.0.1:8765');
   });
 });
 
@@ -986,6 +994,313 @@ test('Shopee por HTTP: a Senha da API e a assinatura nunca aparecem no texto cru
   for (const seg of [...SECRETOS_SHP, ...api.assinaturas]) assert.ok(!saidas.some((l) => l.includes(seg)), 'segredo fora do console');
   assert.ok(api.chamadas.every((u) => u === URL_API_SHOPEE), 'só o host fixo da API');
   assert.equal(global_.mock.callCount(), 0, 'nada passou pelo fetch global');
+});
+
+// ------------------------------------------------------------------ Catálogo do Etiqueta (plano fonte-catalogo-etiqueta, etapa 3)
+// CA2 (cartão: endereço, caminho do token, Testar, 6 estados, categorias da última verificação) e CA8 (o token nunca
+// em resposta, log, console ou erro). O cliente do Etiqueta (src/catalogo.js) é um falso injetado: aqui nada lê o
+// arquivo do token e nada sai para a rede.
+
+const TOKEN_CAT = 'TokenFalsoDoEtiqueta_0123456789abcdefXYZ-SECRETO'; // formato do token: 32 ou mais de A-Za-z0-9_-
+const CAMINHO_CAT = '/home/dono/Documentos/mensagensParaEnviar/api_token.txt';
+const ENDERECO_CAT = 'http://127.0.0.1:8765';
+const ARQUIVO_TOKEN_MSG = 'O arquivo do token precisa ser o api_token.txt da pasta do Etiqueta. Cole o caminho completo dele, terminando em /api_token.txt.';
+const PARECE_TOKEN_MSG = 'Isto parece o token, não o caminho do arquivo. Cole o caminho (por exemplo, …/api_token.txt). Se você colou o token em algum lugar, gere outro no Etiqueta.';
+const FRASES_CAT = {
+  nao_configurada: 'Salve o endereço e o caminho do token para testar.',
+  token_recusado: 'O Etiqueta recusou o token. Se você trocou o arquivo do token, reinicie o servidor.py do Etiqueta (ele lê o arquivo só ao ligar) e teste de novo.',
+  desligada: 'O Etiqueta está no ar, mas a API dele está desligada. Falta o arquivo api_token.txt (ou ele é inválido) na pasta do Etiqueta. O terminal do servidor.py diz o motivo. Depois de corrigir, reinicie-o e teste de novo.',
+  fora_do_ar: `Não consegui falar com o Etiqueta em ${ENDERECO_CAT}. Confira se ele está ligado (python3 servidor.py) e se o endereço e a porta estão certos.`,
+  sem_arquivo: `Não encontrei o arquivo do token em ${CAMINHO_CAT}. Confira o caminho, e se este programa tem permissão para ler o arquivo.`,
+  arquivo_invalido: 'O arquivo do token está vazio ou fora do formato (32 ou mais letras, números, _ e -). Gere o token de novo no Etiqueta.',
+  resposta_inesperada: 'O Etiqueta respondeu algo que não esperávamos. Tente de novo; se continuar, veja o terminal do servidor.py.',
+  indisponivel: 'O teste do Catálogo não está disponível agora. Tente de novo.',
+};
+const falhaCat = (resultado) => ({ ok: false, resultado, mensagem: FRASES_CAT[resultado], total: 0, categorias: [] });
+
+/** Cliente do Catálogo falso: testar() devolve `volta` (ou lança `erro`); situacao() devolve `sit` (ou lança). */
+function catalogoFalso() {
+  const f = { volta: null, erro: null, sit: null, testes: 0 };
+  f.testar = async () => { f.testes++; if (f.erro) throw f.erro; return f.volta; };
+  f.situacao = () => { if (f.sit instanceof Error) throw f.sit; return f.sit; };
+  return f;
+}
+
+/** Banco temporário + createConexoes com o Catálogo falso (ou sem cliente, com `catalogo: null`). */
+function montarCatalogo(t, { catalogo = catalogoFalso() } = {}) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'disp-cx-c-'));
+  const db = openDb(dir);
+  t.after(() => { db.close(); fs.rmSync(dir, { recursive: true, force: true }); });
+  return { db, dir, catalogo, conexoes: createConexoes({ db, catalogo }) };
+}
+const salvarCatalogo = (conexoes, campos) => conexoes.salvar('catalogo', { campos }, true);
+
+/** Captura console.log/info/warn/error durante fn (e devolve as linhas). */
+async function capturarConsole(fn) {
+  const saidas = []; const originais = {};
+  for (const m of ['log', 'info', 'warn', 'error']) { originais[m] = console[m]; console[m] = (...a) => { saidas.push(a.map(String).join(' ')); }; }
+  try { await fn(saidas); } finally { Object.assign(console, originais); }
+  return saidas;
+}
+
+test('Catálogo por HTTP (CA2, CA8): PUT guarda endereço e caminho como texto, sem segredo; recusa o token no lugar do caminho sem ecoar', async () => {
+  const saidas = await capturarConsole(async () => {
+    await comSessao(async ({ api, dir }) => {
+      const respostas = [];
+      const chamar = async (caminho, opts) => { const r = await api(caminho, opts); respostas.push(r); return r; };
+      const put = (campos) => chamar('/conexoes/catalogo', { method: 'PUT', body: { campos } });
+
+      let r = await put({ endereco: ENDERECO_CAT, caminho_token: `  ${CAMINHO_CAT}  ` });
+      assert.equal(r.status, 200, r.txt);
+      assert.equal(r.json.estado, 'salva', 'salvo e ainda não testado');
+      assert.deepEqual(r.json.config, { endereco: ENDERECO_CAT, caminho_token: CAMINHO_CAT });
+      assert.deepEqual(r.json.segredos_salvos, []);
+      assert.deepEqual(linhaCrua(dir, 'catalogo').config, { endereco: ENDERECO_CAT, caminho_token: CAMINHO_CAT });
+      assert.deepEqual(linhaCrua(dir, 'catalogo').segredos, {}, 'nenhum segredo guardado');
+      const antes = linhaCrua(dir, 'catalogo');
+
+      // o token (puro, com / ou ~/ na frente, repetido além do tamanho) no lugar do caminho: 400, frase fixa, nada gravado
+      for (const v of [TOKEN_CAT, `/${TOKEN_CAT}`, `~/${TOKEN_CAT}`, ` ${TOKEN_CAT}\n`, TOKEN_CAT.repeat(20), 'a'.repeat(32)]) {
+        r = await put({ endereco: 'http://localhost:9000', caminho_token: v });
+        assert.equal(r.status, 400, v.slice(0, 20));
+        assert.deepEqual(r.json, { erro: PARECE_TOKEN_MSG, erros: [{ campo: 'caminho_token', msg: PARECE_TOKEN_MSG }] });
+      }
+      // caminho fora do formato e endereço fora deste computador: frases fixas, sem o valor
+      const casos = [
+        [{ caminho_token: 'api_token.txt' }, 'caminho_token', 'Caminho inválido. Use o caminho completo do arquivo, começando por / ou ~/.'],
+        [{ caminho_token: '/pasta/\u0000/x' }, 'caminho_token', 'Caminho inválido. Use o caminho completo do arquivo, começando por / ou ~/.'],
+        [{ caminho_token: '/pasta/' + 'a'.repeat(494) }, 'caminho_token', 'Arquivo do token: até 500 caracteres.'],
+        [{ caminho_token: 123 }, 'caminho_token', 'Caminho inválido. Use o caminho completo do arquivo, começando por / ou ~/.'], // número vira '123'
+        [{ endereco: 'https://localhost:8765' }, 'endereco', 'Endereço não aceito. Use um endereço deste computador, como http://127.0.0.1:8765.'],
+        [{ endereco: 'http://evil.com:8765' }, 'endereco', 'Endereço não aceito. Use um endereço deste computador, como http://127.0.0.1:8765.'],
+        [{ endereco: 'http://localhost:8765/api/v1/ofertas' }, 'endereco', 'Endereço não aceito. Use um endereço deste computador, como http://127.0.0.1:8765.'],
+        [{ endereco: `http://${TOKEN_CAT}@localhost:8765`.slice(0, 40) }, 'endereco', 'Endereço não aceito. Use um endereço deste computador, como http://127.0.0.1:8765.'],
+        [{ endereco: TOKEN_CAT }, 'endereco', 'Endereço do Etiqueta: até 40 caracteres.'],
+        [{ endereco: { $ne: 1 } }, 'endereco', 'Endereço do Etiqueta: valor inválido.'],
+        // S1: só o arquivo do token do Etiqueta (um arquivo qualquer do dono nunca vira cabeçalho)
+        ...['/home/dono/.ssh/id_rsa', '/home/dono/data/wa_auth/creds.json', '/home/dono/api_token.txt.bak', '/home/dono/xapi_token.txt', '/home/dono/api_token.txt/', '~/token.txt']
+          .map((v) => [{ caminho_token: v }, 'caminho_token', ARQUIVO_TOKEN_MSG]),
+      ];
+      for (const [campos, campo, msg] of casos) {
+        r = await put(campos);
+        assert.equal(r.status, 400, JSON.stringify(campos).slice(0, 60));
+        assert.deepEqual(r.json.erros, [{ campo, msg }], JSON.stringify(campos).slice(0, 60));
+      }
+      assert.deepEqual(linhaCrua(dir, 'catalogo'), antes, 'nada gravado com erro');
+
+      // ~/ e o endereço padrão são aceitos; vazio apaga o campo e o cartão volta a "Falta configurar"
+      r = await put({ endereco: 'http://localhost:8765', caminho_token: '~/Documentos/mensagensParaEnviar/api_token.txt' });
+      assert.equal(r.status, 200); assert.equal(r.json.estado, 'salva');
+      r = await put({ caminho_token: '' });
+      assert.equal(r.status, 200); assert.equal(r.json.estado, 'falta_configurar');
+      assert.deepEqual(r.json.config, { endereco: 'http://localhost:8765' });
+
+      const lista = await chamar('/conexoes');
+      assert.equal(lista.json.find((p) => p.id === 'catalogo').estado, 'falta_configurar');
+      for (const resp of respostas) assert.ok(!resp.txt.includes(TOKEN_CAT) && !resp.txt.includes('a'.repeat(32)), `resposta ${resp.status} sem o token: ${resp.txt.slice(0, 160)}`);
+    });
+  });
+  assert.ok(!saidas.some((l) => l.includes(TOKEN_CAT)), 'o token fora do console');
+});
+
+test('Catálogo em Conexões: os 6 estados, situação do cliente (mesmo critério do /api/state) e categorias da última verificação (CA2)', async (t) => {
+  const { db, conexoes, catalogo } = montarCatalogo(t);
+  const cartao = () => conexoes.listar(true).find((p) => p.id === 'catalogo');
+  const vazia = { resultado: null, verificado_em: null, falha_desde: null, mensagem: null };
+
+  catalogo.sit = { resultado: 'ok', verificado_em: Date.now() + 60_000, falha_desde: null };
+  assert.equal(cartao().estado, 'falta_configurar', 'sem endereço e caminho, a situação do cliente não vale');
+  assert.deepEqual(cartao().situacao, vazia);
+  assert.equal(salvarCatalogo(conexoes, { endereco: ENDERECO_CAT }).estado, 'falta_configurar', 'só o endereço');
+  assert.equal(salvarCatalogo(conexoes, { endereco: '', caminho_token: CAMINHO_CAT }).estado, 'falta_configurar', 'só o caminho');
+
+  catalogo.sit = null;
+  let c = salvarCatalogo(conexoes, { endereco: ENDERECO_CAT });
+  assert.equal(c.estado, 'salva');
+  assert.deepEqual(c.situacao, vazia);
+  const salvoEm = c.updated_at;
+  assert.equal(typeof salvoEm, 'number');
+
+  // categorias da última verificação: só os campos do contrato, item fora dele descartado
+  setSetting(db, 'catalogo_verificacao', JSON.stringify({
+    verificado_em: salvoEm + 5, total: 3853,
+    categorias: [
+      { nome: 'Casa', total: 3000, lojas: { amazon: 1000, ml: 1500, shopee: 500 }, token: TOKEN_CAT },
+      { nome: '<img src=x onerror=alert(1)>', total: 853, lojas: { amazon: 500, ml: '300', shopee: -1, outra: 9 } },
+      { nome: '', total: 1 }, { nome: 'x'.repeat(201), total: 1 }, { nome: 'Sem total' }, { nome: 'Negativo', total: -3 }, null, 'texto',
+    ],
+  }));
+  const categorias = [
+    { nome: 'Casa', total: 3000, lojas: { amazon: 1000, ml: 1500, shopee: 500 } },
+    { nome: '<img src=x onerror=alert(1)>', total: 853, lojas: { amazon: 500, ml: 0, shopee: 0 } },
+  ];
+  assert.deepEqual(cartao().verificacao, { categorias, total: 3853, verificado_em: salvoEm + 5 });
+
+  const porResultado = [
+    ['ok', 'conectada', 'Conectado. 3.853 ofertas em 2 categorias.'],
+    ['token_recusado', 'token_recusado', FRASES_CAT.token_recusado],
+    ['desligada', 'indisponivel', FRASES_CAT.desligada],
+    ['fora_do_ar', 'indisponivel', FRASES_CAT.fora_do_ar],
+    ['resposta_inesperada', 'indisponivel', FRASES_CAT.resposta_inesperada],
+    ['sem_arquivo', 'sem_arquivo', FRASES_CAT.sem_arquivo],
+    ['arquivo_invalido', 'sem_arquivo', FRASES_CAT.arquivo_invalido],
+  ];
+  for (const [resultado, estado, mensagem] of porResultado) {
+    catalogo.sit = { resultado, verificado_em: salvoEm + 10, falha_desde: resultado === 'ok' ? null : salvoEm + 7, mensagem: `vazou ${TOKEN_CAT}`, token: TOKEN_CAT };
+    c = cartao();
+    assert.equal(c.estado, estado, resultado);
+    assert.deepEqual(c.situacao, { resultado, verificado_em: salvoEm + 10, falha_desde: resultado === 'ok' ? null : salvoEm + 7, mensagem }, resultado);
+  }
+  // resultado desconhecido, nao_configurada ou sem data: "Salvo, ainda não testado"
+  for (const sit of [{ resultado: 'conectadissima', verificado_em: salvoEm + 10 }, { resultado: '__proto__', verificado_em: salvoEm + 10 },
+    { resultado: 'nao_configurada', verificado_em: salvoEm + 10 }, { resultado: 'ok', verificado_em: null }, { resultado: 'ok', verificado_em: '9' },
+    { resultado: 'ok' }, {}, null, 'ok']) {
+    catalogo.sit = sit;
+    assert.equal(cartao().estado, 'salva', JSON.stringify(sit));
+    assert.equal(cartao().situacao.resultado, null, JSON.stringify(sit));
+  }
+  // R7: o cartão segue a situação do cliente, como o /api/state. Salvar os mesmos valores de novo não apaga a
+  // verificação (quem descarta a de outro endereço ou caminho é o cliente, pela impressão: src/catalogo.js)
+  catalogo.sit = { resultado: 'ok', verificado_em: salvoEm + 10, falha_desde: null };
+  assert.equal(cartao().estado, 'conectada');
+  db.prepare("UPDATE conexoes SET updated_at = ? WHERE plataforma = 'catalogo'").run(salvoEm + 11); // salvou de novo depois
+  assert.equal(cartao().estado, 'conectada');
+  catalogo.sit = null; // o cliente diz: nada verificado para o endereço e caminho de agora
+  assert.equal(cartao().estado, 'salva');
+  assert.deepEqual(cartao().situacao, vazia);
+  catalogo.sit = { resultado: 'fora_do_ar', verificado_em: salvoEm + 10, falha_desde: salvoEm + 9 };
+  assert.equal(cartao().situacao.falha_desde, salvoEm + 9, 'a falha do catálogo continua valendo para as regras'); 
+
+  // situação que quebra: o cartão não quebra e o console só recebe o nome do erro (nunca a mensagem, nem um nome estranho)
+  const saidas = await capturarConsole(async () => {
+    catalogo.sit = new RangeError(`quebrou ${TOKEN_CAT}`);
+    assert.equal(cartao().estado, 'salva');
+    const estranho = new Error(`quebrou ${TOKEN_CAT}`); estranho.name = TOKEN_CAT;
+    catalogo.sit = estranho;
+    assert.deepEqual(cartao().situacao, vazia);
+  });
+  assert.deepEqual(saidas, ['[conexões] situação do Catálogo falhou: RangeError', '[conexões] situação do Catálogo falhou: erro']);
+
+  // configuração ruim no banco (mexida por fora, até o token como caminho) não vale e não volta à tela
+  setSetting(db, 'catalogo_verificacao', 'não é json');
+  assert.deepEqual(cartao().verificacao, { categorias: [], total: 0, verificado_em: null });
+  db.prepare("UPDATE conexoes SET config = json_set(config, '$.caminho_token', ?) WHERE plataforma = 'catalogo'").run(`/${TOKEN_CAT}`);
+  c = cartao();
+  assert.equal(c.estado, 'falta_configurar');
+  assert.deepEqual(c.config, { endereco: ENDERECO_CAT });
+  assert.deepEqual(await conexoes.testar('catalogo'), falhaCat('nao_configurada'));
+  db.prepare("UPDATE conexoes SET config = json_set(config, '$.caminho_token', ?, '$.endereco', ?) WHERE plataforma = 'catalogo'").run(CAMINHO_CAT, 'http://evil.com:80');
+  assert.equal(cartao().estado, 'falta_configurar');
+  assert.deepEqual(cartao().config, { caminho_token: CAMINHO_CAT });
+  assert.deepEqual(await conexoes.testar('catalogo'), falhaCat('nao_configurada'));
+  // S1: caminho trocado por fora para outro arquivo (ex.: a sessão do WhatsApp) não é configuração
+  db.prepare("UPDATE conexoes SET config = json_set(config, '$.caminho_token', ?, '$.endereco', ?) WHERE plataforma = 'catalogo'").run('/home/dono/data/wa_auth/creds.json', ENDERECO_CAT);
+  assert.equal(cartao().estado, 'falta_configurar');
+  assert.deepEqual(cartao().config, { endereco: ENDERECO_CAT });
+  assert.deepEqual(await conexoes.testar('catalogo'), falhaCat('nao_configurada'));
+  assert.equal(catalogo.testes, 0, 'sem configuração válida, o cliente não é chamado');
+  assert.ok(!JSON.stringify(conexoes.listar(true)).includes(TOKEN_CAT), 'o token fora da listagem');
+});
+
+test('Catálogo testar: chama catalogo.testar(), só repassa resultado conhecido, frase fixa e categorias limpas (CA2, CA8)', async (t) => {
+  const { conexoes, catalogo } = montarCatalogo(t);
+  assert.deepEqual(await conexoes.testar('catalogo'), falhaCat('nao_configurada'));
+  assert.equal(catalogo.testes, 0, 'sem endereço e caminho salvos, nada é chamado');
+  salvarCatalogo(conexoes, { endereco: ENDERECO_CAT, caminho_token: CAMINHO_CAT });
+
+  const respostas = [];
+  const testar = async () => { const r = await conexoes.testar('catalogo'); respostas.push(r); return r; };
+  const casos = [
+    [{ ok: true, resultado: 'ok', total: 1234, mensagem: `vazou ${TOKEN_CAT}`, token: TOKEN_CAT, url: `${ENDERECO_CAT}/api/v1/ofertas?token=${TOKEN_CAT}`,
+      categorias: [{ nome: 'Casa', total: 1000, lojas: { amazon: 400, ml: 500, shopee: 100 }, token: TOKEN_CAT }, { nome: 'Perfumes', total: 234, lojas: {} }, { nome: TOKEN_CAT.repeat(5), total: 1 }] },
+    { ok: true, resultado: 'ok', mensagem: 'Conectado. 1.234 ofertas em 2 categorias.', total: 1234,
+      categorias: [{ nome: 'Casa', total: 1000, lojas: { amazon: 400, ml: 500, shopee: 100 } }, { nome: 'Perfumes', total: 234, lojas: { amazon: 0, ml: 0, shopee: 0 } }] }],
+    [{ ok: true, resultado: 'ok', categorias: [{ nome: 'Única', total: 1, lojas: { ml: 1 } }] },
+      { ok: true, resultado: 'ok', mensagem: 'Conectado. 1 oferta em 1 categoria.', total: 1, categorias: [{ nome: 'Única', total: 1, lojas: { amazon: 0, ml: 1, shopee: 0 } }] }],
+    [{ ok: true, resultado: 'ok', total: 0, categorias: 'nenhuma' }, { ok: true, resultado: 'ok', mensagem: 'Conectado. 0 ofertas em 0 categorias.', total: 0, categorias: [] }],
+    [{ ok: false, resultado: 'ok' }, falhaCat('resposta_inesperada')],
+    [{ ok: 'true', resultado: 'ok' }, falhaCat('resposta_inesperada')],
+    [{ ok: true, resultado: 'conectadissima' }, falhaCat('resposta_inesperada')],
+    [{ ok: true, resultado: '__proto__' }, falhaCat('resposta_inesperada')],
+    [{ ok: true, resultado: 'indisponivel' }, falhaCat('resposta_inesperada')], // só este módulo decide 'indisponivel'
+    [null, falhaCat('resposta_inesperada')],
+  ];
+  for (const r of ['nao_configurada', 'token_recusado', 'desligada', 'fora_do_ar', 'resposta_inesperada', 'sem_arquivo', 'arquivo_invalido']) {
+    casos.push([{ ok: false, resultado: r, mensagem: `vazou ${TOKEN_CAT}`, categorias: [{ nome: 'Casa', total: 1, lojas: {} }] }, falhaCat(r)]);
+  }
+  for (const [vindo, saida] of casos) { catalogo.volta = vindo; assert.deepEqual(await testar(), saida, JSON.stringify(vindo)?.slice(0, 80)); }
+  assert.equal(catalogo.testes, casos.length);
+
+  // o cliente lança (com o token na mensagem ou no nome): frase fixa e só o nome do erro no console
+  const saidas = await capturarConsole(async () => {
+    catalogo.erro = new TypeError(`fetch failed ${ENDERECO_CAT} Authorization: Bearer ${TOKEN_CAT}`);
+    assert.deepEqual(await testar(), falhaCat('indisponivel'));
+    const estranho = new Error(TOKEN_CAT); estranho.name = TOKEN_CAT;
+    catalogo.erro = estranho;
+    assert.deepEqual(await testar(), falhaCat('indisponivel'));
+  });
+  assert.deepEqual(saidas, ['[conexões] teste do Catálogo falhou: TypeError', '[conexões] teste do Catálogo falhou: erro']);
+  for (const r of respostas) assert.ok(!JSON.stringify(r).includes(TOKEN_CAT), JSON.stringify(r).slice(0, 120));
+
+  // sem o cliente injetado (o servidor só o liga na etapa 5): o teste diz que não está disponível e o cartão não quebra
+  const sem = montarCatalogo(t, { catalogo: null });
+  salvarCatalogo(sem.conexoes, { endereco: ENDERECO_CAT, caminho_token: CAMINHO_CAT });
+  assert.deepEqual(await sem.conexoes.testar('catalogo'), falhaCat('indisponivel'));
+  assert.equal(sem.conexoes.listar(true).find((p) => p.id === 'catalogo').estado, 'salva');
+});
+
+test('Catálogo por HTTP (CA8): rotas com ctx.catalogo; o token nunca no texto cru das respostas, na tabela log nem no console', async (t) => {
+  const global_ = t.mock.method(globalThis, 'fetch', async () => { throw new Error('fetch global no teste'); });
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'disp-cx-c-'));
+  const db = openDb(dir);
+  const catalogo = catalogoFalso();
+  const app = express();
+  app.use(express.json());
+  montarRotas(app, { db, links: { status: () => ({ online: true }) }, soDono: (_req, _res, next) => next(), catalogo });
+  const { port, server } = await new Promise((ok) => { const server = app.listen(0, '127.0.0.1', () => ok({ port: server.address().port, server })); });
+  t.after(() => new Promise((r) => { server.closeAllConnections?.(); server.close(() => { db.close(); fs.rmSync(dir, { recursive: true, force: true }); r(); }); }));
+  const respostas = [];
+  const chamar = async (caminho, opts) => { const r = await req(port, '/api' + caminho, opts); respostas.push(r); return r; };
+
+  const saidas = await capturarConsole(async () => {
+    let r = await chamar('/conexoes/catalogo', { method: 'PUT', body: { campos: { endereco: ENDERECO_CAT, caminho_token: TOKEN_CAT } } });
+    assert.equal(r.status, 400);
+    r = await chamar('/conexoes/catalogo', { method: 'PUT', body: { campos: { endereco: ENDERECO_CAT, caminho_token: CAMINHO_CAT } } });
+    assert.equal(r.status, 200, r.txt);
+    assert.equal(r.json.estado, 'salva');
+
+    // o cliente "vaza" o token em tudo o que devolve: nada disso passa
+    catalogo.volta = { ok: true, resultado: 'ok', total: 2, token: TOKEN_CAT, mensagem: TOKEN_CAT, cabecalhos: { Authorization: `Bearer ${TOKEN_CAT}` },
+      categorias: [{ nome: 'Casa', total: 2, lojas: { ml: 2 }, token: TOKEN_CAT }] };
+    r = await chamar('/conexoes/catalogo/testar', { method: 'POST', body: {} });
+    assert.equal(r.status, 200);
+    assert.deepEqual(r.json, { ok: true, resultado: 'ok', mensagem: 'Conectado. 2 ofertas em 1 categoria.', total: 2, categorias: [{ nome: 'Casa', total: 2, lojas: { amazon: 0, ml: 2, shopee: 0 } }] });
+    catalogo.sit = { resultado: 'ok', verificado_em: Date.now() + 1000, falha_desde: null, mensagem: TOKEN_CAT, token: TOKEN_CAT };
+    setSetting(db, 'catalogo_verificacao', JSON.stringify({ verificado_em: Date.now(), total: 2, categorias: [{ nome: 'Casa', total: 2, lojas: { ml: 2 }, token: TOKEN_CAT }], token: TOKEN_CAT }));
+    r = await chamar('/conexoes');
+    assert.equal(r.json.find((p) => p.id === 'catalogo').estado, 'conectada');
+
+    for (const resultado of ['token_recusado', 'sem_arquivo', 'fora_do_ar']) {
+      catalogo.volta = { ok: false, resultado, mensagem: `Bearer ${TOKEN_CAT}` };
+      r = await chamar('/conexoes/catalogo/testar', { method: 'POST', body: {} });
+      assert.deepEqual(r.json, falhaCat(resultado));
+    }
+    catalogo.erro = new Error(`Bearer ${TOKEN_CAT}`);
+    r = await chamar('/conexoes/catalogo/testar', { method: 'POST', body: {} });
+    assert.deepEqual(r.json, falhaCat('indisponivel'));
+    catalogo.sit = new Error(`Bearer ${TOKEN_CAT}`);
+    assert.equal((await chamar('/conexoes')).status, 200);
+  });
+  for (const resp of respostas) assert.ok(!resp.txt.includes(TOKEN_CAT), `resposta ${resp.status} sem o token: ${resp.txt.slice(0, 160)}`);
+  assert.ok(!JSON.stringify(db.prepare('SELECT * FROM log').all()).includes(TOKEN_CAT), 'o token fora da tabela log');
+  assert.ok(!JSON.stringify(db.prepare('SELECT * FROM conexoes').all()).includes(TOKEN_CAT), 'o token fora da tabela conexoes');
+  assert.ok(!saidas.some((l) => l.includes(TOKEN_CAT)), 'o token fora do console');
+  assert.equal(global_.mock.callCount(), 0, 'nada passou pelo fetch global');
+});
+
+test('Catálogo: src/conexoes.js nunca lê arquivo (quem lê o token é src/catalogo.js)', () => {
+  const fonte = fs.readFileSync(new URL('../src/conexoes.js', import.meta.url), 'utf8');
+  assert.doesNotMatch(fonte, /from ['"](node:)?fs(\/promises)?['"]|import\(['"](node:)?fs|readFile|createReadStream|openSync/);
 });
 
 // ================================================================================ painel (public/conexoes.js) em DOM falso

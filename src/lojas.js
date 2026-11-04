@@ -16,7 +16,13 @@
 // O link confiável fica guardado no cliente da Shopee por 7 dias (shopee.guardarLink, por produto e ID de afiliado):
 // o mesmo produto não pede outro link à API nem à extensão a cada disparo (S2). Confiável = veio da API, ou da
 // extensão com um longLink cujo an_<ID> é o ID salvo; sem essa prova, o link vale só para o disparo atual.
+//
+// Catálogo do Etiqueta (plano fonte-catalogo-etiqueta, etapa 3): não é loja, é uma fonte de ofertas que entra no
+// registro só para ter o cartão de Conexões. `hosts: []` (identificar nunca a devolve; lerProduto e linkAfiliado a
+// recusam) e nenhum segredo: o token fica num arquivo do dono e aqui só se guarda o CAMINHO dele (quem lê o arquivo
+// é src/catalogo.js, na hora de cada chamada). O endereço só pode ser deste computador (D3).
 
+import path from 'node:path';
 import { IMAGEM_PERMITIDA, offerKey } from './ml.js';
 import { IMAGEM_AMAZON, ErroAmazon, LinkNaoResolvido, extrairAsin } from './amazon.js';
 import { IMAGEM_SHOPEE, ErroShopee, LinkShopeeNaoResolvido, LINK_SHOPEE, RE_ID_AFILIADO, extrairIds, afiliadoDoLongLink } from './shopee.js';
@@ -24,6 +30,26 @@ import { brl } from './template.js';
 
 const MAX_URL = 4096;
 const RE_ASIN = /^[A-Z0-9]{10}$/;
+
+/**
+ * Endereço do Etiqueta (D3): só http://localhost ou http://127.0.0.1, com porta de 1 a 65535 e nada depois dela
+ * (sem caminho, usuário, senha, consulta nem barra final). É a regra do PUT de Conexões; src/catalogo.js confere de
+ * novo antes de cada chamada.
+ */
+export const RE_ENDERECO_CATALOGO = /^http:\/\/(localhost|127\.0\.0\.1):([1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])$/;
+/** Caminho do arquivo do token: absoluto (/) ou na pasta do usuário (~/), sem caractere de controle. */
+export const RE_CAMINHO_TOKEN = /^(~\/|\/)[^\u0000-\u001f\u007f]{1,500}$/;
+/**
+ * "Caminho" que é, na verdade, o próprio token (formato do token do Etiqueta: 32 ou mais de A-Za-z0-9_-), colado
+ * puro ou com / ou ~/ na frente: nunca é lido. Regra única do PUT de Conexões e de src/catalogo.js.
+ */
+export const PARECE_TOKEN = /^(~\/|\/)?[A-Za-z0-9_-]{32,}$/;
+/** Nome que o arquivo do token tem no Etiqueta. Outro nome é recusado no PUT e de novo antes de abrir o arquivo. */
+export const ARQUIVO_TOKEN = 'api_token.txt';
+/** O caminho termina no arquivo do token do Etiqueta (…/api_token.txt)? Um arquivo qualquer do dono nunca vira cabeçalho. */
+export const caminhoDoArquivoDoToken = (v) => typeof v === 'string' && v.endsWith(`/${ARQUIVO_TOKEN}`) && path.posix.basename(v) === ARQUIVO_TOKEN;
+/** Endereço que o cartão já traz preenchido (o servidor do Etiqueta escuta só em 127.0.0.1; localhost pode virar ::1). */
+export const ENDERECO_CATALOGO_PADRAO = 'http://127.0.0.1:8765';
 
 function congelar(o) {
   for (const v of Object.values(o)) if (v && typeof v === 'object') congelar(v);
@@ -34,7 +60,8 @@ function congelar(o) {
  * Registro das plataformas, na ordem da tela Conexões.
  * - hosts: hostnames aceitos (vale o host exato ou um subdomínio dele, inclusive encurtadores).
  * - campos: o que a tela Conexões mostra e salva. tipo 'segredo' nunca volta ao navegador.
- *   padrao é uma regex em texto (com ^ e $) que o valor inteiro precisa casar.
+ *   padrao é uma regex em texto (com ^ e $) que o valor inteiro precisa casar. erro (opcional) é a frase de
+ *   formato inválido no lugar da padrão (nunca inclui o valor).
  */
 const LISTA = [
   {
@@ -91,6 +118,21 @@ const LISTA = [
     descricao: 'Acompanhar campanhas e gasto no painel.',
     hosts: ['facebook.com', 'www.facebook.com', 'm.facebook.com', 'fb.com', 'fb.me'],
     campos: [],
+  },
+  {
+    // Fonte de ofertas, não loja (ver o topo do arquivo): sem hosts e sem segredo. O caminho é texto (é do dono e
+    // aparece na tela); o conteúdo do arquivo nunca passa por aqui.
+    id: 'catalogo', nome: 'Catálogo do Etiqueta', implementada: true,
+    descricao: 'O Etiqueta é o seu outro programa de ofertas, que roda neste computador. O painel lê as ofertas dele, que já vêm com o seu link de afiliado, e usa como fonte nos disparos automáticos. Não tem relação com as etiquetas do Mercado Livre.',
+    hosts: [],
+    campos: [
+      { nome: 'endereco', rotulo: 'Endereço do Etiqueta', tipo: 'texto', max: 40, padrao: RE_ENDERECO_CATALOGO.source,
+        erro: `Endereço não aceito. Use um endereço deste computador, como ${ENDERECO_CATALOGO_PADRAO}.`,
+        ajuda: 'Onde o servidor do Etiqueta está rodando (python3 servidor.py). Só vale endereço deste computador: localhost ou 127.0.0.1.' },
+      { nome: 'caminho_token', rotulo: 'Arquivo do token', tipo: 'texto', max: 500, padrao: RE_CAMINHO_TOKEN.source,
+        erro: 'Caminho inválido. Use o caminho completo do arquivo, começando por / ou ~/.',
+        ajuda: 'Caminho do arquivo api_token.txt que está na pasta do Etiqueta. Cole o caminho, nunca o conteúdo: o painel lê o arquivo e o token não passa por esta tela.' },
+    ],
   },
 ];
 

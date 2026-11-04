@@ -294,9 +294,21 @@ export async function searchOffers({ query, sort = 'relevance', limit = 50 }, { 
   });
 }
 
-/** Candidatos de uma fonte ({ type, config }), sem baixar detalhes ainda. */
+/**
+ * Candidatos de uma fonte ({ type, config }), sem baixar detalhes ainda.
+ * A fonte "catalogo" (API de ofertas do Etiqueta) delega a deps.catalogo.candidatos (src/catalogo.js) com
+ * { rule, fonteIndex, quer, tratada, utilizavel, vistas, paginas, onWarn, previa }, que vêm de candidates() e do
+ * agendador. Sem deps.catalogo (servidor sem o cliente do Etiqueta), a fonte falha como indisponível.
+ */
 export async function candidatesFor({ type, config }, deps = {}) {
   const cfg = config || {};
+  if (type === 'catalogo') {
+    if (typeof deps.catalogo?.candidatos !== 'function') throw new Error('Catálogo do Etiqueta indisponível neste servidor.');
+    return deps.catalogo.candidatos(cfg, {
+      rule: deps.rule, fonteIndex: deps.fonteIndex, quer: deps.quer, tratada: deps.tratada, utilizavel: deps.utilizavel,
+      vistas: deps.vistas, paginas: deps.paginas, onWarn: deps.onWarn, previa: deps.previa === true,
+    });
+  }
   if (type === 'afiliados') {
     if (!deps.links) throw new Error('serviço de links indisponível');
     let pages;
@@ -312,26 +324,37 @@ export async function candidatesFor({ type, config }, deps = {}) {
   return parseListLines(cfg.items);
 }
 
-export const NOME_FONTE = { afiliados: 'Central de Afiliados', list: 'lista de links', search: 'busca' };
+export const NOME_FONTE = { afiliados: 'Central de Afiliados', list: 'lista de links', search: 'busca', catalogo: 'Catálogo do Etiqueta' };
 
 /**
  * Candidatos de uma regra. Com várias fontes (até 5), busca cada uma e intercala (1ª da fonte A,
  * 1ª da B, 2ª da A, …), sem repetir. Uma fonte que falha vira aviso (deps.onWarn) e as outras seguem;
- * só dá erro se todas falharem.
+ * só dá erro se todas falharem. As chaves de cada fonte vão para `vistas` (deps.vistas ou um Set novo) antes
+ * da próxima: o catálogo conta a chave que outra fonte já trouxe como tratada. Na pré-visualização
+ * (deps.previa), a falha da fonte catálogo não vira aviso.
  */
 export async function candidates(rule, deps = {}) {
   const fontes = rule.sources?.length ? rule.sources : [{ type: rule.source_type, config: rule.source_config }];
   // cada candidato carrega a fonte de origem e a etiqueta dela (se tiver uma própria)
   const marcar = (lista, i, f) => lista.map((c) => ({ ...c, source_index: i, tag_id: f.tag_id ?? null }));
-  if (fontes.length === 1) return marcar(await candidatesFor(fontes[0], deps), 0, fontes[0]);
+  const vistas = deps.vistas instanceof Set ? deps.vistas : new Set();
+  // a fonte recebe a regra e a posição dela (o catálogo guarda o que leu por fonte, para o cursor)
+  const depsDa = (i) => ({ ...deps, rule, fonteIndex: i, vistas });
+  const buscar = async (f, i) => {
+    const lista = marcar(await candidatesFor(f, depsDa(i)), i, f);
+    for (const c of lista) if (c?.key != null) vistas.add(c.key);
+    return lista;
+  };
+  if (fontes.length === 1) return buscar(fontes[0], 0);
   const filas = []; const erros = [];
   for (const [i, f] of fontes.entries()) {
-    try { filas.push(marcar(await candidatesFor(f, deps), i, f)); } catch (e) {
-      erros.push(`fonte ${i + 1} (${NOME_FONTE[f.type] || f.type}): ${e.message}`);
+    try { filas.push(await buscar(f, i)); } catch (e) {
+      // a pré-visualização não escreve aviso do catálogo (só entra no erro se todas as fontes falharem)
+      erros.push({ texto: `fonte ${i + 1} (${NOME_FONTE[f.type] || f.type}): ${e.message}`, avisar: !(deps.previa && f.type === 'catalogo') });
     }
   }
-  if (!filas.length) throw new Error(erros.join('; '));
-  for (const e of erros) deps.onWarn?.(`Fonte ignorada neste envio: ${e}`);
+  if (!filas.length) throw new Error(erros.map((e) => e.texto).join('; '));
+  for (const e of erros) if (e.avisar) deps.onWarn?.(`Fonte ignorada neste envio: ${e.texto}`);
   const out = []; const seen = new Set();
   for (let i = 0; filas.some((f) => i < f.length); i++) {
     for (const f of filas) { const c = f[i]; if (c && !seen.has(c.key)) { seen.add(c.key); out.push(c); } }

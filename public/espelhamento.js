@@ -3,6 +3,9 @@
 // Spec: docs/produto/specs/espelhamento-amazon.md. Plano: docs/produto/planos/espelhamento-amazon.md (etapa 12).
 // Rotas: GET/POST /api/espelhos, PUT/DELETE /api/espelhos/:id, POST /api/espelhos/:id/enabled,
 // GET /api/espelhos/itens, POST /api/espelhos/itens/:id/enviar e /descartar.
+// Também a visão Catálogo do Histórico e o dialog "Revisar oferta" da fonte Catálogo (spec fonte-catalogo-etiqueta,
+// seção 3), que reaproveita o miolo do "Completar" (espDialogOferta). Rotas: GET /api/catalogo/itens,
+// POST /api/catalogo/itens/:id/enviar e /descartar (os dois só do Dono).
 // Carrega depois de disparos.js e antes de app.js: só define funções e constantes (prefixo Esp/ESP/esp/hist, para não
 // colidir no escopo global dos scripts clássicos). Os utilitários de app.js ($, $$, esc, zap, S, api, aviso, REQ, opcoes,
 // mostrarErros, seletorGrupos, hora, q, paginaHistorico, rotaAtual) e de disparos.js (dadosOferta, dispApi, dispSegHtml,
@@ -270,10 +273,10 @@ function formEspelhamento(e) {
 }
 
 // ---------- Histórico: seletor "Tipo" (compartilhado com a visão de sempre) ----------
-/** HTML do seletor "Tipo" (Tudo | Disparo automático | Espelhamento). Ligue com histLigarTipo(). */
+/** HTML do seletor "Tipo" (Tudo | Disparo automático | Espelhamento | Catálogo). Ligue com histLigarTipo(). */
 function histTipoHtml(tipo) {
   const H = TEXTOS_ESPELHAMENTO.hist;
-  return `<span class="rotulo-campo" id="hs-tipo-r">${H.tipo}</span>${dispSegHtml('hs-tipo', [['', H.tudo], ['automatico', H.automatico], ['espelhamento', H.espelhamento]], tipo, 'hs-tipo-r')}`;
+  return `<span class="rotulo-campo" id="hs-tipo-r">${H.tipo}</span>${dispSegHtml('hs-tipo', [['', H.tudo], ['automatico', H.automatico], ['espelhamento', H.espelhamento], ['catalogo', TEXTOS_REVISAO_CATALOGO.tipo]], tipo, 'hs-tipo-r')}`;
 }
 function histLigarTipo(nivel = '') { dispLigarSeg($('#hs-tipo'), (v) => histIr({ tipo: v }, nivel)); }
 /** Muda o filtro do Histórico: o endereço passa a mostrá-lo (sem nova entrada no histórico do navegador) e a página é refeita. */
@@ -435,54 +438,349 @@ async function espMostrarMais(ger) {
   } finally { ESP_H.carregandoMais = false; btn.disabled = false; btn.textContent = H.mostrarMais; }
 }
 
-// ---------- "Completar" um item da fila ----------
-function completarEspelhamento(itemId) {
-  const T = TEXTOS_ESPELHAMENTO; const C = T.completar; const dlg = $('#dlg');
-  const it = ESP_H.itens.find((x) => x.id === itemId); if (!it) return;
-  const regra = ESP.lista.find((r) => r.id === it.espelho_id);
-  const tpl = regra ? S.templates.find((t) => t.id === regra.template_id) : null;
-  const n = espDestinosAtivos(regra);
-  dlg.innerHTML = `<div class="corpo" id="cm"><h1>${C.titulo}</h1><p class="dica" style="margin:0">${esc(C.sub(it.origem_nome, it.espelho_nome || T.hist.semRegra))}</p>
+// ---------- miolo comum dos dialogs de oferta: "Completar" (espelhamento) e "Revisar oferta" (catálogo) ----------
+/**
+ * Abre o #dlg com os dados editáveis (dadosOferta), a prévia com o template e os botões Fechar, Descartar e Enviar.
+ * O 409 ("já tratada") avisa, fecha e atualiza; outro erro aparece no dialog (mostrarErros) e o botão volta.
+ * cfg = {
+ *   titulo, sub (texto puro: é escapado aqui), topoHtml (HTML já seguro entre o subtítulo e os dados; opcional),
+ *   oferta (valores iniciais de dadosOferta), sold, link (o {LINK} da prévia), tpl (template ou null), legenda,
+ *   n (grupos que recebem; 0 trava o envio), caminho (`/espelhos/itens/<id>`: POST <caminho>/enviar e /descartar),
+ *   atualizar() → Promise (refaz a lista depois de enviar, descartar ou do 409),
+ *   bloqueio(valores) → texto (opcional): enquanto houver texto, os botões de envio ficam travados e o texto aparece
+ *     no rodapé, ligado a eles por aria-describedby (o servidor decide de novo),
+ *   suspeito(valores) → bool (opcional): o "Preço antigo" fica com aria-invalid, destaque de aviso e o texto da trava,
+ *   proxima: { texto, depois() → Promise } (opcional): segundo botão, que envia e chama depois() no lugar de atualizar(),
+ *   dadosOpcoes (opcional): o 3º argumento de dadosOferta (ex.: { cupomMax }),
+ *   precoAntigoSemExemplo (opcional): tira o exemplo "149,90" do "Preço antigo",
+ *   errosTitulo: { campos, servidor, descartar } (opcional): título do card de erros (padrão o de mostrarErros).
+ *   semDescartar (opcional): sem o botão Descartar (reenvio de oferta já enviada: o servidor só descarta item em revisão).
+ * }
+ */
+function espDialogOferta(cfg) {
+  const C = TEXTOS_ESPELHAMENTO.completar; const dlg = $('#dlg'); const n = cfg.n;
+  // o motivo da trava fica no rodapé (fixo no fim do dialog), à vista de quem está nos botões
+  const trava = cfg.bloqueio ? '<p class="dica nivel-aviso trava-envio" id="cm-trava" role="status" hidden></p>' : '';
+  dlg.innerHTML = `<div class="corpo" id="cm"><h1>${cfg.titulo}</h1><p class="dica" style="margin:0">${esc(cfg.sub)}</p>${cfg.topoHtml || ''}
     <div id="cm-dados"></div>
-    <div class="previa"><h2 style="margin:0;font-size:15px">${C.previa}</h2><div class="chat" style="min-height:0"><div class="balao" id="cm-pv"></div></div><p class="legenda-previa">${tpl ? C.previaLegenda : C.semTemplate}</p></div>
-    <div class="rodape"><button type="button" id="cm-fechar">${C.fechar}</button><button type="button" id="cm-descartar" class="perigo leve">${C.descartar}</button><button type="button" class="pri" id="cm-enviar" ${n ? '' : 'disabled'}>${C.enviar(n)}</button></div></div>`;
+    <div class="previa"><h2 style="margin:0;font-size:15px">${C.previa}</h2><div class="chat" style="min-height:0"><div class="balao" id="cm-pv"></div></div><p class="legenda-previa">${cfg.legenda}</p></div>
+    <div class="rodape">${trava}<button type="button" id="cm-fechar">${C.fechar}</button>${cfg.semDescartar ? '' : `<button type="button" id="cm-descartar" class="perigo leve">${C.descartar}</button>`}${cfg.proxima ? `<button type="button" id="cm-proxima">${cfg.proxima.texto}</button>` : ''}<button type="button" class="pri" id="cm-enviar" ${n ? '' : 'disabled'}>${C.enviar(n)}</button></div></div>`;
   const corpo = $('#cm', dlg);
-  const link = `https://www.amazon.com.br/dp/${espAsinOk(it.asin) ? String(it.asin).toUpperCase() : '…'}?tag=•••`;
   let seq = 0;
   const prever = async (v) => {
-    const k = ++seq; if (!tpl) return;
+    const k = ++seq; if (!cfg.tpl) return;
     try {
-      const r = await api('/templates/preview', 'POST', { body: tpl.body, amostra: { title: v.title, price: v.price, oldPrice: v.oldPrice, discountPct: v.discountPct, sold: it.oferta?.sold ?? null, freeShipping: v.freeShipping, coupon: v.coupon, link } });
+      const r = await api('/templates/preview', 'POST', { body: cfg.tpl.body, amostra: { title: v.title, price: v.price, oldPrice: v.oldPrice, discountPct: v.discountPct, sold: cfg.sold ?? null, freeShipping: v.freeShipping, coupon: v.coupon, link: cfg.link } });
       if (k === seq) $('#cm-pv', dlg).innerHTML = zap(r.texto);
     } catch { /* fica a prévia anterior */ }
   };
-  let tm;
-  const dados = dadosOferta(it.oferta || {}, (v) => { clearTimeout(tm); tm = setTimeout(() => prever(v), 250); });
-  $('#cm-dados', dlg).appendChild(dados.el); prever(dados.valores());
+  let tm; let enviando = false;
+  // botões de envio travados enquanto cfg.bloqueio tiver um motivo (só no "Revisar oferta")
+  const botoesEnvio = () => [$('#cm-enviar', dlg), cfg.proxima ? $('#cm-proxima', dlg) : null].filter(Boolean);
+  const aplicarTrava = () => {
+    if (!cfg.bloqueio) return;
+    const v = dados.valores(); const msg = cfg.bloqueio(v) || ''; const p = $('#cm-trava', dlg);
+    if (p) { p.textContent = msg; p.hidden = !msg; }
+    botoesEnvio().forEach((b) => {
+      if (!enviando) b.disabled = !n || !!msg;
+      if (msg) b.setAttribute('aria-describedby', 'cm-trava'); else b.removeAttribute('aria-describedby');
+    });
+    // preço suspeito: o "Preço antigo" fica marcado (aria-invalid e destaque de aviso), com o texto da trava como descrição
+    const antigo = cfg.suspeito ? dados.el.elements.namedItem('oldPrice') : null;
+    if (antigo) {
+      const s = !!msg && !!cfg.suspeito(v);
+      if (s) antigo.setAttribute('aria-invalid', 'true'); else antigo.removeAttribute('aria-invalid');
+      antigo.classList.toggle('campo-suspeito', s);
+      const ids = String(antigo.getAttribute('aria-describedby') || '').split(/\s+/).filter((x) => x && x !== 'cm-trava');
+      if (s) ids.push('cm-trava');
+      if (ids.length) antigo.setAttribute('aria-describedby', ids.join(' ')); else antigo.removeAttribute('aria-describedby');
+    }
+  };
+  const dados = dadosOferta(cfg.oferta || {}, (v) => { aplicarTrava(); clearTimeout(tm); tm = setTimeout(() => prever(v), 250); }, cfg.dadosOpcoes);
+  if (cfg.precoAntigoSemExemplo) dados.el.elements.namedItem('oldPrice')?.removeAttribute('placeholder');
+  $('#cm-dados', dlg).appendChild(dados.el); prever(dados.valores()); aplicarTrava();
   // o preço atual é obrigatório para enviar (o Disparo manual, que usa o mesmo formulário, não o exige)
   dados.el.elements.namedItem('price')?.closest('label')?.querySelector('span')?.insertAdjacentHTML('beforeend', ` ${REQ}`);
   const fechar = () => { clearTimeout(tm); dlg.close(); };
   $('#cm-fechar', dlg).onclick = fechar;
-  // o item já saiu da fila (409): avisa, fecha e atualiza a lista
-  const jaTratado = async (err) => { fechar(); aviso(err.message, true); await histIr({ tipo: 'espelhamento', regra: ESP_H.regra, status: ESP_H.status }); };
-  $('#cm-enviar', dlg).onclick = tentar(async () => {
+  // o item já foi tratado (409): avisa, fecha e atualiza a lista
+  const jaTratado = async (err) => { fechar(); aviso(err.message, true); await cfg.atualizar(); };
+  const enviar = async (btn, rotulo, depois) => {
     const erros = dados.erros();
     if (!erros.length && dados.valores().price == null) erros.push({ msg: C.faltaPreco, el: dados.el.elements.namedItem('price') });
-    if (mostrarErros(corpo, erros)) return;
-    const btn = $('#cm-enviar', dlg); btn.disabled = true; btn.textContent = C.enviando;
-    try { await dispApi(`/espelhos/itens/${itemId}/enviar`, { method: 'POST', body: { ajustes: dados.ajustes() } }); } catch (err) {
+    if (mostrarErros(corpo, erros, cfg.errosTitulo?.campos)) return;
+    if (cfg.bloqueio?.(dados.valores())) { aplicarTrava(); return; }
+    btn.disabled = true; btn.textContent = C.enviando; enviando = true;
+    try { await dispApi(`${cfg.caminho}/enviar`, { method: 'POST', body: { ajustes: dados.ajustes() } }); } catch (err) {
+      enviando = false;
       if (err.status === 409) return jaTratado(err);
-      btn.disabled = false; btn.textContent = C.enviar(n); mostrarErros(corpo, [{ msg: err.message }]); return;
+      btn.disabled = false; btn.textContent = rotulo; aplicarTrava(); mostrarErros(corpo, [{ msg: err.message }], cfg.errosTitulo?.servidor); return;
     }
-    fechar(); aviso(C.enviada(n)); await histIr({ tipo: 'espelhamento', regra: ESP_H.regra, status: ESP_H.status });
-  });
-  $('#cm-descartar', dlg).onclick = tentar(async () => {
+    fechar(); aviso(C.enviada(n)); await depois();
+  };
+  $('#cm-enviar', dlg).onclick = tentar(() => enviar($('#cm-enviar', dlg), C.enviar(n), cfg.atualizar));
+  if (cfg.proxima) $('#cm-proxima', dlg).onclick = tentar(() => enviar($('#cm-proxima', dlg), cfg.proxima.texto, cfg.proxima.depois));
+  if ($('#cm-descartar', dlg)) $('#cm-descartar', dlg).onclick = tentar(async () => {
     if (!confirm(C.confirmaDescartar)) return;
-    try { await dispApi(`/espelhos/itens/${itemId}/descartar`, { method: 'POST' }); } catch (err) {
+    try { await dispApi(`${cfg.caminho}/descartar`, { method: 'POST' }); } catch (err) {
       if (err.status === 409) return jaTratado(err);
-      mostrarErros(corpo, [{ msg: err.message }]); return;
+      mostrarErros(corpo, [{ msg: err.message }], cfg.errosTitulo?.descartar); return;
     }
-    fechar(); aviso(C.descartada); await histIr({ tipo: 'espelhamento', regra: ESP_H.regra, status: ESP_H.status });
+    fechar(); aviso(C.descartada); await cfg.atualizar();
   });
   dlg.showModal(); dados.el.elements.namedItem('title')?.focus();
+}
+
+// ---------- "Completar" um item da fila ----------
+function completarEspelhamento(itemId) {
+  const T = TEXTOS_ESPELHAMENTO; const C = T.completar;
+  const it = ESP_H.itens.find((x) => x.id === itemId); if (!it) return;
+  const regra = ESP.lista.find((r) => r.id === it.espelho_id);
+  const tpl = regra ? S.templates.find((t) => t.id === regra.template_id) : null;
+  espDialogOferta({
+    titulo: C.titulo, sub: C.sub(it.origem_nome, it.espelho_nome || T.hist.semRegra), oferta: it.oferta || {}, sold: it.oferta?.sold,
+    link: `https://www.amazon.com.br/dp/${espAsinOk(it.asin) ? String(it.asin).toUpperCase() : '…'}?tag=•••`,
+    tpl, legenda: tpl ? C.previaLegenda : C.semTemplate, n: espDestinosAtivos(regra), caminho: `/espelhos/itens/${itemId}`,
+    atualizar: () => histIr({ tipo: 'espelhamento', regra: ESP_H.regra, status: ESP_H.status }),
+  });
+}
+
+// ---------- Histórico: visão Catálogo e "Revisar oferta" (fonte Catálogo, app Etiqueta) ----------
+// Spec: docs/produto/specs/fonte-catalogo-etiqueta.md, seção 3. Tudo o que vem do catálogo (título, categoria, cupom,
+// nome da regra) é texto cru de fora: sempre por esc(); o link só vira <a> se for https de um dos hosts esperados.
+// Só o Dono revisa (o servidor responde 403 ao Operador em enviar e descartar); o Operador vê a lista sem o botão.
+const TEXTOS_REVISAO_CATALOGO = {
+  tipo: 'Catálogo',
+  enviadas: 'Enviadas', descartadas: 'Descartadas', paraRevisar: 'Para revisar', ultimas24: 'Últimas 24 h', esperamVoce: 'Esperam a sua revisão',
+  regra: 'Disparo automático', todasRegras: 'Todos os disparos', resultado: 'Mostrar', todos: 'Tudo', soRevisar: 'Só o que está para revisar',
+  colunas: ['Quando', 'Regra', 'Loja', 'Oferta', 'Resultado'],
+  rotulosCelula: { regra: 'Regra', loja: 'Loja' },
+  vazio: 'Nada para revisar. As ofertas da Shopee e as com 100% de desconto aparecem aqui.', vazioFiltro: 'Nada com este filtro.',
+  erroCarregar: 'Não consegui carregar as ofertas do catálogo. Tente de novo.',
+  semRegra: '(disparo apagado)', semTitulo: 'Oferta sem título',
+  lojas: { ml: 'Mercado Livre', amazon: 'Amazon', shopee: 'Shopee' },
+  motivos: {
+    shopee: 'Shopee: confirme o link', desconto_100: 'Desconto de 100%: confira o preço',
+    preco_antigo: 'Preço antigo muito alto: confira o preço', falha_link: 'Não consegui gerar o link: confira a oferta',
+  },
+  enviada: 'Enviada', paraRevisarPre: 'Para revisar', descartada: 'Descartada: na revisão',
+  dicaAmazon: 'link da Amazon com a sua tag', dicaML: 'link do Mercado Livre gerado com a sua etiqueta', revisada: 'revisada e enviada', enviando: 'enviando…',
+  erroGrupos: (n) => `Erro ao enviar para ${espN(n, 'grupo', 'grupos')}`,
+  revisar: 'Revisar', revisarAria: (titulo, loja) => `Revisar oferta ${titulo}, da ${loja}`, soDono: 'Só o Dono revisa.',
+  // item enviado cujo envio não chegou a nenhum grupo (`pode_reenviar` do servidor): o Dono abre o mesmo dialog
+  reenviar: 'Enviar de novo', reenviarAria: (titulo, loja) => `Enviar de novo a oferta ${titulo}, da ${loja}`,
+  subReenviar: (regra) => `Veio do catálogo, pela regra “${regra}”. O envio anterior não chegou a nenhum grupo (o motivo está na linha desta oferta). Confira os dados e envie de novo.`,
+  // a lista mostra no máximo HCAT_LIMITE itens (GET /api/catalogo/itens pagina por antes=/proximo; a tela ainda não usa)
+  limiteRevisar: (n, total) => `Mostrando as ${n} mais recentes de ${total} para revisar. Escolha um disparo no filtro acima para ver as outras (cada disparo guarda até 50).`,
+  limiteTodos: (n) => `Mostrando as ${n} mais recentes. Para achar uma mais antiga, escolha um disparo e “Só o que está para revisar” no filtro acima.`,
+  cheia: (regra, n) => `A regra “${regra}” tem ${n} ofertas esperando revisão. As novas esperam até você revisar ou descartar algumas.`,
+  // dialog "Revisar oferta"
+  titulo: 'Revisar oferta',
+  sub: (regra, motivos) => `Veio do catálogo, pela regra “${regra}”. Motivo: ${motivos}. Confira os dados e envie, ou descarte.`,
+  faixaShopee: 'O link da Shopee não prova de quem é a conta. Abra o link abaixo para conferir o produto antes de enviar.',
+  faixaPreco: (x, antigo, preco) => `Esta oferta aparece com 100% de desconto ou com preço antigo ${x}× maior que o preço (${antigo} → ${preco}). Costuma ser erro no catálogo. Corrija os preços à mão, ou apague o preço antigo: a mensagem sai sem “de/por” e sem desconto.`,
+  // 100% informado pelo Etiqueta sem preço antigo 10× maior: o envio é liberado, porque o servidor nunca manda o "100%"
+  faixa100SemAntigo: 'O Etiqueta informou 100% de desconto; esse número não vai na mensagem. Sem um preço antigo maior que o preço, ela sai sem “de/por” e sem desconto. Confira o preço antes de enviar.',
+  faixa100ComAntigo: (antigo, preco) => `O Etiqueta informou 100% de desconto; esse número não vai na mensagem. O desconto sai calculado dos dois preços (${antigo} → ${preco}). Confira os preços antes de enviar.`,
+  faixaLink: 'Não consegui gerar o link do Mercado Livre desta oferta. Ao enviar, o painel tenta de novo na hora; se falhar, o motivo aparece na linha desta oferta no Histórico.',
+  abrirLink: 'Abrir o link da oferta (abre em outra aba)', linkFora: 'Link fora do esperado: não enviar.',
+  corrijaPreco: 'Corrija o preço ou apague o preço antigo para enviar.',
+  errosCampos: 'Antes de enviar, falta:', errosServidor: 'Não foi possível enviar:', errosDescartar: 'Não foi possível descartar:',
+  proxima: 'Enviar e ir para a próxima',
+  legenda: {
+    ml: 'Com o template da regra. O link meli.la é gerado com a sua etiqueta na hora do envio.',
+    amazon: 'Com o template da regra. O link sai com a sua tag da Amazon na hora do envio.',
+    shopee: 'Com o template da regra. O link é o do catálogo, o mesmo de cima.',
+  },
+  semTemplate: 'O template desta regra não existe mais. Edite a regra no Disparo automático.',
+};
+// Link mostrado na revisão (plano, alinhamento 10): ML = página do produto, Amazon = /dp/<ASIN> sem tag, Shopee = link curto.
+const HCAT_LINKS = Object.freeze({
+  ml: /^https:\/\/produto\.mercadolivre\.com\.br\/MLB-\d{1,20}$/,
+  amazon: /^https:\/\/www\.amazon\.com\.br\/dp\/[A-Z0-9]{10}$/,
+  shopee: /^https:\/\/s\.shopee\.com\.br\/[A-Za-z0-9_-]{3,40}$/,
+});
+const HCAT_LIMITE = 200; // o máximo que GET /api/catalogo/itens devolve por página (antes=/proximo; a tela usa só a primeira)
+const HCAT = { regra: '', status: '', itens: [], dados: null };
+
+/** O link do item, se for exatamente o formato esperado da loja; senão null (não vira <a> e trava o "Enviar"). */
+const hcatLinkSeguro = (loja, link) => (Object.hasOwn(HCAT_LINKS, loja) && typeof link === 'string' && HCAT_LINKS[loja].test(link) ? link : null);
+/** Motivos do servidor em texto ("A e B"); motivo desconhecido não aparece. */
+const hcatMotivos = (lista) => (Array.isArray(lista) ? lista : []).map((m) => (Object.hasOwn(TEXTOS_REVISAO_CATALOGO.motivos, m) ? TEXTOS_REVISAO_CATALOGO.motivos[m] : '')).filter(Boolean).join(' e ');
+const hcatNomeLoja = (loja) => (Object.hasOwn(TEXTOS_REVISAO_CATALOGO.lojas, loja) ? TEXTOS_REVISAO_CATALOGO.lojas[loja] : '—');
+/**
+ * Preço ainda suspeito com os valores do formulário (a mesma conta do servidor, precoSuspeito em src/catalogo-itens.js):
+ * desconto de 100% ou preço antigo ≥ 10× o preço.
+ */
+function hcatPrecoSuspeito(v) {
+  const preco = Number(v?.price); const antigo = Number(v?.oldPrice); const pct = Number(v?.discountPct);
+  if (Number.isFinite(pct) && pct >= 100) return true;
+  return v?.oldPrice != null && Number.isFinite(antigo) && Number.isFinite(preco) && preco > 0 && antigo >= 10 * preco;
+}
+
+/** Texto e classe do resultado de um item do catálogo. → { cls, texto, detalhe, extra } */
+function hcatResultado(it) {
+  const R = TEXTOS_REVISAO_CATALOGO;
+  if (it.status === 'revisao') return { cls: 'nivel-aviso', texto: `${R.paraRevisarPre}: ${hcatMotivos(it.motivos) || '—'}`, detalhe: '', extra: [] };
+  if (it.status === 'descartado') return { cls: 'nivel-aviso', texto: R.descartada, detalhe: '', extra: [] };
+  const grupos = Array.isArray(it.grupos) ? it.grupos : [];
+  const falhas = grupos.filter((g) => g.ok === false);
+  if (falhas.length) return { cls: 'nivel-erro', texto: R.erroGrupos(falhas.length), detalhe: '', extra: falhas.map((g) => `${g.nome}${g.erro ? ': ' + g.erro : ''}`) };
+  // enviada sozinha pela regra (sem envio_id) ou pela revisão (com envio_id; ainda saindo enquanto algum grupo está sem resultado)
+  const pela = it.envio_id != null ? R.revisada : it.loja === 'amazon' ? R.dicaAmazon : it.loja === 'ml' ? R.dicaML : '';
+  const saindo = it.envio_id != null && grupos.some((g) => g.ok == null);
+  return { cls: 'nivel-ok', texto: R.enviada, detalhe: [pela, saindo ? R.enviando : ''].filter(Boolean).join(' · '), extra: [] };
+}
+
+/** O item abre o dialog: em revisão, ou enviado sem ter chegado a nenhum grupo (`pode_reenviar`). */
+const hcatAbreDialog = (it) => it?.status === 'revisao' || (it?.status === 'enviado' && it.pode_reenviar === true);
+
+/**
+ * Linha da tabela. `dono`: mostra o botão "Revisar" (senão, o texto "Só o Dono revisa.") e, no item enviado que não
+ * chegou a nenhum grupo, "Enviar de novo" (o Operador não vê nada a mais: o erro por grupo já está na linha).
+ */
+function hcatLinhaHtml(it, dono) {
+  const R = TEXTOS_REVISAO_CATALOGO; const r = hcatResultado(it); const o = it.oferta || {};
+  const titulo = o.title || R.semTitulo; const loja = hcatNomeLoja(it.loja); const regra = it.regra || R.semRegra;
+  const botao = (texto, aria, cls) => `<div style="margin-top:6px"><button type="button" class="${cls}" data-revisar="${Number(it.id)}" aria-label="${esc(aria)}">${texto}</button></div>`;
+  const acao = it.status === 'revisao' ? (dono ? botao(R.revisar, R.revisarAria(titulo, loja), 'pri') : `<span class="dica-celula">${R.soDono}</span>`)
+    : hcatAbreDialog(it) && dono ? botao(R.reenviar, R.reenviarAria(titulo, loja), '') : '';
+  // classes esp-* : o mesmo arranjo em cartão da tabela do espelhamento em telas estreitas (style.css)
+  return `<tr data-item="${Number(it.id)}"><td class="esp-quando" style="white-space:nowrap">${hora(it.decidido_em || it.criado_em)}</td>
+    <td class="esp-regra" data-l="${R.rotulosCelula.regra}"><span class="trunca" title="${esc(regra)}">${esc(regra)}</span></td>
+    <td class="esp-origem" data-l="${R.rotulosCelula.loja}"><span class="chip">${esc(loja)}</span></td>
+    <td class="esp-oferta"><span class="trunca" title="${esc(titulo)}">${esc(titulo)}</span>${o.categoria ? `<span class="dica-celula trunca" title="${esc(o.categoria)}">${esc(o.categoria)}</span>` : ''}</td>
+    <td class="esp-resultado"><span class="${r.cls}">${esc(r.texto)}</span>${r.detalhe ? `<span class="dica-celula">${esc(r.detalhe)}</span>` : ''}${r.extra.map((x) => `<span class="dica-celula">${esc(x)}</span>`).join('')}${acao}</td></tr>`;
+}
+
+/** KPIs (últimas 24 h; "Para revisar" conta toda a fila) e o aviso de fila cheia de cada regra, + a tabela. */
+function hcatCorpoHtml(dados, dono) {
+  const R = TEXTOS_REVISAO_CATALOGO; const c = dados?.contadores_24h || {}; const fila = Number(c.para_revisar) || 0;
+  const kpis = `<div class="kpis esp-kpis" aria-live="polite">
+    <div class="kpi"><div class="rotulo">${R.enviadas}</div><div class="valor">${Number(c.enviadas) || 0}</div><div class="nota">${R.ultimas24}</div></div>
+    <div class="kpi"><div class="rotulo">${R.descartadas}</div><div class="valor">${Number(c.descartadas) || 0}</div><div class="nota">${R.ultimas24}</div></div>
+    <div class="kpi${fila > 0 ? ' atencao' : ''}"><div class="rotulo">${R.paraRevisar}</div><div class="valor">${fila}</div><div class="nota">${fila > 0 ? R.esperamVoce : R.ultimas24}</div></div></div>`;
+  const teto = Number(dados?.teto_revisao) || 50;
+  const cheias = (Array.isArray(dados?.regras) ? dados.regras : []).filter((x) => x.cheia)
+    .map((x) => `<div class="aviso-impl" role="status" style="margin-bottom:10px"><p>${esc(R.cheia(x.regra || R.semRegra, teto))}</p></div>`).join('');
+  const itens = Array.isArray(dados?.itens) ? dados.itens : [];
+  // a rota devolve no máximo HCAT_LIMITE: avisa que há mais e como chegar nelas (o filtro por disparo cabe inteiro)
+  const total = Number(c.para_revisar) || 0;
+  const corte = itens.length < HCAT_LIMITE ? ''
+    : `<p class="dica" role="status" id="hc-limite" style="margin:0 0 10px">${HCAT.status === 'revisao' ? R.limiteRevisar(itens.length, Math.max(total, itens.length)) : R.limiteTodos(itens.length)}</p>`;
+  const lista = !itens.length ? `<div class="vazio">${HCAT.regra || HCAT.status ? R.vazioFiltro : R.vazio}</div>`
+    : `<div class="card tabela esp-tab" id="hc-tab" tabindex="-1"><table><thead><tr>${R.colunas.map((x) => `<th scope="col">${x}</th>`).join('')}</tr></thead><tbody id="hc-linhas">${itens.map((it) => hcatLinhaHtml(it, dono)).join('')}</tbody></table></div>`;
+  return kpis + cheias + corte + lista;
+}
+
+const hcatConsulta = () => {
+  const p = new URLSearchParams({ limite: String(HCAT_LIMITE), status: HCAT.status || 'todos' });
+  if (HCAT.regra) p.set('regra', HCAT.regra);
+  return `/catalogo/itens?${p}`;
+};
+const hcatIr = () => histIr({ tipo: 'catalogo', regra: HCAT.regra, status: HCAT.status });
+
+/** Visão Catálogo do Histórico (`#historico?tipo=catalogo&regra=<id>&status=revisao`). */
+async function paginaHistoricoCatalogo(params) {
+  const H = TEXTOS_ESPELHAMENTO.hist; const R = TEXTOS_REVISAO_CATALOGO; const ger = ++ESP_H.ger;
+  HCAT.regra = /^\d+$/.test(params?.get('regra') || '') ? params.get('regra') : '';
+  HCAT.status = params?.get('status') === 'revisao' ? 'revisao' : '';
+  HCAT.itens = []; HCAT.dados = null;
+  clearTimeout(paginaHistorico.t);
+  const regras = (S.rules || []).filter((r) => (r.sources || []).some((f) => f?.type === 'catalogo'));
+  $('#pagina').innerHTML = `<div class="topo"><div><h1>${H.titulo} ${q('historico')}</h1><p class="sub">${H.sub}</p></div>
+      <div class="linha">${histTipoHtml('catalogo')}</div></div>
+    <div class="linha" style="margin-bottom:12px">
+      <label class="campo" style="min-width:200px"><span>${R.regra}</span><select id="hc-regra"><option value="">${R.todasRegras}</option>${regras.map((r) => `<option value="${Number(r.id)}" ${String(r.id) === HCAT.regra ? 'selected' : ''}>${esc(r.name)}</option>`).join('')}</select></label>
+      <label class="campo" style="min-width:200px"><span>${R.resultado}</span><select id="hc-status"><option value="">${R.todos}</option><option value="revisao" ${HCAT.status ? 'selected' : ''}>${R.soRevisar}</option></select></label></div>
+    <div id="hc-corpo"><p class="dica">${H.carregando}</p></div>`;
+  histLigarTipo();
+  $('#hc-regra').onchange = (ev) => { HCAT.regra = ev.target.value; hcatIr(); };
+  $('#hc-status').onchange = (ev) => { HCAT.status = ev.target.value; hcatIr(); };
+  const ativa = () => ger === ESP_H.ger && rotaAtual() === 'historico';
+  const pintar = () => {
+    const corpo = $('#hc-corpo'); corpo.innerHTML = hcatCorpoHtml(HCAT.dados, podeEquipe());
+    $$('[data-revisar]', corpo).forEach((b) => (b.onclick = tentar(() => revisarCatalogo(Number(b.dataset.revisar)))));
+  };
+  const carregar = async (primeira) => {
+    try {
+      const dados = await api(hcatConsulta());
+      if (!ativa()) return;
+      HCAT.dados = dados; HCAT.itens = Array.isArray(dados?.itens) ? dados.itens : [];
+      pintar();
+    } catch {
+      if (!ativa() || !primeira) return; // numa atualização automática que falha, fica o que já está na tela
+      $('#hc-corpo').innerHTML = `<div class="vazio" role="alert">${R.erroCarregar}<div style="margin-top:12px"><button type="button" id="hc-de-novo">${H.tentarDeNovo}</button></div></div>`;
+      $('#hc-de-novo').onclick = () => hcatIr();
+    }
+  };
+  await carregar(true);
+  const agenda = () => {
+    clearTimeout(paginaHistorico.t);
+    paginaHistorico.t = setTimeout(async () => {
+      if (!ativa()) return;
+      if (!$('#dlg').open) await carregar(false); // com o dialog aberto, a lista não é repintada
+      agenda();
+    }, 6000);
+  };
+  agenda();
+}
+
+/** Faixa de motivo do topo do dialog (texto fixo; os preços passam por dispBrl e esc). */
+function hcatFaixaHtml(it) {
+  const R = TEXTOS_REVISAO_CATALOGO; const m = Array.isArray(it.motivos) ? it.motivos : []; const o = it.oferta || {};
+  const ps = [];
+  if (m.includes('shopee')) ps.push(R.faixaShopee);
+  if (m.includes('desconto_100') || m.includes('preco_antigo')) {
+    const preco = Number(o.price); const antigo = Number(o.oldPrice);
+    const temAntigo = o.oldPrice != null && Number.isFinite(antigo) && preco > 0 && antigo > preco;
+    // preço antigo ≥ 10×: a trava vale até corrigir; 100% só informado pelo Etiqueta: o número não sai e o envio é liberado
+    if (temAntigo && (antigo >= 10 * preco || !m.includes('desconto_100'))) ps.push(R.faixaPreco(Math.round(antigo / preco), dispBrl(antigo), dispBrl(preco)));
+    else if (m.includes('desconto_100')) ps.push(temAntigo ? R.faixa100ComAntigo(dispBrl(antigo), dispBrl(preco)) : R.faixa100SemAntigo);
+  }
+  if (m.includes('falha_link')) ps.push(R.faixaLink);
+  return ps.length ? `<div class="aviso-impl" role="status"><div class="aviso-corpo">${ps.map((p) => `<p>${esc(p)}</p>`).join('')}</div></div>` : '';
+}
+
+/** Dialog "Revisar oferta" de um item do catálogo (só o Dono; item 'revisao', ou enviado com `pode_reenviar`). */
+function revisarCatalogo(itemId) {
+  const R = TEXTOS_REVISAO_CATALOGO;
+  const it = HCAT.itens.find((x) => x.id === itemId); if (!hcatAbreDialog(it)) return;
+  const reenvio = it.status !== 'revisao';
+  const regra = (S.rules || []).find((r) => r.id === it.rule_id);
+  const tpl = regra ? (S.templates || []).find((t) => t.id === regra.template_id) : null;
+  const link = hcatLinkSeguro(it.loja, it.oferta?.link);
+  const linkHtml = link
+    ? `<p style="margin:0"><a href="${esc(link)}" target="_blank" rel="noopener noreferrer" class="alvo24" style="text-decoration:underline">${R.abrirLink}</a></p>`
+    : `<p class="nivel-erro" style="margin:0">${R.linkFora}</p>`;
+  const linkPrevia = it.loja === 'ml' ? 'https://meli.la/(gerado no envio)' : !link ? '…' : it.loja === 'amazon' ? `${link}?tag=•••` : link;
+  // as outras desta regra que esperam revisão, a mais antiga primeiro (para "Enviar e ir para a próxima")
+  const proximas = () => HCAT.itens.filter((x) => x.status === 'revisao' && x.rule_id === it.rule_id && x.id !== itemId)
+    .sort((a, b) => (a.criado_em - b.criado_em) || (a.id - b.id));
+  const depois = async () => {
+    await hcatIr();
+    $('#hc-tab')?.focus(); // o botão que abriu sumiu com a linha: o foco volta à tabela
+  };
+  espDialogOferta({
+    titulo: R.titulo, sub: reenvio ? R.subReenviar(it.regra || R.semRegra) : R.sub(it.regra || R.semRegra, hcatMotivos(it.motivos) || '—'),
+    topoHtml: hcatFaixaHtml(it) + linkHtml,
+    oferta: it.oferta || {}, sold: it.oferta?.sold, link: linkPrevia, tpl,
+    legenda: tpl ? R.legenda[it.loja] || '' : R.semTemplate,
+    n: Array.isArray(it.grupos) ? it.grupos.length : 0, caminho: `/catalogo/itens/${Number(itemId)}`,
+    atualizar: depois,
+    bloqueio: (v) => (!link ? R.linkFora : hcatPrecoSuspeito(v) ? R.corrijaPreco : ''),
+    suspeito: hcatPrecoSuspeito,
+    // cupom do catálogo: até 100 (o Espelhamento e o Disparo manual seguem com 30); sem exemplo no "Preço antigo"
+    dadosOpcoes: { cupomMax: 100 }, precoAntigoSemExemplo: true,
+    errosTitulo: { campos: R.errosCampos, servidor: R.errosServidor, descartar: R.errosDescartar },
+    semDescartar: reenvio,
+    proxima: !reenvio && proximas().length ? {
+      texto: R.proxima,
+      depois: async () => {
+        await hcatIr();
+        const prox = proximas()[0];
+        if (prox) revisarCatalogo(prox.id); else $('#hc-tab')?.focus();
+      },
+    } : null,
+  });
 }

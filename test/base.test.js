@@ -551,3 +551,112 @@ test('espelho etapa 1: DEFAULT_TEMPLATE só troca o desconto por pedaço opciona
   assert.equal(db.prepare("SELECT body FROM templates WHERE name = 'Padrão'").get().body, dbMod.DEFAULT_TEMPLATE, 'instalação nova recebe o texto novo');
   db.close();
 });
+
+// Fonte "catalogo" (plano fonte-catalogo-etiqueta, etapa 0): fila/registro do que já foi tratado e cursor por regra.
+const TABELAS_CATALOGO = {
+  catalogo_itens: ['id', 'rule_id', 'chave', 'loja', 'status', 'motivos', 'oferta', 'envio_id', 'criado_em', 'decidido_em'],
+  catalogo_cursores: ['rule_id', 'filtro', 'cursor', 'pronto', 'atualizado_em'],
+};
+const INDICES_CATALOGO = {
+  idx_cat_item: [['rule_id', 'chave'], 1],
+  idx_cat_status: [['status', 'rule_id', 'criado_em'], 0],
+  idx_cat_lista: [['rule_id', 'status', null], 0], // a 3ª coluna é a expressão COALESCE(decidido_em, criado_em) (R10)
+};
+
+function conferirTabelasCatalogo(db, quando) {
+  for (const [tabela, cols] of Object.entries(TABELAS_CATALOGO)) {
+    assert.ok(existe(db, 'table', tabela), `tabela ${tabela} (${quando})`);
+    assert.deepEqual(colunas(db, tabela), cols, `colunas de ${tabela} (${quando})`);
+  }
+  for (const [indice, [cols, unico]] of Object.entries(INDICES_CATALOGO)) {
+    assert.equal(db.prepare("SELECT tbl_name FROM sqlite_master WHERE type = 'index' AND name = ?").get(indice)?.tbl_name, 'catalogo_itens', `índice ${indice} (${quando})`);
+    assert.deepEqual(db.prepare(`PRAGMA index_info(${indice})`).all().map((c) => c.name), cols, `colunas de ${indice} (${quando})`);
+    assert.equal(db.prepare('PRAGMA index_list(catalogo_itens)').all().find((i) => i.name === indice)?.unique, unico, `${indice} ${unico ? 'é' : 'não é'} único (${quando})`);
+  }
+  const pk = db.prepare('PRAGMA table_info(catalogo_cursores)').all().filter((c) => c.pk > 0).sort((a, b) => a.pk - b.pk).map((c) => c.name);
+  assert.deepEqual(pk, ['rule_id', 'filtro'], `chave primária do cursor (${quando})`);
+}
+
+test('catálogo etapa 0: banco novo tem catalogo_itens, catalogo_cursores e índices; reabrir não cria nem altera nada', () => {
+  const dir = tmp();
+  const db1 = openDb(dir);
+  conferirTabelasCatalogo(db1, 'primeira abertura');
+  for (const tabela of Object.keys(TABELAS_CATALOGO)) assert.equal(db1.prepare(`SELECT COUNT(*) AS n FROM ${tabela}`).get().n, 0, `${tabela} nasce vazia`);
+  db1.prepare("INSERT INTO catalogo_itens (rule_id, chave, loja, status, oferta, criado_em) VALUES (1, 'MLB1', 'ml', 'enviado', '{}', 1)").run();
+  db1.prepare("INSERT INTO catalogo_cursores (rule_id, filtro, cursor) VALUES (1, 'abcd', 'c1')").run();
+  const esquema = linhas(db1, 'SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name');
+  const dados = { itens: linhas(db1, 'SELECT * FROM catalogo_itens'), cursores: linhas(db1, 'SELECT * FROM catalogo_cursores') };
+  db1.close();
+
+  const db2 = openDb(dir);
+  conferirTabelasCatalogo(db2, 'segunda abertura');
+  assert.deepEqual(linhas(db2, 'SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name'), esquema, 'reabrir não cria nem altera nada');
+  assert.deepEqual(linhas(db2, 'SELECT * FROM catalogo_itens'), dados.itens, 'itens intactos ao reabrir');
+  assert.deepEqual(linhas(db2, 'SELECT * FROM catalogo_cursores'), dados.cursores, 'cursores intactos ao reabrir');
+  db2.close();
+});
+
+test('catálogo etapa 0: banco da versão anterior (sem as tabelas do catálogo) migra com os dados intactos', () => {
+  const dir = tmp();
+  // Banco como o do serviço antes desta etapa: esquema atual sem as tabelas e índices do catálogo, com dados em várias tabelas.
+  const velho = openDb(dir);
+  velho.exec(`
+    DROP TABLE catalogo_itens; DROP TABLE catalogo_cursores;
+    INSERT INTO groups (jid, name, size, updated_at) VALUES ('g1@g.us', 'Grupo 1', 250, 1);
+    INSERT INTO rules (id, name, template_id, group_jids, sources, created_at) VALUES (3, 'Regra', 1, '["g1@g.us"]', '[{"type":"list","config":{}}]', 1);
+    INSERT INTO sent_offers (rule_id, offer_key, sent_at) VALUES (3, 'MLB123', 1730000000000);
+    INSERT INTO envios (id, tipo, payload, group_jids, status, created_at) VALUES (5, 'mensagem', '{"texto":"oi"}', '["g1@g.us"]', 'concluido', 1);
+    INSERT INTO espelhos (id, nome, created_at) VALUES (2, 'Espelho', 1);
+    INSERT INTO espelho_itens (espelho_id, origem_jid, msg_id, ts, url) VALUES (2, 'o1@g.us', 'M1', 1, 'https://amzn.to/abc');
+    INSERT INTO conexoes (plataforma, config, segredos, updated_at) VALUES ('amazon', '{}', '{"tag":"minhatag-20"}', 1);
+  `);
+  for (const tabela of Object.keys(TABELAS_CATALOGO)) assert.ok(!existe(velho, 'table', tabela), `o banco simulado não tem ${tabela}`);
+  for (const indice of Object.keys(INDICES_CATALOGO)) assert.ok(!existe(velho, 'index', indice), `o banco simulado não tem ${indice}`);
+  const objetosAntigos = linhas(velho, 'SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name');
+  const tabelasAntigas = objetosAntigos.filter((o) => o.type === 'table').map((o) => o.name);
+  const antes = {};
+  for (const t of tabelasAntigas) antes[t] = linhas(velho, `SELECT * FROM ${t} ORDER BY rowid`);
+  velho.close();
+
+  for (let abertura = 1; abertura <= 2; abertura++) {
+    const db = openDb(dir);
+    conferirTabelasCatalogo(db, `abertura ${abertura}`);
+    for (const t of tabelasAntigas) {
+      assert.deepEqual(linhas(db, `SELECT * FROM ${t} ORDER BY rowid`), antes[t], `${t} intacta (abertura ${abertura})`);
+    }
+    const objetos = linhas(db, 'SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name');
+    assert.deepEqual(objetos.filter((o) => !Object.keys(TABELAS_CATALOGO).includes(o.tbl_name)), objetosAntigos, `nenhuma tabela ou índice antigo muda (abertura ${abertura})`);
+    assert.deepEqual(objetos.filter((o) => Object.keys(TABELAS_CATALOGO).includes(o.tbl_name)).map((o) => o.name).sort(),
+      ['catalogo_cursores', 'catalogo_itens', 'idx_cat_item', 'idx_cat_lista', 'idx_cat_status', 'sqlite_autoindex_catalogo_cursores_1'],
+      `só as tabelas e índices do catálogo a mais, sem duplicar (abertura ${abertura})`);
+    for (const tabela of Object.keys(TABELAS_CATALOGO)) assert.equal(db.prepare(`SELECT COUNT(*) AS n FROM ${tabela}`).get().n, 0, `${tabela} nasce vazia (abertura ${abertura})`);
+    db.close();
+  }
+});
+
+test('catálogo etapa 0: defaults, status permitido, obrigatórios e unicidade por regra e chave', () => {
+  const db = openDb(tmp());
+  const item = db.prepare('INSERT INTO catalogo_itens (rule_id, chave, loja, status, oferta, criado_em) VALUES (?, ?, ?, ?, ?, ?)');
+  const { lastInsertRowid: id } = item.run(1, 'MLB1', 'ml', 'revisao', '{"title":"x"}', 10);
+  assert.deepEqual({ ...db.prepare('SELECT motivos, envio_id, decidido_em FROM catalogo_itens WHERE id = ?').get(id) },
+    { motivos: '[]', envio_id: null, decidido_em: null });
+  for (const status of ['enviado', 'descartado']) item.run(1, `ASIN:${status}`, 'amazon', status, '{}', 10);
+  assert.throws(() => item.run(1, 'MLB9', 'ml', 'na_fila', '{}', 10), /CHECK/, 'status fora de revisao|enviado|descartado é recusado');
+  assert.throws(() => item.run(1, 'MLB1', 'ml', 'enviado', '{}', 11), /UNIQUE/, 'a mesma chave não entra duas vezes na mesma regra');
+  item.run(2, 'MLB1', 'ml', 'enviado', '{}', 11); // outra regra pode tratar a mesma oferta
+  const vals = { rule_id: 1, chave: 'SHOPEE:1.2', loja: 'shopee', status: 'revisao', oferta: '{}', criado_em: 1 };
+  for (const col of Object.keys(vals)) {
+    const v = { ...vals, [col]: null };
+    assert.throws(() => item.run(v.rule_id, v.chave, v.loja, v.status, v.oferta, v.criado_em), /NOT NULL/, `${col} é obrigatório`);
+  }
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM catalogo_itens').get().n, 4);
+
+  const cursor = db.prepare('INSERT INTO catalogo_cursores (rule_id, filtro, cursor) VALUES (?, ?, ?)');
+  cursor.run(1, '0123456789abcdef', null);
+  assert.deepEqual({ ...db.prepare('SELECT cursor, pronto, atualizado_em FROM catalogo_cursores').get() }, { cursor: null, pronto: 0, atualizado_em: null });
+  assert.throws(() => cursor.run(1, '0123456789abcdef', 'c2'), /UNIQUE|PRIMARY KEY/, 'um cursor por regra e filtro');
+  cursor.run(1, 'fedcba9876543210', 'c2'); // outro filtro da mesma regra
+  assert.throws(() => cursor.run(null, 'ffff', null), /NOT NULL/, 'rule_id é obrigatório');
+  assert.throws(() => cursor.run(1, null, null), /NOT NULL/, 'filtro é obrigatório');
+  db.close();
+});

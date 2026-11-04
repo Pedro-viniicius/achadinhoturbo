@@ -1,0 +1,508 @@
+// Fonte "catalogo" (plano fonte-catalogo-etiqueta, D1, D5 e D6; ADR-004): o que já foi tratado em cada regra e a
+// fila de revisão do Dono.
+//
+// Tabela `catalogo_itens` (src/db.js): uma linha por (regra, chave). Chave Turbo: ML `MLB<n>`, Amazon `ASIN:<ASIN>`,
+// Shopee `SHOPEE:<shop>.<item>`; a loja (`ml` | `amazon` | `shopee`) sai da chave, nunca do que veio de fora.
+// status: 'revisao' (espera o Dono), 'enviado' (saiu sozinho pela regra ou pela revisão) e 'descartado'.
+//
+// Contrato com o agendador (etapa 4) e com src/catalogo.js (etapa 1). O candidato `c` que chega a tratada() e
+// registrar() é o de `paraCandidato`: { key, title, price, oldPrice, discountPct, sold, freeShipping, coupon, image,
+// link? (só Shopee: o link do catálogo), categoria, tag_id, source_index }. `url`, `asin` e `loja` do candidato são
+// ignorados: a URL e o ASIN guardados são remontados da chave (ML `https://produto.mercadolivre.com.br/MLB-<n>`,
+// Amazon `https://www.amazon.com.br/dp/<ASIN>`), e a foto só fica se for do CDN da própria loja.
+//
+// Envio aprovado (o "Enviar" da revisão, só do Dono): grava a linha de `envios` direto (tipo 'oferta', quando
+// 'agora', pendente vencido) com o payload que `preparar('oferta')` de src/envios.js entende, com
+// origem:{ tipo:'catalogo', rule_id, nome }. Na mesma transação (BEGIN IMMEDIATE) o item vira 'enviado' com o
+// envio_id e a chave entra em `sent_offers` (reserva enquanto o envio está na fila); quem chegar depois recebe 409
+// "Esta oferta já foi tratada.".
+// Envio aprovado que termina (concluido, erro ou cancelado) sem NENHUM grupo ok (R3): a oferta não fica "queimada".
+// liberarFalhos() (o agendador chama depois de cada passada da fila e no começo de cada regra) tira a reserva de
+// `sent_offers`; a lista mostra `pode_reenviar: true` e o "Enviar" aceita o item de novo (mesma trava, mesmo 409,
+// mesmas regras de preço).
+// Nenhum link comum (CA4): ML só com links em modo extensão/simulação e etiqueta; Amazon só com a tag de Conexões
+// (o link é montado na hora do envio); Shopee só com o link do catálogo conferido por LINK_SHOPEE.
+// Preço suspeito (CA7, decisão P4 do dono): sem "Enviar mesmo com 100%". Depois dos ajustes, desconto de 100% ou
+// preço antigo ≥ 10× o preço recusa com frase fixa.
+//
+// Privacidade: nada aqui é dado pessoal (ofertas e nomes de regra e de grupo). Erro inesperado do banco não vai à
+// resposta nem ao console com a mensagem (ela pode trazer valores da query).
+
+import { addLog, parseRule } from './db.js';
+import { imagemPermitida } from './lojas.js';
+import { LINK_SHOPEE } from './shopee.js';
+import { discountPct } from './template.js';
+import { emCentavos } from './catalogo.js';
+import { validarAjustesOferta } from './espelho.js';
+
+const DIA = 86400000;
+export const TETO_REVISAO = 50;             // pendentes por regra (P5): acima, as novas esperam sem entrar
+export const MOTIVOS = Object.freeze(['shopee', 'desconto_100', 'preco_antigo', 'falha_link']);
+const STATUS = ['revisao', 'enviado', 'descartado'];
+const ORDEM_NOVIDADES = 'atualizacao';      // a ordem "Novidades" do contrato: oferta tratada nunca sai de novo
+const LIMITE_PADRAO = 100;
+const LIMITE_MAX = 200;
+const MAX_NOME = 80;
+const MAX_TITULO = 200;
+const MAX_CUPOM_GUARDADO = 100;              // o que vem do catálogo e o que o "Revisar oferta" deixa digitar (R5)
+const MAX_CATEGORIA = 200;
+const MAX_URL = 2048;
+const MAX_GRUPOS = 500;
+const PRECO_MAX = 10_000_000;
+const SONDA_ASIN = 'B000000000';             // montarLink com um ASIN de sonda diz se há tag salva, sem rede
+const ENVIO_ATIVO = ['pendente', 'enviando', 'pausado'];
+const ENVIO_FIM = ['concluido', 'erro', 'cancelado'];
+// o envio (alias v) terminou sem nenhum grupo ok: a oferta aprovada pode sair de novo (R3)
+const SQL_ENVIO_FALHOU = `v.status IN ('concluido','erro','cancelado') AND NOT EXISTS (SELECT 1 FROM envio_resultados r WHERE r.envio_id = v.id AND r.ok = 1)`;
+const MAX_MOTIVO_ENVIO = 200;
+
+const RE_ML = /^MLB(\d{1,20})$/;
+const RE_AMAZON = /^ASIN:([A-Z0-9]{10})$/;
+const RE_SHOPEE = /^SHOPEE:(\d{1,20})\.(\d{1,20})$/;
+/** loja da tabela → id de src/lojas.js (o que `preparar` e `imagemPermitida` entendem). */
+const LOJA_ID = Object.freeze({ ml: 'mercadolivre', amazon: 'amazon', shopee: 'shopee' });
+
+const JA_TRATADA = 'Esta oferta já foi tratada.';
+const PRECO_SUSPEITO = 'Corrija o preço ou apague o preço antigo para enviar.';
+const LINK_SHOPEE_FORA = 'O link da Shopee desta oferta está fora do esperado. Descarte a oferta.';
+const ML_DIRETO = 'Os links do Mercado Livre estão no modo direto, sem comissão: ofertas do catálogo não saem assim. Volte ao modo da extensão em Ajustes.';
+const ML_SEM_EXTENSAO = 'A extensão do Chrome não está conectada: abra o Chrome com a extensão para gerar o link de afiliado.';
+const SEM_ETIQUETA = 'A etiqueta desta oferta foi apagada. Escolha uma etiqueta na regra.';
+const SEM_AMAZON = 'A integração com a Amazon não está disponível neste servidor.';
+const SEM_TAG = 'Falta a tag de associado da Amazon. Cadastre em Conexões → Amazon antes de enviar.';
+
+/** Erro com status HTTP (montarRotas responde com ele). A mensagem é sempre fixa, nunca com dado de fora. */
+export class ErroCatalogoItem extends Error {
+  constructor(status, mensagem) {
+    super(mensagem);
+    this.name = 'ErroCatalogoItem';
+    this.status = status;
+  }
+}
+
+const lerJson = (txt, padrao) => { try { return JSON.parse(txt) ?? padrao; } catch { return padrao; } };
+const listaDeTexto = (txt) => { const l = lerJson(txt, []); return Array.isArray(l) ? l.filter((x) => typeof x === 'string') : []; };
+
+/** Chave Turbo → { loja, url, asin?, shopId?, itemId? }, ou null se a chave não fecha. */
+export function lerChave(chave) {
+  const k = typeof chave === 'string' ? chave : '';
+  let m = RE_ML.exec(k);
+  if (m) return { loja: 'ml', url: `https://produto.mercadolivre.com.br/MLB-${m[1]}` };
+  m = RE_AMAZON.exec(k);
+  if (m) return { loja: 'amazon', url: `https://www.amazon.com.br/dp/${m[1]}`, asin: m[1] };
+  m = RE_SHOPEE.exec(k);
+  if (m) return { loja: 'shopee', url: `https://shopee.com.br/product/${m[1]}/${m[2]}`, shopId: m[1], itemId: m[2] };
+  return null;
+}
+
+/**
+ * A oferta tem preço suspeito (CA7)? Desconto de 100% (ou mais) ou preço antigo ≥ 10× o preço, comparados em
+ * centavos inteiros (Q6). A mesma conta vale para os motivos da revisão (src/catalogo.js) e para o "Enviar" (aqui),
+ * sempre sobre a oferta já com os ajustes.
+ */
+export function precoSuspeito(o) {
+  const pct = Number(o?.discountPct);
+  if (Number.isFinite(pct) && pct >= 100) return true;
+  const preco = emCentavos(o?.price); const antigo = emCentavos(o?.oldPrice);
+  return preco != null && antigo != null && preco > 0 && antigo >= 10 * preco;
+}
+
+const numeroPositivo = (v) => (typeof v === 'number' && Number.isFinite(v) && v > 0 && v <= PRECO_MAX ? Math.round(v * 100) / 100 : null);
+const textoGuardado = (v, max) => (typeof v === 'string' && v.trim() ? v.replace(/\s+/g, ' ').trim().slice(0, max) : null);
+const inteiroOuNulo = (v, min = 0) => (Number.isInteger(v) && v >= min ? v : null);
+
+/**
+ * Oferta para o banco (JSON de `catalogo_itens.oferta`): só os campos do template e da tela, com tamanho e tipo.
+ * url e asin vêm da chave; foto só do CDN da loja; link só na Shopee (texto até 2048; conferido no envio).
+ */
+function ofertaParaGuardar(c, info) {
+  const pct = c?.discountPct;
+  return {
+    title: textoGuardado(c?.title, MAX_TITULO),
+    price: numeroPositivo(c?.price),
+    oldPrice: numeroPositivo(c?.oldPrice),
+    discountPct: typeof pct === 'number' && Number.isFinite(pct) && pct > 0 ? Math.min(Math.round(pct), 100) : null,
+    sold: inteiroOuNulo(c?.sold),
+    freeShipping: c?.freeShipping === true,
+    coupon: textoGuardado(c?.coupon, MAX_CUPOM_GUARDADO),
+    image: imagemPermitida(LOJA_ID[info.loja], c?.image) ? c.image : null,
+    url: info.url,
+    ...(info.asin ? { asin: info.asin } : {}),
+    ...(info.loja === 'shopee' ? { link: typeof c?.link === 'string' && c.link.length <= MAX_URL ? c.link.trim() : null } : {}),
+    categoria: textoGuardado(c?.categoria, MAX_CATEGORIA),
+    tag_id: inteiroOuNulo(c?.tag_id, 1),
+    source_index: inteiroOuNulo(c?.source_index),
+  };
+}
+
+/**
+ * Oferta guardada com os ajustes por cima (como o "Completar" do espelho): preço antigo só se maior que o atual. O
+ * desconto que o catálogo informou só vale entre 1% e 99% e com os preços intactos (a mesma regra do `dadosOferta`
+ * do painel); fora disso, ele é refeito dos preços. Assim um "100%" informado nunca sai na mensagem.
+ */
+function aplicarAjustes(base, a) {
+  const o = { ...base };
+  for (const k of ['title', 'price', 'oldPrice', 'coupon', 'freeShipping']) if (Object.hasOwn(a, k)) o[k] = a[k];
+  if (o.oldPrice != null && (o.price == null || o.oldPrice <= o.price)) o.oldPrice = null;
+  const intacto = o.price === base.price && o.oldPrice === base.oldPrice;
+  const informado = Number(base.discountPct);
+  o.discountPct = intacto && Number.isFinite(informado) && informado > 0 && informado < 100 ? informado : discountPct(o.price, o.oldPrice) || null;
+  if (a.sem_foto || a.upload) o.image = null;
+  return o;
+}
+
+/**
+ * Fila de revisão e registro do que o catálogo já tratou. `wa`: o WhatsApp (isReady); `links`: o serviço de links
+ * (modo e status da extensão); `amazon`: o cliente da Amazon (montarLink, para saber se há tag); `envios`: a fila de
+ * src/envios.js (lerFoto e, sem `acordar`, processarPendentes); `acordar`: pede um tick do agendador (é por ele que
+ * o envio aprovado sai); `agora`: relógio (testes).
+ * → { tratada, registrar, revisaoCheia, listar, enviar, descartar, contar }
+ */
+export function createCatalogoItens({ db, wa = null, links = null, amazon = null, envios = null, acordar = null, agora = Date.now } = {}) {
+  const regraPorId = (id) => parseRule(db.prepare('SELECT * FROM rules WHERE id = ?').get(id));
+  const grupoExiste = (jid) => !!db.prepare('SELECT 1 FROM groups WHERE jid = ?').get(jid);
+  const nomeDaRegra = (nome) => String(nome ?? '').replace(/\s+/g, ' ').trim().slice(0, MAX_NOME) || 'sem nome';
+  const log = (regra, o) => addLog(db, { rule: { id: null, name: `Catálogo: ${nomeDaRegra(regra?.name)}` }, ...o });
+
+  function pedirEnvio() {
+    if (acordar) { acordar(); return; }
+    envios?.processarPendentes?.().catch((e) => console.error('[catalogo] fila de envios:', e?.name || 'erro'));
+  }
+
+  function transacao(fn) {
+    db.exec('BEGIN IMMEDIATE');
+    try { const r = fn(); db.exec('COMMIT'); return r; } catch (e) { db.exec('ROLLBACK'); throw e; }
+  }
+
+  /** Há tag de associado da Amazon salva? (montarLink com o ASIN de sonda, sem rede) */
+  function temTagAmazon() {
+    if (!amazon?.montarLink) return false;
+    try { return !!amazon.montarLink(SONDA_ASIN); } catch { return false; }
+  }
+
+  // ------------------------------------------------------------------------------------------- regra (agendador)
+
+  /**
+   * A oferta já foi tratada nesta regra (D6)? `modo` é a ordem da fonte (`config.ordem`).
+   * - "Novidades" (`atualizacao`): qualquer linha em `catalogo_itens` ou em `sent_offers`, sem janela (nem com
+   *   "dias sem repetir" = 0): a oferta tratada nunca sai de novo.
+   * - Outras ordens: linha 'revisao' ou 'descartado' bloqueia; o envio vale pela janela da regra (`dedupe_days`,
+   *   0 = repete), como `wasSent` do agendador.
+   * Candidato sem chave válida conta como tratado (não há o que fazer com ele).
+   */
+  function tratada(rule, c, modo) {
+    const chave = c?.key;
+    if (!Number.isInteger(rule?.id) || !lerChave(chave)) return true;
+    const linha = db.prepare('SELECT status FROM catalogo_itens WHERE rule_id = ? AND chave = ?').get(rule.id, chave);
+    if (modo === ORDEM_NOVIDADES) {
+      return !!linha || !!db.prepare('SELECT 1 FROM sent_offers WHERE rule_id = ? AND offer_key = ? LIMIT 1').get(rule.id, chave);
+    }
+    if (linha && linha.status !== 'enviado') return true;
+    const dias = Number(rule.dedupe_days);
+    if (!(dias > 0)) return false;
+    return !!db.prepare('SELECT 1 FROM sent_offers WHERE rule_id = ? AND offer_key = ? AND sent_at > ? LIMIT 1').get(rule.id, chave, agora() - dias * DIA);
+  }
+
+  /** A regra já tem TETO_REVISAO ofertas esperando revisão? */
+  function revisaoCheia(ruleId) {
+    return pendentesDe(ruleId) >= TETO_REVISAO;
+  }
+  const pendentesDe = (ruleId) => Number(db.prepare("SELECT COUNT(*) AS n FROM catalogo_itens WHERE rule_id = ? AND status = 'revisao'").get(ruleId)?.n) || 0;
+
+  /**
+   * Grava (upsert por regra e chave) o que a regra fez com a oferta: 'revisao' (com ao menos um motivo de MOTIVOS),
+   * 'enviado' ou 'descartado'. Não mexe em `sent_offers` (o envio da regra já grava lá).
+   * Nunca sobrescreve um item que ainda espera revisão (quem decide é o Dono) e não passa do teto de revisão.
+   * → true se gravou; false se a entrada não fecha (regra, chave, título, preço, status, motivos), se a revisão da
+   * regra está cheia ou se o item está em revisão.
+   */
+  function registrar(rule, c, status, motivos = []) {
+    const info = lerChave(c?.key);
+    if (!Number.isInteger(rule?.id) || rule.id <= 0 || !info || !STATUS.includes(status)) return false;
+    const lista = [...new Set(Array.isArray(motivos) ? motivos.filter((m) => MOTIVOS.includes(m)) : [])];
+    if (status === 'revisao' && !lista.length) return false;
+    const oferta = ofertaParaGuardar(c, info);
+    if (!oferta.title || oferta.price == null) return false;
+    if (status === 'revisao' && revisaoCheia(rule.id)) return false;
+    const now = agora();
+    const r = db.prepare(`INSERT INTO catalogo_itens (rule_id, chave, loja, status, motivos, oferta, envio_id, criado_em, decidido_em)
+      VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)
+      ON CONFLICT (rule_id, chave) DO UPDATE SET loja = excluded.loja, status = excluded.status, motivos = excluded.motivos,
+        oferta = excluded.oferta, envio_id = NULL, criado_em = excluded.criado_em, decidido_em = excluded.decidido_em
+      WHERE catalogo_itens.status != 'revisao'`)
+      .run(rule.id, c.key, info.loja, status, JSON.stringify(lista), JSON.stringify(oferta), now, status === 'revisao' ? null : now);
+    return r.changes === 1;
+  }
+
+  // ------------------------------------------------------------------------------------------- listagem
+
+  function idValido(id, msg = 'Oferta não encontrada.') {
+    const n = Number(id);
+    if (!Number.isInteger(n) || n <= 0) throw new ErroCatalogoItem(404, msg);
+    return n;
+  }
+
+  /** O envio aprovado `envioId` terminou sem nenhum grupo ok (R3)? Envio já apagado pela retenção: não se sabe → false. */
+  function envioFalhou(envioId) {
+    if (!Number.isInteger(envioId)) return false;
+    return !!db.prepare(`SELECT 1 FROM envios v WHERE v.id = ? AND ${SQL_ENVIO_FALHOU}`).get(envioId);
+  }
+
+  /**
+   * Tira de `sent_offers` a reserva dos envios aprovados que terminaram sem nenhum grupo ok (R3): a oferta volta a
+   * valer no "dias sem repetir" das regras. A reserva é a linha que o "Enviar" gravou (mesma regra, chave e
+   * instante). Idempotente. → quantas reservas saíram.
+   */
+  function liberarFalhos() {
+    const linhas = db.prepare(`SELECT i.rule_id, i.chave, i.decidido_em FROM catalogo_itens i JOIN envios v ON v.id = i.envio_id
+      WHERE i.status = 'enviado' AND i.envio_id IS NOT NULL AND ${SQL_ENVIO_FALHOU}`).all();
+    let n = 0;
+    const apagar = db.prepare('DELETE FROM sent_offers WHERE rule_id = ? AND offer_key = ? AND sent_at = ?');
+    for (const l of linhas) if (l.decidido_em != null) n += Number(apagar.run(l.rule_id, l.chave, l.decidido_em).changes);
+    return n;
+  }
+
+  /** Pendentes por regra (só as que têm algum): [{ rule_id, regra, para_revisar, cheia }] e o total. */
+  function contar() {
+    const regras = db.prepare(`SELECT i.rule_id, r.name AS regra, COUNT(*) AS n FROM catalogo_itens i LEFT JOIN rules r ON r.id = i.rule_id
+      WHERE i.status = 'revisao' GROUP BY i.rule_id ORDER BY i.rule_id`).all()
+      .map((l) => ({ rule_id: l.rule_id, regra: l.regra ?? null, para_revisar: Number(l.n) || 0, cheia: Number(l.n) >= TETO_REVISAO }));
+    return { para_revisar: regras.reduce((s, r) => s + r.para_revisar, 0), teto_revisao: TETO_REVISAO, regras };
+  }
+
+  /** Motivo de um envio encerrado para os grupos que ele não tentou (o da fila de envios, já sem dado de fora). */
+  function motivoDoEnvio(status, resultado) {
+    const m = lerJson(resultado, {})?.motivo;
+    if (typeof m === 'string' && m.trim()) return m.trim().slice(0, MAX_MOTIVO_ENVIO);
+    return status === 'cancelado' ? 'o envio foi cancelado' : 'não foi enviado';
+  }
+
+  /** Link para conferir na revisão (spec, item 10): ML página do produto, Amazon /dp/<ASIN> sem tag, Shopee o do catálogo. */
+  const linkParaConferir = (info, o) => (info.loja === 'shopee' ? (typeof o.link === 'string' ? o.link : null) : info.url);
+
+  /**
+   * GET /api/catalogo/itens?regra=&status=revisao|enviado|descartado|todos&limite=&antes= → { itens, proximo,
+   * contadores_24h, regras, para_revisar, teto_revisao }. Itens do mais recente para o mais antigo (decisão ou
+   * criação, depois o id). Paginação (R12): `antes=<ts>:<id>` traz só os que vêm depois desse par na ordem;
+   * `proximo` é o par do último item devolvido quando há mais, senão null.
+   * `grupos`: os do envio, com ok true/false (null enquanto ele está na fila); para o item em revisão, os grupos da
+   * regra (ok null), que é para onde o "Enviar" manda. `pode_reenviar`: item 'enviado' pela revisão cujo envio
+   * terminou (erro, cancelado ou concluído) sem nenhum grupo ok; o "Enviar" aceita de novo (R3). `contadores_24h`:
+   * enviadas e descartadas nas últimas 24 h e todas as que esperam revisão (a fila não vence), com o filtro de regra
+   * se houver.
+   */
+  function listar(q = {}) {
+    const filtros = []; const args = [];
+    let ruleId = null;
+    if (q.regra != null && q.regra !== '') { ruleId = idValido(q.regra, 'Regra não encontrada.'); filtros.push('i.rule_id = ?'); args.push(ruleId); }
+    const status = q.status == null || q.status === '' ? 'todos' : String(q.status);
+    if (STATUS.includes(status)) { filtros.push('i.status = ?'); args.push(status); }
+    else if (status !== 'todos') throw new ErroCatalogoItem(400, 'Filtro inválido: use revisao, enviado, descartado ou todos.');
+    const lim = Math.min(Math.max(Number.parseInt(q.limite, 10) || LIMITE_PADRAO, 1), LIMITE_MAX);
+    if (q.antes != null && q.antes !== '') {
+      const m = /^(\d{1,16}):(\d{1,16})$/.exec(String(q.antes));
+      if (!m) throw new ErroCatalogoItem(400, 'Paginação inválida: use antes=<instante>:<id>.');
+      const ts = Number(m[1]); const idAntes = Number(m[2]);
+      filtros.push('(COALESCE(i.decidido_em, i.criado_em) < ? OR (COALESCE(i.decidido_em, i.criado_em) = ? AND i.id < ?))');
+      args.push(ts, ts, idAntes);
+    }
+    // um a mais que o limite: diz se há próxima página
+    const lidas = db.prepare(`SELECT i.*, r.name AS regra, r.group_jids AS regra_grupos, v.group_jids AS envio_grupos, v.status AS envio_status,
+        v.resultado AS envio_resultado
+      FROM catalogo_itens i LEFT JOIN rules r ON r.id = i.rule_id LEFT JOIN envios v ON v.id = i.envio_id
+      ${filtros.length ? `WHERE ${filtros.join(' AND ')}` : ''} ORDER BY COALESCE(i.decidido_em, i.criado_em) DESC, i.id DESC LIMIT ?`).all(...args, lim + 1);
+    const linhas = lidas.slice(0, lim);
+    const ultima = lidas.length > lim ? linhas.at(-1) : null;
+    const proximo = ultima ? `${ultima.decidido_em ?? ultima.criado_em}:${ultima.id}` : null;
+    const nomes = new Map(db.prepare('SELECT jid, name FROM groups').all().map((g) => [g.jid, g.name]));
+    const resultados = db.prepare('SELECT jid, group_name, ok, erro FROM envio_resultados WHERE envio_id = ? ORDER BY id');
+    const itens = linhas.map((l) => {
+      const info = lerChave(l.chave) ?? { loja: l.loja, url: null };
+      const o = lerJson(l.oferta, {});
+      let grupos = []; let podeReenviar = false;
+      if (l.envio_id != null && l.envio_grupos != null) {
+        const todos = resultados.all(l.envio_id);
+        const ultimo = new Map(todos.map((r) => [r.jid, r]));
+        const encerrado = !ENVIO_ATIVO.includes(l.envio_status);
+        podeReenviar = l.status === 'enviado' && ENVIO_FIM.includes(l.envio_status) && !todos.some((r) => r.ok);
+        const motivo = encerrado ? motivoDoEnvio(l.envio_status, l.envio_resultado) : null;
+        grupos = listaDeTexto(l.envio_grupos).map((jid) => {
+          const r = ultimo.get(jid); const nome = r?.group_name || nomes.get(jid) || '(grupo removido)';
+          if (!r) return encerrado ? { nome, ok: false, erro: motivo } : { nome, ok: null, erro: null };
+          return { nome, ok: !!r.ok, erro: r.ok ? null : r.erro };
+        });
+      } else if (l.status === 'revisao') {
+        grupos = listaDeTexto(l.regra_grupos).filter((j) => nomes.has(j)).map((jid) => ({ nome: nomes.get(jid), ok: null, erro: null }));
+      }
+      return {
+        id: l.id, rule_id: l.rule_id, regra: l.regra ?? null, loja: l.loja, status: l.status,
+        motivos: listaDeTexto(l.motivos).filter((m) => MOTIVOS.includes(m)),
+        oferta: {
+          title: o.title ?? null, price: o.price ?? null, oldPrice: o.oldPrice ?? null, discountPct: o.discountPct ?? null,
+          sold: o.sold ?? null, freeShipping: o.freeShipping === true, coupon: o.coupon ?? null,
+          image: imagemPermitida(LOJA_ID[info.loja], o.image) ? o.image : null, categoria: o.categoria ?? null,
+          link: linkParaConferir(info, o),
+        },
+        grupos, envio_id: l.envio_id ?? null, envio_status: l.envio_status ?? null, pode_reenviar: podeReenviar,
+        criado_em: l.criado_em, decidido_em: l.decidido_em ?? null,
+      };
+    });
+    const desde = agora() - DIA;
+    const c = db.prepare(`SELECT SUM(status = 'enviado' AND decidido_em >= ?) AS enviadas, SUM(status = 'descartado' AND decidido_em >= ?) AS descartadas,
+        SUM(status = 'revisao') AS para_revisar FROM catalogo_itens ${ruleId != null ? 'WHERE rule_id = ?' : ''}`)
+      .get(desde, desde, ...(ruleId != null ? [ruleId] : []));
+    const contados = contar();
+    return {
+      itens, proximo,
+      contadores_24h: { enviadas: Number(c?.enviadas) || 0, descartadas: Number(c?.descartadas) || 0, para_revisar: Number(c?.para_revisar) || 0 },
+      regras: ruleId != null ? contados.regras.filter((r) => r.rule_id === ruleId) : contados.regras,
+      para_revisar: contados.para_revisar, teto_revisao: TETO_REVISAO,
+    };
+  }
+
+  // ------------------------------------------------------------------------------------------- revisão (Dono)
+
+  /**
+   * Ajustes do "Revisar" (os mesmos do "Completar": validarAjustesOferta de src/espelho.js, R9), com o erro daqui e
+   * cupom até MAX_CUPOM_GUARDADO (R5: o catálogo traz cupons maiores que os do espelho). Só estas chaves; image e
+   * link nunca vêm do navegador.
+   */
+  const validarAjustes = (a) => validarAjustesOferta(a, {
+    maxCupom: MAX_CUPOM_GUARDADO,
+    lerFoto: envios?.lerFoto ? (up) => envios.lerFoto(up) : null,
+    erro: (mensagem) => new ErroCatalogoItem(400, mensagem),
+  });
+
+  /**
+   * Campos de loja do payload de `preparar('oferta')`, com a recusa de link comum (CA4). Sem rede: o link do ML e o
+   * da Amazon são gerados na hora do envio; o da Shopee é o do catálogo, conferido aqui e de novo no `preparar`.
+   */
+  function camposDaLoja(info, o, regra) {
+    if (info.loja === 'shopee') {
+      if (typeof o.link !== 'string' || !LINK_SHOPEE.test(o.link)) throw new ErroCatalogoItem(400, LINK_SHOPEE_FORA);
+      return { tag_id: null, etiqueta: null, shop_id: info.shopId, item_id: info.itemId, link_afiliado: o.link };
+    }
+    if (info.loja === 'amazon') {
+      if (!amazon?.montarLink) throw new ErroCatalogoItem(400, SEM_AMAZON);
+      if (!temTagAmazon()) throw new ErroCatalogoItem(400, SEM_TAG);
+      return { tag_id: null, etiqueta: null, asin: info.asin };
+    }
+    const modo = links?.modo?.();
+    if (modo !== 'extension' && modo !== 'fake') throw new ErroCatalogoItem(400, ML_DIRETO);
+    const tagId = Number.isInteger(o.tag_id) ? o.tag_id : regra.tag_id;
+    const etq = Number.isInteger(tagId) ? db.prepare('SELECT id, name FROM tags WHERE id = ?').get(tagId) : null;
+    if (!etq) throw new ErroCatalogoItem(400, SEM_ETIQUETA);
+    if (modo === 'extension' && links?.status?.()?.online !== true) throw new ErroCatalogoItem(400, ML_SEM_EXTENSAO);
+    return { tag_id: etq.id, etiqueta: etq.name };
+  }
+
+  /**
+   * POST /api/catalogo/itens/:id/enviar { ajustes } → { envio_id }. Item em 'revisao', ou 'enviado' cujo envio
+   * aprovado terminou sem nenhum grupo ok (pode_reenviar, R3); senão 409. Preço ainda suspeito depois dos ajustes →
+   * 400 com frase fixa. Grupos, template e "enviar foto" são os da regra.
+   */
+  async function enviar(itemId, corpo, { userId = null } = {}) {
+    const id = idValido(itemId);
+    const b = corpo && typeof corpo === 'object' && !Array.isArray(corpo) ? corpo : {};
+    const item = db.prepare('SELECT * FROM catalogo_itens WHERE id = ?').get(id);
+    if (!item) throw new ErroCatalogoItem(404, 'Oferta não encontrada.');
+    const reenvio = item.status === 'enviado' && envioFalhou(item.envio_id);
+    if (item.status !== 'revisao' && !reenvio) throw new ErroCatalogoItem(409, JA_TRATADA);
+    const regra = regraPorId(item.rule_id);
+    if (!regra) throw new ErroCatalogoItem(404, 'A regra desta oferta foi apagada.');
+    const info = lerChave(item.chave);
+    if (!info) throw new ErroCatalogoItem(400, 'Esta oferta está sem o código do produto.');
+    const ajustes = await validarAjustes(b.ajustes);
+    const guardada = lerJson(item.oferta, {});
+    const oferta = aplicarAjustes(guardada, ajustes);
+    if (!oferta.title) throw new ErroCatalogoItem(400, 'Preencha o título do produto.');
+    if (oferta.price == null) throw new ErroCatalogoItem(400, 'Preencha o preço atual.');
+    if (precoSuspeito(oferta)) throw new ErroCatalogoItem(400, PRECO_SUSPEITO);
+    const loja = camposDaLoja(info, guardada, regra);
+
+    const tpl = Number.isInteger(regra.template_id) ? db.prepare('SELECT id, created_at FROM templates WHERE id = ?').get(regra.template_id) : null;
+    if (!tpl) throw new ErroCatalogoItem(400, 'O template desta regra foi apagado. Escolha outro na regra.');
+    const destinos = [...new Set(Array.isArray(regra.group_jids) ? regra.group_jids : [])].slice(0, MAX_GRUPOS)
+      .filter((j) => typeof j === 'string' && grupoExiste(j));
+    if (!destinos.length) throw new ErroCatalogoItem(400, 'A regra desta oferta não tem grupos. Escolha ao menos um grupo na regra.');
+    if (wa && !wa.isReady()) throw new ErroCatalogoItem(400, 'O WhatsApp está desconectado. Conecte o número antes de enviar.');
+
+    const lojaId = LOJA_ID[info.loja];
+    const imagem = imagemPermitida(lojaId, oferta.image) ? oferta.image : null;
+    const enviarFoto = ajustes.sem_foto ? false : ajustes.upload ? true : regra.send_image;
+    const payload = {
+      url: info.url, loja: lojaId, ...loja,
+      template_id: tpl.id, template_criado_em: tpl.created_at ?? null, fonte_dados: 'manual', enviar_foto: enviarFoto,
+      ...(ajustes.upload ? { upload: ajustes.upload } : {}),
+      origem: { tipo: 'catalogo', rule_id: regra.id, nome: regra.name },
+      offer: {
+        key: item.chave, title: oferta.title, price: oferta.price, oldPrice: oferta.oldPrice ?? null, discountPct: oferta.discountPct ?? null,
+        sold: oferta.sold ?? null, freeShipping: oferta.freeShipping === true, coupon: oferta.coupon ?? null, image: imagem,
+      },
+    };
+    const { key: _chave, ...semChave } = payload.offer;
+    const guardar = JSON.stringify({ ...guardada, ...semChave }); // a oferta como saiu (com os ajustes), para a lista
+    const now = agora();
+    const envioId = transacao(() => {
+      // a trava: só um "Enviar" muda o item de 'revisao' (ou do envio que falhou); o segundo vê 0 linhas e recebe 409
+      const r = reenvio
+        ? db.prepare(`UPDATE catalogo_itens SET oferta = ?, decidido_em = ? WHERE id = ? AND status = 'enviado' AND envio_id = ?
+            AND EXISTS (SELECT 1 FROM envios v WHERE v.id = ? AND ${SQL_ENVIO_FALHOU})`).run(guardar, now, id, item.envio_id, item.envio_id)
+        : db.prepare("UPDATE catalogo_itens SET status = 'enviado', oferta = ?, decidido_em = ? WHERE id = ? AND status = 'revisao'").run(guardar, now, id);
+      if (r.changes !== 1) throw new ErroCatalogoItem(409, JA_TRATADA);
+      // a reserva do envio que falhou (se o agendador ainda não a tirou)
+      if (reenvio && item.decidido_em != null) db.prepare('DELETE FROM sent_offers WHERE rule_id = ? AND offer_key = ? AND sent_at = ?').run(regra.id, item.chave, item.decidido_em);
+      const novo = Number(db.prepare(`INSERT INTO envios (tipo, payload, group_jids, quando, repetir, status, next_run_at, user_id, created_at)
+        VALUES ('oferta', ?, ?, 'agora', NULL, 'pendente', ?, ?, ?)`)
+        .run(JSON.stringify(payload), JSON.stringify(destinos), now, Number.isInteger(userId) ? userId : null, now).lastInsertRowid);
+      db.prepare('UPDATE catalogo_itens SET envio_id = ? WHERE id = ?').run(novo, id);
+      db.prepare('INSERT INTO sent_offers (rule_id, offer_key, sent_at) VALUES (?,?,?)').run(regra.id, item.chave, now);
+      return novo;
+    });
+    pedirEnvio();
+    return { envio_id: envioId };
+  }
+
+  /** POST /api/catalogo/itens/:id/descartar → { ok }. Só item em 'revisao' (senão 409). */
+  function descartar(itemId) {
+    const id = idValido(itemId);
+    const item = db.prepare('SELECT * FROM catalogo_itens WHERE id = ?').get(id);
+    if (!item) throw new ErroCatalogoItem(404, 'Oferta não encontrada.');
+    const r = db.prepare("UPDATE catalogo_itens SET status = 'descartado', decidido_em = ? WHERE id = ? AND status = 'revisao'").run(agora(), id);
+    if (r.changes !== 1) throw new ErroCatalogoItem(409, JA_TRATADA);
+    const regra = regraPorId(item.rule_id);
+    log(regra, { level: 'info', offer_title: lerJson(item.oferta, {})?.title || null, message: 'Descartada na revisão' });
+    return { ok: true };
+  }
+
+  return { tratada, registrar, revisaoCheia, listar, enviar, descartar, contar, liberarFalhos };
+}
+
+/** Responde JSON; ErroCatalogoItem vira o status dele. Erro inesperado (banco) não devolve nem registra a mensagem. */
+const responder = (fn) => async (req, res) => {
+  try { res.json(await fn(req)); } catch (e) {
+    if (e instanceof ErroCatalogoItem) return res.status(e.status).json({ erro: e.message });
+    console.error('[catalogo] falha inesperada:', e?.code || e?.name || 'erro'); // sem e.message: pode trazer valores da query
+    res.status(500).json({ erro: 'Não consegui concluir. Tente de novo.' });
+  }
+};
+
+/** Sem `ctx.soDono` (servidor montado sem login), ninguém envia nem descarta: falha fechada. */
+const negar = (_req, res) => res.status(403).json({ erro: 'Só o Dono pode fazer isso.' });
+
+/**
+ * Rotas da revisão, montadas por buildApp depois do login e da checagem Host/Origin (a ligação é da etapa 5).
+ * A lista é de quem estiver logado (Dono e Operador); enviar e descartar são só do Dono (P6: `ctx.soDono` responde
+ * 403 ao Operador). O serviço é `ctx.catalogoItens` (ou `ctx.scheduler.catalogoItens`), lido na hora.
+ */
+export function montarRotas(app, ctx) {
+  const itens = () => {
+    const s = ctx.catalogoItens ?? ctx.scheduler?.catalogoItens;
+    if (!s) throw new ErroCatalogoItem(503, 'O catálogo não está disponível neste servidor.');
+    return s;
+  };
+  const soDono = typeof ctx.soDono === 'function' ? ctx.soDono : negar;
+  app.get('/api/catalogo/itens', responder((req) => itens().listar(req.query)));
+  app.post('/api/catalogo/itens/:id/enviar', soDono, responder((req) => itens().enviar(req.params.id, req.body, { userId: req.user?.id ?? null })));
+  app.post('/api/catalogo/itens/:id/descartar', soDono, responder((req) => itens().descartar(req.params.id)));
+}

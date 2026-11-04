@@ -68,6 +68,8 @@ textarea.mono, .mono { font-family:var(--mono); font-size:13px; }
 label.campo { display:grid; gap:4px; font-weight:600; font-size:14px; }
 label.campo small, .dica { font-weight:400; color:var(--muted); font-size:13px; }
 .grade { display:grid; gap:14px; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); }
+/* campo esticado pela linha da grade (vizinho com dica longa): rótulo e controle ficam juntos no topo */
+.grade > label.campo, .grade > div.campo { align-content:start; }
 .linha { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
 .chip { display:inline-block; padding:2px 10px; border-radius:99px; background:var(--inset); border:1px solid var(--line); font-size:13px; }
 .chip.etq { background:var(--accent); color:var(--accent-ink); border-color:var(--accent); font-weight:600; }
@@ -89,7 +91,7 @@ td { padding:9px 10px; border-bottom:1px solid var(--line); vertical-align:top; 
 dialog { border:1px solid var(--line); border-radius:var(--raio-g); padding:0; width:min(720px,94vw); max-height:92vh; background:var(--surface); color:var(--ink); }
 dialog::backdrop { background:rgba(23,20,43,.55); }
 dialog form, dialog .corpo { padding:22px 24px; display:grid; gap:16px; }
-.rodape { display:flex; gap:8px; justify-content:flex-end; position:sticky; bottom:0; background:var(--surface); padding-top:12px; }
+.rodape { display:flex; flex-wrap:wrap; gap:8px; justify-content:flex-end; position:sticky; bottom:0; background:var(--surface); padding-top:12px; }
 fieldset { border:1px solid var(--line); border-radius:10px; padding:14px; margin:0; display:grid; gap:12px; }
 legend { font-weight:700; padding:0 6px; }
 .grupos { max-height:210px; overflow:auto; border:1px solid var(--line); border-radius:8px; }
@@ -482,3 +484,21 @@ a[href="#templates"].dica { display:inline-block; min-height:24px; line-height:2
 @media (max-width:600px) { .aviso-impl .aviso-corpo summary { min-height:44px; line-height:44px; } .aviso-impl .aviso-corpo a { line-height:inherit; min-height:24px; display:inline; } }
 .aviso-impl.neutro { border-color:var(--line); background:var(--surface-2); }
 .aviso-impl.neutro::before { content:none; }
+/* Catálogo do Etiqueta (Conexões): cartão na linha inteira, tabela de categorias com rolagem interna, números à direita */
+.sr-only { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); white-space:nowrap; }
+.conexao-catalogo { grid-column:1 / -1; grid-template-columns:minmax(0,1fr); } /* a tabela rola por dentro, não estica o cartão */
+.conexao-catalogo .cab .sub { margin:2px 0 0; font-size:14px; }
+.conexao-catalogo .estado-linha, .conexao-catalogo .cat-resumo { overflow-wrap:anywhere; }
+.conexao-catalogo .cat-resumo { margin:0; font-size:14px; }
+.conexao-catalogo [data-cats] .dica { margin:0; }
+.conexao-catalogo [data-cats] { display:grid; grid-template-columns:minmax(0,1fr); gap:8px; }
+.conexao-catalogo [data-cats]:empty { display:none; }
+.conexao-catalogo summary { cursor:pointer; font-weight:600; min-height:24px; line-height:24px; }
+.cat-tabela .num { text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; }
+.cat-tabela th[scope=row] { font-weight:500; color:var(--text); }
+.cat-tabela .cat-nome { display:block; max-width:36ch; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+@media (max-width:600px) { .conexao-catalogo summary { min-height:44px; line-height:44px; } .cat-tabela .cat-nome { max-width:20ch; } }
+/* Catálogo, "Revisar oferta": motivo da trava no rodapé fixo; "Preço antigo" suspeito em destaque de aviso (o texto da trava acompanha) */
+.rodape .trava-envio { flex:1 1 100%; margin:0; }
+.campo-suspeito:not(.invalido), .campo-suspeito:not(.invalido):focus { border-color:var(--warn); box-shadow:0 0 0 3px color-mix(in oklab, var(--warn) 30%, transparent); }
+@media (max-width:600px) { td [data-revisar], #cm .rodape button { min-height:44px; } }

@@ -288,11 +288,15 @@ export function proximaOcorrencia(repetir, depoisDe = Date.now()) {
   return null;
 }
 
-/** Nome da origem no log (log.rule_name): "Disparo manual", "Mensagem", "Enquete" ou "Espelho: <nome>". */
+/**
+ * Nome da origem no log (log.rule_name): "Disparo manual", "Mensagem", "Enquete", "Espelho: <nome>" ou
+ * "Catálogo: <regra>" (oferta do catálogo aprovada na revisão, src/catalogo-itens.js).
+ */
 function origemDoLog(tipo, p) {
-  if (p?.origem?.tipo === 'espelho') {
+  const prefixo = { espelho: 'Espelho', catalogo: 'Catálogo' }[p?.origem?.tipo];
+  if (prefixo) {
     const nome = String(p.origem.nome ?? '').replace(/\s+/g, ' ').trim().slice(0, 80);
-    return `Espelho: ${nome || 'sem nome'}`;
+    return `${prefixo}: ${nome || 'sem nome'}`;
   }
   return ORIGEM[tipo] || 'Envio';
 }
@@ -675,6 +679,8 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
       try {
         // Shopee: o link gerado ao criar (API ou extensão), conferido de novo; nada de rede nem de link montado aqui
         if (ehShopee && !(typeof p.link_afiliado === 'string' && LINK_SHOPEE.test(p.link_afiliado))) throw new Error('o link da Shopee guardado no envio não é válido');
+        // catálogo (plano fonte-catalogo-etiqueta, D4): o ML nunca sai com link comum, nem se o modo mudou depois da revisão
+        if (p.origem?.tipo === 'catalogo' && !semEtiqueta && !['extension', 'fake'].includes(modoLink())) throw new Error('os links do Mercado Livre estão no modo direto (sem comissão)');
         if (ehAmazon && !amazon) throw new Error(SEM_AMAZON);
         // sem ASIN válido no payload, nada de resolver link na hora do envio: só o ASIN gravado ao criar vale
         if (ehAmazon && !RE_ASIN.test(String(p.asin ?? ''))) throw new Error('o produto da Amazon está sem ASIN');

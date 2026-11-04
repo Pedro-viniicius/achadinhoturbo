@@ -420,9 +420,11 @@ let dispSeqDados = 0;
  * (a Shopee não traz preço antigo, só o percentual): vale enquanto os preços forem os da loja e é descartado quando o dono
  * mexe num preço; com `fonte` ("Shopee"), a dica do Desconto diz "Informado pela Shopee." ou "Calculado dos dois preços.".
  * `notaPreco` é uma frase fixa sob o Preço atual (faixa de variações).
+ * `cupomMax` (opcional): tamanho máximo do cupom (padrão 30; a revisão do catálogo usa 100, o que o servidor aceita lá).
  */
 function dadosOferta(valores = {}, aoMudar = () => {}, opcoes = {}) {
   const T = TEXTOS_DISPAROS; const D = T.dados; const n = ++dispSeqDados;
+  const cupomMax = Number.isInteger(opcoes.cupomMax) && opcoes.cupomMax > 0 ? opcoes.cupomMax : 30;
   const el = document.createElement('fieldset'); el.dataset.dados = '';
   el.innerHTML = `<legend>${D.titulo}</legend>
     <label class="campo"><span>${D.tituloCampo} ${REQ}</span><input name="title" maxlength="200" autocomplete="off"></label>
@@ -432,7 +434,7 @@ function dadosOferta(valores = {}, aoMudar = () => {}, opcoes = {}) {
     </div>
     <div class="grade dados-tres">
       <label class="campo"><span>${D.desconto}</span><input name="desconto" type="text" readonly aria-describedby="do${n}-desc"><small id="do${n}-desc" data-desc-dica>${D.descontoDica}</small></label>
-      <label class="campo"><span>${D.cupom}</span><input name="coupon" maxlength="30" autocomplete="off"></label>
+      <label class="campo"><span>${D.cupom}</span><input name="coupon" maxlength="${cupomMax}" autocomplete="off"></label>
       <div class="campo"><span id="do${n}-frete">${D.frete}</span>
         <label class="linha opcao-chk"><input type="checkbox" name="freeShipping" aria-describedby="do${n}-frete"> ${D.freteGratis}</label></div>
     </div>
@@ -517,7 +519,7 @@ function dadosOferta(valores = {}, aoMudar = () => {}, opcoes = {}) {
     seq++; editado = false;
     inTitulo.value = String(v.title ?? '').slice(0, 200);
     inPreco.value = dispPrecoCampo(v.price); inAntigo.value = dispPrecoCampo(v.oldPrice);
-    inCupom.value = String(v.coupon ?? '').slice(0, 30); chkFrete.checked = !!v.freeShipping;
+    inCupom.value = String(v.coupon ?? '').slice(0, cupomMax); chkFrete.checked = !!v.freeShipping;
     const img = typeof v.image === 'string' && v.image ? v.image : '';
     foto = { modo: img ? 'api' : 'nenhuma', url: img, dataUrl: '', id: null, subindo: false };
     const d = Number(opcoes.descontoInformado ?? v.discountPct);

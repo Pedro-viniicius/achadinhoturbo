@@ -16,6 +16,8 @@ import { createAmazon } from './amazon.js';
 import { createShopee } from './shopee.js';
 import { montarRotas as rotasEspelho } from './espelho.js';
 import { montarRotas as rotasEquipe, montarRotasPublicas as rotasEquipePublicas } from './equipe.js';
+import { createCatalogo, limparFonteCatalogo } from './catalogo.js';
+import { createCatalogoItens, montarRotas as rotasCatalogoItens } from './catalogo-itens.js';
 import { renderTemplate, SAMPLE_OFFER, SAMPLE_OFFER_AMAZON, PLACEHOLDERS } from './template.js';
 import { CATEGORIAS, ORDENS, POR_PAGINA } from './afiliados.js';
 import { overview, resumo, evasaoDoDia, periodRange, startOfDay, dayOf } from './analytics.js';
@@ -41,18 +43,39 @@ const CSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inl
  * de envios e por Conexões. Os dois leem a credencial a cada chamada (segredosDe), nunca guardada. Aqui também o
  * ouvinte de mensagens do WhatsApp é ligado ao espelho: cada mensagem nova de grupo vai a espelho.receber()
  * (síncrono, sem rede, nunca lança), que grava os itens e acorda o agendador.
+ * Catálogo do Etiqueta (plano fonte-catalogo-etiqueta): UM cliente (`catalogo`: fila única de pedidos ao Etiqueta,
+ * situação e cursores) para o agendador e para Conexões, e UMA fila de revisão (`catalogoItens`). O cliente lê o
+ * endereço e o caminho do token a cada chamada (segredosDe; o cartão não tem segredo) e o token do arquivo, nunca
+ * guardado. A revisão manda o envio aprovado pela fila de envios do agendador, criado depois dela: `envios` e
+ * `acordar` a alcançam na hora da chamada.
  * O main abaixo e os testes sobem por aqui. `fetch` só nos testes (padrão: o fetch global).
  */
 export function criarServicos({ db, wa, links, fast = FAST, dir = DATA_DIR, ml = mlPadrao, fetch } = {}) {
   const amazon = createAmazon({ db, fetch, lerConexao: () => segredosDe(db, 'amazon') });
   const shopee = createShopee({ db, fetch, lerConexao: () => segredosDe(db, 'shopee') });
-  const scheduler = createScheduler({ db, wa, links, fast, dir, ml, amazon, shopee });
+  const catalogo = createCatalogo({ db, fetch, lerConexao: () => segredosDe(db, 'catalogo') });
+  let scheduler = null;
+  const envios = {
+    lerFoto: (id) => scheduler.envios.lerFoto(id),
+    processarPendentes: () => scheduler.envios.processarPendentes(),
+  };
+  // o envio aprovado sai no tick do agendador (como o "agora" e o espelho); sem acordar() exposto, pede um tick
+  const acordar = () => {
+    if (typeof scheduler?.acordar === 'function') return scheduler.acordar();
+    scheduler?.tick().catch((e) => console.error('[agendador]', e?.name || 'erro'));
+  };
+  const catalogoItens = createCatalogoItens({ db, wa, links, amazon, envios, acordar });
+  scheduler = createScheduler({ db, wa, links, fast, dir, ml, amazon, shopee, catalogo, catalogoItens });
   wa.onMensagem((m) => scheduler.espelho.receber(m));
-  return { amazon, shopee, scheduler };
+  return { amazon, shopee, catalogo, catalogoItens, scheduler };
 }
 
-// amazon e shopee: os mesmos clientes do agendador (criarServicos); sem eles, as rotas tratam a loja como indisponível.
-export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, panelPassword = PANEL_PASSWORD, dataDir = DATA_DIR, ml = mlPadrao, amazon = scheduler?.amazon ?? null, shopee = scheduler?.shopee ?? null }) {
+const ASIN_SONDA = 'B000000000'; // montarLink com um ASIN de sonda diz se há tag da Amazon salva, sem rede
+
+// amazon, shopee, catalogo e catalogoItens: os mesmos do agendador (criarServicos); sem eles, as rotas tratam a loja
+// (ou o catálogo) como indisponível.
+export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, panelPassword = PANEL_PASSWORD, dataDir = DATA_DIR, ml = mlPadrao,
+  amazon = scheduler?.amazon ?? null, shopee = scheduler?.shopee ?? null, catalogo = scheduler?.catalogo ?? null, catalogoItens = scheduler?.catalogoItens ?? null }) {
   const app = express();
   app.disable('x-powered-by');
   app.set('trust proxy', 1); // Nginx na frente: req.ip e req.secure vêm do X-Forwarded-*
@@ -196,8 +219,31 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
   });
   app.use(express.static(path.join(ROOT, 'public')));
 
+  // erro com `campo` (frase fixa da validação da fonte catálogo) leva o campo e a fonte junto, para o painel marcar
   const wrap = (fn) => async (req, res) => {
-    try { res.json(await fn(req, res) ?? { ok: true }); } catch (e) { res.status(400).json({ erro: e.message }); }
+    try { res.json(await fn(req, res) ?? { ok: true }); } catch (e) {
+      res.status(400).json(typeof e?.campo === 'string' ? { erro: e.message, campo: e.campo, fonte: e.fonte ?? null } : { erro: e.message });
+    }
+  };
+  /**
+   * Catálogo do Etiqueta no /api/state (sem rede): estado do cartão e situação do cliente (falha_desde alimenta o
+   * chip "Catálogo indisponível"), pendentes de revisão (total e por regra) e se há tag da Amazon salva (aviso A5).
+   * Uma falha aqui nunca derruba o /api/state.
+   */
+  const estadoCatalogo = () => {
+    let sit = null; let cont = null; let tag = false;
+    try { sit = catalogo?.situacao() ?? null; } catch (e) { console.error('[catalogo] situação:', e?.code || e?.name || 'erro'); }
+    try { cont = catalogoItens?.contar() ?? null; } catch (e) { console.error('[catalogo] contagem:', e?.code || e?.name || 'erro'); }
+    try { tag = !!amazon?.montarLink?.(ASIN_SONDA); } catch { tag = false; }
+    return {
+      estado: sit?.estado ?? null,
+      situacao: sit ? { estado: sit.estado ?? null, resultado: sit.resultado ?? null, verificado_em: sit.verificado_em ?? null, falha_desde: sit.falha_desde ?? null } : null,
+      falha_desde: sit?.falha_desde ?? null,
+      para_revisar: Number(cont?.para_revisar) || 0,
+      teto_revisao: cont?.teto_revisao ?? null,
+      regras: Array.isArray(cont?.regras) ? cont.regras.map((r) => ({ rule_id: r.rule_id, para_revisar: r.para_revisar, cheia: !!r.cheia })) : [],
+      tag_amazon: tag,
+    };
   };
   // ---------- estado geral ----------
   app.get('/api/state', wrap((req) => ({
@@ -220,6 +266,7 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
     propostas_pendentes: one("SELECT COUNT(*) AS n FROM group_proposals WHERE status = 'pending'").n,
     espelhos_na_fila: one("SELECT COUNT(*) AS n FROM espelho_itens WHERE status = 'na_fila'").n, // ofertas espelhadas esperando o dono completar
     amostras: { amazon: SAMPLE_OFFER_AMAZON }, // oferta de exemplo para a prévia do template (sem tag no link)
+    catalogo: estadoCatalogo(),
   })));
 
   app.put('/api/ajustes', wrap((req) => {
@@ -422,7 +469,7 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
     if (!(interval >= 1)) throw new Error('O intervalo mínimo é 1 minuto.');
     if (!(perRun >= 1 && perRun <= 20)) throw new Error('Ofertas por envio: de 1 a 20.');
     // fontes: lista nova (até 5) ou, nas regras antigas, source_type + source_config
-    const tipo = (t) => (['afiliados', 'search'].includes(t) ? t : 'list');
+    const tipo = (t) => (['afiliados', 'search', 'catalogo'].includes(t) ? t : 'list');
     const str = (v, max) => String(v ?? '').slice(0, max);
     const limpaConfig = (t, c) => {
       c = c && typeof c === 'object' ? c : {};
@@ -432,11 +479,13 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
           ordem: ORDENS.some((o) => o.id === c.ordem) ? c.ordem : 'relevance', paginas: Math.min(Math.max(parseInt(c.paginas, 10) || 3, 1), 10), mais_vendidos: !!c.mais_vendidos, ganhos_extras: !!c.ganhos_extras };
       }
       if (t === 'search') return { query: str(c.query, 80).trim(), sort: ['relevance', 'price_asc', 'price_desc'].includes(c.sort) ? c.sort : 'relevance' };
+      if (t === 'catalogo') return limparFonteCatalogo(c); // limites do contrato do Etiqueta; inválido: frase fixa (ERROS_FONTE) com `campo`
       return { items: str(c.items, 20000) };
     };
+    const daFonte = (i, fn) => { try { return fn(); } catch (e) { if (typeof e?.campo === 'string') e.fonte = i + 1; throw e; } };
     let sources = Array.isArray(b.sources) && b.sources.length
-      ? b.sources.map((s) => { const t = tipo(s?.type); return { type: t, config: limpaConfig(t, s?.config), tag_id: nz(s?.tag_id) == null ? null : Number(s.tag_id) }; })
-      : [{ type: tipo(b.source_type), config: limpaConfig(tipo(b.source_type), b.source_config) }];
+      ? b.sources.map((s, i) => { const t = tipo(s?.type); return { type: t, config: daFonte(i, () => limpaConfig(t, s?.config)), tag_id: nz(s?.tag_id) == null ? null : Number(s.tag_id) }; })
+      : [{ type: tipo(b.source_type), config: daFonte(0, () => limpaConfig(tipo(b.source_type), b.source_config)) }];
     if (sources.length > MAX_SOURCES) throw new Error(`Uma regra aceita no máximo ${MAX_SOURCES} fontes.`);
     for (const [i, s] of sources.entries()) {
       if (s.type === 'search' && !String(s.config.query || '').trim()) throw new Error(`Fonte ${i + 1}: a busca está sem a palavra-chave.`);
@@ -452,7 +501,22 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
     ];
   };
   const COLS = 'name, enabled, tag_id, template_id, group_jids, source_type, source_config, sources, min_price, max_price, min_discount, per_run, interval_min, window_start, window_end, dedupe_days, send_image';
-  app.get('/api/rules', wrap(() => all('SELECT * FROM rules ORDER BY id').map((r) => ({ ...parseRule(r), em_andamento: scheduler.isRunning(r.id) }))));
+  /**
+   * Fonte "Novidades" do catálogo que ainda não terminou a primeira leitura (contrato com o painel, S3): a
+   * pré-visualização dela vem vazia até a regra rodar. Só nas fontes catálogo com ordem Novidades; sem rede. Não é
+   * gravado (ruleFromBody refaz cada fonte só com type, config e tag_id).
+   */
+  const comPrimeiraLeitura = (regra) => {
+    if (!catalogo || !Array.isArray(regra?.sources)) return regra;
+    const sources = regra.sources.map((f) => {
+      if (f?.type !== 'catalogo' || (f.config?.ordem ?? 'atualizacao') !== 'atualizacao') return f;
+      let primeira = false;
+      try { primeira = catalogo.primeiraLeitura(regra.id, f.config); } catch (e) { console.error('[catalogo] primeira leitura:', e?.code || e?.name || 'erro'); }
+      return { ...f, primeira_leitura: !!primeira };
+    });
+    return { ...regra, sources };
+  };
+  app.get('/api/rules', wrap(() => all('SELECT * FROM rules ORDER BY id').map((r) => ({ ...comPrimeiraLeitura(parseRule(r)), em_andamento: scheduler.isRunning(r.id) }))));
   app.post('/api/rules', wrap((req) => {
     const v = ruleFromBody(req.body);
     return { id: db.prepare(`INSERT INTO rules (${COLS}, created_at) VALUES (${v.map(() => '?').join(',')}, ?)`).run(...v, Date.now()).lastInsertRowid };
@@ -464,13 +528,53 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
   app.post('/api/rules/:id/enabled', wrap((req) => {
     db.prepare('UPDATE rules SET enabled = ?, next_run_at = NULL WHERE id = ?').run(req.body.enabled ? 1 : 0, req.params.id);
   }));
+  // Apagar a regra leva junto o que é dela no catálogo (itens tratados, revisão e cursores): o id de `rules` pode ser
+  // reaproveitado por uma regra nova, que não pode herdar nada.
   app.delete('/api/rules/:id', wrap((req) => {
-    db.prepare('DELETE FROM rules WHERE id = ?').run(req.params.id);
-    db.prepare('DELETE FROM sent_offers WHERE rule_id = ?').run(req.params.id);
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      db.prepare('DELETE FROM rules WHERE id = ?').run(req.params.id);
+      db.prepare('DELETE FROM sent_offers WHERE rule_id = ?').run(req.params.id);
+      db.prepare('DELETE FROM catalogo_itens WHERE rule_id = ?').run(req.params.id);
+      if (catalogo) catalogo.esquecerRegra(req.params.id);
+      else db.prepare('DELETE FROM catalogo_cursores WHERE rule_id = ?').run(req.params.id);
+      db.exec('COMMIT');
+    } catch (e) { db.exec('ROLLBACK'); throw e; }
   }));
   app.post('/api/rules/:id/run', wrap((req) => { scheduler.runRule(Number(req.params.id), { manual: true }).catch(() => {}); return { iniciado: true }; }));
   app.get('/api/rules/:id/offers', wrap((req) => scheduler.previewOffers(Number(req.params.id))));
-  app.post('/api/rules/:id/reset-sent', wrap((req) => { db.prepare('DELETE FROM sent_offers WHERE rule_id = ?').run(req.params.id); }));
+  // "Limpar já enviadas": também as ofertas do catálogo que saíram (as em revisão e as descartadas ficam)
+  app.post('/api/rules/:id/reset-sent', wrap((req) => {
+    db.prepare('DELETE FROM sent_offers WHERE rule_id = ?').run(req.params.id);
+    db.prepare("DELETE FROM catalogo_itens WHERE rule_id = ? AND status = 'enviado'").run(req.params.id);
+  }));
+
+  // ---------- catálogo do Etiqueta (o painel nunca fala com o Etiqueta: só com estas rotas) ----------
+  const falhaCatalogo = (res, onde, e) => {
+    console.error(`[catalogo] ${onde}:`, e?.code || e?.name || 'erro'); // sem e.message: pode trazer valores da query
+    res.status(500).json({ erro: 'Não consegui concluir. Tente de novo.' });
+  };
+  const inteiroNaoNegativo = (v) => (Number.isInteger(v) && v >= 0 ? v : 0);
+  // Categorias da última verificação (gravadas pelo "Testar" de Conexões); sem rede. Dono e Operador.
+  app.get('/api/catalogo/categorias', (req, res) => {
+    try {
+      const v = catalogo?.ultimaVerificacao() ?? null;
+      const categorias = (Array.isArray(v?.categorias) ? v.categorias : [])
+        .filter((c) => c && typeof c.nome === 'string' && c.nome)
+        .map((c) => ({ nome: c.nome, total: inteiroNaoNegativo(c.total), lojas: { amazon: inteiroNaoNegativo(c.lojas?.amazon), ml: inteiroNaoNegativo(c.lojas?.ml), shopee: inteiroNaoNegativo(c.lojas?.shopee) } }));
+      let estado = null;
+      try { estado = catalogo?.situacao().estado ?? null; } catch { estado = null; }
+      res.json({ categorias, total: inteiroNaoNegativo(v?.total), verificado_em: Number.isFinite(v?.verificado_em) ? v.verificado_em : null, estado });
+    } catch (e) { falhaCatalogo(res, 'categorias', e); }
+  });
+  // "Reler do começo": só o Dono (P6). Nunca com a regra rodando: o cursor é escrito só pelo runRule.
+  app.post('/api/rules/:id/catalogo/recomecar', exigeDono, (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0 || !one('SELECT 1 FROM rules WHERE id = ?', id)) return res.status(404).json({ erro: 'Regra não encontrada.' });
+    if (!catalogo) return res.status(503).json({ erro: 'O catálogo não está disponível neste servidor.' });
+    if (scheduler?.isRunning?.(id)) return res.status(409).json({ erro: 'Esta regra está rodando agora. Espere terminar e tente de novo.' });
+    try { res.json({ ok: true, fontes: catalogo.recomecar(id) }); } catch (e) { falhaCatalogo(res, 'reler do começo', e); }
+  });
 
   // ---------- histórico ----------
   // ?nivel=<level> e ?tipo=automatico (só as linhas das regras do Disparo automático: só o runRule grava rule_id;
@@ -489,8 +593,8 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
   app.get('/api/simulados', wrap(() => wa.simulated.slice(-50).map((m) => (String(m.jid).endsWith('@g.us') ? m : { ...m, jid: mascararNumero(m.jid) }))));
 
   // ---------- features novas: cada módulo monta as próprias rotas, todas depois do Host/Origin e do login ----------
-  const ctx = { db, wa, links, scheduler, auth, wrap, soDono: exigeDono, dataDir, ml, amazon, shopee, enderecoPublico, publicHost, gravarCookie, sidDe };
-  for (const montar of [rotasEnvios, rotasAvisos, rotasConexoes, rotasEspelho, rotasEquipe]) montar(app, ctx);
+  const ctx = { db, wa, links, scheduler, auth, wrap, soDono: exigeDono, dataDir, ml, amazon, shopee, catalogo, catalogoItens, enderecoPublico, publicHost, gravarCookie, sidDe };
+  for (const montar of [rotasEnvios, rotasAvisos, rotasConexoes, rotasEspelho, rotasEquipe, rotasCatalogoItens]) montar(app, ctx);
 
   // Erros de parsing (JSON inválido, corpo grande demais) e inesperados: resposta curta, sem stack nem caminhos.
   // eslint-disable-next-line no-unused-vars
@@ -511,9 +615,9 @@ if (import.meta.url === `file://${process.argv[1].replace(/\\/g, '/')}` || proce
   // leitura conta 1× por pessoa por dia de negócio (a virada do dia de Relatórios e avisos), como os relatórios
   const wa = createWhatsApp({ db, dir: DATA_DIR, dryRun: DRY_RUN, pseudo: (id) => pseudonimo(db, id), diaDe: (ts) => dayOf(ts, viradaMin(db)) });
   const links = createLinkService({ getMode: () => (DRY_RUN ? 'fake' : getSetting(db, 'link_mode', 'extension')) });
-  const { amazon, shopee, scheduler } = criarServicos({ db, wa, links, fast: FAST, dir: DATA_DIR, ml: mlPadrao });
+  const { amazon, shopee, catalogo, catalogoItens, scheduler } = criarServicos({ db, wa, links, fast: FAST, dir: DATA_DIR, ml: mlPadrao });
   let app;
-  try { app = buildApp({ db, wa, links, scheduler, amazon, shopee }); } catch (e) { console.error('ERRO:', e.message); process.exit(1); }
+  try { app = buildApp({ db, wa, links, scheduler, amazon, shopee, catalogo, catalogoItens }); } catch (e) { console.error('ERRO:', e.message); process.exit(1); }
   const retencao = () => {
     try { const r = limparAntigos(db, Number(getSetting(db, 'retencao_dias', RETENCAO_PADRAO_DIAS))); if (r.eventos || r.leituras || r.cliques) console.log(`Retenção: apagados ${r.eventos} eventos, ${r.leituras} leituras, ${r.cliques} cliques antigos.`); } catch (e) { console.error('[retenção]', e.message); }
     // envios avulsos encerrados e fotos sem uso (src/envios.js); uma falha só vai para o log

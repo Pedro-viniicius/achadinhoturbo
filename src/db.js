@@ -95,6 +95,20 @@ CREATE TABLE IF NOT EXISTS espelho_itens (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_esp_msg ON espelho_itens (espelho_id, origem_jid, msg_id, url);
 CREATE INDEX IF NOT EXISTS idx_esp_dedupe ON espelho_itens (espelho_id, asin, status, decidido_em);
 CREATE INDEX IF NOT EXISTS idx_esp_status ON espelho_itens (status, espera_ate, ts);
+-- Fonte "catalogo" (API de ofertas do Etiqueta). Uma linha por oferta já tratada numa regra; chave: MLB<n>|ASIN:<asin>|SHOPEE:<shop>.<item>.
+-- loja: ml|amazon|shopee. motivos: lista JSON (shopee|desconto_100|preco_antigo|falha_link). oferta: JSON da oferta, sem dado pessoal.
+CREATE TABLE IF NOT EXISTS catalogo_itens (
+  id INTEGER PRIMARY KEY, rule_id INTEGER NOT NULL, chave TEXT NOT NULL, loja TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('revisao','enviado','descartado')), motivos TEXT NOT NULL DEFAULT '[]',
+  oferta TEXT NOT NULL, envio_id INTEGER, criado_em INTEGER NOT NULL, decidido_em INTEGER);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_cat_item ON catalogo_itens (rule_id, chave);
+CREATE INDEX IF NOT EXISTS idx_cat_status ON catalogo_itens (status, rule_id, criado_em);
+-- listagem da revisão por regra e status, da decisão mais recente (GET /api/catalogo/itens)
+CREATE INDEX IF NOT EXISTS idx_cat_lista ON catalogo_itens (rule_id, status, COALESCE(decidido_em, criado_em));
+-- Cursor da API por regra e filtro (sha256 do config normalizado, 16 hex). pronto=0: ainda avançando até o fim sem enviar.
+CREATE TABLE IF NOT EXISTS catalogo_cursores (
+  rule_id INTEGER NOT NULL, filtro TEXT NOT NULL, cursor TEXT, pronto INTEGER NOT NULL DEFAULT 0,
+  atualizado_em INTEGER, PRIMARY KEY (rule_id, filtro));
 `;
 
 // Colunas acrescentadas depois da primeira versão (ALTER TABLE só se faltar).

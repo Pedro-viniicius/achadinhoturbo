@@ -2,7 +2,7 @@
 
 Programa **pessoal** que roda no seu computador e envia ofertas da sua **Central de Afiliados** do Mercado Livre para os seus grupos de WhatsApp, com link `meli.la` e **várias etiquetas** (cada regra usa a sua).
 
-Além das regras automáticas, o painel faz **disparo manual** de uma oferta (do Mercado Livre ou da Amazon), **mensagens e enquetes** (agora, agendadas ou repetidas), **espelha ofertas da Amazon** postadas em outros grupos (veja [Espelhamento da Amazon](#espelhamento-da-amazon)) e manda **resumo diário e avisos** para o seu WhatsApp.
+Além das regras automáticas, o painel faz **disparo manual** de uma oferta (do Mercado Livre ou da Amazon), **mensagens e enquetes** (agora, agendadas ou repetidas), **espelha ofertas da Amazon** postadas em outros grupos (veja [Espelhamento da Amazon](#espelhamento-da-amazon)), usa as ofertas do seu app Etiqueta como fonte (veja [Catálogo do Etiqueta](#catálogo-do-etiqueta)) e manda **resumo diário e avisos** para o seu WhatsApp.
 
 Você configura: grupos, template, quantas ofertas por envio, intervalo, horário de funcionamento e quanto tempo sem repetir a mesma oferta.
 
@@ -17,6 +17,8 @@ Painel (localhost:3737) ── disparos, espelhamento, conexões, templates, gru
         │
         ├─ Espelhamento (Amazon) ◄── mensagens dos grupos de origem (só links da Amazon)
         │       └──► resolve o ASIN ──► Creators API da Amazon (ou o texto da mensagem) ──► link .../dp/<ASIN>?tag=<sua tag>
+        │
+        ├─ Catálogo ──► lê as ofertas do app Etiqueta (127.0.0.1:8765, token lido de um arquivo) ──► link por loja; suspeitas esperam a revisão do Dono
         │
         └──────► WhatsApp Business (aparelho conectado, via QR) ──► grupos de destino (uma fila só, com as pausas de Ajustes)
 ```
@@ -59,7 +61,7 @@ O menu lateral é dividido em grupos:
 - **Disparos**: Disparo manual, Disparo automático (antes chamado *Regras*; é onde fica o botão *Novo espelhamento*), Disparar mensagem, Templates
 - **Comunicação**: Relatórios e avisos
 - **Conta**: Conexões, Números de WhatsApp, Equipe (só o Dono vê)
-- No rodapé: Histórico (com o seletor *Tipo*: Tudo, Disparo automático ou Espelhamento), Ajustes, Ajuda
+- No rodapé: Histórico (com o seletor *Tipo*: Tudo, Disparo automático, Espelhamento ou Catálogo), Ajustes, Ajuda
 
 Os endereços antigos continuam funcionando: `#regras` abre *Disparo automático*, `#whatsapp` abre *Números de WhatsApp* e `#etiquetas` abre *Conexões* (na seção do Mercado Livre).
 
@@ -76,7 +78,7 @@ Os endereços antigos continuam funcionando: `#regras` abre *Disparo automático
 2. **Números de WhatsApp** e **Grupos**: clique em *Conectar WhatsApp* e leia o QR no WhatsApp Business (Aparelhos conectados).
 3. **Templates**: ajuste a mensagem. Linha com campo vazio some sozinha. `{TITULO_PRODUTO}` sai **abreviado** (só o que identifica o produto: tira "Compatível com…", "Premium", "Alta Qualidade" e corta em até 60 caracteres sem partir palavra; o tamanho muda em *Ajustes*, 0 desliga). `{TITULO_COMPLETO}` é o nome inteiro. Um pedaço entre colchetes, como `[ ({DESCONTO_PRODUTO} OFF)]`, some sozinho quando falta o dado (veja [Template com trecho opcional](#template-com-trecho-opcional)).
 4. **Extensão** (abaixo). Sem ela, nem a lista de ofertas nem o link de afiliado são gerados.
-5. **Disparo automático**: crie uma regra escolhendo etiqueta, template, grupos e ritmo. A fonte padrão é a **Central de Afiliados**: a lista "Produtos selecionados para você", com busca, **uma ou várias categorias** (com várias, as ofertas saem intercaladas, bom para grupos de achadinhos gerais), ordem, "só mais vendidos" e "só com ganhos extras". Uma regra aceita **até 5 fontes** (Central com filtros diferentes, listas de links, buscas, misturadas): as ofertas saem intercaladas, uma de cada fonte por vez, e uma fonte que falhar vira aviso sem travar as outras. A etiqueta é uma por regra: para etiquetas diferentes no mesmo grupo, crie outra regra apontando para o mesmo grupo. Use *Ver ofertas* para conferir antes e *Enviar agora* para testar.
+5. **Disparo automático**: crie uma regra escolhendo etiqueta, template, grupos e ritmo. A fonte padrão é a **Central de Afiliados**: a lista "Produtos selecionados para você", com busca, **uma ou várias categorias** (com várias, as ofertas saem intercaladas, bom para grupos de achadinhos gerais), ordem, "só mais vendidos" e "só com ganhos extras". Uma regra aceita **até 5 fontes** (Central com filtros diferentes, listas de links, buscas, misturadas): as ofertas saem intercaladas, uma de cada fonte por vez, e uma fonte que falhar vira aviso sem travar as outras. A etiqueta é uma por regra: para etiquetas diferentes no mesmo grupo, crie outra regra apontando para o mesmo grupo. Use *Ver ofertas* para conferir antes e *Enviar agora* para testar. Outra fonte é o **Catálogo** (as ofertas do seu app Etiqueta): veja [Catálogo do Etiqueta](#catálogo-do-etiqueta).
 
 ## Disparo manual
 
@@ -103,7 +105,7 @@ Precisa da **tag de associado** salva em *Conexões → Amazon*. Sem ela o botã
 
 ### Disparo manual com um link da Shopee
 
-A Shopee funciona só no **Disparo manual** (agora ou agendado para hoje). **Espelhamento e regras automáticas da Shopee ainda não existem**: o espelhamento (veja [Espelhamento da Amazon](#espelhamento-da-amazon)) e as regras do *Disparo automático* só enviam Mercado Livre e Amazon.
+A Shopee funciona só no **Disparo manual** (agora ou agendado para hoje). **O espelhamento da Shopee não existe**, e as regras do *Disparo automático* só enviam a Shopee pela fonte [Catálogo do Etiqueta](#catálogo-do-etiqueta), sempre depois de revisão do Dono (o espelhamento, veja [Espelhamento da Amazon](#espelhamento-da-amazon), só trata a Amazon).
 
 **O link de afiliado nunca é montado à mão.** O link que vai ao grupo é sempre `https://s.shopee.com.br/<código>`, gerado pela própria Shopee na sua conta, por um de dois caminhos:
 
@@ -118,7 +120,7 @@ Para não pedir links demais à Shopee, o programa reaproveita por até 7 dias (
 
 **Pré-requisitos**
 
-- **ID de afiliado** salvo em *Conexões → Shopee* (só números, por exemplo `18328801339`). É o número da sua conta de afiliado: **não é o AppID da API e não é a tag da Amazon**. Sem ele o botão de disparar fica desabilitado.
+- **ID de afiliado** salvo em *Conexões → Shopee* (só números, por exemplo `98765432101`). É o número da sua conta de afiliado: **não é o AppID da API e não é a tag da Amazon**. Sem ele o botão de disparar fica desabilitado.
 - **Para o caminho da extensão:** o Chrome aberto e **logado em `affiliate.shopee.com.br`**, com a extensão **conectada** (veja [Extensão do Chrome](#extensão-do-chrome)). A versão **1.3.0** da extensão pede uma permissão nova, para `affiliate.shopee.com.br`: depois de atualizar a pasta `extension`, abra `chrome://extensions` e clique em **Recarregar** na extensão (e aceite a permissão, se o Chrome pedir). Com a extensão antiga, o link da Shopee não sai. Sem a extensão conectada e sem API útil, o botão de disparar fica desabilitado, com o motivo.
 - **AppID e Senha da API (opcionais):** só servem para o painel buscar os dados do produto sozinho e gerar o link pela API. Ficam em *Conexões → Shopee*. A conta nova costuma **não ter acesso** à API: no portal, a página "Abrir API" mostra o aviso de que a conta não tem acesso e AppID e Senha vazios. Nesse caso peça o acesso à Shopee pelo formulário de atendimento (resposta em até 3 dias úteis); o endereço e o resumo da API estão em `docs/produto/referencias/shopee-api-afiliados.md`. Enquanto isso, tudo funciona pela extensão, com os dados do produto preenchidos por você.
 
@@ -300,6 +302,91 @@ Estas duas decisões **ainda são suas** e a equipe não as tomou por você:
 
 O endereço da API (`creatorsapi.amazon`) e os nomes dos campos da resposta vêm da documentação da Amazon e **nunca foram conferidos contra a Amazon real**: o botão **Testar** é quem confirma isso na sua conta.
 
+## Catálogo do Etiqueta
+
+O **Etiqueta** é o seu outro programa, que coleta e organiza ofertas e roda neste mesmo computador (`python3 servidor.py`). O **Catálogo** é a fonte do *Disparo automático* que lê as ofertas dele, já com o link de afiliado de cada loja (Mercado Livre, Amazon e Shopee). Três coisas diferentes, com nomes parecidos:
+
+- **etiqueta de afiliado do Mercado Livre**: o nome criado na Central de Afiliados, que vai no link `meli.la` e define de quem é a comissão (*Conexões → Mercado Livre*);
+- **Etiqueta (o app)**: o seu outro programa, o dono das ofertas;
+- **Catálogo**: a fonte do painel que lê as ofertas do app Etiqueta. A interface só escreve "Etiqueta" no cartão de Conexões e na ajuda; nas regras e no Histórico é sempre "Catálogo".
+
+### Configurar
+
+1. Deixe o Etiqueta ligado (`python3 servidor.py`) com o arquivo `api_token.txt` na pasta dele.
+2. Em *Conexões → Catálogo do Etiqueta* (só o **Dono** salva e testa), preencha:
+   - **Endereço do Etiqueta**: `http://127.0.0.1:8765` (já vem preenchido) ou `http://localhost:8765`. Só vale `http`, só `127.0.0.1` ou `localhost`, com a porta e **sem nada depois dela**. Prefira `127.0.0.1`: o `localhost` pode resolver para um endereço que o Etiqueta não escuta.
+   - **Arquivo do token**: o **caminho** do `api_token.txt` (começa com `/` ou `~/`, até 500 caracteres), por exemplo `/home/<você>/…/api_token.txt`. O arquivo **precisa se chamar `api_token.txt`** e não pode ser um atalho (link simbólico): qualquer outro nome é recusado, para que o painel nunca leia outro arquivo de segredo do computador. **Nunca o conteúdo do arquivo**: o painel recusa um caminho que pareça o próprio token (32 ou mais letras, números, `_` e `-`) e não repete o que você digitou. Se você colou o token em algum lugar, gere outro no Etiqueta.
+3. Clique em **Salvar** e depois em **Testar**. O teste usa o que está **salvo**, não o que está digitado.
+
+### Estados do cartão
+
+O selo diz em que ponto está, sempre com texto:
+
+| Selo | Quando |
+|---|---|
+| *Falta configurar* | sem endereço ou sem caminho do token salvos |
+| *Salvo, ainda não testado* | salvo, nenhum teste ainda |
+| *Conectada* | o último teste (ou a última leitura de uma regra) foi aceito |
+| *Token recusado* | o Etiqueta respondeu 401. O Etiqueta lê o arquivo do token só ao ligar: depois de trocar o token, reinicie o `servidor.py` e teste de novo |
+| *Indisponível* | o Etiqueta está desligado ou sem rede (`fora_do_ar`), está no ar com a API desligada (`desligada`: falta o `api_token.txt` ou ele é inválido) ou respondeu fora do contrato (`resposta_inesperada`) |
+| *Arquivo do token não encontrado* | o painel não achou ou não conseguiu ler o arquivo, ou ele está vazio ou fora do formato (até 4096 bytes, só 32 ou mais letras, números, `_` e `-`) |
+
+O **Testar** mostra uma frase por resultado e, quando conecta, "Conectado. N ofertas em M categorias." com a lista de **categorias** e o total por loja (Mercado Livre, Amazon, Shopee). Essa lista é a **da última vez que você clicou em Testar**: abrir a tela de uma regra não a atualiza, e o painel nunca chama o Etiqueta para isso. O Operador vê o selo e as categorias, mas não muda a conexão.
+
+### Como a regra usa a fonte
+
+Em *Disparo automático → Novo disparo → De onde vêm as ofertas*, escolha **Catálogo (app Etiqueta)**. Uma regra aceita até 5 fontes, misturando Catálogo com Central, lista de links e busca. A fonte do Catálogo tem:
+
+- **Categorias** do Etiqueta (até 20; nenhuma marcada = todas; com várias, vale qualquer uma delas).
+- **Lojas**: Mercado Livre, Amazon e Shopee (nenhuma marcada = as três).
+- **Buscar por**: até 10 palavras separadas por vírgula (até 200 caracteres no total). Basta uma aparecer no título; não diferencia maiúscula nem acento.
+- **Desconto mínimo no catálogo (%)**: número inteiro de 0 a 99. Vale só para esta fonte; o *Desconto mínimo (%)* em *Filtros* é o filtro geral do disparo.
+- **Ordem**: *Novidades* (padrão), *Mais vendidos*, *Maior desconto*, *Menor preço*, *Maior preço*, *Com cupom primeiro* e *Coletadas há menos tempo*. A ordem aleatória não existe aqui.
+- Os filtros de preço e de desconto da própria regra continuam valendo por cima.
+
+O painel lê o Etiqueta em **páginas de 200 ofertas, um pedido por vez** (nunca dois pedidos ao mesmo tempo ao Etiqueta, mesmo com várias regras). Cada oferta é identificada pelo código da loja (Mercado Livre `MLB…`, Amazon pelo ASIN, Shopee por `loja.item`): a mesma oferta não sai duas vezes na mesma regra. Oferta fora do formato esperado (título, código ou preço inválido, ou link da Shopee fora de `s.shopee.com.br`) é ignorada, e um aviso no *Histórico* diz quantas. Só o link da Shopee é conferido (os do Mercado Livre e da Amazon são refeitos pelo painel); foto de fora das lojas é descartada e a oferta sai sem ela.
+
+**Novidades começa do fim.** Na **primeira leitura** de uma fonte nessa ordem (e sempre que você muda os filtros dela), o painel só percorre o catálogo até o fim, marcando o ponto de partida, **sem enviar nada** (até 20 páginas por execução; se o catálogo for maior, a próxima execução continua de onde parou). Enquanto isso, a prévia (*Ver ofertas*) avisa "Primeira leitura" e não mostra ofertas dessa fonte. Depois disso, cada execução envia o que **chegou ou foi atualizado no catálogo depois** (uma nova coleta do Etiqueta conta como atualização), e uma oferta tratada nunca sai de novo nesse disparo, nem com "dias sem repetir" em 0. O ponto de partida só avança por páginas inteiras já tratadas, então nada se perde, e uma oferta que ficou esperando (veja abaixo) segura a leitura naquela página até ser tratada.
+
+**Reler do começo** (ao editar a regra, só o Dono): na próxima execução, o painel confere o catálogo inteiro de novo, em **todas as fontes Catálogo em Novidades** da regra. Serve para mandar o que já estava lá antes de você salvar, ou depois de reorganizar categorias no Etiqueta. Ofertas já tratadas não se repetem. Não funciona com a regra rodando (o painel pede para tentar de novo).
+
+**As outras ordens** não usam ponto de partida: cada envio lê as páginas do início até achar ofertas ainda não tratadas (o maior entre 20 e 4 vezes as "ofertas por envio", em até 10 páginas) e pega as melhores. Vale o "não repetir por N dias" da regra (0 = pode repetir). Oferta que foi para a revisão ou descartada não volta.
+
+Se o Etiqueta cair, a fonte aparece como **indisponível** (chip "Catálogo indisponível" nos disparos que a usam, com a hora em que começou), o *Histórico* registra o motivo e as outras fontes da regra seguem normalmente. Nada é enviado por essa fonte até ele voltar. Você pode salvar a regra mesmo com o catálogo fora do ar.
+
+### O link de cada loja
+
+Nenhum link comum sai: o link do Etiqueta só é usado onde descrito abaixo.
+
+- **Mercado Livre**: o programa pega o código `MLB…` da oferta e **gera de novo o link `meli.la` pela extensão do Chrome**, com a **etiqueta da regra** (ou a da fonte). O link que vem do Etiqueta não é usado. Com a **extensão desligada**, essas ofertas **esperam** e saem sozinhas quando ela voltar (o *Histórico* avisa; não vão para a revisão). Com o modo de link em "Link direto" (sem etiqueta, só para testar), as ofertas do Mercado Livre do catálogo **não saem**, porque seriam links comuns.
+- **Amazon**: o link é **remontado** como `https://www.amazon.com.br/dp/<ASIN>?tag=<sua tag>`, com a **tag de *Conexões → Amazon***. Sem a tag salva, as ofertas da Amazon esperam (com aviso).
+- **Shopee**: **toda** oferta da Shopee vai para a **revisão**. O link curto do Etiqueta não prova de quem é a conta de afiliado, por isso o Dono confere antes. Aprovada, sai com o link `s.shopee.com.br` do próprio catálogo (qualquer outro endereço é recusado), não pela API nem pela extensão da Shopee.
+- **Foto**: só de endereços de imagem da própria loja (Mercado Livre, Amazon e Shopee). Foto de outro lugar é descartada e a mensagem sai só com texto.
+
+Uma regra cujas fontes são **só Catálogo de Amazon e/ou Shopee dispensa a etiqueta do Mercado Livre**: o campo "Etiqueta padrão" fica opcional e o servidor não recusa a regra por falta dela. Se alguma fonte puder trazer Mercado Livre (inclusive um Catálogo sem lojas marcadas, que vale por todas), a etiqueta continua obrigatória.
+
+### O que vai para a revisão
+
+Nenhuma oferta suspeita sai sozinha. Vão para a revisão, em vez de ser enviadas:
+
+- toda oferta da **Shopee**;
+- oferta com **desconto de 100%**;
+- oferta com **preço antigo 10 vezes maior** que o preço (ou mais), provável erro de preço no catálogo;
+- oferta cujo **link não pôde ser gerado** (falha daquele item; o painel tenta de novo na hora de enviar e, se falhar de novo, o motivo aparece na linha da oferta no *Histórico*).
+
+Elas contam nas "ofertas por envio" da regra. Cada regra guarda **no máximo 50** ofertas esperando: acima disso, as novas esperam sem entrar na fila (chip "Revisão cheia (50)" e aviso no *Histórico* a cada execução) até você revisar ou descartar algumas.
+
+**Só o Dono revisa.** Em *Histórico → Tipo → Catálogo* há a lista de tudo o que passou pelo catálogo (enviadas sozinhas, enviadas pela revisão, para revisar e descartadas). Em "Para revisar", o botão **Revisar** abre a oferta: o Dono abre o link para conferir o produto, corrige título, preços, cupom, frete e foto se precisar, e **envia** (para os grupos, o template e a opção de foto da regra) ou **descarta**. A revisão aceita cupom de até 100 caracteres (o do catálogo). Se o envio não chegar a **nenhum** grupo, a linha mostra o erro e o botão **Enviar de novo** (só o Dono), que abre a mesma tela. O Operador vê a lista, mas não revisa nem envia (o servidor responde 403). O número de ofertas para revisar aparece no cartão da regra, no *Histórico* e no menu, só para o Dono.
+
+**Não existe "Enviar mesmo com 100%".** Com preço antigo 10 vezes maior que o preço (ou um 100% que saia da conta dos dois preços), o "Enviar" só funciona depois de você **corrigir o preço ou apagar o preço antigo** ("Corrija o preço ou apague o preço antigo para enviar."); sem preço antigo, a mensagem sai sem o "de/por" e sem desconto. Quando o 100% é só o número informado pelo Etiqueta (comum na Shopee, que não traz preço antigo), o "Enviar" fica liberado depois da revisão: esse número **nunca vai na mensagem**, que sai sem desconto (ou com o desconto calculado dos dois preços, se houver preço antigo). O servidor confere de novo a conta com os valores enviados. A lista do *Histórico* mostra no máximo as 200 mais recentes; com mais que isso, filtre por disparo (cada um guarda até 50 para revisar). O envio aprovado usa a fila de envios (as pausas de *Ajustes* valem) e precisa do WhatsApp conectado; no Mercado Livre também da extensão on-line e da etiqueta, e na Amazon da tag. Se outra pessoa já tratou a oferta, a tela avisa "Esta oferta já foi tratada."
+
+### Privacidade e segurança
+
+- **O token nunca vai a banco, log, URL, mensagem de erro, resposta da API do painel nem tela.** O painel guarda só o **endereço** e o **caminho** do arquivo (nenhum dos dois é segredo). O arquivo é **lido a cada pedido**, só numa variável local, e o conteúdo é conferido (formato de token, até 4096 bytes, arquivo comum) antes de ir ao Etiqueta; um arquivo qualquer não vira cabeçalho. Sem caminho salvo, o programa não lê nem chama nada.
+- **O Etiqueta só aceita pedidos do servidor, nunca do navegador** (ele recusa pedidos com `Origin`). Por isso o painel não fala com ele: tudo passa pelas rotas do próprio programa. O servidor só chama endereços deste computador, não segue redirecionamentos, desiste em 15 segundos e limita a resposta a 2 MiB.
+- Os textos que vêm do Etiqueta (título, categoria, cupom) são tratados como texto cru e escapados em toda a tela.
+- O que fica em `data/disparador.db`: as categorias da última verificação (`settings`), o ponto de partida de cada fonte (`catalogo_cursores`) e, para cada oferta tratada, título, preço, foto, categoria e link (`catalogo_itens`). **Não há dado pessoal**, mas os backups carregam tudo isso. Apagar uma regra apaga na hora os itens e o ponto de partida dela; "Limpar já enviadas" apaga também as enviadas do catálogo (as em revisão e as descartadas ficam).
+
 ## Relatórios e avisos
 
 Em *Comunicação → Relatórios e avisos* você cadastra os **números que recebem** o resumo diário e os avisos, direto no WhatsApp:
@@ -318,6 +405,7 @@ Em *Conta → Conexões* ficam os cartões das lojas:
 - **Mercado Livre**: etiquetas e a extensão do Chrome (que antes ficavam em *Etiquetas* e *Ajustes*). O cartão diz o que falta para o disparo funcionar.
 - **Amazon**: tag de associado, ID e segredo da credencial da API e versão da credencial, com o botão **Testar**. O selo do cartão diz em que ponto está: *Falta configurar* (sem tag), *Só com a tag* (os dados vêm do texto da mensagem), *Credencial salva* (ainda não confirmada) ou *Conectada* (a Amazon aceitou). Passo a passo e requisitos em [Espelhamento da Amazon](#espelhamento-da-amazon).
 - **Shopee**: ID de afiliado, AppID e Senha da API (os dois últimos opcionais), com o botão **Testar** e a linha que diz se a extensão do Chrome está conectada. O selo do cartão diz em que ponto está: *Falta configurar* (sem ID de afiliado), *Só com o ID* (os links saem pela extensão; é o ponto normal enquanto a Shopee não libera a API), *Credenciais salvas* (ainda não confirmadas), *Conectada* (a Shopee aceitou), *Sem acesso à API* (a Shopee ainda não liberou a API para a conta) ou *Credencial recusada* (AppID ou Senha recusados, ou conta com restrição). *Sem acesso* e *Credencial recusada* **não impedem o disparo** se a extensão estiver conectada: o link cai para ela. O AppID não pode ser igual ao ID de afiliado (são números diferentes; o painel recusa). **Testar** faz uma consulta real à API e responde com uma frase por resultado (aceita, não configurada, recusada, sem acesso, conta restrita, limite de consultas, Shopee fora do ar); se as credenciais forem aceitas mas faltar o ID de afiliado, avisa. Passo a passo e requisitos em [Disparo manual com um link da Shopee](#disparo-manual-com-um-link-da-shopee).
+- **Catálogo do Etiqueta**: endereço do app Etiqueta e **caminho** do arquivo do token (nunca o token), com o botão **Testar** e a lista de categorias. Não é loja: é uma **fonte de ofertas** do *Disparo automático*. Passo a passo, estados e revisão em [Catálogo do Etiqueta](#catálogo-do-etiqueta).
 - **Magalu e Facebook**: mostram **"ainda não implementado"**. Você já pode preencher e salvar os dados (nome da loja de parceiro etc.), mas nenhum envio usa essas lojas ainda. Hoje só o Mercado Livre, a Amazon e a Shopee enviam.
 - **Segredos nunca voltam ao navegador**: depois de salvos, o painel só mostra que o campo está preenchido. Deixar o campo vazio mantém o valor salvo; digitar um valor novo substitui.
 
@@ -343,9 +431,9 @@ A versão **1.3.0** da extensão acrescenta a permissão para `affiliate.shopee.
 
 ## O que foi testado e o que não foi
 
-Testado (`npm test`, mais de 100 testes; a saída do comando mostra o número atual): disparo manual, mensagens e enquetes (agendamento, repetição, pausar e cancelar, retomada após reinício, atraso máximo), conexões e segredos, avisos e resumo diário, equipe (migração da senha única, login por e-mail, convites, papéis), várias fontes por regra, próximo grupo, visão geral, eventos de grupo, blocos, rotacionador, login, sessão, Host/Origin, token da extensão, cabeçalhos, backup e restauração, várias categorias, template, horário de funcionamento (inclusive virando a noite), envio para vários grupos, etiquetas separadas por regra, não repetir ofertas, filtros de preço e desconto, leitura da lista da Central de Afiliados, fila de pedidos com a extensão, API do painel e proteções. Da Amazon: o ASIN de cada formato de link, o link curto resolvido por redirecionamentos simulados, a API e o texto da origem (com as mensagens de exemplo do dono), o template com trecho opcional, o ouvinte de mensagens dos grupos, o cartão em Conexões e o Disparo manual. Da Shopee: os ids de cada formato de link, o link curto resolvido por redirecionamentos simulados (só em endereços da Shopee), a assinatura e os erros da API, o cliente de rede compartilhado com a Amazon (`test/rede.test.js`), o pedido do link pela extensão e a recusa de link que não é `s.shopee.com.br` (`test/links.test.js`), a extensão (`test/extensao-shopee.test.js`, com o portal simulado: sessão vencida, aba fechada, outra conta), a conferência do ID de afiliado pelo endereço longo, os estados do cartão e o Testar em Conexões e o Disparo manual (Identificar, criar, agendar, produto fora do programa, API e extensão fora do ar), com a API e o portal sempre simulados. O espelhamento: receber a mensagem (formatos de texto, anti-laço, só grupos), decidir cada item (repetida, palavra bloqueada, janela e máximo por hora, fila, formato curto, completar, expirar, recuperar após queda), as rotas, a ligação ao agendador e a privacidade, tudo com `fetch` e WhatsApp simulados.
+Testado (`npm test`, mais de 100 testes; a saída do comando mostra o número atual): disparo manual, mensagens e enquetes (agendamento, repetição, pausar e cancelar, retomada após reinício, atraso máximo), conexões e segredos, avisos e resumo diário, equipe (migração da senha única, login por e-mail, convites, papéis), várias fontes por regra, próximo grupo, visão geral, eventos de grupo, blocos, rotacionador, login, sessão, Host/Origin, token da extensão, cabeçalhos, backup e restauração, várias categorias, template, horário de funcionamento (inclusive virando a noite), envio para vários grupos, etiquetas separadas por regra, não repetir ofertas, filtros de preço e desconto, leitura da lista da Central de Afiliados, fila de pedidos com a extensão, API do painel e proteções. Da Amazon: o ASIN de cada formato de link, o link curto resolvido por redirecionamentos simulados, a API e o texto da origem (com as mensagens de exemplo do dono), o template com trecho opcional, o ouvinte de mensagens dos grupos, o cartão em Conexões e o Disparo manual. Da Shopee: os ids de cada formato de link, o link curto resolvido por redirecionamentos simulados (só em endereços da Shopee), a assinatura e os erros da API, o cliente de rede compartilhado com a Amazon (`test/rede.test.js`), o pedido do link pela extensão e a recusa de link que não é `s.shopee.com.br` (`test/links.test.js`), a extensão (`test/extensao-shopee.test.js`, com o portal simulado: sessão vencida, aba fechada, outra conta), a conferência do ID de afiliado pelo endereço longo, os estados do cartão e o Testar em Conexões e o Disparo manual (Identificar, criar, agendar, produto fora do programa, API e extensão fora do ar), com a API e o portal sempre simulados. O espelhamento: receber a mensagem (formatos de texto, anti-laço, só grupos), decidir cada item (repetida, palavra bloqueada, janela e máximo por hora, fila, formato curto, completar, expirar, recuperar após queda), as rotas, a ligação ao agendador e a privacidade, tudo com `fetch` e WhatsApp simulados. Do Catálogo (com um Etiqueta falso, em servidor HTTP local de porta aleatória e token falso em pasta temporária; nenhum teste chama o Etiqueta real nem lê o token real): o cliente e o token (`test/catalogo.test.js`: leitura do arquivo a cada pedido, formato do token, endereço só local, token fora de URL, erro, log e console, 401, 503, rede, resposta fora do contrato, um pedido por vez, páginas de 200, ponto de partida em Novidades, cursor recusado, oferta para candidato por loja, foto por CDN), a fila de revisão e o envio aprovado (`test/catalogo-itens.test.js`: teto de 50, dois "Enviar" ao mesmo tempo geram um envio só, preço suspeito recusado, link por loja, ML em modo direto recusado), as regras ponta a ponta (`test/catalogo-regras.test.js`: Novidades, as outras ordens, revisão, espera por loja indisponível, etiqueta opcional, pré-visualização sem gravar), o cartão em Conexões e as rotas (`test/conexoes.test.js`, `test/servidor.test.js`) e os textos escapados no painel (`test/catalogo-conexoes-painel.test.js`, `test/catalogo-painel.test.js`).
 
-Conferido uma vez contra a Central de Afiliados real (02/11/2026): a lista de produtos e a geração do link `meli.la` com etiqueta. O Mercado Livre pode mudar esses endereços sem aviso; se isso acontecer, o *Histórico* mostra o motivo. **Não testado contra o WhatsApp real**, porque exige a sua conta. **A Amazon também nunca foi testada de verdade**: a Creators API, o token e os encurtadores são sempre simulados nos testes. Quem confirma que a sua conta tem acesso é o botão **Testar** em *Conexões → Amazon*. **A Shopee também nunca foi testada de verdade**: a Open API de Afiliados (sem acesso na conta do dono em 03/11/2026), o "Link personalizado" do portal (endereço interno, sem documentação, que a Shopee pode mudar sem aviso) e a foto vinda do CDN da Shopee são simulados nos testes. O formato dos códigos de erro da API foi tirado da documentação e o parser é tolerante: erro desconhecido vira "a Shopee não respondeu agora". Quem confirma na sua conta é o botão **Testar** em *Conexões → Shopee* (para a API) e um primeiro disparo manual com a extensão conectada (para o link).
+Conferido uma vez contra a Central de Afiliados real (02/11/2026): a lista de produtos e a geração do link `meli.la` com etiqueta. O Mercado Livre pode mudar esses endereços sem aviso; se isso acontecer, o *Histórico* mostra o motivo. **Não testado contra o WhatsApp real**, porque exige a sua conta. **A Amazon também nunca foi testada de verdade**: a Creators API, o token e os encurtadores são sempre simulados nos testes. Quem confirma que a sua conta tem acesso é o botão **Testar** em *Conexões → Amazon*. **A Shopee também nunca foi testada de verdade**: a Open API de Afiliados (sem acesso na conta do dono em 03/11/2026), o "Link personalizado" do portal (endereço interno, sem documentação, que a Shopee pode mudar sem aviso) e a foto vinda do CDN da Shopee são simulados nos testes. O formato dos códigos de erro da API foi tirado da documentação e o parser é tolerante: erro desconhecido vira "a Shopee não respondeu agora". Quem confirma na sua conta é o botão **Testar** em *Conexões → Shopee* (para a API) e um primeiro disparo manual com a extensão conectada (para o link). **O Catálogo foi conferido uma vez contra o Etiqueta real (03/11/2026), só leitura** (conexão, token, categorias); o envio de ofertas dele aos grupos nunca foi feito de verdade, e que a Central de Afiliados gera o `meli.la` a partir da página `produto.mercadolivre.com.br/MLB-<n>` ainda não foi conferido: se falhar, a oferta vai para a revisão como "não consegui gerar o link". Confira com uma oferta antes de ligar uma regra grande.
 
 - Na fonte *Lista de links*, se o título e o preço não forem lidos sozinhos, escreva-os na linha: `link | título | preço | preço antigo | cupom`.
 - A *Busca por palavra-chave* é experimental: a API pública do Mercado Livre pode recusar o acesso sem login.
@@ -356,6 +444,7 @@ Conferido uma vez contra a Central de Afiliados real (02/11/2026): a lista de pr
 - **Números de telefone e e-mails em `data/`:** além do pseudônimo dos membros, o banco guarda os **números de WhatsApp que você cadastra para receber avisos** (tabela `aviso_destinos`) e os **nomes e e-mails da equipe e dos convidados** (tabelas `users` e `invites`). A API mostra o número mascarado; o programa não escreve número nem e-mail no log nem em mensagem de erro. **Os backups carregam tudo isso**: trate-os como dado pessoal.
 - **Convites:** o banco guarda só uma impressão (hash) do link, nunca o link. Convites usados, cancelados ou vencidos são apagados 30 dias depois, na próxima vez que a tela *Equipe* abre. Para apagar os dados de alguém da equipe, remova a pessoa em *Equipe* (o e-mail ainda fica no convite que ela usou até essa limpeza).
 - **Espelhamento da Amazon**: o programa ouve os grupos de origem, mas entrega ao espelhamento só `{ grupo, se foi do seu número, texto, id da mensagem, hora }`: **nunca o número, o identificador nem o nome de exibição de quem postou**. Só os links da Amazon são tratados; o resto da conversa é descartado. Na tabela `espelho_itens` ficam o JID e o **nome do grupo** de origem, o id da mensagem (só para não processar duas vezes) e o **texto da mensagem**, guardado **mascarado** (e-mails, telefones e qualquer sequência de 8 ou mais dígitos viram `…`) e cortado em **1000 caracteres**. Esse texto **não vai para o navegador** (nem na fila de completar) e **não entra no log**, que usa só nomes de grupo. Para a Amazon vão o link postado (para abrir o encurtador), o código do produto e a sua tag, nunca o texto da mensagem, o grupo ou quem postou. **Os backups carregam esses textos de grupos de terceiros**: mesmo mascarados, trate o pacote como dado pessoal. **Retenção:** os itens já decididos (enviados, descartados, expirados, com erro) são apagados depois do prazo de *Ajustes → Privacidade dos grupos* (padrão 90 dias; **0 = guardar para sempre**, e então os textos também ficam), na limpeza que roda ao iniciar e a cada 6 h. Ficam de fora dessa limpeza o que ainda está na fila de decisão ou na fila para completar (esta expira sozinha, veja [Fila para completar](#fila-para-completar)) e o item enviado que ainda conta para o "não repetir" do espelhamento. **Apagar um espelhamento apaga na hora todos os itens e textos dele.** O botão *Apagar o que já passou do prazo* de *Ajustes* aplica a mesma regra na hora, inclusive aos itens do espelhamento.
+- **Catálogo do Etiqueta**: o token fica num arquivo seu; o programa guarda só o caminho, lê o arquivo a cada pedido e nunca o põe em banco, log, URL, mensagem de erro ou tela. Ficam no banco as ofertas já tratadas (título, preço, foto, categoria e link), sem dado pessoal; veja [Privacidade e segurança](#privacidade-e-segurança) do Catálogo.
 - **Fotos enviadas:** as fotos de *Disparar mensagem* ficam em `data/uploads/` e são apagadas **7 dias depois** de não terem mais nenhum envio ativo (agendado ou repetido) que as use.
 - **Retenção:** eventos, leituras e cliques são apagados depois do prazo de *Ajustes → Privacidade dos grupos* (padrão 90 dias; a limpeza roda ao iniciar e a cada 6 h). Sessões vencidas também.
 - **Exclusão por titular:** `POST /api/privacidade/apagar-participante` com `{ "id": "5511999999999" }` apaga tudo daquela pessoa.

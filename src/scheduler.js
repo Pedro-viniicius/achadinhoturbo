@@ -1,7 +1,8 @@
 import { addLog, parseRule, getSetting } from './db.js';
 import { renderTemplate } from './template.js';
 import * as mlDefault from './ml.js';
-import { IMAGEM_PERMITIDA } from './ml.js';
+import { imagemPermitida } from './lojas.js';
+import { motivosDeRevisao, precisaEtiqueta } from './catalogo.js';
 import { createEnvios } from './envios.js';
 import { createAvisos } from './avisos.js';
 import { createEspelho } from './espelho.js';
@@ -9,6 +10,26 @@ import { sleep, jitter } from './util.js';
 
 // Pausas entre mensagens: moram em ./util.js (src/envios.js usa o mesmo ritmo anti-bloqueio); reexportadas aqui.
 export { sleep, jitter };
+
+// Fonte "catalogo" (plano fonte-catalogo-etiqueta, etapa 4)
+const LOJAS_CATALOGO = new Set(['ml', 'amazon', 'shopee']);
+const SONDA_ASIN = 'B000000000'; // montarLink com um ASIN de sonda diz se há tag da Amazon salva, sem rede
+const LINK_ML_PREVIA = 'https://meli.la/(gerado no envio)';
+/** Motivos de revisão (src/catalogo-itens.js MOTIVOS) no Histórico. */
+const TEXTO_MOTIVO = {
+  shopee: 'Shopee, confirme o link', desconto_100: 'desconto de 100%, confira o preço',
+  preco_antigo: 'preço antigo muito alto, confira o preço', falha_link: 'não consegui gerar o link',
+};
+/** Por que ofertas do catálogo esperam (não vão à revisão nem contam como enviadas): aviso a cada execução. */
+const TEXTO_ESPERA = {
+  ml_direto: 'do Mercado Livre esperando: os links estão no modo direto, sem comissão. Volte ao modo da extensão em Ajustes.',
+  ml_extensao: 'do Mercado Livre esperando a extensão do Chrome conectar.',
+  etiqueta: 'do Mercado Livre esperando: escolha uma etiqueta na regra.',
+  amazon: 'da Amazon esperando: falta a tag de associado em Conexões → Amazon.',
+  revisao_cheia: 'esperando: a revisão desta regra está cheia. Revise ou descarte as ofertas pendentes.',
+};
+const qtdOfertas = (n) => `${n} ${n === 1 ? 'oferta' : 'ofertas'}`;
+
 const toMin = (hhmm) => { const [h, m] = String(hhmm).split(':').map(Number); return h * 60 + (m || 0); };
 
 /** O horário de funcionamento pode virar a noite (ex.: 20:00 até 02:00). */
@@ -35,8 +56,11 @@ export function alignToWindow(ts, start, end) {
  * espelho marca os itens com o motivo. `shopee`: o cliente único de src/shopee.js (createShopee, também criado em
  * src/server.js), só para a fila de envios (o espelho não trata a Shopee); sem ele, a fila recusa oferta da Shopee.
  * O espelho só decide: o que ele manda sair vai pela fila de envios.
+ * `catalogo` e `catalogoItens`: o cliente do Etiqueta (src/catalogo.js, createCatalogo) e o registro do que cada
+ * regra já tratou com a fila de revisão (src/catalogo-itens.js, createCatalogoItens), criados em src/server.js; sem
+ * os dois, a fonte "catalogo" das regras falha como indisponível (as outras fontes seguem).
  */
-export function createScheduler({ db, wa, links, ml = mlDefault, fast = false, dir = null, amazon = null, shopee = null }) {
+export function createScheduler({ db, wa, links, ml = mlDefault, fast = false, dir = null, amazon = null, shopee = null, catalogo = null, catalogoItens = null }) {
   const running = new Set();
   let timer = null; let primeiro = null; let ticking = false; let recuperacao = null;
   let acordado = false; // um "agora" chegou com o tick em andamento: ele passa nos envios de novo antes de terminar
@@ -60,12 +84,118 @@ export function createScheduler({ db, wa, links, ml = mlDefault, fast = false, d
     return !!db.prepare('SELECT 1 FROM sent_offers WHERE rule_id = ? AND offer_key = ? AND sent_at > ? LIMIT 1').get(rule.id, key, since);
   }
 
-  /** Escolhe as próximas ofertas da regra (sem enviar nada). */
-  async function pickOffers(rule, want) {
-    const cands = await ml.candidates(rule, { links, onWarn: (m) => log(rule, { level: 'aviso', message: m }) });
+  // ---------- fonte "catalogo" (D4 a D9 do plano fonte-catalogo-etiqueta)
+  const fonteCatalogo = catalogo && catalogoItens ? catalogo : null;
+  const fontesDa = (rule) => (rule.sources?.length ? rule.sources : [{ type: rule.source_type }]);
+  const doCatalogo = (rule, c) => fontesDa(rule)[c.source_index ?? 0]?.type === 'catalogo';
+
+  function temTagAmazon() {
+    if (typeof amazon?.montarLink !== 'function') return false;
+    try { amazon.montarLink(SONDA_ASIN); return true; } catch { return false; }
+  }
+
+  /** O Mercado Livre gera link de afiliado agora? null = sim; senão o motivo da espera (modo direto = link comum, CA4). */
+  function esperaDoMl() {
+    const modo = links?.modo?.();
+    if (modo === 'fake') return null;
+    if (modo === 'extension') return links.status?.().online ? null : 'ml_extensao';
+    return 'ml_direto';
+  }
+
+  /** Loja da oferta do catálogo indisponível agora (espera, sem revisão)? A Shopee sai só pela revisão: nunca espera. */
+  const esperaDaLoja = (c) => (c.loja === 'ml' ? esperaDoMl() : c.loja === 'amazon' && !temTagAmazon() ? 'amazon' : null);
+
+  /**
+   * Link de afiliado de uma oferta do catálogo (D4): ML gerado de novo pela extensão com a etiqueta (nunca o do
+   * Etiqueta); Amazon remontada com a tag de Conexões. → { link } | { espera } (loja indisponível) | { falha }.
+   */
+  async function linkDoCatalogo(offer, etq) {
+    if (offer.loja === 'amazon') {
+      if (!temTagAmazon()) return { espera: 'amazon' };
+      try { return { link: amazon.montarLink(offer.asin) }; } catch { return { falha: 'link da Amazon inválido' }; }
+    }
+    if (offer.loja !== 'ml') return { falha: 'loja sem link automático' };
+    const antes = esperaDoMl();
+    if (antes) return { espera: antes };
+    if (!etq) return { espera: 'etiqueta' };
+    try { return { link: await links.requestLink({ url: offer.url, tag: etq.name }) }; } catch (e) {
+      const depois = esperaDoMl(); // a extensão caiu no meio: espera, não vai à revisão (P8)
+      return depois ? { espera: depois } : { falha: e?.message || 'erro' };
+    }
+  }
+
+  /**
+   * Estado de uma execução: o que o catálogo leu (para o cursor), o que os filtros da regra recusaram, o que esperou
+   * e as chaves que cada fonte trouxe (vistas: o catálogo conta a de outra fonte como tratada, R11).
+   */
+  const novaExecucao = () => ({ paginas: new Map(), recusadas: new Set(), esperando: new Map(), vistas: new Set() });
+  // a regra apagada no meio da execução não grava nada do catálogo: o id pode ser reaproveitado por uma regra nova
+  const regraExiste = (id) => !!db.prepare('SELECT 1 FROM rules WHERE id = ?').get(id);
+  const esperar = (exec, motivo) => exec.esperando.set(motivo, (exec.esperando.get(motivo) || 0) + 1);
+
+  /**
+   * Fim da execução de uma regra com catálogo: um aviso por motivo de espera e o cursor de cada fonte "Novidades"
+   * (avancar: as recusadas pelos filtros contam como tratadas). Nunca lança: o finally do runRule segue.
+   */
+  function fecharCatalogo(rule, exec) {
+    try {
+      for (const [motivo, n] of exec.esperando) {
+        log(rule, { level: 'aviso', message: `Catálogo do Etiqueta: ${qtdOfertas(n)} ${TEXTO_ESPERA[motivo]}` });
+      }
+    } catch (e) { console.error('[agendador] catálogo (aviso):', e?.code || e?.name || 'erro'); }
+    if (!fonteCatalogo || !exec.paginas.size) return;
+    try {
+      fonteCatalogo.avancar(rule.id, exec.paginas, (c, modo) => exec.recusadas.has(c.key) || catalogoItens.tratada(rule, c, modo));
+    } catch (e) {
+      // só o código: erro do banco pode trazer valores da query
+      console.error('[agendador] catálogo (cursor):', e?.code || e?.name || 'erro');
+      try { log(rule, { level: 'erro', message: 'Catálogo do Etiqueta: não consegui guardar até onde a regra leu; a próxima execução relê as mesmas ofertas.' }); } catch { /* banco fora */ }
+    }
+  }
+
+  /**
+   * A regra usaria esta oferta do catálogo agora? Os mesmos filtros do pickOffers: loja conhecida, filtros de preço e
+   * desconto da regra, loja disponível (sem espera) e, se ela iria à revisão, revisão com vaga. Só as utilizáveis
+   * contam para o alvo da leitura do catálogo (Q4, Q5): as que seriam recusadas ou esperariam não prendem a leitura
+   * nas primeiras páginas. A revisão cheia é lida uma vez por execução (nada é registrado durante a escolha).
+   */
+  function utilizavelNa(rule) {
+    let cheia = null;
+    return (c) => {
+      if (!LOJAS_CATALOGO.has(c?.loja) || ml.rejectReason(c, rule) || esperaDaLoja(c)) return false;
+      if (!motivosDeRevisao(c).length) return true;
+      cheia ??= catalogoItens.revisaoCheia(rule.id);
+      return !cheia;
+    };
+  }
+
+  /**
+   * Escolhe as próximas ofertas da regra (sem enviar nada nem gravar no banco). `exec` (novaExecucao) recebe o que
+   * o catálogo leu, as recusadas pelos filtros e as que esperam. Oferta do catálogo: já vem completa (sem
+   * resolveOffer) e sem as tratadas, não conta em maxTries; sai com `catalogo: true` e `motivos` de revisão.
+   * `previa`: pré-visualização (o catálogo não faz a primeira leitura até o fim nem escreve avisos, S3).
+   */
+  async function pickOffers(rule, want, exec = novaExecucao(), { previa = false } = {}) {
+    const cands = await ml.candidates(rule, {
+      links, onWarn: (m) => log(rule, { level: 'aviso', message: m }),
+      catalogo: fonteCatalogo, quer: want, paginas: exec.paginas, vistas: exec.vistas, previa,
+      tratada: (c, modo) => catalogoItens.tratada(rule, c, modo),
+      utilizavel: fonteCatalogo ? utilizavelNa(rule) : undefined,
+    });
     const picked = []; let tried = 0; const maxTries = Math.max(want * 8, 10);
     for (const c of cands) {
-      if (picked.length >= want || tried >= maxTries) break;
+      if (picked.length >= want) break;
+      if (doCatalogo(rule, c)) {
+        if (!LOJAS_CATALOGO.has(c.loja)) continue;
+        if (ml.rejectReason(c, rule)) { exec.recusadas.add(c.key); continue; }
+        const espera = esperaDaLoja(c);
+        if (espera) { esperar(exec, espera); continue; }
+        const motivos = motivosDeRevisao(c);
+        if (motivos.length && catalogoItens.revisaoCheia(rule.id)) { esperar(exec, 'revisao_cheia'); continue; }
+        picked.push({ ...c, catalogo: true, motivos });
+        continue;
+      }
+      if (tried >= maxTries) continue;
       if (wasSent(rule, c.key)) continue;
       tried++;
       let offer;
@@ -85,9 +215,11 @@ export function createScheduler({ db, wa, links, ml = mlDefault, fast = false, d
     if (!rule) throw new Error('Regra não encontrada');
     if (running.has(id)) return { skipped: 'já está em andamento' };
     running.add(id);
-    const summary = { offers: 0, messages: 0, errors: 0 };
+    const summary = { offers: 0, messages: 0, errors: 0, revisao: 0 };
+    const exec = novaExecucao();
     let retrySoon = false;
     try {
+      liberarFalhosDoCatalogo(); // envio aprovado sem nenhum grupo ok não conta no "dias sem repetir" (R3)
       if (!wa.isReady()) {
         log(rule, { level: 'erro', message: 'WhatsApp desconectado: nada foi enviado.' });
         retrySoon = true; summary.errors++; return summary;
@@ -96,11 +228,12 @@ export function createScheduler({ db, wa, links, ml = mlDefault, fast = false, d
       const tpl = rule.template_id && db.prepare('SELECT * FROM templates WHERE id = ?').get(rule.template_id);
       const groups = rule.group_jids
         .map((jid) => db.prepare('SELECT * FROM groups WHERE jid = ?').get(jid)).filter(Boolean);
-      const problem = !tag ? 'escolha uma etiqueta' : !tpl ? 'escolha um template' : !groups.length ? 'escolha ao menos um grupo' : null;
+      // etiqueta do ML só se alguma fonte pode trazer oferta do ML (D8, CA6)
+      const problem = !tag && precisaEtiqueta(rule.sources) ? 'escolha uma etiqueta' : !tpl ? 'escolha um template' : !groups.length ? 'escolha ao menos um grupo' : null;
       if (problem) { log(rule, { level: 'erro', message: `Regra incompleta: ${problem}.` }); summary.errors++; return summary; }
 
       let picked;
-      try { picked = await pickOffers(rule, rule.per_run); } catch (e) {
+      try { picked = await pickOffers(rule, rule.per_run, exec); } catch (e) {
         log(rule, { level: 'erro', message: 'Não consegui buscar ofertas: ' + e.message }); summary.errors++; return summary;
       }
       if (!picked.length) { log(rule, { level: 'info', message: 'Sem ofertas novas dentro dos filtros desta vez.' }); return summary; }
@@ -110,30 +243,56 @@ export function createScheduler({ db, wa, links, ml = mlDefault, fast = false, d
       for (let i = 0; i < picked.length; i++) {
         const offer = picked[i]; const etq = tagDaFonte(offer);
         let link;
-        try { link = await links.requestLink({ url: offer.url, tag: etq.name }); } catch (e) {
-          log(rule, { level: 'erro', offer_title: offer.title, message: 'Link de afiliado não gerado: ' + e.message });
-          summary.errors++; continue;
+        if (offer.catalogo) {
+          // revisão em vez de envio (D5): Shopee, preço suspeito ou falha do link deste item
+          let motivos = offer.motivos; let detalhe = '';
+          if (!motivos.length) {
+            const r = await linkDoCatalogo(offer, etq);
+            if (r.espera) { esperar(exec, r.espera); continue; }
+            if (r.link) link = r.link;
+            else { motivos = ['falha_link']; detalhe = ` (${r.falha})`; }
+          }
+          if (motivos.length) {
+            if (!regraExiste(rule.id)) continue;
+            if (catalogoItens.registrar(rule, offer, 'revisao', motivos)) {
+              summary.revisao++;
+              log(rule, { level: 'aviso', offer_title: offer.title, message: `Separada para revisão: ${motivos.map((m) => TEXTO_MOTIVO[m] || m).join(' e ')}${detalhe}.` });
+            } else esperar(exec, 'revisao_cheia');
+            continue;
+          }
+        } else {
+          try { link = await links.requestLink({ url: offer.url, tag: etq.name }); } catch (e) {
+            log(rule, { level: 'erro', offer_title: offer.title, message: 'Link de afiliado não gerado: ' + e.message });
+            summary.errors++; continue;
+          }
         }
         const text = renderTemplate(tpl.body, { ...offer, link }, tplOpts());
         summary.offers++; let okCount = 0;
+        // foto só do CDN da loja da oferta (D9, CA5); as fontes antigas são do Mercado Livre
+        const fotoOk = rule.send_image && imagemPermitida(offer.plataforma || 'mercadolivre', offer.image);
+        const comoSaiu = offer.catalogo && offer.loja === 'amazon' ? 'Enviado pela Amazon, com a sua tag' : `Enviado com a etiqueta ${etq.name}`;
         for (let g = 0; g < groups.length; g++) {
           try {
-            if (rule.send_image && IMAGEM_PERMITIDA.test(offer.image || '')) {
+            if (fotoOk) {
               try { await wa.sendImage(groups[g].jid, offer.image, text); } catch { await wa.sendText(groups[g].jid, text); }
             } else await wa.sendText(groups[g].jid, text);
             okCount++; summary.messages++;
-            log(rule, { level: 'ok', group_name: groups[g].name, offer_title: offer.title, message: `Enviado com a etiqueta ${etq.name}${picked.some((p) => p.source_index !== offer.source_index) ? ` (fonte ${(offer.source_index ?? 0) + 1})` : ''}` });
+            log(rule, { level: 'ok', group_name: groups[g].name, offer_title: offer.title, message: `${comoSaiu}${picked.some((p) => p.source_index !== offer.source_index) ? ` (fonte ${(offer.source_index ?? 0) + 1})` : ''}` });
           } catch (e) {
             summary.errors++;
             log(rule, { level: 'erro', group_name: groups[g].name, offer_title: offer.title, message: 'Falha no envio: ' + e.message });
           }
           if (g < groups.length - 1) await sleep(jitter(d.group));
         }
-        if (okCount) db.prepare('INSERT INTO sent_offers (rule_id, offer_key, sent_at) VALUES (?,?,?)').run(rule.id, offer.key, Date.now());
+        if (okCount && !(offer.catalogo && !regraExiste(rule.id))) {
+          db.prepare('INSERT INTO sent_offers (rule_id, offer_key, sent_at) VALUES (?,?,?)').run(rule.id, offer.key, Date.now());
+          if (offer.catalogo) catalogoItens.registrar(rule, offer, 'enviado');
+        }
         if (i < picked.length - 1) await sleep(jitter(d.offer));
       }
       return summary;
     } finally {
+      fecharCatalogo(rule, exec); // avisos de espera e cursor do catálogo, no fim (nunca na pré-visualização)
       const now = Date.now();
       const next = retrySoon ? now + 60000 : alignToWindow(now + rule.interval_min * 60000, rule.window_start, rule.window_end);
       db.prepare('UPDATE rules SET last_run_at = ?, next_run_at = ? WHERE id = ?').run(now, next, id);
@@ -145,14 +304,34 @@ export function createScheduler({ db, wa, links, ml = mlDefault, fast = false, d
     const rule = getRule(id);
     if (!rule) throw new Error('Regra não encontrada');
     const tpl = rule.template_id && db.prepare('SELECT * FROM templates WHERE id = ?').get(rule.template_id);
-    const picked = await pickOffers(rule, rule.per_run);
+    // execução própria e descartada: nada vai a catalogo_itens, catalogo_cursores, sent_offers nem ao log do
+    // catálogo; Novidades sem cursor pronto não lê (a regra mostra primeira_leitura na fonte, em GET /api/rules)
+    const picked = await pickOffers(rule, rule.per_run, novaExecucao(), { previa: true });
     const nome = (id) => db.prepare('SELECT name FROM tags WHERE id = ?').get(id)?.name;
-    return picked.map((o) => ({ ...o, etiqueta: nome(o.tag_id) || nome(rule.tag_id) || null, fonte: (o.source_index ?? 0) + 1, text: tpl ? renderTemplate(tpl.body, { ...o, link: 'https://meli.la/(gerado no envio)' }, tplOpts()) : '' }));
+    const linkPrevia = (o) => (!o.catalogo || o.loja === 'ml' ? LINK_ML_PREVIA
+      : o.loja === 'amazon' ? `https://www.amazon.com.br/dp/${o.asin}?tag=•••` : o.link);
+    return picked.map((o) => {
+      const motivos = o.catalogo ? o.motivos : [];
+      const etiqueta = o.catalogo && o.loja !== 'ml' ? null : nome(o.tag_id) || nome(rule.tag_id) || null;
+      // revisao/motivos: a oferta iria à revisão em vez de sair (o painel mostra "Esperaria revisão" e o motivo)
+      return { ...o, etiqueta, fonte: (o.source_index ?? 0) + 1, revisao: motivos.length > 0, motivos, text: tpl ? renderTemplate(tpl.body, { ...o, link: linkPrevia(o) }, tplOpts()) : '' };
+    });
   }
 
   /** Envios e avisos chamados pelo tick: se falharem, registra e segue, para nunca travar as regras. */
   async function passo(nome, fn) {
     try { await fn(); } catch (e) { console.error(`[agendador] ${nome}:`, e?.message || e); }
+  }
+
+  /** R3 (src/catalogo-itens.js liberarFalhos): nunca lança; no console só o código do erro (o do banco traz valores). */
+  function liberarFalhosDoCatalogo() {
+    if (typeof catalogoItens?.liberarFalhos !== 'function') return;
+    try { catalogoItens.liberarFalhos(); } catch (e) { console.error('[agendador] catálogo (envios sem grupo ok):', e?.code || e?.name || 'erro'); }
+  }
+  /** Passada da fila de envios e, logo depois, a reserva dos envios do catálogo que terminaram sem grupo ok. */
+  async function passoEnvios() {
+    await passo('envios', () => envios.processarPendentes());
+    liberarFalhosDoCatalogo();
   }
 
   /** Pede um tick já, sem esperar. Se um tick está rodando, ele mesmo passa nos envios antes de terminar. */
@@ -175,7 +354,7 @@ export function createScheduler({ db, wa, links, ml = mlDefault, fast = false, d
     if (ticking) return; ticking = true; acordado = false;
     try {
       await recuperacao; // o primeiro tick espera o recuperar() do start()
-      await passo('envios', () => envios.processarPendentes());
+      await passoEnvios();
       await passo('espelho (fila)', semDetalhe(() => espelho.expirarFila())); // 'na_fila' esquecido → 'expirado'
       await passoEspelho();
       await passo('avisos', () => avisos.tick());
@@ -190,16 +369,17 @@ export function createScheduler({ db, wa, links, ml = mlDefault, fast = false, d
         if (!wa.isReady()) continue;
         await runRule(r.id);
         await passoEspelho();
-        await passo('envios', () => envios.processarPendentes());
+        await passoEnvios();
       }
       // "agora" criado (ou mensagem espelhada recebida) depois da última passada: sai neste tick, não no próximo
       // (até 15 s depois). O espelho vem antes dos envios: o envio que ele criar sai na mesma volta.
-      while (acordado) { acordado = false; await passoEspelho(); await passo('envios', () => envios.processarPendentes()); }
+      while (acordado) { acordado = false; await passoEspelho(); await passoEnvios(); }
     } catch (e) { console.error('[agendador]', e); } finally { ticking = false; }
   }
 
   return {
-    runRule, previewOffers, tick, envios, avisos, amazon, shopee, espelho,
+    // acordar: o "Enviar" aprovado na revisão do catálogo (src/catalogo-itens.js) pede o tick já
+    runRule, previewOffers, tick, acordar, envios, avisos, amazon, shopee, espelho, catalogo, catalogoItens,
     start() {
       if (timer) return;
       // o que ficou 'enviando' (envios) ou 'processando' (espelho) quando o serviço caiu volta antes do primeiro tick

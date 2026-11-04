@@ -116,7 +116,7 @@ function lerPrecos(texto) {
  * letras, com ou sem "/") ou "@usuario", mesmo depois de "...", "+" ou "%". O nome de um host da Amazon sozinho
  * ("Amazon.com.br") não conta.
  */
-function temCaraDeLink(linha) {
+export function temCaraDeLink(linha) {
   const t = linha.replace(RE_PONTO_SOLTO, ' ');
   if (RE_MENCAO.test(t)) return true;
   for (const m of t.matchAll(RE_DOMINIO)) {
