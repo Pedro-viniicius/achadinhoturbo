@@ -363,7 +363,7 @@ Nenhum link comum sai: o link do Etiqueta só é usado onde descrito abaixo.
 - **Shopee**: **toda** oferta da Shopee vai para a **revisão**. O link curto do Etiqueta não prova de quem é a conta de afiliado, por isso o Dono confere antes. Aprovada, sai com o link `s.shopee.com.br` do próprio catálogo (qualquer outro endereço é recusado), não pela API nem pela extensão da Shopee.
 - **Foto**: só de endereços de imagem da própria loja (Mercado Livre, Amazon e Shopee). Foto de outro lugar é descartada e a mensagem sai só com texto.
 
-Uma regra cujas fontes são **só Catálogo de Amazon e/ou Shopee dispensa a etiqueta do Mercado Livre**: o campo "Etiqueta padrão" fica opcional e o servidor não recusa a regra por falta dela. Se alguma fonte puder trazer Mercado Livre (inclusive um Catálogo sem lojas marcadas, que vale por todas), a etiqueta continua obrigatória.
+Uma regra cujas fontes são **só Catálogo de Amazon e/ou Shopee dispensa a etiqueta do Mercado Livre**: o campo "Etiqueta ML padrão" (a etiqueta de afiliado do Mercado Livre) fica opcional e o servidor não recusa a regra por falta dela. Se alguma fonte puder trazer Mercado Livre (inclusive um Catálogo sem lojas marcadas, que vale por todas), a etiqueta continua obrigatória.
 
 ### O que vai para a revisão
 

@@ -127,18 +127,18 @@ const TEXTOS_REGRA_CATALOGO = {
   ],
   ordemNovidades: 'Começa a contar quando você salva: envia o que chegar ou for atualizado no catálogo depois disso (uma nova coleta do Etiqueta conta); a mesma oferta nunca sai duas vezes neste disparo. Para mandar o que já existe, use outra ordem ou “Reler do começo”.',
   ordemOutras: 'Cada envio pega as melhores que ainda não foram enviadas dentro do prazo de repetição.',
-  etiquetaComum: 'Etiqueta desta fonte', etiquetaFonte: 'Etiqueta do Mercado Livre desta fonte',
+  etiquetaComum: 'Etiqueta ML desta fonte', etiquetaFonte: 'Etiqueta ML desta fonte',
   etiquetaNaoSeAplica: 'Não se aplica: os links da Amazon e da Shopee já vêm prontos do catálogo.',
   conexao: 'O catálogo ainda não está conectado. Conecte em <a href="#conexoes" style="text-decoration:underline">Conexões</a> e use “Testar” para ver as categorias.',
   conexaoIndisp: (selo) => `O catálogo está indisponível agora (${selo}). Você pode salvar esta fonte; ela volta a enviar quando o Etiqueta responder.`,
   selos: { indisponivel: 'Indisponível', token_recusado: 'Token recusado' },
-  semML: 'Esta fonte não precisa de etiqueta do Mercado Livre. Se todas as fontes do disparo forem assim, a etiqueta padrão fica opcional.',
+  semML: 'Esta fonte não precisa de etiqueta do Mercado Livre. Se todas as fontes do disparo forem assim, a etiqueta ML padrão fica opcional.',
   comShopee: 'Toda oferta da Shopee espera a sua revisão antes de sair: o link curto da Shopee não prova de quem é a conta. Elas aparecem em Histórico &gt; Catálogo, com o botão “Revisar”.',
   comML: 'Os links do Mercado Livre são gerados de novo, com a etiqueta escolhida acima, pela extensão do Chrome. Com a extensão desligada, essas ofertas esperam e saem sozinhas quando ela voltar; não vão para a revisão.',
   revisao: 'Ofertas com 100% de desconto, com preço antigo 10 vezes maior que o preço ou cujo link falhe ao ser gerado também esperam a sua revisão. Nada disso sai sozinho.',
   amazonTag: 'Amazon: o link é montado com a sua tag de Conexões.',
   amazonSemTag: 'Falta a tag da Amazon. Salve em <a href="#conexoes" style="text-decoration:underline">Conexões &gt; Amazon</a>; sem ela, as ofertas da Amazon esperam.',
-  padraoObrigatoria: 'Etiqueta padrão', padraoOpcional: 'Etiqueta padrão (opcional)', padraoNaoPrecisa: 'Não precisa: as fontes deste disparo só trazem Amazon e Shopee.',
+  padraoObrigatoria: 'Etiqueta ML padrão', padraoOpcional: 'Etiqueta ML padrão', padraoNaoPrecisa: 'Não precisa: as fontes deste disparo só trazem Amazon e Shopee.',
   reler: 'Reler do começo', relerTitulo: 'Reler o catálogo desde o começo no próximo envio',
   relerDica: 'Use para mandar o que já estava no catálogo antes de você salvar a regra, ou depois de reorganizar as categorias no Etiqueta.',
   relerConfirma: 'Na próxima vez, o painel confere o catálogo inteiro de novo, em todas as fontes Catálogo deste disparo. Ofertas já tratadas não são repetidas. Continuar?',
@@ -366,7 +366,7 @@ function fonteHtml(f, i, total) {
   const sc = f.config || {}; const catsSel = new Set(categoriasDe(sc)); const TC = TEXTOS_REGRA_CATALOGO;
   const cc = f.type === 'catalogo' ? sc : {}; const ccLojas = Array.isArray(cc.lojas) ? cc.lojas : []; const ccOrdem = cc.ordem || 'atualizacao';
   return `<div class="fonte sub-campo" data-i="${i}" style="margin-bottom:10px"><legend>Fonte ${i + 1}${total > 1 ? '' : ''} ${total > 1 ? `<button type="button" data-rm-fonte class="leve perigo" style="float:right;padding:2px 8px">Remover</button>` : ''}</legend>
-    <div class="grade" style="margin-bottom:8px"><label class="campo"><span><span class="src-tag-rot">${TC.etiquetaComum}</span> ${q('fonte.etiqueta')}</span><select name="src_tag" aria-describedby="fc${i}-na"><option value="">A etiqueta padrão</option>${S.tags.map((t) => `<option value="${t.id}" ${t.id === f.tag_id ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}</select><small class="src-tag-na" id="fc${i}-na" hidden>${TC.etiquetaNaoSeAplica}</small></label></div>
+    <div class="grade" style="margin-bottom:8px"><label class="campo"><span><span class="src-tag-rot">${TC.etiquetaComum}</span> ${q('fonte.etiqueta')}</span><select name="src_tag" aria-describedby="fc${i}-na"><option value="">A etiqueta ML padrão</option>${S.tags.map((t) => `<option value="${t.id}" ${t.id === f.tag_id ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}</select><small class="src-tag-na" id="fc${i}-na" hidden>${TC.etiquetaNaoSeAplica}</small></label></div>
     <div class="linha">${q('fonte.tipos')}<label><input type="radio" name="st${i}" value="afiliados" ${f.type === 'afiliados' ? 'checked' : ''} style="width:auto"> Central de Afiliados</label>
       <label><input type="radio" name="st${i}" value="list" ${f.type === 'list' ? 'checked' : ''} style="width:auto"> Lista de links</label>
       <label><input type="radio" name="st${i}" value="search" ${f.type === 'search' ? 'checked' : ''} style="width:auto"> Busca por palavra-chave (experimental)</label>
@@ -393,7 +393,7 @@ function fonteHtml(f, i, total) {
         <small>Nenhuma marcada = todas. Com várias, as ofertas saem intercaladas (uma de cada categoria por vez).</small></fieldset>
       <div class="linha"><label><input type="checkbox" name="af_mais_vendidos" ${sc.mais_vendidos ? 'checked' : ''} style="width:auto"> Só mais vendidos</label>${q('fonte.maisvendidos')}
         <label><input type="checkbox" name="af_ganhos_extras" ${sc.ganhos_extras ? 'checked' : ''} style="width:auto"> Só com ganhos extras</label>${q('fonte.ganhos')}</div>
-      <small class="dica">É a lista “Produtos selecionados para você” da sua Central de Afiliados. A extensão do Chrome busca a lista e gera cada link meli.la com a etiqueta desta fonte (ou a padrão).</small></div>
+      <small class="dica">É a lista “Produtos selecionados para você” da sua Central de Afiliados. A extensão do Chrome busca a lista e gera cada link meli.la com a etiqueta ML desta fonte (ou a etiqueta ML padrão).</small></div>
     <div class="f-list"><label class="campo"><span>Um produto por linha ${REQ} ${q('fonte.lista')}</span><textarea name="items" class="mono" rows="5" placeholder="https://produto.mercadolivre.com.br/MLB-123...&#10;https://produto.mercadolivre.com.br/MLB-456... | Fone Bluetooth | 89,90 | 149,90 | CUPOM10">${esc(sc.items || '')}</textarea>
       <small>Formato opcional: link | título | preço | preço antigo | cupom. Se o título e o preço não forem lidos sozinhos, escreva-os aqui.</small></label></div>
     <div class="f-search grade"><label class="campo"><span>Palavra-chave ${REQ}</span><input name="query" value="${esc(sc.query || '')}" placeholder="Ex.: air fryer"></label>
@@ -494,7 +494,7 @@ function formRegra(r) {
     };
     const erros = [];
     if (!String(corpo.name || '').trim()) erros.push({ msg: 'Dê um nome ao disparo automático.', el: $('[name=name]', dlg) });
-    if (!corpo.tag_id && fcatPrecisaEtiqueta(fontes)) erros.push({ msg: 'Escolha a etiqueta padrão (cadastre em Conexões > Mercado Livre se ainda não tiver).', el: $('[name=tag_id]', dlg) });
+    if (!corpo.tag_id && fcatPrecisaEtiqueta(fontes)) erros.push({ msg: 'Escolha a etiqueta ML padrão (cadastre em Conexões > Mercado Livre se ainda não tiver).', el: $('[name=tag_id]', dlg) });
     if (!corpo.template_id) erros.push({ msg: 'Escolha um template.', el: $('[name=template_id]', dlg) });
     fontes.forEach((f, i) => {
       const el = $(`.fonte[data-i="${i}"]`, dlg);
