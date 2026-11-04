@@ -103,23 +103,37 @@ test('CA2: dados parciais: lista o que a Shopee não trouxe e mantém Disparar h
   assert.equal(D.dispShopeeVeredito(RESP({ produto: PRODUTO({ oldPrice: null }) })).tipo, 'completo', 'oldPrice nulo é o normal da Shopee');
 });
 
-test('CA2: causas que bloqueiam (invalido, nao_produto, nao_encontrado): mensagem, seção de dados fora e motivo ao lado do botão', () => {
+test('CA2: causas que bloqueiam (invalido, nao_produto): mensagem, seção de dados fora e motivo ao lado do botão', () => {
   const casos = [
     [RESP({ causa: 'invalido', produto: null, pode_disparar: false }), 'invalido', T.shopee.invalido, 'Cole um link de produto da Shopee.'],
     [RESP({ causa: 'nao_produto', produto: null, pode_disparar: false }), 'nao_produto', 'Este link não leva a um produto específico. Cole o link da página do produto.', 'Cole o link da página do produto.'],
-    [RESP({ causa: 'nao_encontrado', produto: VAZIO(), pode_disparar: false }), 'nao_encontrado', T.shopee.naoEncontrado, 'Produto fora do programa de afiliados.'],
   ];
   for (const [r, tipo, msg, motivo] of casos) {
     const v = D.dispShopeeVeredito(r);
     assert.deepEqual({ ...v }, { tipo, dados: false, mensagem: msg, destaque: true, link: null, bloqueio: motivo, via: '' }, tipo);
   }
   assert.match(T.shopee.invalido, /s\.shopee\.com\.br ou shp\.ee/);
-  assert.match(T.shopee.naoEncontrado, /Ele pode não participar do programa; sem isso não há comissão\./);
+  assert.equal(T.shopee.motivoNaoEncontrado, undefined, 'nao_encontrado não bloqueia: não há motivo ao lado do botão');
   // sem produto e sem causa: tratado como link inválido (nunca habilita)
   assert.equal(D.dispShopeeVeredito(RESP({ produto: null })).bloqueio, 'Cole um link de produto da Shopee.');
   assert.equal(D.dispShopeeVeredito(null).tipo, 'invalido');
   // o link inválido pesa mais que a falta de ID: o dono precisa corrigir o link primeiro
   assert.equal(D.dispShopeeVeredito(RESP({ causa: 'invalido', produto: null, causa_link: 'sem_id', pode_disparar: false })).tipo, 'invalido');
+});
+
+test('Decisão do dono: nao_encontrado (fora do programa) não bloqueia nem mostra aviso: os dados ficam em branco para preencher', () => {
+  const v = D.dispShopeeVeredito(RESP({ causa: 'nao_encontrado', produto: VAZIO(), extra: null, link_via: 'api', pode_disparar: true }));
+  assert.deepEqual({ ...v }, {
+    tipo: 'nao_encontrado', dados: true, mensagem: '', destaque: true, link: null, bloqueio: '', via: 'Vai sair pela API da Shopee.',
+  });
+  assert.equal(T.shopee.naoEncontrado, undefined, 'sem texto de aviso para fora do programa');
+  // sem ID ou sem caminho para o link o bloqueio continua, e é por causa do link
+  const semId = D.dispShopeeVeredito(RESP({ causa: 'nao_encontrado', produto: VAZIO(), causa_link: 'sem_id', link_via: null, pode_disparar: false }));
+  assert.deepEqual([semId.tipo, semId.dados, semId.link.causa, semId.bloqueio], ['nao_encontrado', true, 'sem_id', T.shopee.motivoSemId]);
+  const semLink = D.dispShopeeVeredito(RESP({ causa: 'nao_encontrado', produto: VAZIO(), causa_link: 'sem_link', link_via: null, pode_disparar: false }));
+  assert.equal(semLink.bloqueio, T.shopee.motivoSemLink);
+  // pode_disparar falso do servidor continua valendo
+  assert.equal(D.dispShopeeVeredito(RESP({ causa: 'nao_encontrado', produto: VAZIO(), pode_disparar: false })).bloqueio, T.shopee.motivoGeral);
 });
 
 test('CA2: causa_link sem_id e sem_link bloqueiam, mostram o segundo aviso com o link para Conexões e mantêm os dados editáveis', () => {
@@ -340,9 +354,8 @@ test('CA2: sem_link e sem_id: dados editáveis, segundo aviso com link para Cone
   }
 });
 
-test('CA2: nao_encontrado, nao_produto e invalido: sem seção de dados, Disparar desabilitado com o motivo', async () => {
+test('CA2: nao_produto e invalido: sem seção de dados, Disparar desabilitado com o motivo', async () => {
   for (const [r, texto, motivo] of [
-    [RESP({ causa: 'nao_encontrado', produto: VAZIO(), pode_disparar: false }), /A Shopee não encontrou este produto na API de afiliados/, 'Produto fora do programa de afiliados.'],
     [RESP({ causa: 'nao_produto', produto: null, pode_disparar: false }), /Este link não leva a um produto específico/, 'Cole o link da página do produto.'],
     [RESP({ causa: 'invalido', produto: null, pode_disparar: false }), /Não reconheci este link da Shopee/, 'Cole um link de produto da Shopee.']]) {
     const a = abrirDisparo({ 'POST /api/disparo/identificar': () => ({ status: 200, json: r }) });
@@ -353,6 +366,16 @@ test('CA2: nao_encontrado, nao_produto e invalido: sem seção de dados, Dispara
     assert.equal(a.$('#dm-disparar').disabled, true, r.causa);
     assert.equal(a.$('#dm-motivo').textContent, motivo, r.causa);
   }
+});
+
+test('Decisão do dono: nao_encontrado mostra "Dados da oferta" em branco, sem cartão de aviso, e deixa Disparar habilitado', async () => {
+  const a = abrirDisparo({ 'POST /api/disparo/identificar': () => ({ status: 200, json: RESP({ causa: 'nao_encontrado', produto: VAZIO(), extra: null, link_via: 'api', pode_disparar: true }) }) });
+  a.$('#dm-url').value = 'https://shopee.com.br/Fone-i.123.456';
+  await a.$('#dm-identificar').onclick();
+  assert.equal(a.$('#dm-prod').innerHTML, '', 'sem cartão de aviso');
+  assert.equal(a.$('#dm-dados').filhos.length, 1, 'dados da oferta para preencher');
+  assert.equal(a.$('#dm-disparar').disabled, false, a.$('#dm-motivo').textContent);
+  assert.doesNotMatch(a.$('#dm-prod').innerHTML, /<img/, 'sem produto, sem foto');
 });
 
 test('CA2: sem_acesso (API ainda não liberada): sem cartão, o dono preenche à mão e Disparar fica habilitado (o link sai pelo Chrome)', async () => {

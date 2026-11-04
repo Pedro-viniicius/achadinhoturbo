@@ -720,9 +720,9 @@ test('CA1/CA4: o endereço que o servidor entrega à extensão e à API é aceit
   assert.deepEqual([...new Set(falhas)], []);
 });
 
-// ============================================================================== nao_encontrado bloqueia
+// ============================================================================== nao_encontrado não bloqueia
 
-test('Decisão do dono: nao_encontrado (nó ausente ou de outro item) bloqueia Identificar e Disparar, mesmo com extensão; nada é gravado nem pedido à extensão', async () => {
+test('Decisão do dono (04/11): nao_encontrado (nó ausente ou de outro item) não bloqueia: Identificar libera, sem título recusa, com título à mão cria o envio com o link gerado', async () => {
   for (const api of ['vazio', 'outro-item']) {
     const f = fetchShopee({ api });
     const s = await montar({ fetch: f });
@@ -731,15 +731,23 @@ test('Decisão do dono: nao_encontrado (nó ausente ou de outro item) bloqueia I
       await s.conectar();
       const id = await s.identificar(PRODUTO);
       assert.equal(id.status, 200, id.txt);
-      assert.deepEqual([id.json.causa, id.json.pode_disparar, id.json.link_via], ['nao_encontrado', false, 'api'], api);
+      assert.deepEqual([id.json.causa, id.json.pode_disparar, id.json.link_via, id.json.causa_link], ['nao_encontrado', true, 'api', null], api);
       assert.equal(id.json.produto.title, null);
-      // mesmo com título à mão
-      const r = await s.disparar({ ajustes: { title: 'Fone', price: '10' } });
-      assert.equal(r.status, 400, api);
-      assert.match(r.json.erro, /não encontrou este produto|programa/i);
+      // sem título: a mesma frase dos outros casos de "API sem dados"; nenhum link é gerado
+      const sem = await s.disparar({ ajustes: { price: '10' } });
+      assert.deepEqual([sem.status, sem.json.erro], [400, 'Não consegui buscar os dados na Shopee: preencha o título do produto.'], api);
       assert.equal(s.envios().length, 0);
-      assert.equal(ext.jobs.length, 0, 'nenhum link é pedido para produto fora do programa');
       assert.deepEqual(f.mutacoes(), []);
+      // com título à mão: o link sai como sempre (API primeiro) e o envio é criado
+      const r = await s.disparar({ ajustes: { title: 'Fone', price: '10' } });
+      assert.equal(r.status, 200, `${api}: ${r.txt}`);
+      await s.assentar();
+      assert.equal(f.mutacoes().length, 1, 'o link foi pedido à API uma vez');
+      assert.equal(ext.jobs.length, 0, 'a API deu o link: a extensão não é usada');
+      const [p] = s.payloads();
+      assert.deepEqual([p.link_afiliado, p.fonte_dados, p.offer.title], [LINK_API, 'manual', 'Fone'], api);
+      assert.equal(s.envios()[0].status, 'concluido');
+      assert.ok(s.msgs()[0].text.includes(LINK_API), 'a mensagem leva o link de afiliado');
     } finally { await ext.parar(); await s.fechar(); }
   }
 });

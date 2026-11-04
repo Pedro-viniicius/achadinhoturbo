@@ -1580,10 +1580,10 @@ test('CA3: identificar Shopee sem dados da API: 10035 → campos nulos e sem_ace
     assert.deepEqual([r.causa, r.link_via, r.causa_link, r.pode_disparar], ['sem_credenciais', 'extensao', null, true]);
     s.estado.modo = 'extension';
 
-    // a API não devolve o produto (fora do programa): bloqueia
+    // a API não devolve o produto (fora do programa): não bloqueia (decisão do dono, 04/11); o painel avisa da comissão
     s.salvarShopee(CONEXAO_SHOPEE); s.estado.nos = [];
     r = await ident();
-    assert.deepEqual([r.causa, r.produto, r.link_via, r.causa_link, r.pode_disparar], ['nao_encontrado', VAZIA_SHOPEE, 'api', null, false]);
+    assert.deepEqual([r.causa, r.produto, r.link_via, r.causa_link, r.pode_disparar], ['nao_encontrado', VAZIA_SHOPEE, 'api', null, true]);
 
     // link que chega a uma busca (não é produto) e link de host da Shopee que não leva a lugar nenhum
     s.estado.nos = null;
@@ -1689,7 +1689,7 @@ test('CA3/CA4: Shopee sem API (10035): o dono preenche, o link vem da extensão 
   } finally { await s.fechar(); }
 });
 
-test('CA4: ID divergente no longLink, link fora do formato e falha da extensão → 400 e nada gravado; sem ID, sem caminho e fora do programa também', async () => {
+test('CA4: ID divergente no longLink, link fora do formato e falha da extensão → 400 e nada gravado; sem ID e sem caminho também', async () => {
   const s = await subirShopee({ api: '10035' });
   try {
     const corpo = { tipo: 'oferta', url: URL_PRODUTO_SHOPEE, template_id: 1, group_jids: ['111@g.us'], ajustes: { title: 'Fone', price: '50' } };
@@ -1708,11 +1708,7 @@ test('CA4: ID divergente no longLink, link fora do formato e falha da extensão 
     assert.equal(sessao.status, 400); assert.match(sessao.json.erro, /^Não consegui gerar o seu link de afiliado da Shopee: não há sessão de afiliado/);
     assert.ok(!sessao.txt.includes(ID_AF), 'número longo da extensão sai limpo');
 
-    // fora do programa (a API não devolve o produto): recusa antes de gerar o link
-    s.estado.api = 'ok'; s.estado.nos = []; s.shopee.invalidar();
-    const fora = await s.post('/api/envios', corpo);
-    assert.deepEqual([fora.status, fora.json.erro], [400, 'A Shopee não encontrou este produto na API de afiliados. Ele pode não participar do programa.']);
-    assert.equal(s.fetchF.chamadas.filter((c) => c.consulta?.startsWith('mutation')).length, 0);
+    s.estado.api = 'ok';
     // a API devolve um link fora do formato e a reserva (a extensão) está off-line: nada sai
     const linksOff = createLinkService({ getMode: () => 'extension' }); // nunca consultado pela extensão: off-line
     s.scheduler.envios = createEnvios({ db: s.db, wa: s.wa, links: linksOff, ml: s.ml, fast: true, dir: s.dir, shopee: s.shopee });
@@ -1737,7 +1733,37 @@ test('CA4: ID divergente no longLink, link fora do formato e falha da extensão 
     assert.equal(contar(s.db, 'SELECT COUNT(*) AS n FROM envios'), 0, 'nada gravado');
     assert.equal(contar(s.db, 'SELECT COUNT(*) AS n FROM log'), 0);
     assert.equal(s.wa.simulated.length, 0);
-    for (const r of [outra, meli, sessao, fora, ruim, semId, semCaminho]) semChave(r.txt, 'erro');
+    for (const r of [outra, meli, sessao, ruim, semId, semCaminho]) semChave(r.txt, 'erro');
+  } finally { await s.fechar(); }
+});
+
+test('Decisão do dono (04/11): produto fora do programa (nao_encontrado) com título à mão cria o envio com o link gerado; sem título recusa; link que falha segue o erro de sempre', async () => {
+  const s = await subirShopee();
+  try {
+    s.estado.nos = []; s.shopee.invalidar(); // a API responde, mas sem o produto
+    const corpo = { tipo: 'oferta', url: URL_PRODUTO_SHOPEE, template_id: 1, group_jids: ['111@g.us'], ajustes: { title: 'Fone à mão', price: '50' } };
+    const mutacoes = () => s.fetchF.chamadas.filter((c) => c.consulta?.startsWith('mutation')).length;
+
+    const semTitulo = await s.post('/api/envios', { ...corpo, ajustes: { price: '50' } });
+    assert.deepEqual([semTitulo.status, semTitulo.json.erro], [400, 'Não consegui buscar os dados na Shopee: preencha o título do produto.']);
+    assert.equal(mutacoes(), 0, 'sem título, nenhum link é gerado');
+    assert.equal(contar(s.db, 'SELECT COUNT(*) AS n FROM envios'), 0);
+
+    const r = await s.post('/api/envios', corpo);
+    assert.equal(r.status, 200, r.txt);
+    assert.equal(mutacoes(), 1, 'o link saiu pela API, como nos outros casos');
+    const payload = payloadDe(s.db, r.json.id);
+    assert.deepEqual([payload.link_afiliado, payload.fonte_dados, payload.offer.title], [LINK_API, 'manual', 'Fone à mão']);
+    semChave(r.txt, 'envio');
+
+    // a geração do link falha para este produto: vale o erro que já existia (nada novo)
+    const linksOff = createLinkService({ getMode: () => 'extension' }); // extensão off-line
+    s.scheduler.envios = createEnvios({ db: s.db, wa: s.wa, links: linksOff, ml: s.ml, fast: true, dir: s.dir, shopee: s.shopee });
+    s.estado.link = 'https://evil.example/s'; s.shopee.invalidar();
+    const ruim = await s.post('/api/envios', corpo);
+    assert.equal(ruim.status, 400);
+    assert.equal(ruim.json.erro, 'Não consegui gerar o seu link de afiliado da Shopee: a extensão do Chrome não está conectada (abra o Chrome com a extensão instalada)');
+    assert.equal(contar(s.db, 'SELECT COUNT(*) AS n FROM envios'), 1, 'só o envio que deu certo');
   } finally { await s.fechar(); }
 });
 

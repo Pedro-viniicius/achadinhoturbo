@@ -1,5 +1,8 @@
 # Especificação de UI/UX: integração da Shopee
 
+> **Atualização de 04/11/2026:** o dono reverteu esta decisão. `nao_encontrado` **não bloqueia** mais o Disparar: os dados ficam em branco para preencher à mão sem cartão de aviso (o produto pode não gerar comissão). O que este documento diz sobre o bloqueio vale só como histórico.
+
+
 Pedido do dono em 03/11/2026. **Rodada 1, revisada em 03/11 com o plano do arquiteto** (`docs/produto/planos/integracao-shopee.md`, seção "Alinhamento com a spec"): o link de afiliado sai pela extensão do Chrome (Link personalizado do portal, sessão do dono) e, quando a API for liberada, também pela Open API (API primeiro, extensão de reserva). Espelhamento e regras automáticas da Shopee ficam fora (entrega 2). Padrão visual, de estados e de tom herdado de `docs/produto/specs/espelhamento-amazon.md` (já implementada). Referência da API: `docs/produto/referencias/shopee-api-afiliados.md`. Só apresentação: nomes de campo, rotas e causas ficam "a alinhar com o plano" (`docs/produto/planos/integracao-shopee.md`, seção "A alinhar com o plano" abaixo). Tokens e classes: nenhum novo (`.card.conexao`, `.estado-pill`, `.aviso-impl`, `.passos`, `fieldset`, `.card-prod`, `.chat/.balao`, `nivel-*`, `dadosOferta`).
 
 ## Objetivo e usuário

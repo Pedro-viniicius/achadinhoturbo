@@ -88,13 +88,11 @@ const TEXTOS_DISPAROS = {
     nome: 'Shopee',
     invalido: 'Não reconheci este link da Shopee. Cole o endereço do produto (shopee.com.br/…) ou um link curto, como s.shopee.com.br ou shp.ee.',
     naoProduto: 'Este link não leva a um produto específico. Cole o link da página do produto.',
-    naoEncontrado: 'A Shopee não encontrou este produto na API de afiliados. Ele pode não participar do programa; sem isso não há comissão. Confira o link ou escolha outro produto.',
     semId: 'Shopee identificada, mas falta o ID de afiliado.', cadastrarId: 'Cadastre em Conexões.',
     semLink: 'Não tenho como gerar o seu link de afiliado agora. Abra o Chrome com a extensão e entre no portal de afiliados da Shopee, ou ligue a API em Conexões.',
     irConexoes: 'Ir para Conexões',
     motivoInvalido: 'Cole um link de produto da Shopee.',
     motivoNaoProduto: 'Cole o link da página do produto.',
-    motivoNaoEncontrado: 'Produto fora do programa de afiliados.',
     motivoSemId: 'Cadastre o ID de afiliado em Conexões.',
     motivoSemLink: 'Falta um caminho para o link: Chrome com a extensão ou API.',
     motivoGeral: 'Não dá para disparar este link da Shopee.',
@@ -584,12 +582,13 @@ function dispShopeeFaixa(p, extra) {
 }
 /**
  * Tabela de estados do Identificar da Shopee (spec, seção 2). `r` = resposta de POST /api/disparo/identificar.
- * Só bloqueiam: `invalido`, `nao_produto`, `nao_encontrado`, `causa_link` (`sem_id`, `sem_link`) e `pode_disparar` falso.
- * Falha dos dados (sem API) é aviso + campos em branco. → {
+ * Só bloqueiam: `invalido`, `nao_produto`, `causa_link` (`sem_id`, `sem_link`) e `pode_disparar` falso.
+ * Falha dos dados (sem API) e produto fora do programa (`nao_encontrado`) são campos em branco; `nao_encontrado` não mostra aviso (decisão do dono).
+ * → {
  *   tipo      'invalido' | 'nao_produto' | 'nao_encontrado' | 'api' | 'parcial' | 'completo'
  *   dados     mostra "Dados da oferta"
  *   mensagem  texto do cartão principal; destaque: é um aviso (cartão amarelo) e não o cartão do produto.
- *             Com `sem_credenciais` e `sem_acesso` vem '' e não há cartão (o segundo aviso, `link`, continua)
+ *             Com `sem_credenciais`, `sem_acesso` e `nao_encontrado` vem '' e não há cartão (o segundo aviso, `link`, continua)
  *   link      null | { causa, texto, acao }: segundo aviso (falta o ID ou o caminho do link)
  *   bloqueio  frase ao lado do botão desabilitado ('' = pode disparar)
  *   via       "Vai sair pela …" quando dá para disparar }
@@ -599,7 +598,6 @@ function dispShopeeVeredito(r) {
   const causa = typeof r.causa === 'string' ? r.causa : null;
   const bloqueado = (tipo, mensagem, bloqueio) => ({ tipo, dados: false, mensagem, destaque: true, link: null, bloqueio, via: '' });
   if (causa === 'nao_produto') return bloqueado('nao_produto', A.naoProduto, A.motivoNaoProduto);
-  if (causa === 'nao_encontrado') return bloqueado('nao_encontrado', A.naoEncontrado, A.motivoNaoEncontrado);
   const p = r.produto && typeof r.produto === 'object' ? r.produto : null;
   if (causa === 'invalido' || !p) return bloqueado('invalido', A.invalido, A.motivoInvalido);
   const link = r.causa_link === 'sem_id' ? { causa: 'sem_id', texto: A.semId, acao: A.cadastrarId }
@@ -607,6 +605,7 @@ function dispShopeeVeredito(r) {
   const bloqueio = link ? (link.causa === 'sem_id' ? A.motivoSemId : A.motivoSemLink) : r.pode_disparar === true ? '' : A.motivoGeral;
   const via = bloqueio ? '' : r.link_via === 'api' ? A.viaApi : r.link_via === 'extensao' ? A.viaExtensao : '';
   const semDados = !p.title && p.price == null;
+  if (causa === 'nao_encontrado') return { tipo: 'nao_encontrado', dados: true, mensagem: '', destaque: true, link, bloqueio, via };
   if (causa || semDados) {
     return { tipo: 'api', dados: true, mensagem: dispShopeeAvisoApi(causa || 'indisponivel', r.link_via, !!link), destaque: true, link, bloqueio, via };
   }
@@ -790,7 +789,7 @@ function paginaDisparoManual() {
   };
   /**
    * Shopee: o veredito (dispShopeeVeredito) decide tudo. Falha dos dados vira aviso + campos em branco; só bloqueiam link
-   * inválido, não é produto, fora do programa, falta o ID de afiliado e falta caminho para o link.
+   * inválido, não é produto, falta o ID de afiliado e falta caminho para o link (fora do programa: campos em branco, sem aviso).
    */
   const pintarShopee = (r) => {
     const loja = r.loja; const v = dispShopeeVeredito(r); const p = v.dados ? r.produto : null;

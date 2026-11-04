@@ -501,7 +501,6 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
    */
   async function ofertaShopee(url, ajustes) {
     const { ids, produto, causa } = await produtoShopee(url);
-    if (causa === 'nao_encontrado') throw new ErroShopee('nao_encontrado'); // fora do programa: sem comissão
     const offer = aplicarAjustes(produto, ajustes);
     if (!offer.title) throw new Error(causa ? 'Não consegui buscar os dados na Shopee: preencha o título do produto.' : 'Preencha o título do produto.');
     const link = await linkShopee(ids.urlProduto);
@@ -532,7 +531,7 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
     const { produto, extra, causa } = dados;
     return {
       ...base, produto, extra, causa, link_via: linkVia, causa_link: causaLink,
-      pode_disparar: causa !== 'nao_encontrado' && !causaLink,
+      pode_disparar: !causaLink, // `nao_encontrado` (fora do programa) não bloqueia: sem aviso, os dados vão à mão
       texto: renderTemplate(template.body, { ...produto, link: LINK_EXEMPLO_SHOPEE }, tplOpts(db)),
     };
   }

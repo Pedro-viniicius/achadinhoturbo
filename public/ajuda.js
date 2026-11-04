@@ -74,7 +74,7 @@ const TIPS = {
   // disparo manual
   'manual': 'Dispare uma oferta agora ou em um horário de hoje, sem criar disparo automático. Cole o link, escolha grupos e template.',
   'manual.link': 'Cole o link do produto. “Identificar” descobre a loja e lê título, preço e foto. Mercado Livre, Amazon e Shopee geram link de afiliado; Magalu e Facebook ainda não.',
-  'manual.shopee': 'Cole um link da Shopee (da página do produto ou curto, como s.shopee.com.br ou shp.ee). O painel gera o seu link de afiliado ao disparar (pela extensão do Chrome ou pela API). Com a API, busca também os dados; sem ela, preencha título e preço à mão. A Shopee não informa o preço antigo, só o desconto. Produto fora do programa de afiliados é bloqueado.',
+  'manual.shopee': 'Cole um link da Shopee (da página do produto ou curto, como s.shopee.com.br ou shp.ee). O painel gera o seu link de afiliado ao disparar (pela extensão do Chrome ou pela API). Com a API, busca também os dados; sem ela, preencha título e preço à mão. A Shopee não informa o preço antigo, só o desconto. Produto fora do programa de afiliados também pode ser disparado (pode não gerar comissão): preencha os dados à mão.',
   'manual.amazon': 'Cole um link da Amazon (link.amazon, amzn.to ou da página do produto). O painel busca os dados; você confere, ajusta e envia. Se a busca falhar, preencha à mão.',
   'manual.agendar': 'Desligado, envia na hora. Ligado, envia no horário de hoje que você escolher. Se o programa reiniciar antes, o envio continua agendado.',
   'manual.etiqueta': 'Etiqueta usada no link meli.la desta mensagem. É o que atribui a comissão a você. Na Amazon, vale a tag de associado de Conexões. Na Shopee, vale o ID de afiliado de Conexões.',

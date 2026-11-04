@@ -1,4 +1,7 @@
 # Plano técnico: Shopee no Disparo manual e em Conexões
+
+> **Atualização de 04/11/2026:** o dono reverteu esta decisão. `nao_encontrado` **não bloqueia** mais o Disparar: os dados ficam em branco para preencher à mão sem cartão de aviso (o produto pode não gerar comissão). O que este documento diz sobre o bloqueio vale só como histórico.
+
 - Brief: não há. O pedido do dono de 03/11/2026, repassado pelo lead, faz as vezes de brief (premissas no fim).
 - Referência: docs/produto/referencias/shopee-api-afiliados.md (Open API de Afiliados e "Link personalizado" capturado em 03/11)
 - Spec de UI (em paralelo): docs/produto/specs/integracao-shopee.md. As respostas aos pontos "A alinhar com o plano" estão na seção "Alinhamento com a spec".

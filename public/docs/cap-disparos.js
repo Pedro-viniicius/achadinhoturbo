@@ -147,7 +147,7 @@ docsCapitulo({
           'Clique em “Disparar”.',
         ] },
         { p: 'O link de afiliado é gerado na hora de disparar ou de agendar, pela API ou, de reserva, pela extensão do Chrome. A prévia mostra `https://s.shopee.com.br/(gerado ao disparar)`. Como o link já fica guardado no envio, um envio agendado não precisa do Chrome aberto na hora de sair.' },
-        { nota: 'aviso', texto: 'Se a API responde mas não reconhece o produto, ele provavelmente não participa do programa de afiliados e não geraria comissão. O disparo é bloqueado.' },
+        { nota: 'aviso', texto: 'Se a API responde mas não reconhece o produto, ele provavelmente não participa do programa de afiliados e pode não gerar comissão. O painel não avisa nem bloqueia: preencha os dados da oferta (o título é obrigatório) e dispare se quiser.' },
         { nota: 'erro', texto: '“O Chrome está logado em outra conta de afiliado da Shopee.” A comissão iria para outra conta, então o disparo é recusado. Entre na conta certa no portal e tente de novo.' },
         { nota: 'dica', texto: 'O painel reaproveita por até 7 dias o link já gerado do mesmo produto e pede no máximo 60 links por hora pela extensão. Passou disso, o disparo é recusado e volta a funcionar na hora seguinte.' },
       ],
