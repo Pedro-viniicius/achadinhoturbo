@@ -146,8 +146,6 @@ test('CA2: pode_disparar falso sem outra explicação nunca habilita o botão', 
 test('CA2: falha dos dados (sem API) vira aviso com campos em branco, Disparar habilitado e o trecho do link conforme link_via', () => {
   const API = (causa, via = 'extensao') => D.dispShopeeVeredito(RESP({ produto: VAZIO(), causa, link_via: via, extra: null }));
   const esperado = {
-    sem_credenciais: 'A busca automática de dados da Shopee não está ligada (faltam o AppID e a Senha da API). Preencha o título e o preço abaixo; o link já sai com o seu ID de afiliado, pelo Chrome.',
-    sem_acesso: 'A Shopee ainda não liberou a API para a sua conta. Preencha o título e o preço abaixo; o link sai pelo Chrome.',
     credencial_recusada: 'A Shopee não aceitou o AppID ou a Senha da API salvos. Confira em Conexões e use “Testar”. Preencha os dados abaixo; o link sai pelo Chrome.',
     conta_restrita: 'A Shopee recusou o acesso da API a esta conta. Fale com o suporte de afiliados da Shopee. Preencha os dados abaixo; o link sai pelo Chrome.',
     cota: 'A Shopee limitou as consultas por agora. Preencha à mão ou tente de novo em alguns minutos.',
@@ -159,9 +157,14 @@ test('CA2: falha dos dados (sem API) vira aviso com campos em branco, Disparar h
     assert.equal(v.dados, true, `${causa}: campos em branco para preencher`); assert.equal(v.destaque, true);
     assert.equal(v.bloqueio, '', `${causa}: não bloqueia`);
   }
+  // API não ligada ou sem acesso: sem aviso (mensagem vazia), campos em branco e disparo permitido
+  for (const causa of ['sem_credenciais', 'sem_acesso']) {
+    const v = API(causa);
+    assert.deepEqual([v.tipo, v.mensagem, v.dados, v.bloqueio], ['api', '', true, ''], causa);
+    assert.equal(D.dispShopeeAvisoApi(causa, 'api'), '', causa);
+  }
   // pela API: "o link sai pela API"; sem caminho: o trecho some
-  assert.equal(API('sem_acesso', 'api').mensagem, 'A Shopee ainda não liberou a API para a sua conta. Preencha o título e o preço abaixo; o link sai pela API.');
-  assert.equal(D.dispShopeeAvisoApi('sem_acesso', null), 'A Shopee ainda não liberou a API para a sua conta. Preencha o título e o preço abaixo.');
+  assert.equal(API('conta_restrita', 'api').mensagem, 'A Shopee recusou o acesso da API a esta conta. Fale com o suporte de afiliados da Shopee. Preencha os dados abaixo; o link sai pela API.');
   assert.equal(D.dispShopeeAvisoApi('indisponivel', null), 'Não consegui buscar os dados na Shopee agora. Preencha o título e o preço abaixo.');
   assert.equal(D.dispShopeeAvisoApi('cota', 'api'), esperado.cota, 'a cota não fala do link');
   // causa que o painel não conhece: vale como "indisponivel"
@@ -352,14 +355,48 @@ test('CA2: nao_encontrado, nao_produto e invalido: sem seção de dados, Dispara
   }
 });
 
-test('CA2: com a busca de dados fora do ar, o dono preenche à mão e Disparar fica habilitado (o link sai pelo Chrome)', async () => {
+test('CA2: sem_acesso (API ainda não liberada): sem cartão, o dono preenche à mão e Disparar fica habilitado (o link sai pelo Chrome)', async () => {
   const a = abrirDisparo({ 'POST /api/disparo/identificar': () => ({ status: 200, json: RESP({ produto: VAZIO(), causa: 'sem_acesso', extra: null }) }) });
   a.$('#dm-url').value = 'https://shopee.com.br/Fone-i.123.456';
   await a.$('#dm-identificar').onclick();
-  assert.match(a.$('#dm-prod').innerHTML, /A Shopee ainda não liberou a API para a sua conta\. Preencha o título e o preço abaixo; o link sai pelo Chrome\./);
+  assert.equal(a.$('#dm-prod').innerHTML, '', 'sem_acesso: nenhum cartão de aviso');
   assert.equal(a.$('#dm-dados').filhos.length, 1);
   assert.equal(a.$('#dm-disparar').disabled, false, a.$('#dm-motivo').textContent);
   assert.doesNotMatch(a.$('#dm-prod').innerHTML, /<img/, 'sem produto, sem foto');
+});
+
+test('Sem aviso técnico: Amazon sem_credenciais e Shopee sem_credenciais/sem_acesso deixam #dm-prod vazio; cota e indisponivel continuam avisando', async () => {
+  const amazon = (causa) => ({ loja: { id: 'amazon', nome: 'Amazon', implementada: true }, motivo: null, editavel: true, causa, tag_salva: true,
+    produto: { key: 'ASIN:B0ABC12345', asin: 'B0ABC12345', title: null, price: null, oldPrice: null, discountPct: null, image: null }, texto: 'x', template_id: 1 });
+  const identificar = async (json, url) => {
+    const a = abrirDisparo({ 'POST /api/disparo/identificar': () => ({ status: 200, json }) });
+    a.$('#dm-url').value = url; await a.$('#dm-identificar').onclick(); return a;
+  };
+  const URL_AMZ = 'https://www.amazon.com.br/dp/B0ABC12345'; const URL_SHP = 'https://shopee.com.br/Fone-i.123.456';
+  const vazia = await identificar(amazon('sem_credenciais'), URL_AMZ);
+  assert.equal(vazia.$('#dm-prod').innerHTML, '', 'Amazon sem_credenciais: nenhum cartão');
+  assert.equal(vazia.$('#dm-dados').filhos.length, 1, 'os campos continuam em branco'); assert.equal(vazia.$('#dm-disparar').disabled, false, vazia.$('#dm-motivo').textContent);
+  for (const [causa, texto] of [['cota', /limitou as consultas|tente de novo/i], ['indisponivel', /Não consegui|preencha/i]]) {
+    const a = await identificar(amazon(causa), URL_AMZ);
+    assert.match(a.$('#dm-prod').innerHTML, /card-prod aviso/, `Amazon ${causa}: o aviso continua`); assert.match(a.$('#dm-prod').innerHTML, texto, causa);
+  }
+  for (const causa of ['sem_credenciais', 'sem_acesso']) {
+    const a = await identificar(RESP({ produto: VAZIO(), causa, extra: null }), URL_SHP);
+    assert.equal(a.$('#dm-prod').innerHTML, '', `Shopee ${causa}: nenhum cartão`);
+    assert.equal(a.$('#dm-dados').filhos.length, 1); assert.equal(a.$('#dm-disparar').disabled, false, causa);
+  }
+  for (const causa of ['cota', 'indisponivel', 'credencial_recusada', 'conta_restrita']) {
+    const a = await identificar(RESP({ produto: VAZIO(), causa, extra: null }), URL_SHP);
+    assert.match(a.$('#dm-prod').innerHTML, /card-prod aviso/, `Shopee ${causa}: o aviso continua`);
+  }
+  // o aviso do link continua, porque bloqueia o disparo
+  const bloq = await identificar(RESP({ produto: VAZIO(), causa: 'sem_credenciais', causa_link: 'sem_link', link_via: null, pode_disparar: false, extra: null }), URL_SHP);
+  const cartoes = (a) => (a.$('#dm-prod').innerHTML.match(/card-prod/g) || []).length;
+  assert.equal(cartoes(bloq), 1, 'só o aviso do link');
+  assert.match(bloq.$('#dm-prod').innerHTML, /Não tenho como gerar o seu link/); assert.doesNotMatch(bloq.$('#dm-prod').innerHTML, /busca automática|AppID/);
+  assert.equal(bloq.$('#dm-disparar').disabled, true);
+  const semId = await identificar(RESP({ produto: VAZIO(), causa: 'sem_credenciais', causa_link: 'sem_id', link_via: null, pode_disparar: false, extra: null }), URL_SHP);
+  assert.equal(cartoes(semId), 1); assert.match(semId.$('#dm-prod').innerHTML, /falta o ID de afiliado/); assert.equal(semId.$('#dm-disparar').disabled, true);
 });
 
 test('CA3: Disparar na Shopee mostra "Gerando o seu link…" até o servidor responder e manda os ajustes sem link nem etiqueta', async () => {

@@ -74,7 +74,6 @@ const TEXTOS_DISPAROS = {
     semTag: 'Amazon identificada, mas falta a tag de associado.',
     cadastrarTag: 'Cadastre em Conexões.',
     indisponivel: 'Não consegui buscar os dados na Amazon agora. Preencha o título e os preços abaixo; o link já está com a sua tag.',
-    semCredenciais: 'A API da Amazon não está configurada. Configure em Conexões ou preencha à mão.',
     cota: 'A Amazon limitou as consultas por agora. Preencha à mão ou tente de novo em alguns minutos.',
     semPrecoAntigo: 'A Amazon não trouxe o preço antigo. A linha vai sumir da mensagem. Preencha se quiser.',
     faltou: (lista) => `A Amazon não trouxe ${lista}. Preencha abaixo; o que ficar vazio some da mensagem.`,
@@ -103,8 +102,6 @@ const TEXTOS_DISPAROS = {
     faltou: (lista) => `A Shopee não trouxe ${lista}. Preencha abaixo; o que ficar vazio some da mensagem.`,
     // Falha dos dados (API): aviso + campos em branco. `link(via)` é o trecho do link; some se não há caminho (aí vale sem_link).
     api: {
-      sem_credenciais: { base: 'A busca automática de dados da Shopee não está ligada (faltam o AppID e a Senha da API). Preencha o título e o preço abaixo', link: (via) => `o link já sai com o seu ID de afiliado, ${via}` },
-      sem_acesso: { base: 'A Shopee ainda não liberou a API para a sua conta. Preencha o título e o preço abaixo', link: (via) => `o link sai ${via}` },
       credencial_recusada: { base: 'A Shopee não aceitou o AppID ou a Senha da API salvos. Confira em Conexões e use “Testar”. Preencha os dados abaixo', link: (via) => `o link sai ${via}` },
       conta_restrita: { base: 'A Shopee recusou o acesso da API a esta conta. Fale com o suporte de afiliados da Shopee. Preencha os dados abaixo', link: (via) => `o link sai ${via}` },
       cota: { base: 'A Shopee limitou as consultas por agora. Preencha à mão ou tente de novo em alguns minutos' },
@@ -556,11 +553,14 @@ function dispPareceShopeeCurto(url) {
 }
 /** "Vai sair pelo Chrome" / "pela API" para o trecho dos avisos; '' se não há caminho para o link. */
 const dispShopeeVia = (via) => (via === 'api' ? TEXTOS_DISPAROS.shopee.pelaApi : via === 'extensao' ? TEXTOS_DISPAROS.shopee.pelaExtensao : '');
+/** Causas de falha dos dados que não geram aviso: não é erro, é a API ainda não estar ligada. */
+const DISP_SHOPEE_SEM_AVISO = ['sem_credenciais', 'sem_acesso'];
 /**
  * Aviso de falha dos dados (a API não respondeu): texto da tabela de estados + o trecho do link conforme `link_via`
  * ("o link sai pelo Chrome", "pela API"; some se não há caminho). Causa desconhecida vale como `indisponivel`.
  */
 function dispShopeeAvisoApi(causa, via, semPreencher = false) {
+  if (DISP_SHOPEE_SEM_AVISO.includes(causa)) return ''; // API não ligada ou sem acesso: o dono já sabe e preenche à mão; sem cartão
   const A = TEXTOS_DISPAROS.shopee.api; const e = Object.hasOwn(A, causa) ? A[causa] : A.indisponivel;
   const v = dispShopeeVia(via);
   const base = semPreencher ? e.base.replace(/\. Preencha o título e o preço abaixo$/, '') : e.base; // o segundo aviso (ID ou link) já explica o resto
@@ -588,7 +588,8 @@ function dispShopeeFaixa(p, extra) {
  * Falha dos dados (sem API) é aviso + campos em branco. → {
  *   tipo      'invalido' | 'nao_produto' | 'nao_encontrado' | 'api' | 'parcial' | 'completo'
  *   dados     mostra "Dados da oferta"
- *   mensagem  texto do cartão principal; destaque: é um aviso (cartão amarelo) e não o cartão do produto
+ *   mensagem  texto do cartão principal; destaque: é um aviso (cartão amarelo) e não o cartão do produto.
+ *             Com `sem_credenciais` e `sem_acesso` vem '' e não há cartão (o segundo aviso, `link`, continua)
  *   link      null | { causa, texto, acao }: segundo aviso (falta o ID ou o caminho do link)
  *   bloqueio  frase ao lado do botão desabilitado ('' = pode disparar)
  *   via       "Vai sair pela …" quando dá para disparar }
@@ -772,8 +773,10 @@ function paginaDisparoManual() {
     const p = r.produto && typeof r.produto === 'object' ? r.produto : null;
     st.asin = String(p?.asin || String(p?.key || '').replace(/^ASIN:/, '') || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
     const semDados = !p || (!p.title && p.price == null);
-    const aviso = { sem_credenciais: A.semCredenciais, cota: A.cota }[causa] || A.indisponivel;
-    if (causa || semDados) { // a API não respondeu: o link já leva a tag, os dados vão em branco para o dono preencher
+    const aviso = causa === 'cota' ? A.cota : A.indisponivel;
+    if (causa === 'sem_credenciais') { // API não configurada: sem aviso, o dono já sabe e preenche à mão
+      prodEl.innerHTML = '';
+    } else if (causa || semDados) { // a API não respondeu: o link já leva a tag, os dados vão em branco para o dono preencher
       prodEl.innerHTML = `<div class="card-prod aviso" role="status"><div class="info"><span>${esc(aviso)}</span></div></div>`;
     } else {
       const faltou = [!p.title && 'o título', p.price == null && 'o preço', p.price != null && p.oldPrice == null && 'o preço antigo'].filter(Boolean);
@@ -792,7 +795,8 @@ function paginaDisparoManual() {
   const pintarShopee = (r) => {
     const loja = r.loja; const v = dispShopeeVeredito(r); const p = v.dados ? r.produto : null;
     if (!v.dados) { st.produto = null; st.texto = ''; bloquear(v.mensagem, v.bloqueio); st.via = ''; mostrarEtiqueta(); return; }
-    if (v.destaque) prodEl.innerHTML = `<div class="card-prod aviso" role="status"><div class="info"><span>${esc(v.mensagem)}</span></div></div>`;
+    if (v.destaque && !v.mensagem) prodEl.innerHTML = ''; // sem aviso (API não ligada); o segundo aviso, se houver, entra abaixo
+    else if (v.destaque) prodEl.innerHTML = `<div class="card-prod aviso" role="status"><div class="info"><span>${esc(v.mensagem)}</span></div></div>`;
     else cartaoProduto(p, loja, v.mensagem, dispShopeeLinhaLoja(p, r.extra));
     if (v.link) { // segundo aviso, logo abaixo: falta o ID de afiliado ou um caminho para o link
       prodEl.style.display = 'grid'; prodEl.style.gap = '8px';

@@ -130,7 +130,7 @@ docsCapitulo({
         ] },
         { p: 'O link que vai ao grupo é sempre `https://www.amazon.com.br/dp/<ASIN>?tag=<sua tag>`, montado na hora do envio. O ASIN é o código do produto na Amazon.' },
         { nota: 'dica', texto: 'O preço antigo só vale se for maior que o atual. Senão a linha “De” some. O desconto é calculado dos dois preços. A foto é JPG ou PNG de até 5 MB; sem foto, a mensagem sai só com texto.' },
-        { nota: 'erro', texto: '“Não consegui buscar os dados na Amazon agora.” Sem API, ou com a API fora do ar, a tela deixa os campos em branco e o título é obrigatório. Preencha à mão. Link de busca, lista ou loja é recusado: cole o link da página do produto.' },
+        { nota: 'erro', texto: '“Não consegui buscar os dados na Amazon agora.” Sem a API configurada, “Dados da oferta” vem em branco, sem aviso, e você preenche à mão (o título é obrigatório). Com a API fora do ar ou sem acesso, aparece essa mensagem e vale o mesmo. Link de busca, lista ou loja é recusado: cole o link da página do produto.' },
       ],
     },
     {
