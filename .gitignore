@@ -1,5 +1,7 @@
 node_modules/
 data/
+# toda pasta de dados na raiz: data-simulacao (npm run simular), data-restaurado, data-antiga…
+/data*/
 # memória dos agentes (local, não versionar)
 .claude/agent-memory/
 

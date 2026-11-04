@@ -1,0 +1,233 @@
+// Docs do sistema: apêndice "Referência" (glossário, estados dos cartões, motivos de revisão, limites).
+// Só chama docsCapitulo (public/docs.js): nenhuma declaração no topo, porque o escopo global é o mesmo dos outros
+// scripts do painel. Formato dos blocos e mini-marcação: comentário de docsInline e plano docs-do-sistema.
+// Slugs da spec (docs/produto/specs/docs-do-sistema.md, seção 1): pode acrescentar seção, nunca renomear nem tirar.
+// Fatos conferidos no código (04/11): selos em public/conexoes.js (pillConexao, TEXTOS_CONEXOES) e src/conexoes.js
+// (estados), motivos em src/catalogo-itens.js (MOTIVOS) e public/espelhamento.js (espResultado, TEXTOS_REVISAO_CATALOGO),
+// limites nas constantes citadas na tabela de "limites". Mudou o número no código? Mude aqui e no README.
+
+docsCapitulo({
+  id: 'referencia',
+  titulo: 'Referência',
+  aprenda: [
+    'O significado de cada termo do painel.',
+    'O que quer dizer cada selo dos cartões de Conexões e cada motivo de revisão.',
+    'Os limites e números do sistema.',
+  ],
+  secoes: [
+    {
+      id: 'glossario', titulo: 'Glossário',
+      blocos: [
+        { p: '**Cinco nomes parecidos.** Cinco coisas diferentes têm nome quase igual e aparecem em telas perto uma da outra. Confira esta tabela antes de colar um código no campo errado.' },
+        { tabela: {
+          colunas: ['Nome', 'O que é', 'Onde fica no painel'],
+          linhas: [
+            ['Etiqueta ML', 'O nome que você criou na Central de Afiliados do Mercado Livre. Vai nos links `meli.la` e diz de quem é a comissão. O painel escreve “Etiqueta ML” ou só “etiqueta”.', '[[Conexões → Mercado Livre]]'],
+            ['Etiqueta, o app', 'O seu outro programa, que coleta ofertas e roda neste computador (`servidor.py`). Não tem relação com a etiqueta do Mercado Livre.', 'Fora do painel. O painel só lê as ofertas dele, pela fonte Catálogo.'],
+            ['Catálogo', 'A fonte de ofertas do painel que lê o app Etiqueta.', '[[Conexões → Catálogo do Etiqueta]] e, no disparo automático, a fonte “Catálogo (app Etiqueta)”.'],
+            ['Tag de associado da Amazon', 'O seu identificador na Amazon, por exemplo `seunome-20`. Vai no link e diz de quem é a comissão.', '[[Conexões → Amazon]]'],
+            ['ID de afiliado da Shopee', 'Só números, por exemplo `98765432101`. Vai no link e diz de quem é a comissão.', '[[Conexões → Shopee]]'],
+          ],
+        } },
+        { termos: [
+          ['Etiqueta', 'Etiqueta de afiliado do Mercado Livre: identificador que vai no link e define de quem é a comissão. Fica em [[Conexões → Mercado Livre]]. Não confundir com o Etiqueta (o app), o seu outro programa, nem com o Catálogo.'],
+          ['Etiqueta (o app)', 'Seu outro programa, que coleta e organiza ofertas e roda neste computador (`servidor.py`). Quando este painel diz “etiqueta” sozinho, é a etiqueta de afiliado do Mercado Livre; quando diz “Catálogo”, são as ofertas do app Etiqueta.'],
+          ['meli.la', 'Link curto do Mercado Livre gerado pela Central de Afiliados, já com a sua etiqueta.'],
+          ['Central de Afiliados', 'Área do Mercado Livre para afiliados. A lista “Produtos selecionados para você” é a fonte padrão do disparo automático.'],
+          ['Loja conectada', 'Loja cujos dados você já cadastrou em Conexões. Hoje Mercado Livre, Amazon e Shopee funcionam de fato.'],
+          ['ID de afiliado', 'Número da sua conta de afiliado da Shopee (ex.: `98765432101`). Vai no link e define de quem é a comissão. Fica em [[Conexões → Shopee]].'],
+          ['AppID e Senha da API', 'Dados do aplicativo da API de afiliados da Shopee. Só existem depois que a Shopee libera o acesso. A senha equivale a uma senha de banco: fica no seu computador.'],
+          ['Open API de Afiliados', 'Acesso técnico da Shopee que permite ao painel buscar dados do produto e gerar links pela API. É preciso pedir; a conta não vem com ele. Sem ele, os links saem pela extensão do Chrome.'],
+          ['Link personalizado', 'Ferramenta do portal de afiliados da Shopee (`affiliate.shopee.com.br`) que gera o link curto com o seu ID. A extensão do Chrome usa essa ferramenta por você.'],
+          ['Tag de associado', 'Identificador do afiliado na Amazon (ex.: `seunome-20`). Vai no link e define de quem é a comissão. Fica em [[Conexões → Amazon]].'],
+          ['Extensão', 'Complemento do Chrome que fala com a Central de Afiliados usando a sua sessão. Nada de cookie sai do navegador.'],
+        ], titulo: 'Lojas e afiliado' },
+        { termos: [
+          ['Fonte', 'De onde um disparo automático tira ofertas: Central, lista de links, busca ou Catálogo. Até 5 por disparo, intercaladas.'],
+          ['Catálogo', 'Fonte de ofertas do Achadinho Turbo que lê as ofertas do seu app Etiqueta. Cada oferta já vem com o link de afiliado da loja. Configura-se em [[Conexões → Catálogo do Etiqueta]] e escolhe-se em um disparo automático.'],
+          ['Token do catálogo', 'Chave de acesso ao Etiqueta, guardada num arquivo no seu computador. O painel lê o arquivo; o token não aparece em tela nem em log. Equivale a uma senha.'],
+          ['Pedaço opcional', 'Trecho do template entre colchetes, como `[🎟️ Cupom: {CUPOM}]`. Some sozinho quando algum campo dentro dele está vazio.'],
+          ['Envio', 'Uma mensagem que o programa mandou (ou tentou mandar) para os grupos. Todo envio aparece no Histórico.'],
+          ['Ocorrência', 'Cada vez que algo acontece em um disparo agendado ou repetido: um horário que chegou e foi enviado, pulado ou falhou.'],
+          ['Repetição', 'Mensagem que sai sozinha nos dias da semana e horários escolhidos (até 6 horários).'],
+          ['Enquete', 'Pergunta com 2 a 12 opções para o grupo votar, enviada em Disparar mensagem.'],
+        ], titulo: 'Disparos' },
+        { termos: [
+          ['Espelhamento', 'Disparo que copia ofertas da Amazon de grupos de origem para os seus grupos, com a sua tag e a mensagem completa.'],
+          ['Grupo de origem', 'Grupo que o espelhamento vigia em busca de links da Amazon. O resto da conversa é ignorado.'],
+          ['Grupo de destino', 'Grupo seu que recebe as ofertas espelhadas.'],
+          ['Na fila', 'Oferta espelhada à qual falta o título ou o preço. Espera no Histórico até você completar ou descartar (se a regra for “esperar eu completar”).'],
+          ['Palavra bloqueada', 'Palavra que, se aparecer no título ou no texto da oferta, impede o envio. Não diferencia maiúscula, minúscula nem acento.'],
+          ['Repetida', 'Mesmo produto da Amazon já enviado pelo mesmo espelhamento nas últimas horas definidas (padrão 168). Não é reenviado.'],
+          ['Para revisar', 'Oferta do catálogo que não sai sozinha: a da Shopee (o link não prova de quem é a conta), a com 100% de desconto, a com preço antigo 10 vezes maior que o preço (provável erro de preço) e a que falhou ao gerar o link. Você confere em [[Histórico → Catálogo]] e envia ou descarta.'],
+        ], titulo: 'Espelhamento e revisão' },
+        { termos: [
+          ['Bloco', 'Conjunto de grupos de um nicho, para análise, para relatórios e para marcar disparos de uma vez.'],
+          ['Rotacionador', 'Link único que leva ao primeiro grupo com vaga.'],
+          ['Destino de aviso', 'Número de WhatsApp que recebe o resumo diário e os avisos, em Relatórios e avisos.'],
+          ['Virada do dia', 'Hora em que um dia termina nos relatórios. Entradas antes dela contam para o dia anterior.'],
+          ['Evasão', 'Quem entra e sai logo: no mesmo dia ou em até 7 dias.'],
+        ], titulo: 'Grupos e análise' },
+        { termos: [
+          ['Dono', 'Quem administra a conta: convida, remove pessoas, muda papéis e vê as chaves das conexões.'],
+          ['Operador', 'Quem usa o painel no dia a dia. Acessa todas as telas, menos Equipe. Não desconecta o WhatsApp, não gera novo token da extensão nem apaga dados antes do prazo.'],
+          ['Convite', 'Link que o Dono cria em Equipe para alguém criar a própria senha e entrar no painel. Vale 7 dias e só pode ser usado uma vez.'],
+        ], titulo: 'Conta e equipe' },
+      ],
+    },
+    {
+      id: 'estados', titulo: 'Estados dos cartões de Conexões',
+      onde: '[[Conexões]]',
+      blocos: [
+        { p: 'Cada cartão de [[Conexões]] tem um selo no canto. O selo sempre traz texto, nunca só cor. As tabelas abaixo usam a grafia exata do selo.' },
+        { p: '**Mercado Livre**' },
+        { tabela: {
+          colunas: ['Selo', 'O que significa', 'O que fazer'],
+          linhas: [
+            ['Conectado', 'Há pelo menos uma etiqueta salva, a extensão do Chrome está on-line e o modo direto está desligado.', 'Nada. Os links `meli.la` saem com a sua etiqueta.'],
+            ['Falta configurar', 'Falta uma dessas três coisas. A linha de estado logo abaixo do selo diz qual.', 'Cadastre uma etiqueta, abra o Chrome com a extensão e logado na Central de Afiliados, ou volte o modo de links em [[Ajustes]] para “Pela extensão do Chrome”.'],
+          ],
+        } },
+        { p: '**Amazon**' },
+        { tabela: {
+          colunas: ['Selo', 'O que significa', 'O que fazer'],
+          linhas: [
+            ['Falta configurar', 'Nenhuma tag de associado salva.', 'Salve a tag em [[Conexões → Amazon]]. Sem ela, nenhum link da Amazon sai.'],
+            ['Só com a tag', 'A tag está salva e não há credencial da API. Os links saem com a sua tag; o espelhamento usa o título e os preços escritos na mensagem de origem.', 'Nada, se isso basta. Para o painel buscar título, preço e foto sozinho, salve a credencial da API (a Amazon exige vendas qualificadas recentes).'],
+            ['Credencial salva', 'Tag e credencial estão salvas, mas a Amazon ainda não confirmou o acesso: ainda não houve teste, ou a última tentativa não foi aceita (credencial recusada, conta sem acesso à API) ou ficou sem resposta.', 'Clique em **Testar**. A frase do resultado diz qual é o caso: credencial recusada, conta sem acesso à API, tag que não pertence à credencial ou Amazon fora do ar.'],
+            ['Conectada', 'A Amazon aceitou a credencial na última vez que o painel falou com ela (no teste ou ao consultar uma oferta).', 'Nada. O painel busca título, preço e foto pela API.'],
+          ],
+        } },
+        { p: '**Shopee**' },
+        { tabela: {
+          colunas: ['Selo', 'O que significa', 'O que fazer'],
+          linhas: [
+            ['Falta configurar', 'Nem o ID de afiliado nem as credenciais da API estão salvos.', 'Salve o ID de afiliado em [[Conexões → Shopee]]. Sem ele, os links não saem.'],
+            ['Só com o ID', 'O ID de afiliado está salvo e a API não está configurada. Os links saem pela extensão do Chrome; título e preço você preenche à mão.', 'Nada, se isso basta. Para a busca automática, peça a Open API de Afiliados à Shopee e salve o AppID e a Senha da API.'],
+            ['Credenciais salvas', 'AppID e Senha da API estão salvos, mas a Shopee ainda não confirmou o acesso: ainda não houve teste, o último teste ficou sem resposta (Shopee fora do ar ou limite de consultas), ou as credenciais foram aceitas e falta o ID de afiliado.', 'Clique em **Testar**. Se aparecer o aviso de que falta o ID de afiliado, salve-o.'],
+            ['Conectada', 'A Shopee aceitou as credenciais e o ID de afiliado está salvo.', 'Nada. O painel busca os dados do produto e gera o link pela API.'],
+            ['Sem acesso à API', 'A conta ainda não tem a Open API liberada pela Shopee.', 'Peça o acesso (a Shopee responde em até 3 dias úteis). Enquanto isso, **os links continuam saindo pela extensão**, se ela estiver conectada.'],
+            ['Credencial recusada', 'A Shopee não aceitou o AppID ou a Senha da API, ou recusou a conta (restrição, ID inválido, credenciais de outra conta).', 'Confira os dois valores, se o aplicativo está ativo e se a data e a hora do computador estão certas. **Os links continuam saindo pela extensão**, se ela estiver conectada.'],
+          ],
+        } },
+        { p: '**Catálogo do Etiqueta**' },
+        { tabela: {
+          colunas: ['Selo', 'O que significa', 'O que fazer'],
+          linhas: [
+            ['Falta configurar', 'Falta o endereço do Etiqueta ou o caminho do arquivo do token.', 'Preencha os dois em [[Conexões → Catálogo do Etiqueta]] e salve.'],
+            ['Salvo, ainda não testado', 'Os dados estão salvos e nenhum teste foi feito depois do último Salvar.', 'Clique em **Testar**.'],
+            ['Conectada', 'O último teste (ou a última leitura de um disparo) foi aceito pelo Etiqueta.', 'Nada. A fonte Catálogo está pronta para os disparos automáticos.'],
+            ['Token recusado', 'O Etiqueta respondeu que o token não vale. Ele lê o arquivo do token só ao ligar.', 'Reinicie o `servidor.py` do Etiqueta e teste de novo.'],
+            ['Indisponível', 'O Etiqueta está desligado ou sem resposta, está no ar com a API desligada (falta o `api_token.txt` na pasta dele) ou respondeu algo inesperado.', 'Confira se ele está ligado (`python3 servidor.py`) e se o endereço e a porta estão certos. O terminal do `servidor.py` diz o motivo da API desligada.'],
+            ['Arquivo do token não encontrado', 'O painel não achou ou não conseguiu ler o arquivo, ou ele está vazio ou fora do formato.', 'Confira o caminho (o arquivo precisa se chamar `api_token.txt`) e a permissão de leitura. Se o arquivo for novo, gere o token de novo no Etiqueta.'],
+          ],
+        } },
+        { p: '**Magalu e Facebook**' },
+        { tabela: {
+          colunas: ['Selo', 'O que significa', 'O que fazer'],
+          linhas: [
+            ['Ainda não implementado', 'A integração ainda não existe. Você pode guardar os dados, mas o painel não os usa.', 'Nada por enquanto.'],
+          ],
+        } },
+      ],
+    },
+    {
+      id: 'motivos', titulo: 'Motivos de revisão e de descarte',
+      onde: '[[Histórico → Catálogo]] e [[Histórico → Espelhamento]]',
+      blocos: [
+        { p: '**Ofertas do Catálogo que esperam a sua revisão.** Nenhuma oferta suspeita sai sozinha. Só o Dono revisa. Cada disparo guarda até 50 ofertas esperando; acima disso, as novas esperam sem entrar na lista.' },
+        { tabela: {
+          colunas: ['Motivo no Histórico', 'Quando acontece', 'O que fazer'],
+          linhas: [
+            ['Shopee: confirme o link', 'Toda oferta da Shopee. O link curto do catálogo não prova de quem é a conta.', 'Abra o link, confira o produto e envie ou descarte. Aprovada, sai com o link do próprio catálogo.'],
+            ['Desconto de 100%: confira o preço', 'O catálogo informou 100% de desconto.', 'Confira o preço e envie. O “100%” nunca vai na mensagem: ela sai sem desconto, ou com o desconto calculado dos dois preços, se houver preço antigo.'],
+            ['Preço antigo muito alto: confira o preço', 'O preço antigo é 10 vezes o preço atual, ou mais. Costuma ser erro no catálogo.', 'Corrija o preço ou apague o preço antigo. Não existe “enviar mesmo assim” para esse caso.'],
+            ['Não consegui gerar o link: confira a oferta', 'O link de afiliado desta oferta não pôde ser gerado (por exemplo, extensão desconectada).', 'Resolva a causa e envie: o painel tenta de novo na hora. Se falhar, o motivo aparece na linha da oferta no Histórico.'],
+          ],
+        } },
+        { p: 'Depois da revisão, a oferta aparece no Histórico como **Enviada** ou **Descartada: na revisão**. Se o envio não chegar a nenhum grupo, a linha mostra o erro e o botão **Enviar de novo**.' },
+        { p: '**Resultados do Histórico do Espelhamento.** A coluna Resultado diz o que aconteceu com cada link da Amazon que apareceu nos grupos de origem.' },
+        { tabela: {
+          colunas: ['Resultado', 'Quando acontece', 'O que fazer'],
+          linhas: [
+            ['Espelhada', 'A oferta foi enviada a pelo menos um grupo de destino. A linha diz de onde vieram os dados (API da Amazon ou texto da mensagem de origem).', 'Nada.'],
+            ['Descartada: palavra bloqueada (palavra)', 'O título ou o texto da mensagem de origem tem uma palavra da lista de bloqueio do espelhamento.', 'Nada, se foi o que você quis. Para liberar, tire a palavra da lista do espelhamento.'],
+            ['Descartada: repetida (enviada há N h)', 'O mesmo produto já foi enviado pelo mesmo espelhamento dentro das horas de “Não repetir a mesma oferta por”.', 'Nada. Para permitir repetição, diminua as horas (0 = pode repetir).'],
+            ['Descartada: mesmo produto de outro link desta mensagem', 'A mensagem trazia dois links para o mesmo produto.', 'Nada: só um é enviado.'],
+            ['Descartada: link não resolvido', 'O link curto não abriu ou não levou a uma página de produto da Amazon. “Descartada: não é um produto” é o caso de um link que abre outra coisa.', 'Cole o link longo do produto em [[Disparo manual]].'],
+            ['Na fila: falta completar', 'Falta título ou preço e o espelhamento está em “esperar eu completar”. Também vão para a fila o produto que a Amazon não encontrou na loja do Brasil e o que ela diz estar indisponível.', 'Em [[Histórico → Espelhamento]], clique em **Completar** e envie, ou descarte.'],
+            ['Descartada: expirou sem ser completada', 'Ninguém completou a oferta da fila a tempo: 24 horas, ou as horas de “Não repetir” se forem mais (com o padrão, 168 h).', 'Nada. Se ainda vale a pena, cole o link no Disparo manual.'],
+            ['Descartada: descartada à mão', 'Alguém clicou em Descartar na fila.', 'Nada.'],
+            ['Descartada: ficou parada mais de 2 h (programa desligado ou fora do ar)', 'O item chegou, mas o programa ficou desligado por mais de 2 horas antes de processá-lo.', 'Nada. Mantenha o programa ligado.'],
+            ['Não espelhada: falta a tag de associado da Amazon em Conexões', 'Não há tag da Amazon salva, então nenhum link pode sair com a sua comissão.', 'Salve a tag em [[Conexões → Amazon]]. Os próximos links saem normalmente.'],
+          ],
+        } },
+      ],
+    },
+    {
+      id: 'limites', titulo: 'Limites e números',
+      onde: 'Onde o valor muda: a terceira coluna.',
+      blocos: [
+        { p: 'Os valores abaixo são os do programa hoje. “Fixo” quer dizer que não há campo para mudar.' },
+        { tabela: {
+          colunas: ['O quê', 'Valor', 'Onde muda'],
+          linhas: [
+            ['Fontes por disparo automático', 'até 5, intercaladas', 'Fixo'],
+            ['Pausas entre mensagens', 'padrão de 6 s entre grupos e 30 s entre ofertas (mínimo de 2 s e de 5 s)', '[[Ajustes → Pausas entre mensagens]]'],
+            ['Mensagem', 'até 4096 caracteres', 'Fixo'],
+            ['Enquete', 'pergunta de até 255 caracteres; 2 a 12 opções de até 100 caracteres', 'Fixo'],
+            ['Foto', 'JPG ou PNG de até 5 MB', 'Fixo'],
+            ['Repetição', 'até 6 horários por dia', 'Fixo'],
+            ['Agendamento', 'um agendado que perde o horário por mais de 2 h não sai', 'Fixo'],
+            ['Não repetir a mesma oferta (espelhamento)', '168 h por padrão, de 0 a 8760 (0 = pode repetir)', 'Campo “Não repetir a mesma oferta por (horas)” no espelhamento'],
+            ['Máximo por hora (espelhamento)', '10 por hora por padrão, de 0 a 60 (0 = sem limite)', 'Campo “Máximo por hora” no espelhamento'],
+            ['Links lidos no espelhamento', 'até 5 links por mensagem; até 60 links por hora por grupo de origem', 'Fixo'],
+            ['Palavras bloqueadas', 'até 50 palavras de até 60 caracteres', 'Fixo'],
+            ['Fila para completar', 'expira em 24 h, ou nas horas de “Não repetir” se forem mais', 'Campo “Não repetir a mesma oferta por (horas)”'],
+            ['Revisão do Catálogo', 'até 50 ofertas esperando por disparo; o Histórico mostra as 200 mais recentes', 'Fixo'],
+            ['Catálogo', 'leitura de 200 ofertas por página; até 20 categorias e 10 palavras de busca por fonte; desconto mínimo de 0 a 99', 'Na fonte Catálogo do disparo automático'],
+            ['API da Amazon', 'exige pelo menos 10 vendas qualificadas nos últimos 30 dias; o acesso volta em até 2 dias depois de novas vendas; os dados de um produto ficam em memória por até 15 minutos', 'Regras da Amazon'],
+            ['Shopee', 'até 60 links por hora pela extensão e 300 consultas por hora no total; um link gerado é reaproveitado por até 7 dias; a Shopee libera a API em até 3 dias úteis', 'Fixo (a liberação é da Shopee)'],
+            ['Rotacionador', 'limite de até 1.024 pessoas por grupo; aviso de grupo lotando aos 95%; o modo alternar usa até 3 grupos com vaga', 'Campo de limite do link, em [[Rotacionador de Links]]'],
+            ['Avisos', 'aviso de erro de disparo no máximo 1 a cada 30 minutos; no máximo 10 cadastros de número a cada 10 minutos', 'Fixo'],
+            ['Convite', 'vale 7 dias e 1 uso', 'Fixo'],
+            ['Login', 'sessão aberta por 30 dias, que cai depois de 7 dias sem uso; 5 senhas erradas bloqueiam o IP por 15 minutos', 'Fixo'],
+            ['Guarda de dados', '90 dias por padrão (0 = guardar para sempre, não recomendado)', '[[Ajustes → Privacidade dos grupos]]'],
+            ['Fotos enviadas pelo painel', 'apagadas 7 dias depois de não terem mais envio ativo', 'Fixo'],
+            ['Backups', 'o comando mantém os 7 mais recentes', 'Fixo'],
+          ],
+        } },
+      ],
+    },
+    {
+      id: 'ordens-catalogo', titulo: 'Ordens do Catálogo e “Reler do começo”',
+      onde: '[[Disparo automático → Novo disparo automático → De onde vêm as ofertas]]',
+      leia: 'disparo-automatico/catalogo',
+      blocos: [
+        { p: 'Na fonte Catálogo, o campo “Ordem” tem sete opções: “Novidades (após salvar)” (a padrão), “Mais vendidos”, “Maior desconto”, “Menor preço”, “Maior preço”, “Com cupom primeiro” e “Coletadas há menos tempo”. A ordem aleatória não existe aqui.' },
+        { p: '**Novidades** envia o que chegar ou for atualizado no catálogo depois de você salvar, sem repetir a mesma oferta. Na primeira leitura, o painel só percorre o catálogo até o fim e marca o ponto de partida, sem enviar nada. Nesse tempo, “Ver ofertas” avisa “Primeira leitura”.' },
+        { p: '**Reler do começo** (botão ao editar o disparo, só para o Dono) faz o painel conferir o catálogo inteiro na próxima execução. Use para mandar o que já estava lá antes de você salvar. Ofertas já tratadas não se repetem. Não funciona com o disparo rodando.' },
+        { p: 'As outras ordens não usam ponto de partida: cada envio pega as melhores ofertas ainda não tratadas. Vale o “Não repetir a mesma oferta por (dias)” do disparo.' },
+      ],
+    },
+    {
+      id: 'fluxo-espelhamento', titulo: 'O que acontece com cada mensagem do espelhamento',
+      onde: '[[Disparo automático → Novo espelhamento]]',
+      leia: 'espelhamento/criar',
+      blocos: [
+        { passos: [
+          'Alguém posta uma mensagem com link da Amazon no grupo de origem. O painel recebe só o grupo, a hora e o texto, nunca quem postou.',
+          'Ele lê o link. Se for curto, segue os redirecionamentos só em endereços da Amazon até achar o código do produto (ASIN). Não lê a página da Amazon.',
+          'Confere se o produto já saiu há menos horas que o prazo de “não repetir”. A regra vale por espelhamento: dois espelhamentos podem enviar o mesmo produto.',
+          'Junta os dados: a API tem prioridade e o texto da origem completa o que faltar, campo a campo.',
+          'Confere as palavras bloqueadas no título e no texto.',
+          'Com título e preço, monta a mensagem com o template. Sem eles, a oferta vai para a fila ou sai no formato curto.',
+          'Envia pela fila de envios (valem as pausas de [[Ajustes]]) aos grupos de destino, menos o de origem. Os dados são consultados na hora de enviar.',
+        ] },
+        { p: 'Com foto, a mensagem sai como imagem com legenda. Sem API não há foto: sai só o texto. Link que já leva a sua tag e mensagens enviadas pelo próprio programa são ignorados.' },
+        { p: 'Uma mensagem com vários links gera uma oferta por produto, até 5 links. O texto descreve **um** produto só: com produtos diferentes, o texto não é usado para nenhum.' },
+        { p: 'Cada espelhamento lê no máximo 60 links por hora de cada grupo de origem. Passou disso, os seguintes são ignorados até a hora seguinte.' },
+      ],
+    },
+  ],
+});

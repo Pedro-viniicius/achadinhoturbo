@@ -640,7 +640,7 @@ test('CA8: menu em grupos na ordem da spec, rodapé, rotas e aliases, verbetes d
     { grupo: 'Conta', itens: ['#conexoes', '#numeros'] }, // Equipe entra por app.js só para o Dono
   ]);
   const rodape = /<nav aria-label="Apoio">([\s\S]*?)<\/nav>/.exec(html)[1];
-  assert.deepEqual([...rodape.matchAll(/href="(#[^"]+)"/g)].map((m) => m[1]), ['#historico', '#ajustes', '#ajuda']);
+  assert.deepEqual([...rodape.matchAll(/href="(#[^"]+)"/g)].map((m) => m[1]), ['#historico', '#ajustes', '#docs']);
 
   // app.js de verdade num contexto vm: ROTAS, aliases e a rota que cada endereço abre
   const els = new Map(); const el = (s) => { if (!els.has(s)) els.set(s, elementoFalso(s)); return els.get(s); };
@@ -653,25 +653,40 @@ test('CA8: menu em grupos na ordem da spec, rodapé, rotas e aliases, verbetes d
   ctx.window = ctx;
   vm.runInContext(fonte('app.js'), ctx, { filename: 'public/app.js' });
   const rotas = JSON.parse(vm.runInContext('JSON.stringify(Object.keys(ROTAS))', ctx));
-  for (const h of [...grupos.flatMap((g) => g.itens), '#historico', '#ajustes', '#ajuda', '#equipe']) assert.ok(rotas.includes(h.slice(1)), `rota ${h}`);
+  for (const h of [...grupos.flatMap((g) => g.itens), '#historico', '#ajustes', '#docs', '#equipe']) assert.ok(rotas.includes(h.slice(1)), `rota ${h}`);
+  assert.ok(!rotas.includes('ajuda'), '#ajuda é só um endereço antigo (alias) dos Docs');
   const abre = (hash) => { ctx.location.hash = hash; return vm.runInContext('rotaAtual()', ctx); };
   assert.deepEqual(['#regras', '#whatsapp', '#etiquetas', '#nao-existe', '#constructor', ''].map(abre), ['disparo-automatico', 'numeros', 'conexoes', 'visao', 'visao', 'visao']);
+  // Docs: #ajuda é alias; o trecho depois da "/" não muda a rota (e o "?" continua cortando antes)
+  assert.deepEqual(['#ajuda', '#docs', '#docs/conexoes', '#docs/conexoes/amazon', '#docs/xyz', '#ajuda/conexoes', '#docs?a=b', '#historico?tipo=automatico', '#visao/x', '#/docs'].map(abre),
+    ['docs', 'docs', 'docs', 'docs', 'docs', 'docs', 'docs', 'historico', 'visao', 'visao']);
+  // ir(): a rota docs recebe o pedido já validado (o mesmo do endereço reescrito: alias e malformado viram 'docs') e o endereço mantém capítulo e seção; as outras rotas seguem como antes
+  const abertos = []; const enderecos = [];
+  ctx.history.replaceState = (_a, _b, u) => { enderecos.push(u); ctx.location.hash = u; };
+  ctx.URLSearchParams = URLSearchParams; // o vm não traz; só o Histórico a usa
+  vm.runInContext('globalThis.paginaDocs = (pedido) => { globalThis.__docsPedidos.push(pedido); }; globalThis.__docsPedidos = []; paginaHistorico = () => {}; paginaVisao = () => {};', ctx);
+  const vai = (hash) => { ctx.location.hash = hash; enderecos.length = 0; vm.runInContext('ir()', ctx); abertos.push(...JSON.parse(vm.runInContext('JSON.stringify(__docsPedidos.splice(0))', ctx))); return enderecos.at(-1) ?? hash; };
+  assert.equal(vai('#docs/conexoes/amazon'), '#docs/conexoes/amazon', 'seção: o endereço fica');
+  assert.equal(vai('#docs/conexoes'), '#docs/conexoes');
+  assert.equal(vai('#docs/xyz'), '#docs/xyz', 'capítulo que não existe: o endereço fica (a página explica)');
+  assert.equal(vai('#docs'), '#docs');
+  assert.equal(vai('#ajuda'), '#docs', '#ajuda vira #docs');
+  assert.equal(vai('#docs/a/b/c'), '#docs', 'mais de duas partes: volta ao início dos Docs');
+  assert.equal(vai('#docs/Conexoes'), '#docs', 'só minúsculas, dígitos e hífen');
+  assert.equal(vai('#historico?tipo=automatico'), '#historico?tipo=automatico', 'o Histórico segue levando o filtro');
+  assert.equal(vai('#visao/qualquer'), '#visao', 'fora dos Docs, o que vem depois da "/" não fica no endereço');
+  assert.deepEqual(abertos, ['docs/conexoes/amazon', 'docs/conexoes', 'docs/xyz', 'docs', 'docs', 'docs', 'docs']);
 
-  // ajuda: todo q('…') das telas tem verbete; os cartões apontam para rotas que existem; verbetes da spec
+  // ajuda: todo q('…') das telas tem verbete (o conteúdo longo mora nos capítulos de public/docs/)
   const actx = vm.createContext({ document: { addEventListener() {}, getElementById: () => null }, addEventListener() {} });
   vm.runInContext(fonte('ajuda.js'), actx, { filename: 'public/ajuda.js' });
   const TIPS = JSON.parse(vm.runInContext('JSON.stringify(TIPS)', actx));
-  const AJUDA = JSON.parse(vm.runInContext('JSON.stringify(AJUDA)', actx));
-  const GLOSSARIO = JSON.parse(vm.runInContext('JSON.stringify(GLOSSARIO)', actx));
   for (const arq of fs.readdirSync(path.join(RAIZ, 'public')).filter((f) => f.endsWith('.js'))) {
     for (const m of fonte(arq).matchAll(/\bq\(\s*'([^']+)'\s*\)/g)) assert.ok(Object.hasOwn(TIPS, m[1]), `${arq}: q('${m[1]}') sem verbete`);
   }
   for (const k of ['manual', 'manual.link', 'manual.agendar', 'manual.etiqueta', 'mensagem', 'mensagem.formato', 'mensagem.enquete', 'mensagem.imagem',
     'mensagem.quando', 'relatorios', 'relatorios.virada', 'relatorios.limite', 'relatorios.avisos', 'conexoes', 'conexoes.segredo']) assert.ok(Object.hasOwn(TIPS, k), `TIPS.${k}`);
-  for (const a of AJUDA) assert.ok(rotas.includes(a.rota.slice(1)), `cartão "${a.titulo}" aponta para ${a.rota}`);
-  for (const r of ['#disparo-manual', '#disparar-mensagem', '#relatorios', '#conexoes']) assert.ok(AJUDA.some((a) => a.rota === r), `cartão de ajuda para ${r}`);
-  for (const termo of ['Operador', 'Dono', 'Virada do dia', 'Enquete']) assert.ok(GLOSSARIO.some(([t]) => t === termo), `glossário: ${termo}`);
-  assert.ok(!AJUDA.some((a) => /^Regras$/.test(a.titulo)), 'o cartão "Regras" virou "Disparo automático"');
+  assert.equal(vm.runInContext("typeof AJUDA + typeof GLOSSARIO + typeof paginaAjuda", actx), 'undefinedundefinedundefined', 'AJUDA, GLOSSARIO e paginaAjuda foram para os Docs');
 
   const readme = fs.readFileSync(path.join(RAIZ, 'README.md'), 'utf8');
   for (const t of ['Disparo manual', 'Disparo automático', 'Disparar mensagem', 'Relatórios e avisos', 'Conexões', 'Números de WhatsApp']) assert.ok(readme.includes(t), `README cita "${t}"`);
@@ -1036,6 +1051,238 @@ test('S16 rodada 2: o freio de consultas de número vale por IP para duas sessõ
     assert.equal((await s.post('/api/avisos/destinos', { nome: 'Pedro 35 99999-1234', numero: '11 90012-0000' })).status, 400, 'S17: telefone no nome');
     assert.equal(consultas, 11, 'o nome recusado não gasta consulta');
   } finally { await s.fechar(); }
+});
+
+// ---- "Ler mais" dos ícones "?" (docs-do-sistema, etapa 11) -------------------------------------------------
+/** ajuda.js (e, se pedido, docs.js + capítulos) num vm com um DOM falso que guarda os ouvintes e os dispara à mão. */
+function montarDicas({ capitulos = true } = {}) {
+  const ouvintes = {}; const janela = {}; const doc = { activeElement: null };
+  const dispara = (tipo, e) => { for (const fn of ouvintes[tipo] || []) fn(e); };
+  const tip = {
+    id: 'tip', hidden: true, aberto: false, filhos: [], texto: '', aberturas: 0, classes: new Set(), style: {},
+    set textContent(v) { this.texto = String(v); this.filhos = []; }, get textContent() { return this.texto + this.filhos.map((f) => f.textContent).join(''); },
+    set innerHTML(_) { throw new Error('innerHTML na dica é proibido: o texto do link vai por textContent'); },
+    appendChild(f) { f.pai = this; this.filhos.push(f); return f; },
+    classList: { add: (...c) => c.forEach((x) => tip.classes.add(x)), remove: (...c) => c.forEach((x) => tip.classes.delete(x)) },
+    showPopover() { this.aberto = true; this.aberturas++; }, hidePopover() { this.aberto = false; }, matches: (s) => s === ':popover-open' && tip.aberto,
+    offsetWidth: 200, offsetHeight: 60,
+    closest: (s) => (s === '#tip' ? tip : null),
+  };
+  const noCorpo = (f) => { f.parentNode = doc.body; return f; };
+  doc.body = { appendChild: noCorpo }; tip.parentNode = doc.body;
+  doc.createElement = (tag) => {
+    const el = { tag, style: {}, className: '', href: '', texto: '', get textContent() { return this.texto; }, set textContent(v) { this.texto = String(v); },
+      closest(s) { return s === '#tip' ? (this.pai === tip ? tip : null) : s === 'a' ? this : null; },
+      focus() { doc.activeElement = this; } };
+    return el;
+  };
+  doc.getElementById = (id) => (id === 'tip' ? tip : null);
+  doc.addEventListener = (tipo, fn) => { (ouvintes[tipo] ||= []).push(fn); };
+  const ctx = vm.createContext({ document: doc, addEventListener: (tipo, fn) => { (janela[tipo] ||= []).push(fn); }, innerWidth: 1024, innerHeight: 768 });
+  vm.runInContext(fonte('ajuda.js'), ctx, { filename: 'public/ajuda.js' });
+  if (capitulos) {
+    vm.runInContext(fonte('docs.js'), ctx, { filename: 'public/docs.js' });
+    for (const arq of fs.readdirSync(path.join(RAIZ, 'public', 'docs')).filter((f) => f.endsWith('.js'))) vm.runInContext(fonte('docs/' + arq), ctx, { filename: 'public/docs/' + arq });
+  }
+  /** Ícone "?" falso: dataset do HTML de q(); focus() dispara o focusin como o navegador. */
+  const icone = (chave, dialogo = null) => {
+    const html = vm.runInContext(`q(${JSON.stringify(chave)})`, ctx);
+    const dataset = {}; for (const m of html.matchAll(/ data-(tip|docs)="([^"]*)"/g)) dataset[m[1]] = m[2].replace(/&quot;/g, '"');
+    const attrs = {}; for (const m of html.matchAll(/ (role|aria-expanded)="([^"]*)"/g)) attrs[m[1]] = m[2];
+    const el = { html, dataset, attrs, isConnected: true, focos: 0,
+      closest: (s) => (s === '.q' || (s === '.q[data-docs]' && dataset.docs) ? el : s === 'dialog' ? dialogo : null),
+      getBoundingClientRect: () => ({ left: 100, right: 112, top: 200, bottom: 214, width: 12, height: 14 }),
+      setAttribute(k, v) { attrs[k] = String(v); },
+      focus() { doc.activeElement = el; el.focos++; dispara('focusin', { target: el }); } };
+    return el;
+  };
+  const tecla = (alvoEl, key, extra = {}) => { const e = { key, target: alvoEl, defaultPrevented: false, parou: false, preventDefault() { this.defaultPrevented = true; }, stopPropagation() { this.parou = true; }, ...extra }; dispara('keydown', e); return e; };
+  const clique = (alvoEl) => { const e = { target: alvoEl, defaultPrevented: false, preventDefault() { this.defaultPrevented = true; } }; dispara('click', e); return e; };
+  const sobre = (el) => dispara('mouseover', { target: el });
+  const sai = (el) => dispara('mouseout', { target: el });
+  const rola = () => { for (const fn of janela.scroll || []) fn({}); };
+  const hash = () => { for (const fn of janela.hashchange || []) fn({}); };
+  return { ctx, doc, tip, icone, tecla, clique, sobre, sai, rola, hash, dispara, janela, rodar: (c) => vm.runInContext(c, ctx) };
+}
+const TITULO_AMAZON = 'Amazon: tag e API'; // título da seção conexoes/amazon em public/docs/cap-comecar.js
+
+test('Ler mais (etapa 11): toda chave de LEIA_MAIS existe em TIPS e todo destino existe nos capítulos; o mapa da spec está inteiro', () => {
+  const D = montarDicas();
+  const TIPS = JSON.parse(D.rodar('JSON.stringify(TIPS)'));
+  const LEIA = JSON.parse(D.rodar('JSON.stringify(LEIA_MAIS)'));
+  const CAPS = JSON.parse(D.rodar('JSON.stringify(DOCS_CAPS)'));
+  assert.ok(Object.keys(LEIA).length >= 30, 'o mapa não ficou vazio');
+  for (const [chave, destino] of Object.entries(LEIA)) {
+    assert.ok(Object.hasOwn(TIPS, chave), `LEIA_MAIS.${chave} não tem verbete em TIPS`);
+    assert.match(destino, /^[a-z0-9-]+\/[a-z0-9-]+$/, `${chave}: destino mal formado`);
+    const [cap, sec] = destino.split('/');
+    assert.ok(CAPS[cap], `${chave}: o capítulo ${cap} não existe`);
+    assert.ok(CAPS[cap].secoes.some((x) => x.id === sec), `${chave}: a seção ${destino} não existe`);
+  }
+  // mapa inicial da spec (docs/produto/specs/docs-do-sistema.md, seção 3)
+  const SPEC = { 'conexoes.amazon': 'conexoes/amazon', 'espelhamento.formato': 'espelhamento/formato', 'espelhamento.fila': 'espelhamento/fila', espelhamento: 'espelhamento/criar',
+    'conexoes.shopee': 'conexoes/shopee', 'conexoes.shopee.id': 'perguntas/id-shopee', 'conexoes.shopee.appid': 'perguntas/id-shopee', 'conexoes.shopee.senha': 'perguntas/id-shopee',
+    'conexoes.shopee.extensao': 'primeiros-passos/extensao', 'ajustes.extensao': 'primeiros-passos/extensao', 'conexoes.catalogo': 'conexoes/catalogo',
+    'conexoes.catalogo.endereco': 'conexoes/catalogo', 'conexoes.catalogo.token': 'conexoes/catalogo', 'regras.etiqueta': 'perguntas/etiqueta-desta-fonte',
+    'fonte.etiqueta': 'perguntas/etiqueta-desta-fonte', 'fonte.catalogo': 'disparo-automatico/catalogo', 'fonte.catalogo.ordem': 'disparo-automatico/catalogo',
+    'fonte.catalogo.revisao': 'revisao/motivos', 'regras.fontes': 'disparo-automatico/fontes', 'fonte.tipos': 'disparo-automatico/fontes',
+    'manual.link': 'disparo-manual/mercado-livre', 'manual.amazon': 'disparo-manual/amazon', 'manual.shopee': 'disparo-manual/shopee',
+    'regras.template': 'templates/linha-some', templates: 'templates/linha-some', whatsapp: 'primeiros-passos/whatsapp', equipe: 'equipe/papeis',
+    'equipe.convite': 'equipe/convidar', 'ajustes.privacidade': 'privacidade/retencao', links: 'grupos/rotacionador', 'links.modo': 'grupos/rotacionador',
+    'links.proximo': 'grupos/proximo-grupo', relatorios: 'resultados/avisos', 'relatorios.virada': 'resultados/avisos' };
+  assert.deepEqual(LEIA, SPEC);
+  // todo ícone q('chave') de uma tela com destino sai com data-docs; os demais seguem sem
+  for (const chave of Object.keys(TIPS)) {
+    const html = D.rodar(`q(${JSON.stringify(chave)})`);
+    if (LEIA[chave]) assert.match(html, new RegExp(`data-docs="${LEIA[chave]}"`), chave); else assert.doesNotMatch(html, /data-docs/, chave);
+  }
+});
+
+test('Ler mais (etapa 11): q() — com destino vira botão que ainda não está aberto; sem destino fica como era; chave de protótipo não vale', () => {
+  const D = montarDicas({ capitulos: false });
+  const com = D.rodar("q('conexoes.amazon')");
+  assert.match(com, /^<span class="q" tabindex="0" role="button" aria-expanded="false" aria-label="Ajuda: [^"]+" data-tip="[^"]+" data-docs="conexoes\/amazon">\?<\/span>$/);
+  const sem = D.rodar("q('regras')");
+  assert.match(sem, /^<span class="q" tabindex="0" role="img" aria-label="Ajuda: [^"]+" data-tip="[^"]+">\?<\/span>$/);
+  assert.equal(D.rodar("q('nao.existe')"), '');
+  assert.equal(D.rodar("q('constructor')"), '');
+  assert.equal(D.rodar("leiaMaisDe('constructor') + leiaMaisDe('__proto__') + leiaMaisDe(null)"), '');
+  // aspas na dica não quebram o atributo (como antes)
+  assert.doesNotMatch(D.rodar("q('regras.fontes')").replace(/&quot;/g, ''), /data-tip="[^"]*"[^>]*"[^>]*data-docs/);
+});
+
+test('Ler mais (etapa 11): hover só mostra a prévia; clique, toque, Enter e Espaço fixam a dica com o link e o foco nele', () => {
+  const D = montarDicas(); const q1 = D.icone('conexoes.amazon');
+  D.sobre(q1);
+  assert.equal(D.tip.aberto, true); assert.equal(D.tip.filhos.length, 0, 'prévia sem link'); assert.equal(D.tip.style.pointerEvents ?? '', '');
+  D.sai(q1); assert.equal(D.tip.aberto, false, 'a prévia some ao sair');
+
+  // clique (e o toque, que o navegador entrega como mouseover + focusin + click)
+  D.sobre(q1); q1.focus();
+  const e = D.clique(q1);
+  assert.ok(e.defaultPrevented);
+  assert.equal(D.tip.aberto, true); assert.equal(D.tip.filhos.length, 1);
+  const a = D.tip.filhos[0];
+  assert.equal(a.tag, 'a'); assert.equal(a.href, '#docs/conexoes/amazon'); assert.equal(a.textContent, `Ler mais: ${TITULO_AMAZON} →`);
+  assert.equal(D.doc.activeElement, a, 'o foco vai para o link');
+  // R5: o pointer-events da dica fixa e o layout do link vêm do CSS (.tip.tip-fixo e .tip-link), nada inline
+  assert.ok(D.tip.classes.has('tip-fixo'), 'a dica fixa recebe cliques pela classe tip-fixo'); assert.equal(D.tip.style.pointerEvents ?? '', ''); assert.deepEqual({ ...a.style }, {}, 'o link não leva style inline');
+  assert.match(fs.readFileSync(path.join(RAIZ, 'public', 'style.css'), 'utf8'), /\.tip\.tip-fixo\s*\{[^}]*pointer-events:\s*auto/);
+  assert.equal(a.target ?? '', '', 'fora de diálogo o link navega na mesma aba'); assert.equal(a.rel ?? '', '');
+  assert.equal(q1.attrs['aria-expanded'], 'true');
+  assert.equal(D.tip.textContent, `${q1.dataset.tip}Ler mais: ${TITULO_AMAZON} →`);
+
+  // Enter e Espaço no "?" com o foco nele (sem clique): fixam; o Espaço não rola a página
+  for (const key of ['Enter', ' ']) {
+    const D2 = montarDicas(); const k = D2.icone('conexoes.shopee.id'); k.focus();
+    assert.equal(D2.tip.filhos.length, 0, 'foco: só a prévia');
+    const ev = D2.tecla(k, key);
+    assert.ok(ev.defaultPrevented, `${JSON.stringify(key)} não rola nem clica`);
+    assert.equal(D2.tip.filhos[0].href, '#docs/perguntas/id-shopee');
+    assert.equal(D2.tip.filhos[0].textContent, 'Ler mais: Meu ID de afiliado da Shopee vai no AppID? →');
+    assert.equal(D2.doc.activeElement, D2.tip.filhos[0]);
+  }
+  // Enter com Ctrl/Alt/Meta não fixa; Enter em outro elemento não faz nada
+  const D3 = montarDicas(); const k3 = D3.icone('whatsapp'); k3.focus();
+  D3.tecla(k3, 'Enter', { ctrlKey: true }); assert.equal(D3.tip.filhos.length, 0);
+  assert.equal(D3.tecla({ closest: () => null }, 'Enter').defaultPrevented, false);
+});
+
+test('Ler mais (etapa 11): a dica fixa não some ao tirar o mouse, ao perder o foco no "?" nem ao rolar; Esc devolve o foco ao "?" e não reabre a prévia', () => {
+  const D = montarDicas(); const k = D.icone('conexoes.catalogo'); k.focus(); D.clique(k);
+  const a = D.tip.filhos[0];
+  D.sai(k); D.dispara('focusout', { target: k, relatedTarget: a }); D.rola(); D.rola();
+  assert.equal(D.tip.aberto, true, 'segue aberta');
+  // passar o mouse por outro "?" não troca a dica fixa
+  const outro = D.icone('regras'); D.sobre(outro); outro.focus();
+  assert.equal(D.tip.textContent, `${k.dataset.tip}Ler mais: Catálogo do Etiqueta →`.replace('Catálogo do Etiqueta', a.textContent.slice('Ler mais: '.length, -2)));
+  const antes = k.focos;
+  const esc = D.tecla(a, 'Escape');
+  assert.ok(esc.defaultPrevented && esc.parou, 'o Esc não fecha também o diálogo que contém o "?"');
+  assert.equal(D.tip.aberto, false); assert.equal(D.doc.activeElement, k); assert.equal(k.focos, antes + 1);
+  assert.equal(D.tip.aberto, false, 'o foco devolvido não reabre a prévia');
+  assert.equal(k.attrs['aria-expanded'], 'false');
+  // Esc sem dica fixa: fecha a prévia e não bloqueia o Esc de quem está embaixo
+  const D2 = montarDicas(); const p = D2.icone('regras'); D2.sobre(p);
+  const e2 = D2.tecla(p, 'Escape'); assert.equal(D2.tip.aberto, false); assert.equal(e2.defaultPrevented, false);
+});
+
+test('Ler mais (etapa 11): clicar de novo no "?", fora, no link ou mudar de página fecha; clicar no texto da dica fixa não; Tab sai do link para o "?"', () => {
+  const abre = () => { const D = montarDicas(); const k = D.icone('equipe.convite'); k.focus(); D.clique(k); return { D, k, a: D.tip.filhos[0] }; };
+  let c = abre(); D_ok(c.D.clique(c.k)); assert.equal(c.D.tip.aberto, false, 'segundo clique no "?" fecha'); assert.equal(c.D.doc.activeElement, c.k);
+  c = abre(); c.D.clique({ closest: () => null }); assert.equal(c.D.tip.aberto, false, 'clique fora');
+  c = abre(); c.D.clique(c.D.tip); assert.equal(c.D.tip.aberto, true, 'clicar no texto da dica não fecha');
+  c = abre(); const ev = c.D.clique(c.a); assert.equal(c.D.tip.aberto, false, 'clicar no link fecha'); assert.equal(ev.defaultPrevented, false, 'e deixa o link navegar');
+  c = abre(); c.D.hash(); assert.equal(c.D.tip.aberto, false, 'mudou o endereço');
+  // Tab (ou Shift+Tab) dentro da dica: fecha e o foco volta ao "?" para o Tab seguir dali
+  c = abre(); const t = c.D.tecla(c.a, 'Tab'); assert.equal(c.D.tip.aberto, false); assert.equal(c.D.doc.activeElement, c.k); assert.equal(t.defaultPrevented, false);
+  // o foco indo para outro lugar da página fecha; ir para o próprio "?" ou para dentro da dica não
+  c = abre(); c.D.dispara('focusout', { target: c.a, relatedTarget: c.k }); assert.equal(c.D.tip.aberto, true);
+  c.D.dispara('focusout', { target: c.k, relatedTarget: c.a }); assert.equal(c.D.tip.aberto, true);
+  c.D.dispara('focusout', { target: c.a, relatedTarget: { closest: () => null } }); assert.equal(c.D.tip.aberto, false);
+  c = abre(); c.D.dispara('focusout', { target: c.a, relatedTarget: null }); assert.equal(c.D.tip.aberto, true, 'janela perdendo o foco não fecha');
+  // outro "?" com destino, clicado com a primeira aberta, passa a ser a fixa (e a primeira volta a "fechada")
+  c = abre(); const k2 = c.D.icone('whatsapp'); c.D.clique(k2);
+  assert.equal(c.k.attrs['aria-expanded'], 'false'); assert.equal(k2.attrs['aria-expanded'], 'true');
+  assert.equal(c.D.tip.filhos.length, 1); assert.equal(c.D.tip.filhos[0].href, '#docs/primeiros-passos/whatsapp');
+  function D_ok(e) { assert.ok(e.defaultPrevented); }
+});
+
+test('Ler mais (etapa 11): "?" dentro de um <dialog> modal: a dica fixa vai para dentro dele (fora dele tudo é inerte) e volta ao <body> ao fechar', () => {
+  const D = montarDicas();
+  const dlg = { appendChild(f) { f.parentNode = this; return f; } };
+  const k = D.icone('conexoes.amazon', dlg);
+  D.sobre(k); assert.equal(D.tip.parentNode, D.doc.body, 'a prévia (só hover) fica no <body>');
+  D.clique(k); assert.equal(D.tip.parentNode, dlg, 'fixa: dentro do diálogo'); assert.equal(D.tip.aberto, true); assert.equal(D.doc.activeElement, D.tip.filhos[0]);
+  D.tecla(D.tip.filhos[0], 'Escape'); assert.equal(D.tip.parentNode, D.doc.body, 'Esc devolve a dica ao <body>');
+  D.clique(k); assert.equal(D.tip.parentNode, dlg);
+  D.clique({ closest: () => null }); assert.equal(D.tip.parentNode, D.doc.body, 'clique fora também');
+  D.clique(k); D.dispara('close', { target: dlg }); assert.equal(D.tip.aberto, false, 'diálogo fechado por fora fecha a dica'); assert.equal(D.tip.parentNode, D.doc.body);
+  // "?" fora de diálogo: a dica fica no <body>, mesmo depois de ter estado dentro de um
+  const fora = D.icone('whatsapp'); D.clique(fora); assert.equal(D.tip.parentNode, D.doc.body); assert.equal(D.tip.aberto, true);
+});
+
+test('Ler mais (D4/R2): "?" dentro de um <dialog> abre o link em outra aba (o formulário aberto não se perde); fora dele, igual a antes', () => {
+  const D = montarDicas();
+  const dlg = { appendChild(f) { f.parentNode = this; return f; } };
+  const k = D.icone('conexoes.amazon', dlg); D.clique(k);
+  const a = D.tip.filhos[0];
+  assert.equal(a.href, '#docs/conexoes/amazon');
+  assert.equal(a.target, '_blank'); assert.equal(a.rel, 'noopener');
+  assert.equal(a.textContent, `Ler mais (abre em outra aba): ${TITULO_AMAZON} →`);
+  assert.equal(D.doc.activeElement, a, 'o foco continua indo para o link');
+  assert.deepEqual({ ...a.style }, {}, 'sem style inline também aqui');
+  // "?" sem <dialog> na ascendência: texto e atributos de sempre
+  const fora = D.icone('conexoes.amazon'); D.clique(fora);
+  const b = D.tip.filhos[0];
+  assert.equal(b.textContent, `Ler mais: ${TITULO_AMAZON} →`); assert.ok(!b.target && !b.rel);
+  // a mesma chave, agora em outro diálogo, e depois fora de novo: cada abertura decide pelo seu "?"
+  const k2 = D.icone('conexoes.shopee.id', dlg); D.clique(k2);
+  assert.equal(D.tip.filhos[0].target, '_blank'); assert.match(D.tip.filhos[0].textContent, /^Ler mais \(abre em outra aba\): /);
+  D.clique(fora); assert.equal(D.tip.filhos[0].target ?? '', '');
+  // R9: o exemplo do desconto bate com o que o template gera ("25%", sem "OFF")
+  assert.match(D.rodar('DICAS_PLACEHOLDERS.DESCONTO_PRODUTO'), /como 25%\./); assert.doesNotMatch(D.rodar('DICAS_PLACEHOLDERS.DESCONTO_PRODUTO'), /OFF/);
+});
+
+test('Ler mais (etapa 11): "?" sem destino mantém o comportamento de antes (prévia, alterna no clique, sem link nem foco movido)', () => {
+  const D = montarDicas(); const k = D.icone('regras');
+  D.sobre(k); assert.equal(D.tip.aberto, true); D.sai(k); assert.equal(D.tip.aberto, false);
+  k.focus(); assert.equal(D.tip.aberto, true); D.dispara('focusout', { target: k, relatedTarget: null }); assert.equal(D.tip.aberto, false);
+  D.sobre(k); D.clique(k); assert.equal(D.tip.aberto, false, 'clique com a prévia aberta fecha (como antes)');
+  D.clique(k); assert.equal(D.tip.aberto, true); assert.equal(D.tip.filhos.length, 0); assert.equal(D.tip.style.pointerEvents ?? '', '');
+  assert.notEqual(D.doc.activeElement, undefined);
+  D.rola(); assert.equal(D.tip.aberto, false, 'rolar esconde a prévia');
+  D.tecla(k, 'Enter'); assert.equal(D.tip.filhos.length, 0, 'Enter não fixa quem não tem destino');
+});
+
+test('Ler mais (etapa 11): sem os capítulos carregados o link usa o próprio destino; destino malformado no HTML não vira link', () => {
+  const D = montarDicas({ capitulos: false }); const k = D.icone('conexoes.amazon'); D.clique(k);
+  assert.equal(D.tip.filhos[0].textContent, 'Ler mais: conexoes/amazon →');
+  for (const ruim of ['', 'javascript:alert(1)', '../x/y', 'a/b/c', 'A/B', 'a"b/c', 'a/b" onmouseover="x']) {
+    const D2 = montarDicas({ capitulos: false }); const k2 = D2.icone('regras'); k2.dataset.docs = ruim; D2.clique(k2);
+    assert.equal(D2.tip.filhos.length, 0, `destino ${JSON.stringify(ruim)}: sem link`);
+  }
+  assert.doesNotMatch(fonte('ajuda.js'), /innerHTML\s*=/, 'a dica nunca recebe HTML');
 });
 
 test('nenhum teste deste arquivo acessou a rede', () => {

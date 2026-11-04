@@ -1,4 +1,4 @@
-// Ajuda: ícones "?" com explicação ao passar o mouse (ou focar com Tab) e a página "Ajuda" do menu.
+// Ajuda: ícones "?" com explicação ao passar o mouse (ou focar com Tab) (a página "Docs" do menu mora em docs.js).
 // Carrega antes de app.js: só define coisas; não usa nada de lá ao carregar.
 
 const TIPS = {
@@ -116,7 +116,7 @@ const DICAS_PLACEHOLDERS = {
   TITULO_COMPLETO: 'Nome do produto inteiro, sem abreviar.',
   PRECO_ANTIGO: 'Preço de antes (“De R$”). Vazio quando não há desconto.',
   PRECO_PRODUTO: 'Preço atual (“Por R$”).',
-  DESCONTO_PRODUTO: 'Porcentagem de desconto, como 25% OFF. Vazio quando não há preço antigo.',
+  DESCONTO_PRODUTO: 'Porcentagem de desconto, como 25%. Vazio quando não há preço antigo.',
   NUMERO_VENDAS: 'Quantidade de vendas, como +1 mil vendidos. Vazio quando a loja não informa.',
   FRETE: 'Informação de frete, como “Frete grátis”. Vazio quando não há.',
   CUPOM: 'Cupom da oferta. Vazio quando não há.',
@@ -124,10 +124,64 @@ const DICAS_PLACEHOLDERS = {
 };
 const DICA_OPCIONAL = 'Para um pedaço da linha sumir sozinho, ponha-o entre colchetes: [🎟️ Cupom: {CUPOM}]. Se algum campo dentro dos colchetes estiver vazio, o pedaço some e o resto da linha fica.';
 
-/** Ícone "?" com explicação. Uso: ${q('regras.etiqueta')} */
+// "Ler mais" dos ícones "?": chave de TIPS → 'capítulo/seção' dos Docs (public/docs/cap-*.js). Só as chaves daqui ganham
+// o link; TIPS não muda. Um teste (test/qa.test.js) confere que toda chave existe em TIPS e todo destino existe nos capítulos.
+const LEIA_MAIS = {
+  'conexoes.amazon': 'conexoes/amazon',
+  'espelhamento.formato': 'espelhamento/formato',
+  'espelhamento.fila': 'espelhamento/fila',
+  'espelhamento': 'espelhamento/criar',
+  'conexoes.shopee': 'conexoes/shopee',
+  'conexoes.shopee.id': 'perguntas/id-shopee',
+  'conexoes.shopee.appid': 'perguntas/id-shopee',
+  'conexoes.shopee.senha': 'perguntas/id-shopee',
+  'conexoes.shopee.extensao': 'primeiros-passos/extensao',
+  'ajustes.extensao': 'primeiros-passos/extensao',
+  'conexoes.catalogo': 'conexoes/catalogo',
+  'conexoes.catalogo.endereco': 'conexoes/catalogo',
+  'conexoes.catalogo.token': 'conexoes/catalogo',
+  'regras.etiqueta': 'perguntas/etiqueta-desta-fonte',
+  'fonte.etiqueta': 'perguntas/etiqueta-desta-fonte',
+  'fonte.catalogo': 'disparo-automatico/catalogo',
+  'fonte.catalogo.ordem': 'disparo-automatico/catalogo',
+  'fonte.catalogo.revisao': 'revisao/motivos',
+  'regras.fontes': 'disparo-automatico/fontes',
+  'fonte.tipos': 'disparo-automatico/fontes',
+  'manual.link': 'disparo-manual/mercado-livre',
+  'manual.amazon': 'disparo-manual/amazon',
+  'manual.shopee': 'disparo-manual/shopee',
+  'regras.template': 'templates/linha-some',
+  'templates': 'templates/linha-some',
+  'whatsapp': 'primeiros-passos/whatsapp',
+  'equipe': 'equipe/papeis',
+  'equipe.convite': 'equipe/convidar',
+  'ajustes.privacidade': 'privacidade/retencao',
+  'links': 'grupos/rotacionador',
+  'links.modo': 'grupos/rotacionador',
+  'links.proximo': 'grupos/proximo-grupo',
+  'relatorios': 'resultados/avisos',
+  'relatorios.virada': 'resultados/avisos',
+};
+const LEIA_MAIS_DESTINO = /^[a-z0-9-]+\/[a-z0-9-]+$/; // único formato que vira href do link (sempre interno)
+const leiaMaisDe = (chave) => (typeof chave === 'string' && Object.hasOwn(LEIA_MAIS, chave) && LEIA_MAIS_DESTINO.test(LEIA_MAIS[chave]) ? LEIA_MAIS[chave] : '');
+
+/** Ícone "?" com explicação. Uso: ${q('regras.etiqueta')}. Com destino em LEIA_MAIS vira um botão que fixa a dica e mostra o link. */
 function q(chave) {
-  const t = TIPS[chave]; if (!t) return '';
-  return `<span class="q" tabindex="0" role="img" aria-label="Ajuda: ${t.replace(/"/g, '&quot;')}" data-tip="${t.replace(/"/g, '&quot;')}">?</span>`;
+  const t = Object.hasOwn(TIPS, chave) ? TIPS[chave] : ''; if (!t) return '';
+  const tx = t.replace(/"/g, '&quot;'); const destino = leiaMaisDe(chave);
+  if (destino) return `<span class="q" tabindex="0" role="button" aria-expanded="false" aria-label="Ajuda: ${tx}" data-tip="${tx}" data-docs="${destino}">?</span>`;
+  return `<span class="q" tabindex="0" role="img" aria-label="Ajuda: ${tx}" data-tip="${tx}">?</span>`;
+}
+
+/** Título da seção de destino ("capítulo/seção"), lido dos capítulos na hora do clique; sem eles, o próprio destino. */
+function leiaMaisTitulo(destino) {
+  const [capId, secId] = String(destino).split('/');
+  try {
+    const cap = typeof DOCS_CAPS !== 'undefined' && Object.hasOwn(DOCS_CAPS, capId) ? DOCS_CAPS[capId] : null;
+    const sec = (cap?.secoes || []).find((x) => x && x.id === secId);
+    if (sec && typeof sec.titulo === 'string') return typeof docsPlano === 'function' ? docsPlano(sec.titulo) : sec.titulo;
+  } catch { /* sem capítulos carregados */ }
+  return destino;
 }
 
 // Caixinha de explicação (#tip). Usa a API de popover para ficar acima de qualquer diálogo aberto.
@@ -140,131 +194,82 @@ function tipShow(texto) {
 function tipHide() {
   const t = document.getElementById('tip'); if (!t) return;
   if (t.hidePopover && t.matches(':popover-open')) t.hidePopover();
-  t.hidden = true; t.classList.remove('tip-ajuda');
+  t.hidden = true; t.classList.remove('tip-ajuda', 'tip-fixo'); t.style.pointerEvents = '';
 }
 
-// Ícones "?": por delegação, com hover, foco e toque.
+// Ícones "?": por delegação, com hover, foco e toque. Os que têm destino em LEIA_MAIS (data-docs) fixam a dica ao clicar,
+// tocar ou apertar Enter/Espaço e mostram o link "Ler mais: <seção> →" (foco nele; Esc ou clique fora fecha e devolve o foco).
 (() => {
-  let atual = null;
-  function mostrar(el) {
-    const t = tipShow(el.dataset.tip); if (!t) return;
-    t.classList.add('tip-ajuda');
+  let atual = null; let fixo = false; let semPrevia = false; let guardada = null; // guardada = o #tip, mesmo se um diálogo que o continha for refeito
+  const dentroDaDica = (alvo) => !!alvo?.closest?.('#tip');
+  function posicionar(el, t) {
     const r = el.getBoundingClientRect(); const w = Math.min(320, innerWidth - 24);
     t.style.maxWidth = w + 'px';
     const left = Math.max(12, Math.min(r.left + r.width / 2 - t.offsetWidth / 2, innerWidth - t.offsetWidth - 12));
-    const top = r.bottom + 8 + t.offsetHeight > innerHeight ? r.top - t.offsetHeight - 8 : r.bottom + 8;
-    t.style.left = left + 'px'; t.style.top = top + 'px'; atual = el;
+    let top = r.bottom + 8 + t.offsetHeight > innerHeight ? r.top - t.offsetHeight - 8 : r.bottom + 8;
+    if (fixo) top = Math.max(8, Math.min(top, innerHeight - t.offsetHeight - 8)); // fixa, ela acompanha o "?" sem sair da tela
+    t.style.left = left + 'px'; t.style.top = top + 'px';
   }
-  function esconder() { if (atual) { tipHide(); atual = null; } }
-  document.addEventListener('mouseover', (e) => { const el = e.target.closest?.('.q'); if (el) mostrar(el); });
-  document.addEventListener('mouseout', (e) => { if (e.target.closest?.('.q') === atual) esconder(); });
-  document.addEventListener('focusin', (e) => { const el = e.target.closest?.('.q'); if (el) mostrar(el); });
-  document.addEventListener('focusout', (e) => { if (e.target.closest?.('.q') === atual) esconder(); });
-  document.addEventListener('click', (e) => { const el = e.target.closest?.('.q'); if (el) { e.preventDefault(); atual === el ? esconder() : mostrar(el); } else if (atual) esconder(); });
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') esconder(); });
-  addEventListener('scroll', esconder, true);
+  // Um <dialog> modal deixa tudo fora dele inerte, inclusive o #tip (que mora no fim do <body>): com a dica fixa o link não
+  // receberia foco nem clique. Então, enquanto fixa, a dica vai para dentro do diálogo do "?" e volta ao <body> ao fechar.
+  function trazerParaCorpo() {
+    const t = guardada || document.getElementById('tip'); if (!t) return;
+    guardada = t; if (t.parentNode !== document.body && document.body) document.body.appendChild(t);
+  }
+  function abrigarNoDialogo(el) {
+    const t = guardada || document.getElementById('tip'); if (!t) return;
+    guardada = t; const dlg = el.closest?.('dialog');
+    if (dlg && t.parentNode !== dlg) dlg.appendChild(t); else if (!dlg) trazerParaCorpo();
+  }
+  function soltar() { if (atual?.dataset?.docs) atual.setAttribute('aria-expanded', 'false'); fixo = false; }
+  function mostrar(el) { // prévia (hover e foco): sem link, some ao sair
+    trazerParaCorpo(); const t = tipShow(el.dataset.tip); if (!t) return;
+    soltar(); t.classList.add('tip-ajuda'); t.classList.remove('tip-fixo');
+    atual = el; posicionar(el, t);
+  }
+  function fixar(el) {
+    abrigarNoDialogo(el); const t = tipShow(el.dataset.tip); if (!t) return;
+    soltar(); t.classList.add('tip-ajuda', 'tip-fixo'); // .tip-fixo devolve o pointer-events que .tip tira (layout do link: .tip-link)
+    const destino = String(el.dataset.docs || ''); let link = null;
+    if (LEIA_MAIS_DESTINO.test(destino)) {
+      link = document.createElement('a'); link.className = 'tip-link'; link.href = '#docs/' + destino;
+      // Dentro de um <dialog> (formulário aberto) navegar na mesma aba fecharia o diálogo e perderia o que foi digitado: abre em outra aba.
+      const emDialogo = !!el.closest?.('dialog');
+      if (emDialogo) { link.target = '_blank'; link.rel = 'noopener'; }
+      link.textContent = `Ler mais${emDialogo ? ' (abre em outra aba)' : ''}: ${leiaMaisTitulo(destino)} →`;
+      t.appendChild(link);
+    }
+    atual = el; fixo = true; el.setAttribute('aria-expanded', 'true'); posicionar(el, t);
+    link?.focus?.({ preventScroll: true });
+  }
+  function esconder(devolverFoco) {
+    if (!atual) return;
+    const el = atual; const estavaFixo = fixo; soltar(); tipHide(); atual = null; trazerParaCorpo();
+    if (devolverFoco && estavaFixo && el.isConnected) { semPrevia = true; try { el.focus({ preventScroll: true }); } finally { semPrevia = false; } }
+  }
+  const alternar = (el) => { if (fixo && atual === el) esconder(true); else fixar(el); };
+  document.addEventListener('mouseover', (e) => { const el = e.target.closest?.('.q'); if (el && !fixo) mostrar(el); });
+  document.addEventListener('mouseout', (e) => { if (!fixo && e.target.closest?.('.q') === atual) esconder(); });
+  document.addEventListener('focusin', (e) => { const el = e.target.closest?.('.q'); if (el && !fixo && !semPrevia) mostrar(el); });
+  document.addEventListener('focusout', (e) => {
+    if (!fixo) { if (e.target.closest?.('.q') === atual) esconder(); return; }
+    const p = e.relatedTarget; // foco foi para outro lugar da página (Tab do link também cai aqui pelo keydown)
+    if (p && !dentroDaDica(p) && p !== atual) esconder();
+  });
+  document.addEventListener('click', (e) => {
+    const el = e.target.closest?.('.q');
+    if (el) { e.preventDefault(); if (el.dataset.docs) alternar(el); else if (atual === el && !fixo) esconder(); else { esconder(); mostrar(el); } return; }
+    if (dentroDaDica(e.target) && !e.target.closest?.('a')) return; // clicar no texto da dica fixa não fecha
+    if (atual) esconder(); // clicar fora ou no link (que navega) fecha
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { if (fixo) { e.preventDefault(); e.stopPropagation(); esconder(true); } else esconder(); return; }
+    if (e.key === 'Tab' && fixo && dentroDaDica(e.target)) { esconder(true); return; } // o Tab segue a partir do "?"
+    if ((e.key === 'Enter' || e.key === ' ') && !e.altKey && !e.ctrlKey && !e.metaKey) {
+      const el = e.target.closest?.('.q[data-docs]'); if (el) { e.preventDefault(); alternar(el); }
+    }
+  });
+  addEventListener('scroll', () => { if (!atual) return; if (!fixo) { esconder(); return; } const t = document.getElementById('tip'); if (atual.isConnected && t) posicionar(atual, t); else esconder(); }, true);
+  addEventListener('hashchange', () => esconder());
+  document.addEventListener('close', () => esconder(), true); // diálogo fechado por fora (o evento não borbulha: captura)
 })();
-
-// ---------- página Ajuda ----------
-const AJUDA = [
-  { id: 'visao', titulo: 'Visão Geral', rota: '#visao', oque: 'O painel de resultados dos seus grupos: cliques, entradas, saídas, leitura das mensagens e evasão, por período e por bloco.',
-    passos: ['Escolha o período (Hoje, 7 dias, Mês…) e, se quiser, um bloco.', 'Leia o funil: cliques → entradas → saídas. “Pelo link” é quem entrou sozinho; “adicionados”, quem um admin colocou.', '“Abriram o grupo” conta pessoas que leram alguma mensagem sua: é o seu alcance real.', 'Nos cartões de evasão, veja quantos saem no mesmo dia e em 7 dias. Alta evasão no mesmo dia = expectativa errada no convite.'],
-    dica: 'Os números começam a contar quando o programa está conectado ao WhatsApp. Não há histórico de antes.' },
-  { id: 'links', titulo: 'Rotacionador de Links', rota: '#links', oque: 'Um endereço só para divulgar (…/g/nome). Quem clica cai no primeiro grupo com vaga; quando enche, o link passa ao próximo.',
-    passos: ['Em “Grupos”, garanta que cada grupo tem convite (Buscar, se você é admin, ou cole).', 'Crie o link, escolha o endereço, o modo e os grupos na ordem em que devem encher.', 'Ligue “Criar próximo grupo” para o painel propor um grupo novo quando um chegar a 95%.', 'Divulgue o endereço. Os cliques aparecem no funil da Visão Geral.'],
-    dica: 'No seu computador o endereço só abre para você. Para o público, o programa precisa estar publicado na internet.' },
-  { id: 'grupos', titulo: 'Grupos', rota: '#grupos', oque: 'A lista dos grupos do número conectado, com membros, blocos e o link de convite.',
-    passos: ['Use “Atualizar lista de grupos” depois de entrar em grupos novos.', 'Pegue o convite dos grupos que vão para o rotacionador: “Buscar convite” se você é admin, ou cole o link.', 'Para agrupar por nicho, use “Blocos de análise”.'],
-    dica: 'Sem número conectado, a lista fica vazia. Conecte em “Números de WhatsApp”.' },
-  { id: 'blocos', titulo: 'Blocos de análise', rota: '#blocos', oque: 'Conjuntos de grupos por nicho (Casa, Beleza, Tech…), com etiqueta própria opcional.',
-    passos: ['Crie um bloco, dê um nome e marque os grupos daquele nicho.', 'Se quiser separar o ganho na Central, escolha a etiqueta do nicho.', 'Na Visão Geral, clique no bloco para ver só os números dele.', 'Ao criar um disparo automático, use “Marcar um bloco…” para marcar todos os grupos e a etiqueta de uma vez.'],
-    dica: 'Um grupo pode estar em mais de um bloco.' },
-  { id: 'disparo-manual', titulo: 'Disparo manual', rota: '#disparo-manual', oque: 'Manda uma oferta agora, ou em um horário de hoje, sem criar disparo automático.',
-    passos: ['Cole o link do produto e clique em “Identificar”: o programa descobre a loja e lê título, preço e foto.', 'Para a Amazon, cole o link (link.amazon, amzn.to ou da página do produto): o painel busca os dados, você confere e ajusta. Se a busca falhar, preencha à mão.', 'Para a Shopee, cole o link do produto: o painel gera o seu link de afiliado ao disparar. Se a busca de dados não estiver ligada, preencha título e preço à mão.', 'Escolha a etiqueta, o template e os grupos.', 'Clique em “Disparar”. Para mandar mais tarde, ligue “Agendar” e escolha um horário de hoje.', 'Confira o resultado no Histórico.'],
-    dica: 'Se a loja não estiver conectada, o aviso aparece na hora. Mercado Livre, Amazon e Shopee geram link de afiliado; Magalu e Facebook ainda não.' },
-  { id: 'disparo-automatico', titulo: 'Disparo automático', rota: '#disparo-automatico', oque: 'Envia ofertas sozinho, no ritmo que você definir. Cada disparo junta etiqueta + template + fontes de ofertas + grupos + ritmo. É o que antes se chamava “Regras”.',
-    passos: ['Dê um nome, escolha a etiqueta e o template.', 'Adicione até 5 fontes. A Central de Afiliados é a mais prática: filtre por busca e categorias. O Catálogo (app Etiqueta) traz ofertas do seu outro programa, já com link de afiliado: escolha categorias, lojas e filtros.', 'Marque os grupos (ou um bloco inteiro) e defina o ritmo: ofertas por envio, intervalo e horário.', 'Clique em “Ver ofertas” para conferir o que sairia, e em “Enviar agora” para testar.',
-      'No Catálogo, a ordem “Novidades” envia o que chegar ou for atualizado no catálogo depois de você salvar, sem repetir a mesma oferta; “Reler do começo” (ao editar) manda também o que já estava lá. Ofertas da Shopee, com 100% de desconto ou preço antigo exagerado esperam a sua revisão em Histórico > Catálogo.'],
-    dica: 'Para o mesmo grupo receber de duas etiquetas, crie dois disparos apontando para ele. Se todas as fontes do disparo são do Catálogo e só de Amazon e/ou Shopee, a etiqueta do Mercado Livre é opcional.' },
-  { id: 'espelhamento', titulo: 'Espelhar ofertas da Amazon', rota: '#disparo-automatico', oque: 'Pega ofertas da Amazon postadas em outros grupos, põe a sua tag e envia ao seu grupo com a mensagem completa, foto incluída. Fica em Disparo automático (botão “Novo espelhamento”).',
-    passos: ['Em Conexões, cadastre a tag de associado da Amazon (e, se tiver, as credenciais da API). Sem a tag o espelhamento pode ser salvo desligado, mas só liga depois de você cadastrá-la.', 'Crie o espelhamento em Disparo automático: escolha os grupos de origem, os grupos de destino e o template. Se quiser, bloqueie palavras e defina por quantas horas (padrão 168) o mesmo produto não se repete e o máximo por hora.', 'Escolha o que fazer quando faltar o preço: esperar você completar (fila) ou enviar mesmo assim, no formato curto.', 'Acompanhe no Histórico, no tipo Espelhamento, e use “Completar” ou “Descartar” no que ficar na fila.'],
-    dica: 'Todo link sai como amazon.com.br/dp/… com a sua tag, nunca a de quem postou. Sem acesso à API, a mensagem sai com o texto da origem: funciona melhor com título na 1ª linha, “De R$”, “Por R$”, “NN% OFF”, frete e “Compre aqui:” com o link completo.' },
-  { id: 'disparar-mensagem', titulo: 'Disparar mensagem', rota: '#disparar-mensagem', oque: 'Manda um texto livre ou uma enquete para os grupos. Serve para avisos, sorteios e chamadas que não são oferta.',
-    passos: ['Escolha Mensagem ou Enquete. Na mensagem, use *negrito*, _itálico_ e ~riscado~. Na enquete, uma pergunta e de 2 a 12 opções.', 'Se quiser, anexe uma foto (JPG ou PNG, até 5 MB). Ela vai com o texto como legenda. A prévia do link só funciona com links do Mercado Livre.', 'Escolha os grupos e quando enviar: agora, em um dia e horário, ou repetido nos dias da semana (até 6 horários).', 'Na lista ao lado, as repetidas podem ser pausadas (e retomadas); agendadas e repetidas podem ser canceladas. O que já saiu fica no Histórico.'],
-    dica: 'Cancelar uma mensagem agendada evita o envio; o que já foi enviado não volta.' },
-  { id: 'templates', titulo: 'Templates', rota: '#templates', oque: 'O texto das mensagens. Campos entre chaves são preenchidos com a oferta.',
-    passos: ['Clique nos campos (chips) para inserir: {TITULO_PRODUTO}, {PRECO_PRODUTO}, {DESCONTO_PRODUTO}, {LINK}…', 'Linha com campo vazio some sozinha: pode deixar “Cupom: {CUPOM}” sempre.', 'Para sumir só um pedaço da linha, ponha-o entre colchetes: “[🎟️ Cupom: {CUPOM}]”. Se algum campo dentro dos colchetes estiver vazio, o pedaço todo some e o resto da linha fica. Colchete sem campo dentro é texto normal.', '{TITULO_PRODUTO} sai abreviado (ajuste em Ajustes); {TITULO_COMPLETO} é o nome inteiro.', 'Veja a prévia ao lado, como fica no WhatsApp.'],
-    dica: '{LINK} é obrigatório; sem ele a mensagem sai sem o link de afiliado.' },
-  { id: 'relatorios', titulo: 'Relatórios e avisos', rota: '#relatorios', oque: 'Define quem recebe, pelo WhatsApp, o resumo diário e os avisos do programa.',
-    passos: ['Cadastre os números que recebem e escolha os blocos de cada um.', 'Ligue o resumo diário e defina o horário de envio. A “virada do dia” diz a que horas um dia termina nos relatórios; o resumo conta da virada até o horário dele, então não use o mesmo horário nos dois (ele sairia quase vazio).', 'Defina o limite padrão de membros: ele só preenche o limite de cada link novo do rotacionador. O aviso de lotação sai quando um grupo chega perto do limite do link dele.', 'Ligue o aviso de erro para saber quando uma mensagem não saiu.'],
-    dica: 'Os números aparecem mascarados na tela e os dados ficam só no seu computador.' },
-  { id: 'conexoes', titulo: 'Conexões', rota: '#conexoes', oque: 'Onde ficam as lojas e a extensão do Chrome que geram os seus links de afiliado.',
-    passos: ['Mercado Livre: cadastre aqui as etiquetas, com o nome exato da Central de Afiliados.', 'Extensão do Chrome: copie o endereço e o token e cole no ícone dela.', 'Amazon: cadastre a tag de associado (ex.: seunome-20). Para a API buscar título, preço e foto, cadastre também o Credential ID, o Secret e a versão da Creators API (Central de Associados > Ferramentas > Creators API > Create Application > Add New Credential) e clique em “Testar”. Sem a API, o espelhamento usa o texto da mensagem de origem.', 'Shopee: cadastre o seu ID de afiliado (só números), deixe o Chrome logado no portal de afiliados da Shopee (affiliate.shopee.com.br) e recarregue a extensão em chrome://extensions: os links já saem por ela. Para o painel buscar título, preço e foto, peça acesso em affiliate.shopee.com.br/open_api; quando a Shopee liberar, cole o AppID e a Senha da API e clique em “Testar”. O espelhamento da Shopee não existe; nas regras automáticas, a Shopee só entra pela fonte Catálogo, sempre com revisão.', 'Catálogo do Etiqueta: informe o endereço (padrão http://127.0.0.1:8765) e o caminho do arquivo do token, salve e clique em “Testar”. Se aparecer “Token recusado”, reinicie o servidor.py do Etiqueta. Cole o caminho do arquivo, nunca o token.', 'Magalu e Facebook estão como “ainda não implementado”: você já pode guardar os dados, mas o painel só vai usá-los quando a integração existir.'],
-    dica: 'A API da Amazon exige conta de Associados aprovada em definitivo, com pelo menos 10 vendas qualificadas nos últimos 30 dias, na Amazon.com.br. Chaves e senhas ficam no seu computador e não voltam para a tela. Só o Dono vê esses campos. O token do Etiqueta fica num arquivo seu: o painel só guarda o caminho. Cada campo tem um nome diferente: ID de afiliado da Shopee, tag da Amazon e etiquetas do Mercado Livre não são intercambiáveis.' },
-  { id: 'numeros', titulo: 'Números de WhatsApp', rota: '#numeros', oque: 'Conecta o número que envia (como “aparelho conectado”).',
-    passos: ['Clique em “Conectar WhatsApp” e leia o QR em Aparelhos conectados, no celular.', 'Depois de conectar, a lista de grupos aparece em “Grupos”.', 'Se o número cair, conecte de novo por aqui.'],
-    dica: 'Prefira um número que você não dependa. A conexão é não oficial e pode ser restringida com volume alto.' },
-  { id: 'equipe', titulo: 'Equipe', rota: '#equipe', oque: 'Convida pessoas para usar o painel, cada uma com o próprio e-mail e senha, sem passar a sua. Só o Dono vê esta tela.',
-    passos: ['Se o painel ainda não pede login, preencha “Proteja o painel” para criar a sua conta de Dono.', 'Em “Convidar pessoa”, digite o e-mail, escolha o papel (Operador ou Dono) e clique em “Criar convite”.', 'Copie o link e mande pelo WhatsApp. Não enviamos e-mail.', 'A pessoa abre o link, escreve o nome e cria a senha. Depois disso, ela entra com o e-mail e essa senha.', 'Para mudar o papel ou tirar o acesso, use a lista “Pessoas”. Convite que não vai ser usado: “Cancelar convite”.'],
-    dica: 'O convite vale 7 dias e só pode ser usado uma vez. “Copiar link” na lista gera um link novo e o anterior para de funcionar.' },
-  { id: 'historico', titulo: 'Histórico', rota: '#historico', oque: 'Registro de tudo o que saiu e do que falhou, com o motivo.',
-    passos: ['Filtre por “Só erros” quando algo não sair.', 'Em Tipo > Espelhamento, veja cada oferta espelhada, o motivo de ter sido descartada (palavra bloqueada, repetida, sem dados) e as que esperam na fila.', 'Em Catálogo, as ofertas marcadas “Para revisar” esperam você: clique em “Revisar” (só o Dono), confira, corrija os preços se preciso e envie ou descarte. Se o envio não chegar a nenhum grupo, “Enviar de novo” abre a oferta outra vez.', 'Erros comuns: extensão desconectada, WhatsApp desconectado, Central sem sessão.'],
-    dica: 'Os avisos mostram ofertas e fontes puladas, sem travar o envio.' },
-  { id: 'ajustes', titulo: 'Ajustes', rota: '#ajustes', oque: 'Pausas entre mensagens, tamanho do título, modo de link e privacidade. A extensão do Chrome agora fica em Conexões.',
-    passos: ['Pausas: 6 s entre grupos e 30 s entre ofertas é um ponto de partida seguro.', 'Título: 60 caracteres deixa a mensagem limpa; 0 desliga.', 'Modo de link: “Pela extensão” gera comissão; “Link direto” é só para testar.'],
-    dica: 'A extensão precisa do Chrome aberto e logado na Central de Afiliados.' },
-];
-const GLOSSARIO = [
-  ['Etiqueta', 'Etiqueta de afiliado do Mercado Livre: identificador que vai no link e define de quem é a comissão. Fica em Conexões > Mercado Livre. Não confundir com o Etiqueta (o app), o seu outro programa, nem com o Catálogo.'],
-  ['meli.la', 'Link curto do Mercado Livre gerado pela Central de Afiliados, já com a sua etiqueta.'],
-  ['Central de Afiliados', 'Área do Mercado Livre para afiliados. A lista “Produtos selecionados para você” é a fonte padrão do disparo automático.'],
-  ['Loja conectada', 'Loja cujos dados você já cadastrou em Conexões. Hoje Mercado Livre, Amazon e Shopee funcionam de fato.'],
-  ['ID de afiliado', 'Número da sua conta de afiliado da Shopee (ex.: 98765432101). Vai no link e define de quem é a comissão. Fica em Conexões > Shopee.'],
-  ['AppID e Senha da API', 'Dados do aplicativo da API de afiliados da Shopee. Só existem depois que a Shopee libera o acesso. A senha equivale a uma senha de banco: fica no seu computador.'],
-  ['Open API de Afiliados', 'Acesso técnico da Shopee que permite ao painel buscar dados do produto e gerar links pela API. É preciso pedir; a conta não vem com ele. Sem ele, os links saem pela extensão do Chrome.'],
-  ['Link personalizado', 'Ferramenta do portal de afiliados da Shopee (affiliate.shopee.com.br) que gera o link curto com o seu ID. A extensão do Chrome usa essa ferramenta por você.'],
-  ['Tag de associado', 'Identificador do afiliado na Amazon (ex.: seunome-20). Vai no link e define de quem é a comissão. Fica em Conexões > Amazon.'],
-  ['Pedaço opcional', 'Trecho do template entre colchetes, como [🎟️ Cupom: {CUPOM}]. Some sozinho quando algum campo dentro dele está vazio.'],
-  ['Espelhamento', 'Disparo que copia ofertas da Amazon de grupos de origem para os seus grupos, com a sua tag e a mensagem completa.'],
-  ['Grupo de origem', 'Grupo que o espelhamento vigia em busca de links da Amazon. O resto da conversa é ignorado.'],
-  ['Grupo de destino', 'Grupo seu que recebe as ofertas espelhadas.'],
-  ['Na fila', 'Oferta espelhada à qual falta o título ou o preço. Espera no Histórico até você completar ou descartar (se a regra for “esperar eu completar”).'],
-  ['Palavra bloqueada', 'Palavra que, se aparecer no título ou no texto da oferta, impede o envio. Não diferencia maiúscula, minúscula nem acento.'],
-  ['Repetida', 'Mesmo produto da Amazon já enviado pelo mesmo espelhamento nas últimas horas definidas (padrão 168). Não é reenviado.'],
-  ['Fonte', 'De onde um disparo automático tira ofertas: Central, lista de links, busca ou Catálogo. Até 5 por disparo, intercaladas.'],
-  ['Catálogo', 'Fonte de ofertas do Achadinho Turbo que lê as ofertas do seu app Etiqueta. Cada oferta já vem com o link de afiliado da loja. Configura-se em Conexões > Catálogo do Etiqueta e escolhe-se em um disparo automático.'],
-  ['Etiqueta (o app)', 'Seu outro programa, que coleta e organiza ofertas e roda neste computador (servidor.py). Quando este painel diz “etiqueta” sozinho, é a etiqueta de afiliado do Mercado Livre; quando diz “Catálogo”, são as ofertas do app Etiqueta.'],
-  ['Para revisar', 'Oferta do catálogo que não sai sozinha: a da Shopee (o link não prova de quem é a conta), a com 100% de desconto, a com preço antigo 10 vezes maior que o preço (provável erro de preço) e a que falhou ao gerar o link. Você confere em Histórico > Catálogo e envia ou descarta.'],
-  ['Token do catálogo', 'Chave de acesso ao Etiqueta, guardada num arquivo no seu computador. O painel lê o arquivo; o token não aparece em tela nem em log. Equivale a uma senha.'],
-  ['Envio', 'Uma mensagem que o programa mandou (ou tentou mandar) para os grupos. Todo envio aparece no Histórico.'],
-  ['Ocorrência', 'Cada vez que algo acontece em um disparo agendado ou repetido: um horário que chegou e foi enviado, pulado ou falhou.'],
-  ['Repetição', 'Mensagem que sai sozinha nos dias da semana e horários escolhidos (até 6 horários).'],
-  ['Bloco', 'Conjunto de grupos de um nicho, para análise, para relatórios e para marcar disparos de uma vez.'],
-  ['Rotacionador', 'Link único que leva ao primeiro grupo com vaga.'],
-  ['Destino de aviso', 'Número de WhatsApp que recebe o resumo diário e os avisos, em Relatórios e avisos.'],
-  ['Virada do dia', 'Hora em que um dia termina nos relatórios. Entradas antes dela contam para o dia anterior.'],
-  ['Evasão', 'Quem entra e sai logo: no mesmo dia ou em até 7 dias.'],
-  ['Enquete', 'Pergunta com 2 a 12 opções para o grupo votar, enviada em Disparar mensagem.'],
-  ['Dono', 'Quem administra a conta: convida, remove pessoas, muda papéis e vê as chaves das conexões.'],
-  ['Operador', 'Quem usa o painel no dia a dia. Acessa todas as telas, menos Equipe. Não desconecta o WhatsApp, não gera novo token da extensão nem apaga dados antes do prazo.'],
-  ['Convite', 'Link que o Dono cria em Equipe para alguém criar a própria senha e entrar no painel. Vale 7 dias e só pode ser usado uma vez.'],
-  ['Extensão', 'Complemento do Chrome que fala com a Central de Afiliados usando a sua sessão. Nada de cookie sai do navegador.'],
-];
-function paginaAjuda() {
-  // Para o Operador o cartão da Equipe some, como o item do menu (podeEquipe é de app.js, que carrega depois).
-  document.getElementById('pagina').innerHTML = `<div class="topo"><div><h1>Ajuda</h1><p class="sub">Como cada ferramenta funciona, em ordem de uso. Os ícones <span class="q" tabindex="0" data-tip="Isso! Passe o mouse ou toque nos “?” pelo painel para ver explicações curtas.">?</span> pelo painel dão explicações curtas no lugar.</p></div></div>
-    <div class="card"><h2>Comece por aqui</h2><ol class="passos passos-ajuda">
-      <li><b>Números de WhatsApp</b>: conecte o número pelo QR. A lista aparece em <b>Grupos</b>.</li>
-      <li><b>Conexões</b>: no Mercado Livre, cadastre o nome exato da sua etiqueta da Central de Afiliados. Na extensão do Chrome (pasta <code>extension</code>), cole o endereço e o token, e fique logado na Central nesse Chrome.</li>
-      <li><b>Templates</b>: ajuste a mensagem e veja a prévia.</li>
-      <li><b>Disparo manual</b>: cole um link, clique em “Identificar” e dispare para testar.</li>
-      <li><b>Disparo automático</b>: crie o primeiro, clique em “Ver ofertas” e depois em “Enviar agora”.</li>
-      <li><b>Disparar mensagem</b>: avisos e enquetes, agora ou agendados.</li>
-      <li><b>Relatórios e avisos</b>: escolha quem recebe o resumo diário e os avisos.</li>
-      <li>Acompanhe o <b>Histórico</b> e a <b>Visão Geral</b>.</li></ol></div>
-    <div class="ajuda-grade">${AJUDA.filter((a) => a.id !== 'equipe' || typeof podeEquipe !== 'function' || podeEquipe()).map((a) => `<article class="card ajuda-card" id="ajuda-${a.id}"><h2>${a.titulo}</h2><p class="sub">${a.oque}</p>
-      <p class="rotulo-ajuda">Como usar</p><ol class="passos">${a.passos.map((p) => `<li>${p}</li>`).join('')}</ol>
-      <p class="dica-ajuda"><b>Dica:</b> ${a.dica}</p><a class="btn" href="${a.rota}">Abrir ${a.titulo}</a></article>`).join('')}</div>
-    <div class="card"><h2>Glossário</h2><dl class="glossario">${GLOSSARIO.map(([t, d]) => `<dt>${t}</dt><dd>${d}</dd>`).join('')}</dl></div>`;
-}
-

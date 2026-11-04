@@ -33,7 +33,7 @@ Nenhum cookie do Mercado Livre sai do seu Chrome: a extensão devolve só a list
 2. Windows: dê dois cliques em `iniciar.bat`. Outros sistemas: `npm install` e depois `npm start`.
 3. Abra http://localhost:3737
 
-Quer só olhar o painel sem conectar nada? Rode `npm run simular`. Nesse modo nada é enviado de verdade.
+Quer só olhar o painel sem conectar nada? Rode `npm run simular`. Nesse modo nada é enviado de verdade, e ele usa uma pasta separada, `data-simulacao/` (ou a de `DATA_DIR`, se você passar uma): não mexe nos seus dados de `data/`. Se a porta 3737 estiver ocupada pelo serviço, use `PORT=3799 npm run simular`.
 
 ### Login do painel
 
@@ -50,7 +50,7 @@ Em casa, só no `localhost`, o painel abre sem login (aparece um aviso no termin
 
 ### Backup
 
-`npm run backup [pasta]` copia o banco com `VACUUM INTO` (seguro com o programa rodando) e a sessão do WhatsApp num `.tar.gz`, mantendo os 7 mais recentes. O destino padrão é `data/backups/`, que o `.gitignore` já exclui; se você apontar para dentro de um repositório git não ignorado, o script avisa. **Nunca faça commit de um backup.** Para conferir um backup: `npm run backup -- restaurar arquivo.tar.gz pasta-vazia` (extrai e roda `PRAGMA integrity_check`). **O pacote contém a sessão do seu WhatsApp**: trate como senha. Ele também leva o ID e o segredo da credencial da Amazon e, com o espelhamento, **textos de mensagens de grupos de terceiros** (já mascarados; veja [Privacidade (LGPD)](#privacidade-lgpd)).
+`npm run backup [pasta]` copia o banco com `VACUUM INTO` (seguro com o programa rodando) e a sessão do WhatsApp num `.tar.gz`, mantendo os 7 mais recentes. O destino padrão é `data/backups/`, que o `.gitignore` já exclui; se você apontar para dentro de um repositório git não ignorado, o script avisa. **Nunca faça commit de um backup.** Para conferir um backup: `npm run backup -- restaurar arquivo.tar.gz ../achadinho-restaurado` (extrai numa pasta nova, fora da pasta do programa, e roda `PRAGMA integrity_check`; o passo a passo para trocar a `data/` está nos Docs, capítulo *Manutenção*). **O pacote contém a sessão do seu WhatsApp**: trate como senha. Ele também leva o ID e o segredo da credencial da Amazon e, com o espelhamento, **textos de mensagens de grupos de terceiros** (já mascarados; veja [Privacidade (LGPD)](#privacidade-lgpd)).
 
 ## Menu do painel
 
@@ -61,9 +61,19 @@ O menu lateral é dividido em grupos:
 - **Disparos**: Disparo manual, Disparo automático (antes chamado *Regras*; é onde fica o botão *Novo espelhamento*), Disparar mensagem, Templates
 - **Comunicação**: Relatórios e avisos
 - **Conta**: Conexões, Números de WhatsApp, Equipe (só o Dono vê)
-- No rodapé: Histórico (com o seletor *Tipo*: Tudo, Disparo automático, Espelhamento ou Catálogo), Ajustes, Ajuda
+- No rodapé: Histórico (com o seletor *Tipo*: Tudo, Disparo automático, Espelhamento ou Catálogo), Ajustes, Docs
 
-Os endereços antigos continuam funcionando: `#regras` abre *Disparo automático*, `#whatsapp` abre *Números de WhatsApp* e `#etiquetas` abre *Conexões* (na seção do Mercado Livre).
+Os endereços antigos continuam funcionando: `#regras` abre *Disparo automático*, `#whatsapp` abre *Números de WhatsApp*, `#etiquetas` abre *Conexões* (na seção do Mercado Livre) e `#ajuda` abre os *Docs*.
+
+### Docs do painel
+
+O item **Docs** do menu é o manual dentro do próprio painel (`#docs`). Ele tem três partes:
+
+- **O livro**: 13 capítulos em ordem de trilha, de *Primeiros passos* até *Manutenção*, cada um com o que você vai aprender, passos numerados, o caminho no painel e comandos com botão *Copiar*. Cada capítulo e cada seção tem endereço próprio (`#docs/<capítulo>` e `#docs/<capítulo>/<seção>`), há busca no topo, e o navegador guarda quais capítulos você já leu (só neste navegador).
+- **Perguntas reais**: as dúvidas que mais aparecem (tag da Amazon, `meli.la`, ID da Shopee, Catálogo, limpar o log, painel só no computador…), cada uma com resposta curta e o caminho no painel.
+- **Referência**: glossário por tema (com o quadro "Cinco nomes parecidos": etiqueta do Mercado Livre, app Etiqueta, Catálogo, tag da Amazon e ID de afiliado da Shopee), o significado de cada selo dos cartões de *Conexões*, os motivos de revisão e de descarte, e a tabela de limites e números.
+
+Os botões **?** das telas continuam com a explicação curta e muitos levam ao capítulo do assunto. O Operador também lê tudo, inclusive *Equipe e papéis* (as ações que só o Dono faz levam o selo "Só o Dono"). **Este README segue como guia de instalação e referência técnica** (arquivos, API, segurança, decisões); o passo a passo de uso mora nos Docs, e os números que aparecem nos dois lugares são conferidos por teste (`test/docs.test.js`).
 
 ## Visão Geral, blocos e rotacionador
 
@@ -78,7 +88,7 @@ Os endereços antigos continuam funcionando: `#regras` abre *Disparo automático
 2. **Números de WhatsApp** e **Grupos**: clique em *Conectar WhatsApp* e leia o QR no WhatsApp Business (Aparelhos conectados).
 3. **Templates**: ajuste a mensagem. Linha com campo vazio some sozinha. `{TITULO_PRODUTO}` sai **abreviado** (só o que identifica o produto: tira "Compatível com…", "Premium", "Alta Qualidade" e corta em até 60 caracteres sem partir palavra; o tamanho muda em *Ajustes*, 0 desliga). `{TITULO_COMPLETO}` é o nome inteiro. Um pedaço entre colchetes, como `[ ({DESCONTO_PRODUTO} OFF)]`, some sozinho quando falta o dado (veja [Template com trecho opcional](#template-com-trecho-opcional)).
 4. **Extensão** (abaixo). Sem ela, nem a lista de ofertas nem o link de afiliado são gerados.
-5. **Disparo automático**: crie uma regra escolhendo etiqueta, template, grupos e ritmo. A fonte padrão é a **Central de Afiliados**: a lista "Produtos selecionados para você", com busca, **uma ou várias categorias** (com várias, as ofertas saem intercaladas, bom para grupos de achadinhos gerais), ordem, "só mais vendidos" e "só com ganhos extras". Uma regra aceita **até 5 fontes** (Central com filtros diferentes, listas de links, buscas, misturadas): as ofertas saem intercaladas, uma de cada fonte por vez, e uma fonte que falhar vira aviso sem travar as outras. A etiqueta é uma por regra: para etiquetas diferentes no mesmo grupo, crie outra regra apontando para o mesmo grupo. Use *Ver ofertas* para conferir antes e *Enviar agora* para testar. Outra fonte é o **Catálogo** (as ofertas do seu app Etiqueta): veja [Catálogo do Etiqueta](#catálogo-do-etiqueta).
+5. **Disparo automático**: crie uma regra escolhendo etiqueta, template, grupos e ritmo. A fonte padrão é a **Central de Afiliados**: a lista "Produtos selecionados para você", com busca, **uma ou várias categorias** (com várias, as ofertas saem intercaladas, bom para grupos de achadinhos gerais), ordem, "só mais vendidos" e "só com ganhos extras". Cada página da Central traz 18 produtos e "Páginas lidas por envio" vai de 1 a 10. Uma regra aceita **até 5 fontes** (Central com filtros diferentes, listas de links, buscas, misturadas): as ofertas saem intercaladas, uma de cada fonte por vez, e uma fonte que falhar vira aviso sem travar as outras. A etiqueta é uma por regra: para etiquetas diferentes no mesmo grupo, crie outra regra apontando para o mesmo grupo. Use *Ver ofertas* para conferir antes e *Enviar agora* para testar. Outra fonte é o **Catálogo** (as ofertas do seu app Etiqueta): veja [Catálogo do Etiqueta](#catálogo-do-etiqueta).
 
 ## Disparo manual
 
@@ -308,7 +318,7 @@ O **Etiqueta** é o seu outro programa, que coleta e organiza ofertas e roda nes
 
 - **etiqueta de afiliado do Mercado Livre**: o nome criado na Central de Afiliados, que vai no link `meli.la` e define de quem é a comissão (*Conexões → Mercado Livre*);
 - **Etiqueta (o app)**: o seu outro programa, o dono das ofertas;
-- **Catálogo**: a fonte do painel que lê as ofertas do app Etiqueta. A interface só escreve "Etiqueta" no cartão de Conexões e na ajuda; nas regras e no Histórico é sempre "Catálogo".
+- **Catálogo**: a fonte do painel que lê as ofertas do app Etiqueta. A interface só escreve "Etiqueta" no cartão de Conexões e nos Docs; nas regras e no Histórico é sempre "Catálogo".
 
 ### Configurar
 
@@ -394,8 +404,8 @@ Em *Comunicação → Relatórios e avisos* você cadastra os **números que rec
 - **Números de destino**: para cada número, escolha se recebe o **resumo diário**, quais **blocos** entram nele (todos os grupos ou só alguns blocos) e quais **avisos** quer. A lista mostra o número mascarado. O programa confere no WhatsApp se o número existe (no máximo **10 cadastros a cada 10 minutos**) e o **nome** do destino não pode conter telefone (6 dígitos ou mais).
 - **Resumo diário**: sai uma vez por dia, no **horário do resumo** (padrão 21:00), com os números do dia, para todos os grupos ou por bloco: grupos e membros, quantos entraram, quantos saíram, a % de quem entrou e saiu no mesmo dia, quantas pessoas abriram as suas mensagens e os cliques nos links do rotacionador. Se o programa estava desligado no horário, o resumo sai atrasado, desde que ainda seja o mesmo dia. Há **prévia** e **Enviar resumo agora** para testar.
 - **Virada do dia**: define a hora em que o dia "começa" para a Visão Geral, o resumo e os blocos (padrão 00:00, como antes). Com virada às 02:00, uma entrada às 01:30 conta no dia anterior, e as leituras também passam a ser contadas por esse "dia de negócio". Não use o mesmo horário para o resumo e para a virada: o resumo sairia com o dia zerado.
-- **Limite padrão por grupo**: só preenche o limite de cada link **novo** do rotacionador (padrão 1000). Links que já existem não mudam: o aviso de lotação usa o limite de cada link.
-- **Aviso de grupo lotando**: quando um grupo do rotacionador chega a 95% do limite. Avisa uma vez por grupo, até ele esvaziar.
+- **Limite padrão por grupo**: só preenche o limite de cada link **novo** do rotacionador (padrão 1000; vale de 2 a 1.024, o máximo do WhatsApp). Links que já existem não mudam: o aviso de lotação usa o limite de cada link.
+- **Aviso de grupo lotando**: quando um grupo do rotacionador chega a 95% do limite. Avisa uma vez por grupo e só avisa de novo depois que ele cair abaixo de 90% do limite.
 - **Aviso de erro de disparo**: mensagem **agregada** com os erros novos, **no máximo 1 a cada 30 minutos**. Só sai com o WhatsApp conectado: se ele caiu, o aviso chega quando voltar.
 
 ## Conexões
@@ -455,6 +465,6 @@ Conferido uma vez contra a Central de Afiliados real (02/11/2026): a lista de pr
 
 ## Cuidados
 
-- A conexão com o WhatsApp é **não oficial**. Há risco de o número ser restringido. Mantenha as pausas em *Ajustes* e evite volume alto.
+- A conexão com o WhatsApp é **não oficial**. Há risco de o número ser restringido. Mantenha as pausas em *Ajustes* (padrão de 6 s entre grupos e 30 s entre ofertas, com mínimo de 2 s e de 5 s) e evite volume alto.
 - A pasta `data` guarda a sessão do seu WhatsApp, números de telefone dos avisos, e-mails da equipe, fotos enviadas e segredos das conexões. Não compartilhe nem envie para a nuvem.
 - O programa só ouve em `127.0.0.1`. Num servidor, quem expõe é o Nginx com HTTPS, e o painel exige login.

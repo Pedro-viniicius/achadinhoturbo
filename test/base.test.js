@@ -19,6 +19,8 @@ import * as envios from '../src/envios.js';
 import * as avisos from '../src/avisos.js';
 import * as conexoes from '../src/conexoes.js';
 import * as equipe from '../src/equipe.js';
+import { ROOT, pastaDeDados, modoSimulacao } from '../src/config.js';
+import { execFileSync } from 'node:child_process';
 
 // pastas temporárias apagadas no fim do arquivo
 const pastas = [];
@@ -659,4 +661,35 @@ test('catálogo etapa 0: defaults, status permitido, obrigatórios e unicidade p
   assert.throws(() => cursor.run(null, 'ffff', null), /NOT NULL/, 'rule_id é obrigatório');
   assert.throws(() => cursor.run(1, null, null), /NOT NULL/, 'filtro é obrigatório');
   db.close();
+});
+
+// R1 (docs-do-sistema, rodada 1): a simulação roda o agendador de verdade (encerra agendados vencidos, marca o resumo
+// do dia e ofertas como enviadas com links falsos). Por isso, sem DATA_DIR, ela usa data-simulacao/, nunca data/.
+test('config: sem DATA_DIR, o serviço normal usa data/ e a simulação (--simular ou DRY_RUN=1) usa data-simulacao/', () => {
+  const raiz = path.join(path.sep, 'projeto');
+  assert.equal(pastaDeDados({ env: {}, argv: ['node', 'src/server.js'], raiz }), path.join(raiz, 'data'));
+  assert.equal(pastaDeDados({ env: {}, argv: ['node', 'src/server.js', '--simular'], raiz }), path.join(raiz, 'data-simulacao'));
+  assert.equal(pastaDeDados({ env: { DRY_RUN: '1' }, argv: ['node', 'src/server.js'], raiz }), path.join(raiz, 'data-simulacao'));
+  assert.equal(pastaDeDados({ env: { DRY_RUN: '0' }, argv: ['node', 'src/server.js'], raiz }), path.join(raiz, 'data'), 'só DRY_RUN=1 liga a simulação');
+  assert.equal(pastaDeDados({ env: { DATA_DIR: '' }, argv: ['node', 'src/server.js', '--simular'], raiz }), path.join(raiz, 'data-simulacao'), 'DATA_DIR vazio é o mesmo que não passar');
+  // DATA_DIR explícito vale sempre, com ou sem simulação
+  assert.equal(pastaDeDados({ env: { DATA_DIR: '/outra/pasta' }, argv: ['node', 'src/server.js'], raiz }), '/outra/pasta');
+  assert.equal(pastaDeDados({ env: { DATA_DIR: '/outra/pasta' }, argv: ['node', 'src/server.js', '--simular'], raiz }), '/outra/pasta');
+  assert.equal(pastaDeDados({ env: { DATA_DIR: '/outra/pasta', DRY_RUN: '1' }, argv: [], raiz }), '/outra/pasta');
+  assert.equal(modoSimulacao({ env: {}, argv: ['node', 'src/server.js'] }), false);
+  assert.equal(modoSimulacao({ env: {}, argv: ['--simular'] }), true);
+  assert.equal(modoSimulacao({ env: { DRY_RUN: '1' }, argv: [] }), true);
+});
+
+test('config: o módulo carregado de verdade (como o npm start e o npm run simular) escolhe a pasta pelo modo', () => {
+  const env = { ...process.env }; delete env.DATA_DIR; delete env.DRY_RUN;
+  const ler = (args, extra = {}) => JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e',
+    `const c = await import(${JSON.stringify(new URL('../src/config.js', import.meta.url).href)}); console.log(JSON.stringify([c.DATA_DIR, c.DRY_RUN]));`,
+    '--', ...args], { cwd: ROOT, env: { ...env, ...extra }, encoding: 'utf8' }));
+  assert.deepEqual(ler([]), [path.join(ROOT, 'data'), false], 'npm start: data/');
+  assert.deepEqual(ler(['--simular']), [path.join(ROOT, 'data-simulacao'), true], 'npm run simular: data-simulacao/');
+  assert.deepEqual(ler([], { DRY_RUN: '1' }), [path.join(ROOT, 'data-simulacao'), true], 'DRY_RUN=1: data-simulacao/');
+  const dir = tmp();
+  assert.deepEqual(ler(['--simular'], { DATA_DIR: dir }), [dir, true], 'DATA_DIR explícito vale na simulação');
+  assert.deepEqual(ler([], { DATA_DIR: dir }), [dir, false]);
 });

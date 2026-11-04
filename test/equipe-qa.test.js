@@ -743,7 +743,7 @@ test('CA7 convite.html: token mal formado nem chama o servidor; 429 do freio mos
 // =====================================================================================================================
 // CA7: o Operador não vê nem alcança as ações do Dono
 // =====================================================================================================================
-test('CA7 Operador: #equipe desvia para a Visão Geral; Desconectar, Apagar agora, Gerar novo token, segredos e o cartão Equipe da Ajuda somem; o Dono vê tudo', async (t) => {
+test('CA7 Operador: #equipe desvia para a Visão Geral; Desconectar, Apagar agora, Gerar novo token, segredos somem; nos Docs o Operador vê a Equipe com o selo "Só o Dono"; o Dono vê tudo', async (t) => {
   const saida = capturarConsole(t);
   const s = await subir();
   try {
@@ -771,10 +771,15 @@ test('CA7 Operador: #equipe desvia para a Visão Geral; Desconectar, Apagar agor
     const segredosOp = pb.$$('#outras-lojas input[type=password]');
     assert.ok(segredosOp.length > 0, 'há campos de segredo nas outras lojas');
     assert.ok(segredosOp.every((i) => i.disabled && i.value === ''), 'segredo travado e vazio para o Operador');
-    // Ajuda: o cartão da Equipe some, como o item do menu
+    // Docs: #ajuda abre o livro; "Equipe e papéis" não some para o Operador (o servidor barra as ações) e leva o selo "Só o Dono"
     await pb.irPara('#ajuda');
-    assert.equal(pb.$('#ajuda-equipe'), null);
-    assert.ok(pb.$('#ajuda-numeros'), 'os outros cartões ficam');
+    assert.equal(pb.location.hash, '#docs', '#ajuda vira #docs');
+    assert.match(pb.texto('h1'), /Docs do sistema/);
+    assert.ok(pb.$$('#docs-toc a').some((a) => /Equipe e papéis/.test(a.textContent)), 'o sumário lista "Equipe e papéis"');
+    await pb.irPara('#docs/equipe');
+    assert.equal(pb.location.hash, '#docs/equipe');
+    assert.match(pb.texto('#docs-conteudo'), /Equipe e papéis/);
+    assert.match(pb.texto('#docs-conteudo'), /Só o Dono/, 'selo nas ações exclusivas do Dono');
 
     // o Dono vê tudo
     const pd = await abrir(dono, 'index.html', { hash: '#numeros' });
@@ -783,7 +788,8 @@ test('CA7 Operador: #equipe desvia para a Visão Geral; Desconectar, Apagar agor
     await pd.irPara('#conexoes'); assert.ok(pd.$('#novo-token'));
     const segredosDono = pd.$$('#outras-lojas input[type=password]');
     assert.ok(segredosDono.length > 0 && segredosDono.every((i) => !i.disabled), 'o Dono pode trocar segredos');
-    await pd.irPara('#ajuda'); assert.ok(pd.$('#ajuda-equipe'));
+    await pd.irPara('#ajuda'); assert.equal(pd.location.hash, '#docs');
+    await pd.irPara('#docs/equipe'); assert.match(pd.texto('#docs-conteudo'), /Equipe e papéis/);
     await pd.irPara('#equipe'); assert.equal(pd.location.hash, '#equipe');
     semEmailNoLog(s, saida);
   } finally { await s.fechar(); }
@@ -1021,15 +1027,37 @@ test('CA8 ajuda: verbetes de Equipe existem nas telas, nada de "próxima entrega
     const pd = await abrir(nav, 'index.html', { hash: '#equipe' });
     assert.match(String(pd.$('#eq-conv-h .q')?.dataset.tip), /Não enviamos e-mail: copie o link e mande pelo WhatsApp\. Vale 7 dias e só pode ser usado uma vez\./);
     assert.ok(pd.$('h1 .q')?.dataset.tip, 'verbete equipe no título');
-    await pd.irPara('#ajuda');
-    const card = pd.texto('#ajuda-equipe');
+    await pd.irPara('#docs/equipe');
+    const card = pd.texto('#docs-conteudo');
     assert.match(card, /Criar convite/); assert.match(card, /Copie o link e mande pelo WhatsApp/); assert.match(card, /cria a senha/);
     for (const arq of ['ajuda.js', 'equipe.js', 'app.js', 'index.html']) {
       assert.doesNotMatch(fs.readFileSync(path.join(PUB, arq), 'utf8'), /próxima entrega/i, `${arq} ainda promete "próxima entrega"`);
     }
-    // o glossário do Operador lista exatamente o que a tela esconde dele
+    // o glossário do Operador (Docs, Referência) lista exatamente o que a tela esconde dele
+    await pd.irPara('#docs/referencia');
     const op = pd.$$('#pagina dt').find((dt) => dt.textContent === 'Operador')?.nextElementSibling?.textContent || '';
     for (const x of [/Equipe/, /desconecta o WhatsApp/, /novo token/, /apaga dados/]) assert.match(op, x, `glossário do Operador: ${op}`);
+  } finally { await s.fechar(); }
+});
+
+test('Docs: o item do menu é "Docs"; seção e capítulo inexistente mantêm o endereço', async () => {
+  const s = await subir();
+  try {
+    const p = await abrir(s.navegador(), 'index.html', { hash: '#docs/conexoes/amazon' });
+    assert.equal(p.location.hash, '#docs/conexoes/amazon', 'o endereço da seção não é reescrito');
+    assert.equal(p.$('#rail nav a[href="#docs"]')?.textContent, 'Docs');
+    assert.equal(p.$('#rail nav a[href="#ajuda"]'), null, 'o item Ajuda saiu do menu');
+    assert.equal(p.$('#rail nav a[href="#docs"]').getAttribute('aria-current'), 'page', 'o item Docs fica marcado em qualquer endereço do livro');
+    assert.match(p.texto('#menu-atual'), /Docs/);
+    assert.ok(p.$('#docs-conteudo'), 'abre a página dos Docs');
+    await p.irPara('#docs/xyz');
+    assert.equal(p.location.hash, '#docs/xyz', 'capítulo que não existe: endereço mantido');
+    assert.match(p.texto('#docs-conteudo'), /Não achamos este capítulo/);
+    await p.irPara('#docs/conexoes');
+    assert.equal(p.location.hash, '#docs/conexoes');
+    assert.match(p.texto('#docs-conteudo'), /Conexões/);
+    await p.irPara('#visao/qualquer');
+    assert.equal(p.location.hash, '#visao');
   } finally { await s.fechar(); }
 });
 

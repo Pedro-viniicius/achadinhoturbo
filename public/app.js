@@ -670,10 +670,11 @@ const ROTAS = {
   relatorios: () => paginaRelatorios(),
   conexoes: (pedido) => paginaConexoes({ rolarPara: pedido === 'etiquetas' ? 'ml-etiquetas' : '' }),
   numeros: () => paginaNumeros(), equipe: () => paginaEquipe(),
-  historico: (_, params) => paginaHistorico('', params), ajustes: () => paginaAjustes(), ajuda: () => paginaAjuda(),
+  historico: (_, params) => paginaHistorico('', params), ajustes: () => paginaAjustes(),
+  docs: (pedido) => paginaDocs(pedido), // docs.js decide o capítulo e a seção pelo pedido ('docs' + o sufixo já validado por ir())
 };
 // Endereços antigos continuam abrindo a página nova (favoritos, links da ajuda). #etiquetas rola até a seção em Conexões.
-const ALIASES = { regras: 'disparo-automatico', whatsapp: 'numeros', etiquetas: 'conexoes' };
+const ALIASES = { regras: 'disparo-automatico', whatsapp: 'numeros', etiquetas: 'conexoes', ajuda: 'docs' };
 // Telas de duas colunas (formulário à esquerda, acompanhamento à direita) usam main.larga.
 const ROTAS_LARGAS = new Set(['disparo-manual', 'disparar-mensagem']);
 // Equipe é só do Dono. Sem login (auth desligada) usuario é null e o painel se comporta como Dono.
@@ -681,12 +682,14 @@ const ROTAS_LARGAS = new Set(['disparo-manual', 'disparar-mensagem']);
 const podeEquipe = () => !S.st?.usuario || S.st.usuario.papel === 'dono';
 /** Rota que está aberta: resolve os nomes antigos e manda rota desconhecida (ou Equipe para o Operador) para a Visão Geral. */
 function rotaAtual() {
-  const pedido = (location.hash || '#visao').slice(1).split('?')[0]; const r = Object.hasOwn(ALIASES, pedido) ? ALIASES[pedido] : pedido;
+  const pedido = (location.hash || '#visao').slice(1).split('?')[0].split('/')[0]; const r = Object.hasOwn(ALIASES, pedido) ? ALIASES[pedido] : pedido; // #docs/<cap>/<secao> é a rota docs
   return Object.hasOwn(ROTAS, r) && (r !== 'equipe' || podeEquipe()) ? r : 'visao';
 }
 function ir() {
   const [pedido, consulta = ''] = (location.hash || '#visao').slice(1).split('?'); const r = rotaAtual();
-  const endereco = '#' + r + (r === 'historico' && consulta ? '?' + consulta : ''); // só o Histórico leva filtros no endereço
+  // só o Histórico leva filtros no endereço; só os Docs levam capítulo e seção (#docs/<cap>[/<secao>]), mesmo que o capítulo não exista
+  const sufixo = r === 'docs' && /^docs(\/[a-z0-9-]+){1,2}$/.test(pedido) ? pedido.slice(4) : '';
+  const endereco = '#' + r + (r === 'historico' && consulta ? '?' + consulta : '') + sufixo;
   if (location.hash !== endereco) history.replaceState(null, '', endereco); // o endereço passa a mostrar a página aberta
   $$('#rail nav a').forEach((a) => { if (a.getAttribute('href') === '#' + r) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current'); });
   $('#menu-atual').textContent = '· ' + ($(`#rail nav a[href="#${r}"]`)?.textContent || '');
@@ -694,7 +697,7 @@ function ir() {
   fecharMenu();
   const pg = $('#pagina'); pg.onclick = null; pg.innerHTML = ''; // tratadores da tela anterior não podem vazar para a próxima
   if ($('#dlg').open) $('#dlg').close();
-  ROTAS[r](pedido, r === 'historico' ? new URLSearchParams(consulta) : null); // só o Histórico lê filtros do endereço
+  ROTAS[r](r === 'docs' ? 'docs' + sufixo : pedido, r === 'historico' ? new URLSearchParams(consulta) : null); // só o Histórico lê filtros do endereço
 }
 
 // ---------- menu em telas estreitas (≤ 900 px): o botão "Menu" abre os grupos sobre o conteúdo ----------
