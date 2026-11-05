@@ -765,3 +765,244 @@ test('rotas dos ganhos: falha inesperada do banco → 500 com frase fixa, sem a 
     for (const l of logs) assert.ok(!/comissoes|gastos_anuncio|no such table|Meta Ads|@g\.us/.test(l), `log sem detalhe da consulta: ${l}`);
   } finally { await s.fechar(); }
 });
+
+// ------------------------------------------------------------------------------------------- Entrega C, etapa 2
+// docs/produto/planos/dashboard-ganhos-c.md: M16 (comparar com o período anterior), filtro de grupo em por=oferta e
+// URL da página do produto (sem afiliado) em cada oferta. Valores conhecidos do C1 (virada 0).
+const M_C = ganhos.MENSAGENS_GANHOS;
+/** Métricas do C1 num período personalizado (dias de negócio), com comparação. */
+const comparado = (db, de, ate, extra = {}) => simples(ganhos.metricas(db, { ...periodo(de, ate), comparar: true, ...extra }));
+const CAMPOS_M16 = ['comissao', 'receita', 'vendas', 'cliques', 'epc', 'conversao', 'envios', 'entradas'];
+const igualOuQuase = (a, b, msg) => (b === null ? assert.equal(a, null, msg) : quase(a, b, msg));
+
+// M16, custom 06–10/10 contra 01–05/10: [métrica, valor do período, valor do anterior, variação]
+const M16_C1 = [
+  ['comissao', 1200, 300, 3],
+  ['receita', 24000, 5000, 3.8],
+  ['vendas', 5, 1, 4],
+  ['cliques', 150, 60, 1.5],
+  ['epc', 8, 5, 0.6],
+  ['conversao', 1 / 30, 1 / 60, 1],
+  ['envios', 0, 16, -1],
+  ['entradas', 0, 0, null],
+];
+for (const [campo, atual, anterior, v] of M16_C1) {
+  test(`M16 ${campo} (C1, 06–10/10 contra 01–05/10): ${atual} contra ${anterior} → ${v}`, () => {
+    const db = cenarioC1();
+    const r = comparado(db, '2026-10-06', '2026-10-10');
+    assert.deepEqual([r.anterior.dia_de, r.anterior.dia_ate], ['2026-10-01', '2026-10-05'], 'os mesmos 5 dias de negócio logo antes');
+    quase(r.total[campo], atual, `${campo} do período`);
+    quase(r.anterior.total[campo], anterior, `${campo} do período anterior`);
+    igualOuQuase(r.anterior.variacao[campo], v, `M16 ${campo}`);
+    db.close();
+  });
+}
+
+test('M16: a variação traz exatamente as oito métricas dos cartões (gasto, custo por membro e retorno ficam de fora)', () => {
+  const db = cenarioC1();
+  const r = comparado(db, '2026-10-06', '2026-10-10');
+  assert.deepEqual(Object.keys(r.anterior).sort(), ['dia_ate', 'dia_de', 'total', 'variacao']);
+  assert.deepEqual(Object.keys(r.anterior.variacao).sort(), [...CAMPOS_M16].sort());
+  assert.deepEqual(Object.keys(r.anterior.total), Object.keys(r.total), 'o total anterior tem a mesma forma do total');
+  db.close();
+});
+
+test('M16 comissão (C1, 01–05/10 contra 26–30/09): 300 contra 700 → ≈ −0,5714', () => {
+  const db = cenarioC1();
+  const r = comparado(db, '2026-10-01', '2026-10-05');
+  assert.deepEqual([r.anterior.dia_de, r.anterior.dia_ate], ['2026-09-26', '2026-09-30']);
+  assert.deepEqual([r.total.comissao, r.anterior.total.comissao], [300, 700]);
+  quase(r.anterior.variacao.comissao, (300 - 700) / 700, 'M16 comissão');
+  db.close();
+});
+
+test('M16 comissão (C1, 30/09 contra 29/09): 700 contra 0 → null (sem base para comparar)', () => {
+  const db = cenarioC1();
+  const r = comparado(db, '2026-09-30', '2026-09-30');
+  assert.deepEqual([r.anterior.dia_de, r.anterior.dia_ate], ['2026-09-29', '2026-09-29'], 'um dia: o dia anterior');
+  assert.deepEqual([r.total.comissao, r.anterior.total.comissao, r.anterior.variacao.comissao], [700, 0, null]);
+  assert.equal(r.anterior.variacao.epc, null, 'EPC anterior null (sem clique em 29/09) → null');
+  db.close();
+});
+
+test('M16: métrica do período null (sem clique) contra anterior com valor → null, nunca NaN', () => {
+  const db = cenarioC1();
+  const r = comparado(db, '2026-10-11', '2026-10-11'); // 11/10: só ML, sem clique; 10/10: Amazon com 60 cliques
+  assert.equal(r.total.epc, null);
+  quase(r.anterior.total.epc, 500 / 60, 'EPC de 10/10');
+  assert.equal(r.anterior.variacao.epc, null);
+  assert.equal(r.anterior.variacao.conversao, null);
+  db.close();
+});
+
+test('M16: o período anterior segue os mesmos filtros de loja e de bloco', () => {
+  const db = cenarioC1();
+  // Shopee 06–10/10: 200 + 100 = 300; 01–05/10: 300
+  const shopee = comparado(db, '2026-10-06', '2026-10-10', { loja: 'shopee' });
+  assert.deepEqual([shopee.total.comissao, shopee.anterior.total.comissao, shopee.anterior.variacao.comissao], [300, 300, 0]);
+  // B1 06–10/10: G1 200 + G2 100 + o do bloco 400 = 700; 01–05/10: G1 300 (envio de 01/10)
+  const b1 = comparado(db, '2026-10-06', '2026-10-10', { bloco: 1 });
+  assert.deepEqual([b1.total.comissao, b1.anterior.total.comissao], [700, 300]);
+  quase(b1.anterior.variacao.comissao, 4 / 3, 'M16 comissão do bloco');
+  assert.equal(b1.anterior.total.envios, 12, 'envios de 01–05/10 só dos grupos do bloco');
+  // a virada do dia vale para o anterior também
+  const v = simples(ganhos.metricas(db, { ...periodo('2026-10-06', '2026-10-10', 120), comparar: true }));
+  assert.deepEqual([v.anterior.dia_de, v.anterior.dia_ate], ['2026-10-01', '2026-10-05']);
+  db.close();
+});
+
+test('M16: sem comparar (ou com comparar diferente de true), anterior é null e grupo é null', () => {
+  const db = cenarioC1();
+  for (const extra of [{}, { comparar: false }, { comparar: 1 }, { comparar: 'sim' }]) {
+    const r = c1(db, extra);
+    assert.equal(r.anterior, null, JSON.stringify(extra));
+    assert.equal(r.grupo, null);
+  }
+  db.close();
+});
+
+test('filtro de grupo (D4): G1 em por=oferta só tem as vendas atribuídas ao G1 (o 400 do bloco B1 não entra); G3 sem linhas', () => {
+  const db = cenarioC1();
+  const g1 = c1(db, { por: 'oferta', grupo: G1 });
+  assert.deepEqual(g1.linhas.map((l) => [l.loja, l.oferta, l.comissao, l.vendas, l.envios, l.grupos]), [['shopee', 'SHOPEE:1.2', 500, 2, 4, 1]],
+    'envios: só os do G1 com a oferta');
+  assert.deepEqual([g1.grupo, g1.bloco, g1.nao_atribuida], [G1, null, null]);
+  const t = g1.total;
+  assert.deepEqual([t.comissao, t.cliques, t.envios, t.entradas, t.gasto], [500, 100, 6, 10, null], 'total do recorte do grupo');
+  const g3 = c1(db, { por: 'oferta', grupo: G3 });
+  assert.deepEqual(g3.linhas, [], 'G3 só recebeu links com o código padrão');
+  assert.deepEqual([g3.total.comissao, g3.total.envios, g3.total.gasto, g3.total.entradas], [0, 4, 1200, 6]);
+  db.close();
+});
+
+test('filtro de grupo (invariante): Σ comissão das ofertas com grupo=G = comissão da linha G em por=grupo', () => {
+  const db = cenarioC1();
+  const grupo = c1(db, { por: 'grupo' });
+  for (const jid of [G1, G2, G3]) {
+    const soma = c1(db, { por: 'oferta', grupo: jid }).linhas.reduce((s, l) => s + l.comissao, 0);
+    assert.equal(soma, linhaDe(grupo, 'jid', jid).comissao, jid);
+  }
+  // com filtro de loja também
+  const soma = c1(db, { por: 'oferta', grupo: G2, loja: 'shopee' }).linhas.reduce((s, l) => s + l.comissao, 0);
+  assert.equal(soma, linhaDe(c1(db, { por: 'grupo', loja: 'shopee' }), 'jid', G2).comissao);
+  db.close();
+});
+
+test('filtro de grupo com comparar: o período anterior é o do mesmo grupo', () => {
+  const db = cenarioC1();
+  const r = comparado(db, '2026-10-06', '2026-10-10', { por: 'oferta', grupo: G1 });
+  assert.deepEqual([r.total.comissao, r.anterior.total.comissao], [200, 300], 'G1: 06/10 contra 05/10');
+  quase(r.anterior.variacao.comissao, -1 / 3, 'M16 comissão do G1');
+  db.close();
+});
+
+test('metricas: grupo validado com frase fixa (formato 404, combinação 400, inexistente 404), sem eco', () => {
+  const db = cenarioC1();
+  const casos = [
+    [{ por: 'grupo', grupo: G1 }, 400, M_C.grupo_por], [{ grupo: G1 }, 400, M_C.grupo_por],
+    [{ por: 'oferta', grupo: G1, bloco: 1 }, 400, M_C.grupo_e_bloco], [{ por: 'oferta', grupo: G1, bloco: 99 }, 400, M_C.grupo_e_bloco],
+    [{ por: 'oferta', grupo: 'sumiu@g.us' }, 404, M_C.grupo], [{ por: 'oferta', grupo: 5 }, 404, M_C.grupo],
+    [{ por: 'oferta', grupo: [G1] }, 404, M_C.grupo], [{ por: 'oferta', grupo: 'x'.repeat(201) }, 404, M_C.grupo],
+    [{ por: 'oferta', grupo: '' }, 404, M_C.grupo],
+  ];
+  for (const [extra, status, frase] of casos) {
+    assert.throws(() => ganhos.metricas(db, { ...OUTUBRO, ...extra }), ERRO(status, frase), JSON.stringify(extra).slice(0, 80));
+  }
+  for (const k of ['grupo_por', 'grupo_e_bloco', 'comparar']) assert.equal(typeof M_C[k], 'string', `frase ${k}`);
+  db.close();
+});
+
+test('lerConsulta: grupo e comparar (repetido ou formato errado recusado, combinação proibida 400)', () => {
+  const ok = ganhos.lerConsulta({ periodo: 'custom', de: '2026-10-01', ate: '2026-10-31', por: 'oferta', grupo: G1, comparar: '1' });
+  assert.deepEqual([ok.por, ok.grupo, ok.comparar], ['oferta', G1, true]);
+  const padrao = ganhos.lerConsulta({});
+  assert.deepEqual([padrao.grupo, padrao.comparar], [null, false], 'sem os parâmetros novos');
+  assert.deepEqual([ganhos.lerConsulta({ grupo: '', comparar: '' }).grupo, ganhos.lerConsulta({ comparar: '' }).comparar], [null, false], 'vazio = ausente');
+  const casos = [
+    [{ por: 'grupo', grupo: G1 }, 400, M_C.grupo_por], [{ grupo: G1 }, 400, M_C.grupo_por], [{ por: 'dia', grupo: G1 }, 400, M_C.grupo_por],
+    [{ por: 'oferta', grupo: G1, bloco: '1' }, 400, M_C.grupo_e_bloco],
+    [{ por: 'oferta', grupo: [G1, G1] }, 404, M_C.grupo], [{ por: 'oferta', grupo: 'x'.repeat(201) }, 404, M_C.grupo],
+    [{ comparar: '2' }, 400, M_C.comparar], [{ comparar: ['1', '1'] }, 400, M_C.comparar], [{ comparar: 'true' }, 400, M_C.comparar],
+    [{ comparar: '01' }, 400, M_C.comparar], [{ comparar: '0' }, 400, M_C.comparar], [{ comparar: ' 1' }, 400, M_C.comparar],
+    [{ por: 'semana', grupo: G1 }, 400, M_C.por],
+  ];
+  for (const [q, status, frase] of casos) assert.throws(() => ganhos.lerConsulta(q), ERRO(status, frase), JSON.stringify(q).slice(0, 80));
+});
+
+test('rota GET /api/ganhos: comparar=1 e grupo= (o mesmo que metricas); recusas com frase fixa e sem eco', async () => {
+  const s = await subirGanhos(cenarioC1());
+  const Q = 'periodo=custom&de=2026-10-06&ate=2026-10-10';
+  try {
+    let r = await pedir(s, `/api/ganhos?${Q}&por=grupo&comparar=1`);
+    assert.equal(r.status, 200, r.txt);
+    assert.deepEqual(r.json, comparado(s.db, '2026-10-06', '2026-10-10', { por: 'grupo' }));
+    assert.deepEqual([r.json.anterior.total.comissao, r.json.anterior.variacao.comissao], [300, 3]);
+    r = await pedir(s, `/api/ganhos?${OUT_Q}&por=oferta&grupo=${encodeURIComponent(G1)}`);
+    assert.equal(r.status, 200, r.txt);
+    assert.deepEqual(r.json.linhas.map((l) => [l.oferta, l.comissao]), [['SHOPEE:1.2', 500]]);
+    assert.deepEqual([r.json.grupo, r.json.anterior], [G1, null]);
+
+    const eco = encodeURIComponent('<script>sumiu</script>@g.us');
+    const casos = [
+      [`por=oferta&grupo=${eco}`, 404, M_C.grupo], [`por=oferta&grupo=${'x'.repeat(201)}`, 404, M_C.grupo],
+      [`por=oferta&grupo=${encodeURIComponent(G1)}&grupo=${encodeURIComponent(G1)}`, 404, M_C.grupo],
+      [`por=grupo&grupo=${encodeURIComponent(G1)}`, 400, M_C.grupo_por], [`grupo=${eco}`, 400, M_C.grupo_por],
+      [`por=oferta&grupo=${encodeURIComponent(G1)}&bloco=1`, 400, M_C.grupo_e_bloco],
+      ['comparar=2', 400, M_C.comparar], ['comparar=1&comparar=1', 400, M_C.comparar], [`comparar=${eco}`, 400, M_C.comparar],
+    ];
+    for (const [q, status, erro] of casos) {
+      const p = await pedir(s, `/api/ganhos?${OUT_Q}&${q}`);
+      assert.deepEqual([p.status, p.json], [status, { erro }], q.slice(0, 80));
+      assert.ok(!/script|sumiu|xxxx|1201/.test(p.txt), `sem eco (${q.slice(0, 40)})`);
+    }
+  } finally { await s.fechar(); }
+});
+
+test('CA8: sem comparar nem grupo, a resposta é a de antes com grupo/anterior null e só o campo url a mais em por=oferta', async () => {
+  const s = await subirGanhos(cenarioC1());
+  try {
+    const r = await pedir(s, `/api/ganhos?${OUT_Q}&por=oferta`);
+    assert.equal(r.status, 200, r.txt);
+    assert.deepEqual(Object.keys(r.json), ['de', 'ate', 'dia_de', 'dia_ate', 'por', 'loja', 'bloco', 'grupo', 'total', 'nao_atribuida',
+      'cobertura', 'linhas', 'importado_ate', 'gastos_informados', 'anterior']);
+    assert.deepEqual([r.json.grupo, r.json.anterior], [null, null]);
+    for (const l of r.json.linhas) {
+      assert.deepEqual(Object.keys(l), ['loja', 'oferta', 'titulo', 'url', 'comissao', 'comissao_confirmada', 'receita', 'vendas', 'envios', 'grupos']);
+    }
+    assert.equal(r.json.total.comissao, 2100, 'os números não mudam');
+  } finally { await s.fechar(); }
+});
+
+test('urlDaOferta (D5): página do produto na loja, sem afiliado, só por regex estrita com domínio fixo', () => {
+  const u = ganhos.urlDaOferta;
+  assert.equal(u('amazon', 'B0TESTE001'), 'https://www.amazon.com.br/dp/B0TESTE001');
+  assert.equal(u('amazon', 'ASIN:b0teste001'), 'https://www.amazon.com.br/dp/B0TESTE001');
+  assert.equal(u('mercadolivre', 'MLB-123'), 'https://produto.mercadolivre.com.br/MLB-123');
+  assert.equal(u('mercadolivre', 'MLB123'), 'https://produto.mercadolivre.com.br/MLB-123');
+  assert.equal(u('mercadolivre', 'mlb123'), 'https://produto.mercadolivre.com.br/MLB-123');
+  assert.equal(u('shopee', 'SHOPEE:1.2'), 'https://shopee.com.br/product/1/2');
+  for (const [loja, produto] of [
+    ['shopee', 'B0TESTE001'], ['amazon', 'javascript:x'], ['amazon', null], [null, null], ['mercadolivre', '123'],
+    ['amazon', 'MLB123'], ['mercadolivre', 'SHOPEE:1.2'], ['shopee', 'MLB123'], ['shopee', 'ASIN:B0TESTE001'],
+    ['ml', 'MLB123'], ['magalu', 'MLB123'], ['amazon', 'B0TESTE0011'], ['amazon', ' B0TESTE001'], ['amazon', 'B0TESTE001\n'],
+    ['amazon', 'B0TESTE001/../x'], ['shopee', 'SHOPEE:1.2?x=1'], ['shopee', 'shopee:1.2'], ['shopee', 'SHOPEE:1.2.3'],
+    ['mercadolivre', 'MLB--1'], ['mercadolivre', `MLB${'1'.repeat(21)}`], ['amazon', 5], ['amazon', { toString: () => 'B0TESTE001' }],
+  ]) assert.equal(u(loja, produto), null, `${loja} ${String(produto)}`);
+});
+
+test('por=oferta (C1): cada oferta traz url da página do produto; nenhuma é link de afiliado', () => {
+  const db = cenarioC1();
+  const r = c1(db, { por: 'oferta' });
+  assert.deepEqual(r.linhas.map((l) => [l.oferta, l.url]), [
+    ['MLB1', 'https://produto.mercadolivre.com.br/MLB-1'],
+    ['B0TESTE002', 'https://www.amazon.com.br/dp/B0TESTE002'],
+    ['SHOPEE:1.2', 'https://shopee.com.br/product/1/2'],
+    ['B0TESTE001', 'https://www.amazon.com.br/dp/B0TESTE001'],
+    ['SHOPEE:3.4', 'https://shopee.com.br/product/3/4'],
+  ]);
+  for (const l of r.linhas) assert.ok(!/tag=|meli\.la|s\.shopee|exemplo\.invalid/.test(l.url), l.url);
+  // produto em formato que não fecha: sem link
+  comissao(db, { loja: 'amazon', codigo: 'x', data: '2026-10-12', valor: 1, status: 'confirmada', produto: 'NAOEASIN' });
+  assert.equal(linhaDe(c1(db, { por: 'oferta' }), 'oferta', 'NAOEASIN').url, null);
+  db.close();
+});

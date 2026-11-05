@@ -60,11 +60,15 @@ export function createLinkService({ getMode, limiteShopeeHora = LIMITE_SHOPEE_HO
   const online = () => Date.now() - lastPollAt < ONLINE_MS;
   const status = () => ({ online: online(), lastPollAt, lastOkAt, lastOffersAt, lastError, shopeeLastOkAt, shopeeLastError, pending: queue.length });
 
-  /** Há vaga para mais um pedido link_shopee nesta hora? */
-  function vagaShopee() {
+  /**
+   * Quantos pedidos link_shopee ainda cabem na janela de 1 h (0 = o próximo é recusado com LIMITE_SHOPEE_ATINGIDO).
+   * src/lojas.js consulta antes de pedir um Sub_id (`reservaVagas`, que o envio passa), para deixar vagas ao link base.
+   * Na simulação o teto não vale, e as vagas não mudam.
+   */
+  function vagasShopee() {
     const limite = agora() - JANELA_SHOPEE_MS;
     while (pedidosShopee.length && pedidosShopee[0] <= limite) pedidosShopee.shift();
-    return pedidosShopee.length < tetoShopee;
+    return Math.max(0, tetoShopee - pedidosShopee.length);
   }
 
   function flush() {
@@ -114,7 +118,7 @@ export function createLinkService({ getMode, limiteShopeeHora = LIMITE_SHOPEE_HO
     const comSubId = !semSubId(subId);
     if (comSubId && !(typeof subId === 'string' && RE_SUB_ID.test(subId))) throw new Error('Sub_id da Shopee inválido');
     if (getMode() === 'fake') return { link: `https://s.shopee.com.br/fake${++seq}`, longo: null, subIdAplicado: comSubId };
-    if (!vagaShopee()) throw new Error(LIMITE_SHOPEE_ATINGIDO);
+    if (vagasShopee() === 0) throw new Error(LIMITE_SHOPEE_ATINGIDO);
     if (online()) pedidosShopee.push(agora()); // off-line, ask recusa sem pôr na fila
     // sem Sub_id, o pedido é o de antes (sem o campo)
     return ask(comSubId ? { type: 'link_shopee', url, subId } : { type: 'link_shopee', url }, timeoutMs);
@@ -173,5 +177,5 @@ export function createLinkService({ getMode, limiteShopeeHora = LIMITE_SHOPEE_HO
   }
 
   // modo(): o modo em que requestLink vai gerar o link agora (quem precisa saber se a extensão é necessária pergunta aqui)
-  return { requestLink, requestLinkShopee, requestOffers, poll, submit, status, modo: () => getMode() };
+  return { requestLink, requestLinkShopee, requestOffers, poll, submit, status, vagasShopee, modo: () => getMode() };
 }

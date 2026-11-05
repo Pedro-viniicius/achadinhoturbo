@@ -590,6 +590,9 @@ test('mesma mensagem: link sem esquema + link da prévia do mesmo produto → um
 // ------------------------------------------------------------------------------------------------ CA11, CA7
 
 test('CA11: nada de número, e-mail ou participante em espelho_itens, log, console ou no que vai à tela; ASIN numérico intacto no link', async (t) => {
+  // Relógio fixo: os timestamps (13 dígitos, em ms) vão para o banco, o log e a tela, e com o relógio real
+  // um deles às vezes contém "5432" ou "99876" e a busca por dígitos de telefone acusava vazamento que não houve.
+  t.mock.timers.enable({ apis: ['Date'], now: 1786000000000 });
   const espias = capturarConsole(t);
   const s = montar({ api: '403' });
   s.regra();

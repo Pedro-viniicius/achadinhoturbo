@@ -1,6 +1,7 @@
 // Importador de comissões e cliques por CSV (docs/produto/planos/dashboard-ganhos.md, D7 e etapa 14).
-// Fixtures PROVISÓRIAS, inline, com cabeçalhos prováveis e valores inventados: quando o dono mandar os exemplos
-// dos portais (P5), entra só a linha de cabeçalho com valores inventados. Arquivo real nunca vai ao repositório.
+// Fixtures inline com valores inventados. As *_PROVISORIO têm cabeçalhos prováveis; as de "P5" têm os cabeçalhos
+// reais capturados em 05/11/2026 (docs/produto/referencias/relatorios-dos-portais.md), nunca os valores do dono.
+// Arquivo real nunca vai ao repositório.
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -9,6 +10,7 @@ import path from 'node:path';
 import http from 'node:http';
 import express from 'express';
 import crypto from 'node:crypto';
+import zlib from 'node:zlib';
 import { openDb, getSetting, setSetting } from '../src/db.js';
 import { soDono } from '../src/auth.js';
 import { MENSAGENS_CSV } from '../src/csv.js';
@@ -712,4 +714,462 @@ test('rotas: falha inesperada → 500 com frase fixa; o log não traz conteúdo 
     assert.equal(logs.length, 1);
     for (const p of [...PESSOAIS, 'comissoes', 'g1', 'Garrafa']) assert.ok(!logs[0].includes(p), logs[0]);
   } finally { console.error = original; s.db.exec('CREATE TABLE comissoes (id INTEGER)'); await s.fechar(); }
+});
+
+// ------------------------------------------------------------------------------------------- P5: relatórios reais dos portais
+
+// Amazon, "Produto relacionado" (Linked-Product): cabeçalho real em inglês; data MM-DD-AAAA, ponto decimal, "-" vazio,
+// e a linha "Other" (ASIN que não é ASIN) com os cliques sem produto. Valores inventados.
+const CAB_AMAZON_PRODUTO = 'Date,Category,Product Title,ASIN,Clicks,Indirect Items Ordered,Direct Items Ordered,Items Ordered,'
+  + 'Direct Conversion Rate,Order Quantity,Product Conversion Rate,Order Conversion Rate,Commission Rate,Ordered Revenue,Items Shipped,'
+  + 'Items Returned,Items Shipped Revenue,Items Shipped Earnings,Items Returned Revenue,Items Returned Earnings,Total Earnings';
+const FIXTURE_AMAZON_PRODUTO = csv(CAB_AMAZON_PRODUTO,
+  '11-04-2026,-,-,Other,12.0,0.0,0.0,0.0,0,0.0,0,0,-,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0',
+  '11-04-2026,Cozinha,Panela inventada,B0TESTE001,8.0,0.0,1.0,1.0,0.125,1.0,0.125,0.125,0.05,80.0,1.0,0.0,80.0,4.0,0.0,0.0,4.0',
+  '11-05-2026,Livros,Livro inventado,B0TESTE002,5.0,0.0,2.0,2.0,0.4,2.0,0.4,0.4,0.045,60.0,2.0,1.0,60.0,2.7,30.0,1.35,1.35');
+// Amazon, "ID de rastreamento" (Tracking-Id): cabeçalho real em português, sem coluna de data (total do período por ID).
+const CAB_AMAZON_ID = 'Número de rastreamento,cliques,produtos pedidos,receita solicitada,produtos enviados,produtos devolvidos,'
+  + 'receita de produtos enviados,receita de produtos devolvidos,ganhos totais,bônus,ganhos de produtos enviados,ganhos de produtos devolvidos';
+const FIXTURE_AMAZON_ID = csv(CAB_AMAZON_ID,
+  'grupoa-20,40.0,-,-,-,-,-,-,-,0.0,-,-',
+  'grupob-20,25.0,2.0,150.0,2.0,0.0,150.0,0.0,7.5,0.0,7.5,0.0');
+// Shopee, relatório de cliques: colunas vistas na tela (o arquivo exportado não foi visto); uma linha por clique.
+const CAB_SHOPEE_CLIQUES = 'ID dos Cliques,Período dos Cliques,Região dos Cliques,Sub_id,Referenciador';
+const FIXTURE_SHOPEE_CLIQUES = csv(CAB_SHOPEE_CLIQUES,
+  'C0001,2026-11-04 10:15:00,Região Inventada,g1,WhatsApp',
+  'C0002,2026-11-04 23:59,Região Inventada,g1,WhatsApp',
+  'C0003,04/11/2026 08:00:01,Outra Região,g2,-',
+  'C0004,05/11/2026 00:00,Outra Região,g1,',
+  ',2026-11-05 01:00:00,Outra Região,g1,',
+  'C0006,ontem,Outra Região,g1,');
+
+/** ZIP com uma entrada (deflate), como o da Amazon: só o necessário para a rota; os casos do formato estão em csv.test.js. */
+function zipUm(nome, dados) {
+  const n = Buffer.from(nome); const comp = zlib.deflateRawSync(dados); const crc = zlib.crc32(dados);
+  const local = Buffer.alloc(30);
+  local.writeUInt32LE(0x04034b50, 0); local.writeUInt16LE(20, 4); local.writeUInt16LE(8, 8); local.writeUInt32LE(crc, 14);
+  local.writeUInt32LE(comp.length, 18); local.writeUInt32LE(dados.length, 22); local.writeUInt16LE(n.length, 26);
+  const central = Buffer.alloc(46);
+  central.writeUInt32LE(0x02014b50, 0); central.writeUInt16LE(20, 4); central.writeUInt16LE(20, 6); central.writeUInt16LE(8, 10);
+  central.writeUInt32LE(crc, 16); central.writeUInt32LE(comp.length, 20); central.writeUInt32LE(dados.length, 24); central.writeUInt16LE(n.length, 28);
+  const fim = Buffer.alloc(22);
+  fim.writeUInt32LE(0x06054b50, 0); fim.writeUInt16LE(1, 8); fim.writeUInt16LE(1, 10);
+  fim.writeUInt32LE(46 + n.length, 12); fim.writeUInt32LE(30 + n.length + comp.length, 16);
+  return Buffer.concat([local, n, comp, central, n, fim]);
+}
+
+test('P5: lerData com loja=amazon lê NN-NN-AAAA (hífen) como mês-dia-ano; DD/MM/AAAA (barra) continua dia/mês em todas as lojas', () => {
+  const casos = [
+    ['11-04-2026', 'amazon', '2026-11-04'], ['11-04-2026 10:00', 'amazon', '2026-11-04'], ['1-4-2026', 'amazon', '2026-01-04'],
+    ['04/11/2026', 'amazon', '2026-11-04'], ['2026-11-04', 'amazon', '2026-11-04'], ['12-31-2026', 'amazon', '2026-12-31'],
+    ['11-04-2026', 'shopee', '2026-04-11'], ['11-04-2026', 'mercadolivre', '2026-04-11'], ['11-04-2026', undefined, '2026-04-11'],
+    ['04/11/2026', 'shopee', '2026-11-04'],
+  ];
+  for (const [texto, loja, data] of casos) assert.equal(lerData(texto, { loja }), data, `${texto} ${loja}`);
+  for (const ruim of ['13-04-2026', '02-30-2026', '31-12-2026']) assert.equal(lerData(ruim, { loja: 'amazon' }), null, ruim);
+  assert.equal(lerData('31-12-2026'), '2026-12-31', 'sem loja, como antes');
+});
+
+test('P5: data e hora no formato dos cliques da Shopee (AAAA-MM-DD hh:mm[:ss] e DD/MM/AAAA hh:mm[:ss])', () => {
+  for (const [texto, data] of [['2026-11-04 10:15:00', '2026-11-04'], ['2026-11-04 23:59', '2026-11-04'], ['04/11/2026 08:00:01', '2026-11-04'], ['05/11/2026 00:00', '2026-11-05']]) {
+    assert.equal(lerData(texto, { loja: 'shopee' }), data, texto);
+  }
+});
+
+test('P5: status "em revisão" (Mercado Livre) é pendente', () => {
+  for (const s of ['EM REVISÃO', 'em revisão', 'Em revisao']) assert.equal(lerStatus(s), 'pendente', s);
+});
+
+test('P5: Amazon "Produto relacionado" (cabeçalho real) como comissões: MM-DD-AAAA, ponto decimal, "-" vazio, Total Earnings; "Other" não é produto', () => {
+  const db = novoDb();
+  const r = importar(db, FIXTURE_AMAZON_PRODUTO, { loja: 'amazon', codigo: 'grupoa-20' });
+  assert.deepEqual([r.lidas, r.novas, r.ignoradas, r.so_cliques], [3, 2, 0, 1], r.avisos.join(' | '));
+  // a "Other" só tem cliques (comissão, venda e quantidade 0): fica de fora das comissões (R2)
+  assert.deepEqual(negocio(db), [
+    { loja: 'amazon', data: '2026-11-04', codigo: 'grupoa-20', produto: 'B0TESTE001', titulo: 'Panela inventada', quantidade: 1, venda_centavos: 8000, comissao_centavos: 400, status: 'pendente' },
+    { loja: 'amazon', data: '2026-11-05', codigo: 'grupoa-20', produto: 'B0TESTE002', titulo: 'Livro inventado', quantidade: 1, venda_centavos: 6000, comissao_centavos: 135, status: 'pendente' },
+  ]);
+  assert.deepEqual(r.periodo, { de: '2026-11-04', ate: '2026-11-05' });
+  assert.equal(r.comissao_centavos, 535, 'Total Earnings (já com a devolução), não Items Shipped Earnings');
+  assert.deepEqual(r.colunas_usadas, [
+    { campo: 'data', coluna: 'Date' }, { campo: 'produto', coluna: 'ASIN' }, { campo: 'titulo', coluna: 'Product Title' },
+    { campo: 'venda', coluna: 'Items Shipped Revenue' }, { campo: 'comissao', coluna: 'Total Earnings' },
+    { campo: 'quantidade', coluna: 'Items Shipped' }, { campo: 'devolucoes', coluna: 'Items Returned' },
+  ]);
+  assert.ok(r.colunas_ignoradas.includes('Clicks') && r.colunas_ignoradas.includes('Items Shipped Earnings'));
+  db.close();
+});
+
+test('P5: Amazon "Produto relacionado" como cliques: Clicks com ponto decimal somados por dia (a linha Other conta)', () => {
+  const db = novoDb();
+  const r = importar(db, FIXTURE_AMAZON_PRODUTO, { loja: 'amazon', tipo: 'cliques', codigo: 'GrupoA-20' });
+  assert.deepEqual([r.lidas, r.novas, r.ignoradas, r.cliques_total], [3, 2, 0, 25]);
+  assert.deepEqual(linhas(db, 'SELECT dia, codigo, cliques FROM cliques_loja ORDER BY dia'), [
+    { dia: '2026-11-04', codigo: 'grupoa-20', cliques: 20 }, { dia: '2026-11-05', codigo: 'grupoa-20', cliques: 5 },
+  ]);
+  db.close();
+});
+
+test('P5: CSV da Amazon dentro do .zip pela rota → importa como o CSV solto; o XLSX segue recusado', async () => {
+  const s = await subir();
+  try {
+    const nome = '1234-Linked-Product-0f0f0f0f-aaaa-bbbb-cccc-000000000000-CSV.csv';
+    let r = await pedir(s, '/api/ganhos/importar?loja=amazon&tipo=cliques&codigo=grupoa-20&previa=1', { method: 'POST', body: zipUm(nome, FIXTURE_AMAZON_PRODUTO) });
+    assert.equal(r.status, 200, r.txt);
+    assert.deepEqual([r.json.previa, r.json.lidas, r.json.novas, r.json.cliques_total], [true, 3, 2, 25]);
+    assert.ok(!r.txt.includes('Linked-Product'), 'o nome da entrada não volta');
+    r = await pedir(s, '/api/ganhos/importar?loja=amazon&codigo=grupoa-20', { method: 'POST', body: zipUm(nome, FIXTURE_AMAZON_PRODUTO) });
+    assert.equal(r.status, 200, r.txt);
+    assert.deepEqual([r.json.novas, r.json.so_cliques], [2, 1], 'a "Other" só tem cliques (R2)');
+    assert.equal(conta(s.db, 'comissoes'), 2);
+    r = await pedir(s, '/api/ganhos/importar?loja=amazon', { method: 'POST', body: zipUm('leia.txt', FIXTURE_AMAZON_PRODUTO) });
+    assert.deepEqual([r.status, r.json], [415, { erro: MENSAGENS_CSV.zip }]);
+    assert.equal(conta(s.db, 'importacoes'), 1);
+  } finally { await s.fechar(); }
+});
+
+test('P5: Amazon "ID de rastreamento" (sem coluna de data): sem a data do relatório → 400 com frase fixa; com dia, toda linha usa a data e há aviso', () => {
+  const db = novoDb();
+  assert.equal(MENSAGENS_IMPORTADOR.semData, 'Este relatório não tem data por linha: informe a data do relatório.');
+  for (const tipo of ['comissoes', 'cliques']) {
+    assert.throws(() => importar(db, FIXTURE_AMAZON_ID, { loja: 'amazon', tipo }), recusa(400, MENSAGENS_IMPORTADOR.semData), tipo);
+  }
+  const r = importar(db, FIXTURE_AMAZON_ID, { loja: 'amazon', dia: '2026-11-04' });
+  assert.deepEqual([r.lidas, r.novas, r.ignoradas, r.so_cliques], [2, 1, 0, 1], 'o grupoa-20 só tem cliques (R2)');
+  assert.deepEqual(negocio(db), [
+    { loja: 'amazon', data: '2026-11-04', codigo: 'grupob-20', produto: null, titulo: null, quantidade: 2, venda_centavos: 15000, comissao_centavos: 750, status: 'pendente' },
+  ]);
+  assert.deepEqual(r.colunas_usadas, [
+    { campo: 'codigo', coluna: 'Número de rastreamento' }, { campo: 'venda', coluna: 'receita de produtos enviados' },
+    { campo: 'comissao', coluna: 'ganhos totais' }, { campo: 'quantidade', coluna: 'produtos enviados' }, { campo: 'devolucoes', coluna: 'produtos devolvidos' },
+  ]);
+  assert.ok(r.avisos.includes(MENSAGENS_IMPORTADOR.diaUsado), r.avisos.join(' | '));
+  assert.deepEqual(r.periodo, { de: '2026-11-04', ate: '2026-11-04' });
+  assert.equal(importar(db, FIXTURE_AMAZON_ID, { loja: 'amazon', dia: '2026-11-04' }).repetidas, 1, 'reimportar com a mesma data não duplica');
+  const k = importar(db, FIXTURE_AMAZON_ID, { loja: 'amazon', tipo: 'cliques', dia: '2026-11-04' });
+  assert.deepEqual([k.novas, k.cliques_total], [2, 65]);
+  assert.ok(k.avisos.includes(MENSAGENS_IMPORTADOR.diaUsado));
+  assert.deepEqual(linhas(db, 'SELECT dia, codigo, cliques FROM cliques_loja ORDER BY codigo'), [
+    { dia: '2026-11-04', codigo: 'grupoa-20', cliques: 40 }, { dia: '2026-11-04', codigo: 'grupob-20', cliques: 25 },
+  ]);
+  db.close();
+});
+
+test('P5: com coluna de data, a data do relatório não muda nada (aviso de que não foi usada); dia inválido → 400 com frase fixa', () => {
+  const db = novoDb();
+  const r = importar(db, FIXTURE_AMAZON_PRODUTO, { loja: 'amazon', dia: '2026-10-01', previa: true });
+  assert.deepEqual(r.periodo, { de: '2026-11-04', ate: '2026-11-05' });
+  assert.ok(r.avisos.includes(MENSAGENS_IMPORTADOR.diaIgnorado), r.avisos.join(' | '));
+  assert.ok(!r.avisos.includes(MENSAGENS_IMPORTADOR.diaUsado));
+  assert.ok(!importar(db, FIXTURE_AMAZON_PRODUTO, { loja: 'amazon', previa: true }).avisos.includes(MENSAGENS_IMPORTADOR.diaIgnorado));
+  for (const dia of ['ontem', '2026-02-30', '2026-1-01', '04/11/2026', '1999-12-31', '2026-11-04 10:00', ['2026-11-04'], 20261104, ' 2026-11-04']) {
+    assert.throws(() => importar(db, FIXTURE_AMAZON_ID, { loja: 'amazon', dia }), recusa(400, MENSAGENS_IMPORTADOR.dia), String(dia));
+  }
+  for (const vazio of [undefined, null, '']) {
+    assert.throws(() => importar(db, FIXTURE_AMAZON_ID, { loja: 'amazon', dia: vazio }), recusa(400, MENSAGENS_IMPORTADOR.semData), String(vazio));
+  }
+  assert.equal(conta(db, 'comissoes'), 0);
+  db.close();
+});
+
+test('P5: rota com dia=: válida importa; inválida ou repetida → 400 com frase fixa, nada gravado', async () => {
+  const s = await subir();
+  try {
+    for (const q of ['dia=ontem', 'dia=2026-02-30', 'dia=2026-11-04&dia=2026-11-05', 'dia=2026-11-04%2010:00']) {
+      const r = await pedir(s, `/api/ganhos/importar?loja=amazon&${q}`, { method: 'POST', body: FIXTURE_AMAZON_ID });
+      assert.deepEqual([r.status, r.json], [400, { erro: MENSAGENS_IMPORTADOR.dia }], q);
+    }
+    let r = await pedir(s, '/api/ganhos/importar?loja=amazon', { method: 'POST', body: FIXTURE_AMAZON_ID });
+    assert.deepEqual([r.status, r.json], [400, { erro: MENSAGENS_IMPORTADOR.semData }]);
+    assert.equal(conta(s.db, 'importacoes') + conta(s.db, 'comissoes'), 0);
+    r = await pedir(s, '/api/ganhos/importar?loja=amazon&tipo=cliques&dia=2026-11-04', { method: 'POST', body: FIXTURE_AMAZON_ID });
+    assert.equal(r.status, 200, r.txt);
+    assert.deepEqual([r.json.novas, r.json.cliques_total], [2, 65]);
+    assert.ok(r.json.avisos.includes(MENSAGENS_IMPORTADOR.diaUsado));
+  } finally { await s.fechar(); }
+});
+
+test('P5: Shopee, relatório de cliques com uma linha por clique: cada linha vale 1, somada por dia e Sub_id; data com hora', () => {
+  const db = novoDb();
+  const r = importar(db, FIXTURE_SHOPEE_CLIQUES, { loja: 'shopee', tipo: 'cliques' });
+  assert.deepEqual([r.lidas, r.novas, r.ignoradas, r.cliques_total], [6, 3, 2, 4]);
+  assert.deepEqual(r.linhas_ignoradas, [6, 7], 'sem ID do clique e com data inválida');
+  assert.deepEqual(linhas(db, 'SELECT dia, codigo, cliques FROM cliques_loja ORDER BY dia, codigo'), [
+    { dia: '2026-11-04', codigo: 'g1', cliques: 2 }, { dia: '2026-11-04', codigo: 'g2', cliques: 1 }, { dia: '2026-11-05', codigo: 'g1', cliques: 1 },
+  ]);
+  assert.deepEqual(r.colunas_usadas.map((c) => c.campo), ['data', 'codigo', 'id_clique']);
+  assert.deepEqual(r.colunas_ignoradas, ['Região dos Cliques', 'Referenciador']);
+  assert.ok(!JSON.stringify(r).includes('Região Inventada') && !JSON.stringify(r).includes('C0001'));
+  // com coluna de contagem, ela vale (não conta linhas)
+  const c = importar(db, csv('ID dos Cliques,Período dos Cliques,Sub_id,Cliques', 'C1,2026-11-06 10:00,g1,5'), { loja: 'shopee', tipo: 'cliques' });
+  assert.equal(c.cliques_total, 5);
+  // relatório de cliques não serve como comissões
+  assert.throws(() => importar(db, FIXTURE_SHOPEE_CLIQUES, { loja: 'shopee' }), recusa(400, MENSAGENS_IMPORTADOR.semComissao));
+  db.close();
+});
+
+test('P5: números com ponto decimal (245.0, 0.0) e "-" valem nos inteiros; "-" no texto é vazio', () => {
+  const db = novoDb();
+  const c = importar(db, csv('Date,ASIN,Product Title,Items Shipped,Items Returned,Items Shipped Revenue,Total Earnings',
+    '10-01-2026,-,-,-,-,-,0.5', '10-02-2026,B0TESTE001,Fone inventado,3.0,1.0,"1,234.50",2.0', '10-03-2026,-,-,-,-,-,-'), { loja: 'amazon', codigo: 'x-20' });
+  assert.deepEqual([c.novas, c.ignoradas, c.so_cliques], [2, 0, 1], 'a linha só com "-" vale 0 em tudo: só cliques (R2)');
+  assert.deepEqual(negocio(db).map((l) => [l.data, l.produto, l.titulo, l.quantidade, l.venda_centavos, l.comissao_centavos, l.status]), [
+    ['2026-10-01', null, null, 0, 0, 50, 'pendente'], ['2026-10-02', 'B0TESTE001', 'Fone inventado', 2, 123450, 200, 'pendente'],
+  ]);
+  const k = importar(db, csv('Date,Clicks', '10-01-2026,245.0', '10-02-2026,0.0', '10-03-2026,-', '10-04-2026,1.5'), { loja: 'amazon', tipo: 'cliques' });
+  assert.deepEqual([k.novas, k.ignoradas, k.cliques_total], [3, 1, 245], '1.5 clique não existe: pulada');
+  db.close();
+});
+
+// ------------------------------------------------------------------------------------------- Entrega C, etapa 1: avisos de código na prévia
+
+const amzC = (...l) => csv('Date Shipped,ASIN,Ad Fees,Items Shipped', ...l);
+const DOIS_IGUAIS = amzC('2026-10-10,B0ABCDEF12,"5,00",1', '2026-10-10,B0ABCDEF12,"5,00",1');
+/** Frase de MENSAGENS_IMPORTADOR com singular e plural ([um, vários]) montada para n. */
+const frase = ([um, varios], n) => (n === 1 ? um : varios).replace('{n}', String(n));
+const contagens = (r) => [r.novas, r.atualizadas, r.repetidas, r.outro_codigo, r.recebem_codigo];
+
+test('Entrega C: frases fixas dos avisos de código (texto do plano), com singular e plural', () => {
+  const M = MENSAGENS_IMPORTADOR;
+  assert.equal(frase(M.outroCodigoPrevia, 1), '1 linha tem a mesma data e produto de uma venda já importada com outro código (ou sem código). Se for o mesmo relatório importado de novo, não importe: a venda contaria em dobro.');
+  assert.equal(frase(M.outroCodigoPrevia, 3), '3 linhas têm a mesma data e produto de vendas já importadas com outro código (ou sem código). Se for o mesmo relatório importado de novo, não importe: as vendas contariam em dobro.');
+  assert.equal(frase(M.outroCodigoGravado, 1), '1 linha tem a mesma data e produto de uma venda já importada com outro código (ou sem código). Se era o mesmo relatório, apague esta importação em Importações recentes.');
+  assert.equal(frase(M.outroCodigoGravado, 2), '2 linhas têm a mesma data e produto de vendas já importadas com outro código (ou sem código). Se era o mesmo relatório, apague esta importação em Importações recentes.');
+  assert.equal(frase(M.recebemCodigoPrevia, 1), '1 linha importada antes sem código vai receber o código deste arquivo. Se era de outro grupo, não importe: apague a importação antiga e importe os dois arquivos de novo, cada um com o seu código.');
+  assert.equal(frase(M.recebemCodigoPrevia, 2), '2 linhas importadas antes sem código vão receber o código deste arquivo. Se eram de outro grupo, não importe: apague a importação antiga e importe os dois arquivos de novo, cada um com o seu código.');
+  assert.equal(frase(M.recebemCodigoGravado, 1), '1 linha importada antes sem código recebeu o código deste arquivo. Se era de outro grupo, apague a importação antiga e importe os dois arquivos de novo, cada um com o seu código.');
+  assert.equal(frase(M.recebemCodigoGravado, 2), '2 linhas importadas antes sem código receberam o código deste arquivo. Se eram de outro grupo, apague a importação antiga e importe os dois arquivos de novo, cada um com o seu código.');
+});
+
+test('Entrega C (a): sem pedido, o relatório importado com código e depois sem código → outro_codigo 2 com aviso; grava como hoje (4 linhas)', () => {
+  const db = novoDb();
+  importar(db, DOIS_IGUAIS, { loja: 'amazon', codigo: 'grupoa-20' });
+  const p = importar(db, DOIS_IGUAIS, { loja: 'amazon', previa: true });
+  assert.deepEqual(contagens(p), [2, 0, 0, 2, 0]);
+  assert.ok(p.avisos.includes(frase(MENSAGENS_IMPORTADOR.outroCodigoPrevia, 2)), p.avisos.join(' | '));
+  assert.ok(!p.avisos.includes(frase(MENSAGENS_IMPORTADOR.outroCodigoGravado, 2)));
+  assert.equal(conta(db, 'comissoes'), 2, 'a prévia não grava');
+  const r = importar(db, DOIS_IGUAIS, { loja: 'amazon' });
+  assert.deepEqual(contagens(r), contagens(p), 'o resumo bate com a prévia');
+  assert.ok(r.avisos.includes(frase(MENSAGENS_IMPORTADOR.outroCodigoGravado, 2)), r.avisos.join(' | '));
+  assert.ok(!r.avisos.includes(frase(MENSAGENS_IMPORTADOR.outroCodigoPrevia, 2)));
+  assert.equal(conta(db, 'comissoes'), 4, 'o aviso não bloqueia nem muda o que é gravado');
+  assert.deepEqual(linhas(db, 'SELECT codigo, COUNT(*) AS n FROM comissoes GROUP BY codigo ORDER BY codigo'), [{ codigo: null, n: 2 }, { codigo: 'grupoa-20', n: 2 }]);
+  db.close();
+});
+
+test('Entrega C (b): arquivo do grupo A sem código, depois o do grupo B com código → recebem_codigo 1 com aviso, outro_codigo 0; grava como hoje', () => {
+  const db = novoDb();
+  importar(db, amzC('2026-10-10,B0ABCDEF12,"5,00",1'), { loja: 'amazon' });
+  const p = importar(db, amzC('2026-10-10,B0ABCDEF12,"7,00",1'), { loja: 'amazon', codigo: 'grupob-20', previa: true });
+  assert.deepEqual(contagens(p), [0, 1, 0, 0, 1]);
+  assert.ok(p.avisos.includes(frase(MENSAGENS_IMPORTADOR.recebemCodigoPrevia, 1)), p.avisos.join(' | '));
+  const r = importar(db, amzC('2026-10-10,B0ABCDEF12,"7,00",1'), { loja: 'amazon', codigo: 'grupob-20' });
+  assert.deepEqual(contagens(r), contagens(p));
+  assert.ok(r.avisos.includes(frase(MENSAGENS_IMPORTADOR.recebemCodigoGravado, 1)), r.avisos.join(' | '));
+  assert.deepEqual(linhas(db, 'SELECT codigo, comissao_centavos FROM comissoes'), [{ codigo: 'grupob-20', comissao_centavos: 700 }], 'R4 como hoje');
+  // a linha do banco que vai receber o código não conta também como "outro código" para a linha seguinte
+  const db2 = novoDb();
+  importar(db2, amzC('2026-10-10,B0ABCDEF12,"5,00",1'), { loja: 'amazon' });
+  const q = importar(db2, DOIS_IGUAIS, { loja: 'amazon', codigo: 'grupob-20', previa: true });
+  assert.deepEqual(contagens(q), [1, 1, 0, 0, 1]);
+  db.close(); db2.close();
+});
+
+test('Entrega C (c): sem falso alarme (mesmo código, com pedido, outro dia ou produto, Amazon em outra caixa) → 0 e 0, sem frase', () => {
+  const semAviso = (r, caso) => {
+    assert.deepEqual([r.outro_codigo, r.recebem_codigo], [0, 0], caso);
+    const M = MENSAGENS_IMPORTADOR;
+    const todas = [M.outroCodigoPrevia, M.outroCodigoGravado, M.recebemCodigoPrevia, M.recebemCodigoGravado].flat().map((f) => f.split('{n}').pop());
+    assert.ok(!r.avisos.some((a) => todas.some((f) => a.endsWith(f))), `${caso}: ${r.avisos.join(' | ')}`);
+  };
+  let db = novoDb();
+  importar(db, DOIS_IGUAIS, { loja: 'amazon', codigo: 'grupoa-20' });
+  semAviso(importar(db, DOIS_IGUAIS, { loja: 'amazon', codigo: 'grupoa-20', previa: true }), 'reimportar com o mesmo código');
+  semAviso(importar(db, amzC('2026-10-11,B0ABCDEF12,"5,00",1', '2026-10-10,B0ZZZZZZZZ,"5,00",1'), { loja: 'amazon', previa: true }), 'outro dia ou outro produto');
+  db.close();
+  db = novoDb();
+  const comPedido = (pedido) => csv('Order ID,Date Shipped,ASIN,Ad Fees', `${pedido},2026-10-10,B0ABCDEF12,"5,00"`);
+  importar(db, comPedido('111'), { loja: 'amazon', codigo: 'grupoa-20' });
+  semAviso(importar(db, comPedido('111'), { loja: 'amazon', previa: true }), 'com pedido, sem código');
+  const outroPedido = importar(db, comPedido('222'), { loja: 'amazon', previa: true });
+  assert.equal(outroPedido.novas, 1);
+  semAviso(outroPedido, 'com pedido, outro pedido no mesmo dia e produto');
+  db.close();
+  db = novoDb();
+  importar(db, amzC('2026-10-10,B0ABCDEF12,"5,00",1'), { loja: 'amazon', codigo: 'GrupoA-20' });
+  semAviso(importar(db, amzC('2026-10-10,B0ABCDEF12,"6,00",1'), { loja: 'amazon', codigo: 'grupoa-20', previa: true }), 'Amazon: GrupoA-20 e grupoa-20 (R14)');
+  // sem produto nem título (relatório por ID de rastreamento) não dá para dizer "mesmo produto"
+  importar(db, FIXTURE_AMAZON_ID, { loja: 'amazon', dia: '2026-11-04' });
+  semAviso(importar(db, csv('Número de rastreamento,ganhos totais', 'grupoc-20,1.0'), { loja: 'amazon', dia: '2026-11-04', previa: true }), 'sem produto');
+  db.close();
+});
+
+test('Entrega C (d) e (e): cada linha do banco conta uma vez só; R11 (A com código, B com outro) conta 1, só aviso', () => {
+  let db = novoDb();
+  importar(db, csv('Data,ID do item,Comissão', '2026-10-10,MLB123,"3,00"'), { loja: 'mercadolivre', codigo: 'a' });
+  const tres = csv('Data,ID do item,Comissão', '2026-10-10,MLB123,"3,00"', '2026-10-10,MLB123,"3,00"', '2026-10-10,MLB123,"3,00"');
+  const r = importar(db, tres, { loja: 'mercadolivre', codigo: 'b' });
+  assert.deepEqual(contagens(r), [3, 0, 0, 1, 0]);
+  assert.ok(r.avisos.includes(frase(MENSAGENS_IMPORTADOR.outroCodigoGravado, 1)), r.avisos.join(' | '));
+  assert.equal(conta(db, 'comissoes'), 4);
+  db.close();
+  // R11 legítimo (dois grupos vendem o mesmo produto no mesmo dia) também avisa: é ambíguo, por isso não bloqueia
+  db = novoDb();
+  importar(db, amzC('2026-10-10,B0ABCDEF12,"5,00",1'), { loja: 'amazon', codigo: 'grupoa-20' });
+  const b = importar(db, amzC('2026-10-10,B0ABCDEF12,"7,00",1'), { loja: 'amazon', codigo: 'grupob-20' });
+  assert.deepEqual(contagens(b), [1, 0, 0, 1, 0]);
+  assert.equal(conta(db, 'comissoes'), 2);
+  db.close();
+});
+
+test('Entrega C (f) e (g): cliques não têm os avisos (null); nenhuma frase traz valor do arquivo nem o código do parâmetro', () => {
+  const db = novoDb();
+  const k = importar(db, cliquesShopee(), { loja: 'shopee', tipo: 'cliques', codigo: 'segredo1', previa: true });
+  assert.deepEqual([k.outro_codigo, k.recebem_codigo], [null, null]);
+  const dados = amzC('2026-10-10,B0ABCDEF12,"5,55",1', '2026-10-10,B0ABCDEF12,"5,55",1');
+  importar(db, dados, { loja: 'amazon' });
+  importar(db, dados, { loja: 'amazon', codigo: 'segredo1' });
+  const r = importar(db, amzC('2026-10-10,B0ABCDEF12,"5,55",1', '2026-10-10,B0ABCDEF12,"5,55",1', '2026-10-10,B0ABCDEF12,"5,55",1'), { loja: 'amazon', codigo: 'segredo2' });
+  assert.ok(r.outro_codigo > 0, 'o caso tem aviso');
+  const texto = r.avisos.join(' ');
+  for (const eco of ['segredo', 'B0ABCDEF12', '2026-10-10', '5,55', 'amazon']) assert.ok(!texto.includes(eco), `${eco} em: ${texto}`);
+  const M = MENSAGENS_IMPORTADOR;
+  for (const f of [M.outroCodigoPrevia, M.outroCodigoGravado, M.recebemCodigoPrevia, M.recebemCodigoGravado].flat()) {
+    assert.equal(f.replace('{n}', '').includes('{'), false, 'só o {n} é trocado');
+  }
+  db.close();
+});
+
+// ------------------------------------------------------------------------------------------- rodada 2 da Entrega C: R1, R2, S1
+
+test('R1: "Horário do pedido" (Shopee) é a coluna de data: cada linha fica no seu dia, sem pedir a data do relatório', () => {
+  const db = novoDb();
+  assert.ok(COLUNAS.data.includes('horario do pedido'));
+  const arq = csv('ID do pedido,Horário do pedido,ID da loja,ID do item,Comissão total do item(R$),Sub_id1',
+    'P1,2026-11-04 10:00:00,1,2,"3,00",casa', 'P2,2026-11-05 11:00:00,1,3,"4,00",casa');
+  const r = importar(db, arq, { loja: 'shopee' });
+  assert.deepEqual([r.lidas, r.novas, r.ignoradas], [2, 2, 0]);
+  assert.deepEqual(r.periodo, { de: '2026-11-04', ate: '2026-11-05' });
+  assert.deepEqual(r.colunas_usadas[0], { campo: 'data', coluna: 'Horário do pedido' });
+  db.close();
+});
+
+test('R1: coluna com cara de data que o painel não reconhece → 400 com frase própria e fixa, mesmo com a data do relatório (nunca tudo num dia só)', () => {
+  const db = novoDb();
+  const M = MENSAGENS_IMPORTADOR;
+  assert.equal(M.dataDesconhecida, 'Não reconheci a coluna de data deste relatório. O portal pode ter mudado o formato. Mande o arquivo de exemplo para a equipe ajustar.');
+  assert.notEqual(M.dataDesconhecida, M.semData);
+  for (const col of ['Data de pagamento', 'Order Timestamp', 'Horário da compra', 'Período', 'Dia da venda', 'Purchase Date (UTC)', 'Hora']) {
+    const com = csv(`ID do pedido,${col},Comissão`, 'P1,2026-11-04 10:00,"3,00"', 'P2,2026-11-05 10:00,"4,00"');
+    const cli = csv(`${col},Sub_id1,Cliques`, '2026-11-04 10:00,g1,3', '2026-11-05 10:00,g1,4');
+    for (const dia of [undefined, '2026-11-01']) {
+      assert.throws(() => importar(db, com, { loja: 'shopee', dia }), recusa(400, M.dataDesconhecida), `${col}, dia ${dia}`);
+      assert.throws(() => importar(db, cli, { loja: 'shopee', tipo: 'cliques', dia }), recusa(400, M.dataDesconhecida), `cliques: ${col}, dia ${dia}`);
+    }
+    assert.ok(!M.dataDesconhecida.includes(col), 'sem eco do nome da coluna');
+  }
+  assert.equal(conta(db, 'comissoes') + conta(db, 'cliques_loja') + conta(db, 'importacoes'), 0, 'nada gravado');
+  // sem nenhuma coluna com cara de data, a frase segue a de pedir a data do relatório (o painel mostra o campo por ela)
+  assert.throws(() => importar(db, FIXTURE_AMAZON_ID, { loja: 'amazon' }), recusa(400, M.semData));
+  assert.throws(() => importar(db, csv('Produto,Comissão,Status', 'Fone,"3,00",Pago'), { loja: 'shopee' }), recusa(400, M.semData));
+  db.close();
+});
+
+// "Produto relacionado" da Amazon com linhas só de cliques: o produto com cliques e sem venda e a "Other".
+// (data, título, ASIN, cliques, enviados, receita, ganho)
+const lpCliques = (data, titulo, asin, cliques, enviados, receita, ganho) => [data, '-', titulo, asin, cliques, '0.0', '0.0', '0.0',
+  '0', '0.0', '0', '0', '-', receita, enviados, '0.0', receita, ganho, '0.0', '0.0', ganho].join(',');
+const LP_A = csv(CAB_AMAZON_PRODUTO,
+  lpCliques('11-04-2026', 'Panela inventada', 'B0TESTE001', '8.0', '0.0', '0.0', '0'),
+  lpCliques('11-04-2026', '-', 'Other', '12.0', '0.0', '0.0', '0'),
+  lpCliques('11-04-2026', 'Livro inventado', 'B0TESTE002', '5.0', '1.0', '60.0', '2.7'));
+const LP_B = csv(CAB_AMAZON_PRODUTO,
+  lpCliques('11-04-2026', 'Panela inventada', 'B0TESTE001', '3.0', '0.0', '0.0', '0'),
+  lpCliques('11-04-2026', '-', 'Other', '4.0', '0.0', '0.0', '0'),
+  lpCliques('11-04-2026', 'Fone inventado', 'B0TESTE003', '2.0', '1.0', '50.0', '2.5'));
+const zeradas = (db) => db.prepare('SELECT COUNT(*) AS n FROM comissoes WHERE comissao_centavos = 0 AND venda_centavos = 0 AND quantidade = 0').get().n;
+
+test('R2: em comissões, a linha só de cliques (comissão, venda e quantidade 0) não é gravada; conta em so_cliques e num aviso, não em puladas', () => {
+  const M = MENSAGENS_IMPORTADOR;
+  assert.equal(frase(M.soCliques, 1), '1 linha só tem cliques (sem venda nem comissão) e ficou de fora. Os cliques entram ao importar o arquivo como cliques.');
+  assert.equal(frase(M.soCliques, 2), '2 linhas só têm cliques (sem venda nem comissão) e ficaram de fora. Os cliques entram ao importar o arquivo como cliques.');
+  const db = novoDb();
+  const p = importar(db, LP_A, { loja: 'amazon', codigo: 'grupoa-20', previa: true });
+  const a = importar(db, LP_A, { loja: 'amazon', codigo: 'grupoa-20' });
+  for (const r of [p, a]) {
+    assert.deepEqual([r.lidas, r.novas, r.atualizadas, r.repetidas, r.ignoradas, r.so_cliques], [3, 1, 0, 0, 0, 2]);
+    assert.deepEqual(r.linhas_ignoradas, []);
+    assert.ok(r.avisos.includes(frase(M.soCliques, 2)), r.avisos.join(' | '));
+    assert.ok(!r.avisos.some((x) => /pulada/.test(x)), 'não cai em "puladas por valor inválido"');
+    assert.deepEqual(r.periodo, { de: '2026-11-04', ate: '2026-11-04' });
+  }
+  assert.deepEqual(negocio(db), [
+    { loja: 'amazon', data: '2026-11-04', codigo: 'grupoa-20', produto: 'B0TESTE002', titulo: 'Livro inventado', quantidade: 1, venda_centavos: 6000, comissao_centavos: 270, status: 'pendente' },
+  ]);
+  // no histórico, a linha só de cliques não vira "repetida" (lidas − novas − atualizadas − puladas)
+  const [h] = listarImportacoes(db);
+  assert.deepEqual([h.lidas, h.novas, h.repetidas, h.ignoradas, h.linhas], [3, 1, 0, 2, 1]);
+  // reimportar o mesmo arquivo: a venda é repetida, as só de cliques seguem de fora
+  const de0 = importar(db, LP_A, { loja: 'amazon', codigo: 'grupoa-20' });
+  assert.deepEqual([de0.novas, de0.repetidas, de0.so_cliques], [0, 1, 2]);
+  // o arquivo do grupo B (outro Código do arquivo), com o mesmo produto só de cliques no mesmo dia: sem outro_codigo falso
+  const pb = importar(db, LP_B, { loja: 'amazon', codigo: 'grupob-20', previa: true });
+  const b = importar(db, LP_B, { loja: 'amazon', codigo: 'grupob-20' });
+  for (const r of [pb, b]) assert.deepEqual([r.novas, r.so_cliques, r.outro_codigo, r.recebem_codigo], [1, 2, 0, 0], r.avisos.join(' | '));
+  assert.equal(conta(db, 'comissoes'), 2);
+  assert.equal(zeradas(db), 0, 'nenhuma oferta de R$ 0 em "Por oferta"');
+  // o mesmo arquivo como cliques: as linhas só de cliques valem (so_cliques não se aplica)
+  const k = importar(db, LP_A, { loja: 'amazon', tipo: 'cliques', codigo: 'grupoa-20' });
+  assert.deepEqual([k.cliques_total, k.so_cliques], [25, null]);
+  db.close();
+});
+
+test('R2: venda com comissão 0 (ou quantidade sem valor) continua gravada; a linha zerada de antes no banco não gera outro_codigo', () => {
+  const db = novoDb();
+  const r = importar(db, amzC('2026-10-10,B0ABCDEF12,0,1', '2026-10-11,B0ABCDEF12,0,-'), { loja: 'amazon', previa: true });
+  assert.deepEqual([r.novas, r.so_cliques], [1, 1], 'quantidade 1 com comissão 0 é venda; "-" na quantidade vale 0');
+  const v = importar(db, csv('Date Shipped,ASIN,Revenue,Ad Fees,Items Shipped', '2026-10-10,B0ABCDEF12,"10,00",0,0'), { loja: 'amazon', previa: true });
+  assert.deepEqual([v.novas, v.so_cliques], [1, 0], 'com valor de venda, entra');
+  // linha zerada gravada antes desta correção, do grupo A, no mesmo dia e produto da venda do grupo B
+  db.prepare(`INSERT INTO comissoes (loja, chave, data, codigo, produto, titulo, quantidade, venda_centavos, comissao_centavos, status,
+    importacao_id, atualizado_em) VALUES ('amazon', 'antiga#1', '2026-11-04', 'grupoa-20', 'B0TESTE003', 'Fone inventado', 0, 0, 0, 'pendente', 1, 0)`).run();
+  const b = importar(db, LP_B, { loja: 'amazon', codigo: 'grupob-20', previa: true });
+  assert.deepEqual([b.novas, b.outro_codigo], [1, 0], b.avisos.join(' | '));
+  db.close();
+});
+
+test('S1: "Número de rastreamento", "Tracking ID" e "ID de rastreamento" só são o código na Amazon; nas outras lojas a coluna é ignorada', () => {
+  const db = novoDb();
+  const rastreio = 'BR123456789XX'; // nas outras lojas, pode ser o código de envio dos Correios de um comprador
+  for (const col of ['Número de rastreamento', 'Tracking ID', 'ID de rastreamento']) {
+    const com = csv(`Data,${col},ID do item,Comissão`, `2026-11-04,${rastreio},MLB123,"3,00"`);
+    const cli = csv(`Data,${col},Cliques`, `2026-11-04,${rastreio},5`);
+    for (const loja of ['shopee', 'mercadolivre']) {
+      const r = importar(db, com, { loja, previa: true });
+      assert.ok(r.colunas_ignoradas.includes(col), `${loja}: ${r.colunas_ignoradas.join(', ')}`);
+      assert.ok(!r.colunas_usadas.some((c) => c.campo === 'codigo'), `${loja}: ${col} não é o código`);
+      assert.deepEqual([r.sem_grupo, r.codigos_desconhecidos], [1, []]);
+      const k = importar(db, cli, { loja, tipo: 'cliques', previa: true });
+      assert.ok(k.colunas_ignoradas.includes(col), `${loja} (cliques)`);
+      for (const x of [r, k]) assert.ok(!JSON.stringify(x).includes(rastreio), `${loja}: o valor da coluna não volta`);
+    }
+    const a = importar(db, com, { loja: 'amazon', previa: true });
+    assert.deepEqual(a.colunas_usadas.find((c) => c.campo === 'codigo'), { campo: 'codigo', coluna: col }, 'na Amazon é o ID de rastreamento');
+  }
+  importar(db, csv('Data,Número de rastreamento,ID do item,Comissão', `2026-11-04,${rastreio},MLB123,"3,00"`), { loja: 'mercadolivre' });
+  importar(db, csv('Data,Número de rastreamento,Cliques', `2026-11-04,${rastreio},5`), { loja: 'shopee', tipo: 'cliques' });
+  assert.deepEqual(linhas(db, 'SELECT loja, codigo FROM comissoes'), [{ loja: 'mercadolivre', codigo: null }]);
+  assert.deepEqual(linhas(db, 'SELECT loja, codigo FROM cliques_loja'), [{ loja: 'shopee', codigo: '' }]);
+  db.close();
+});
+
+test('R7/Q1: "Média de cliques" e "Mediana" não têm cara de data (começo de palavra): o relatório sem data entra com o dia informado', () => {
+  const r = analisar(csv('Número de rastreamento,cliques,Média de cliques,Mediana,ganhos totais', 'grupoa-20,10,2,1,"3,00"'), { loja: 'amazon', dia: '2026-11-10' });
+  assert.equal(r.registros.length, 1);
+  assert.equal(r.registros[0].data, '2026-11-10');
+  // e uma coluna que é mesmo de data, mas desconhecida, continua barrando o dia
+  assert.throws(() => analisar(csv('Número de rastreamento,Data de pagamento,ganhos totais', 'grupoa-20,2026-11-03,"3,00"'), { loja: 'amazon', dia: '2026-11-10' }));
+  // nomes colados (camelCase) com date/time no fim também barram
+  for (const col of ['OrderDate', 'ClickTime']) assert.throws(() => analisar(csv(`Número de rastreamento,${col},ganhos totais`, 'grupoa-20,x,"3,00"'), { loja: 'amazon', dia: '2026-11-10' }), col);
 });

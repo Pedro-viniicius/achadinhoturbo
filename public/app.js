@@ -668,7 +668,7 @@ function paginaAjustes() {
 // Uma rota por hash. As páginas novas ficam nos próprios arquivos (disparos.js, relatorios.js, conexoes.js,
 // equipe.js, carregados antes deste); aqui a função só é procurada na hora de abrir a página.
 const ROTAS = {
-  visao: () => paginaVisao(), ganhos: () => paginaGanhos(), links: () => paginaLinks(), grupos: () => paginaGrupos(), blocos: () => paginaBlocos(),
+  visao: () => paginaVisao(), ganhos: (_, params) => paginaGanhos({ endereco: params }), links: () => paginaLinks(), grupos: () => paginaGrupos(), blocos: () => paginaBlocos(),
   'disparo-manual': () => paginaDisparoManual(), 'disparo-automatico': () => paginaRegras(),
   'disparar-mensagem': () => paginaDispararMensagem(), templates: () => paginaTemplates(),
   relatorios: () => paginaRelatorios(),
@@ -697,9 +697,11 @@ function ir() {
   // Página só do Dono pedida antes de o estado chegar: não se sabe o papel, então não abre nem reescreve o endereço; o carregar() inicial chama ir().
   if (!S.st && ROTAS_DO_DONO.has(pedido.split('/')[0])) return;
   const r = rotaAtual();
-  // só o Histórico leva filtros no endereço; só os Docs levam capítulo e seção (#docs/<cap>[/<secao>]), mesmo que o capítulo não exista
+  // só o Histórico e Ganhos levam filtros no endereço (Ganhos os confere em ganhosLerEndereco e reescreve o endereço com os
+  // valores aceitos); só os Docs levam capítulo e seção (#docs/<cap>[/<secao>]), mesmo que o capítulo não exista
+  const comFiltros = r === 'historico' || r === 'ganhos';
   const sufixo = r === 'docs' && /^docs(\/[a-z0-9-]+){1,2}$/.test(pedido) ? pedido.slice(4) : '';
-  const endereco = '#' + r + (r === 'historico' && consulta ? '?' + consulta : '') + sufixo;
+  const endereco = '#' + r + (comFiltros && consulta ? '?' + consulta : '') + sufixo;
   if (location.hash !== endereco) history.replaceState(null, '', endereco); // o endereço passa a mostrar a página aberta
   $$('#rail nav a').forEach((a) => { if (a.getAttribute('href') === '#' + r) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current'); });
   $('#menu-atual').textContent = '· ' + ($(`#rail nav a[href="#${r}"]`)?.textContent || '');
@@ -707,7 +709,7 @@ function ir() {
   fecharMenu();
   const pg = $('#pagina'); pg.onclick = null; pg.innerHTML = ''; // tratadores da tela anterior não podem vazar para a próxima
   if ($('#dlg').open) $('#dlg').close();
-  ROTAS[r](r === 'docs' ? 'docs' + sufixo : pedido, r === 'historico' ? new URLSearchParams(consulta) : null); // só o Histórico lê filtros do endereço
+  ROTAS[r](r === 'docs' ? 'docs' + sufixo : pedido, comFiltros ? new URLSearchParams(consulta) : null); // só o Histórico e Ganhos leem filtros do endereço
 }
 
 // ---------- menu em telas estreitas (≤ 900 px): o botão "Menu" abre os grupos sobre o conteúdo ----------
@@ -740,7 +742,7 @@ function pintarConta() {
   const ganhos = $('#rail nav a[href="#ganhos"]');
   if (podeEquipe() && !ganhos) $('#ng-principal').insertAdjacentHTML('afterend', '<a href="#ganhos">Ganhos</a>');
   if (!podeEquipe() && ganhos) ganhos.remove();
-  if (!podeEquipe() && location.hash === '#ganhos') ir();
+  if (!podeEquipe() && location.hash.split('?')[0] === '#ganhos') ir(); // #ganhos?bloco=… também (pela rota, antes do "?")
   // ofertas do catálogo que esperam revisão, no item Histórico (só o Dono revisa)
   const hist = $('#rail nav a[href="#historico"]');
   if (hist) {

@@ -25,12 +25,12 @@ const CSRF = 'csrf-segredo-0123456789';
 const SEM_SESSAO = /não há sessão de afiliado da Shopee neste Chrome/;
 const plano = (v) => JSON.parse(JSON.stringify(v)); // objetos do vm têm outro protótipo
 
-// Sub_id (plano dashboard-ganhos, etapa 5): o nome do campo de advancedLinkParams ainda não foi capturado (P4).
-// Para provar o caminho "com campo preenchido", o teste troca a constante no texto da fonte.
-const CAMPO_VAZIO = "const SHOPEE_SUBID_CAMPO = '';";
-assert.equal(FONTE.split(CAMPO_VAZIO).length, 2, 'SHOPEE_SUBID_CAMPO vazio, declarado uma vez, em extension/background.js');
-const comCampo = (texto, campo) => texto.replace(CAMPO_VAZIO, `const SHOPEE_SUBID_CAMPO = ${JSON.stringify(campo)};`);
-const FONTE_COM_CAMPO = comCampo(FONTE, 'subId1');
+// Sub_id (plano dashboard-ganhos, etapa 5 e P4): o campo de advancedLinkParams capturado no portal é `subId1`.
+// Para provar o caminho "campo vazio" (o interruptor que desliga o Sub_id), o teste troca a constante no texto da fonte.
+const CAMPO_ATUAL = "const SHOPEE_SUBID_CAMPO = 'subId1';";
+assert.equal(FONTE.split(CAMPO_ATUAL).length, 2, "SHOPEE_SUBID_CAMPO = 'subId1', declarado uma vez, em extension/background.js");
+const comCampo = (texto, campo) => texto.replace(CAMPO_ATUAL, `const SHOPEE_SUBID_CAMPO = ${JSON.stringify(campo)};`);
+const FONTE_SEM_CAMPO = comCampo(FONTE, '');
 
 function puras(extra = {}, trecho = TRECHO) {
   const ctx = vm.createContext({ URL, AbortSignal, ...extra });
@@ -38,6 +38,7 @@ function puras(extra = {}, trecho = TRECHO) {
   return ctx.__x;
 }
 const X = puras();
+const XV = puras({}, comCampo(TRECHO, '')); // o mesmo trecho com SHOPEE_SUBID_CAMPO vazio
 // O corpo de hoje, escrito à mão: com o campo vazio, o corpo com Sub_id tem de ser byte a byte este.
 const CORPO_DE_HOJE = (url) => JSON.stringify({
   operationName: 'batchGetCustomLink',
@@ -74,16 +75,29 @@ test('corpoLinkShopee: o mesmo corpo do Link personalizado, sem Sub_ids, com a U
   assert.equal(JSON.parse(X.corpoLinkShopee(estranho)).variables.linkParams[0].originalLink, estranho);
 });
 
-test('Sub_id (CA2, CA9): com SHOPEE_SUBID_CAMPO vazio, o corpo com Sub_id é byte a byte o de hoje', () => {
-  assert.equal(X.SHOPEE_SUBID_CAMPO, '', 'o formato do Sub_id ainda não foi capturado (P4)');
+test('Sub_id (CA2, P4): com o campo capturado, o corpo é byte a byte o que a página do portal manda', () => {
+  assert.equal(X.SHOPEE_SUBID_CAMPO, 'subId1');
+  // capturado no "Link personalizado" em 05/11/2026 com Sub_id 1 = turboteste1 (só o corpo, sem cookies)
+  const capturado = '{"operationName":"batchGetCustomLink","query":"query batchGetCustomLink($linkParams: [CustomLinkParam!], $sourceCaller: SourceCaller){ batchCustomLink(linkParams: $linkParams, sourceCaller: $sourceCaller){ shortLink longLink failCode } }","variables":{"linkParams":[{"originalLink":"' + PRODUTO + '","advancedLinkParams":{"subId1":"turboteste1"}}],"sourceCaller":"CUSTOM_LINK_CALLER"}}';
+  assert.equal(X.corpoLinkShopee(PRODUTO, 'turboteste1'), capturado);
+  assert.deepEqual(JSON.parse(X.corpoLinkShopee(PRODUTO, 'g1')).variables.linkParams, [{ originalLink: PRODUTO, advancedLinkParams: { subId1: 'g1' } }]);
+});
+
+test('Sub_id (CA9): sem Sub_id, o corpo é byte a byte o de hoje (a página omite advancedLinkParams)', () => {
   assert.equal(X.corpoLinkShopee(PRODUTO), CORPO_DE_HOJE(PRODUTO));
+  for (const subId of [undefined, null, '']) assert.equal(X.corpoLinkShopee(PRODUTO, subId), CORPO_DE_HOJE(PRODUTO), String(subId));
+});
+
+test('Sub_id (CA2, CA9): com SHOPEE_SUBID_CAMPO vazio, o corpo com Sub_id é byte a byte o de hoje', () => {
+  assert.equal(XV.SHOPEE_SUBID_CAMPO, '');
+  assert.equal(XV.corpoLinkShopee(PRODUTO), CORPO_DE_HOJE(PRODUTO));
   for (const subId of [...SUBIDS_BONS, undefined, null, '']) {
-    assert.equal(X.corpoLinkShopee(PRODUTO, subId), CORPO_DE_HOJE(PRODUTO), String(subId));
+    assert.equal(XV.corpoLinkShopee(PRODUTO, subId), CORPO_DE_HOJE(PRODUTO), String(subId));
   }
 });
 
 test('Sub_id: com SHOPEE_SUBID_CAMPO preenchido, vai em advancedLinkParams no campo da constante; sem Sub_id, o corpo é o de hoje', () => {
-  const C = puras({}, comCampo(TRECHO, 'subId1'));
+  const C = X;
   assert.equal(C.SHOPEE_SUBID_CAMPO, 'subId1');
   for (const subId of SUBIDS_BONS) {
     assert.deepEqual(JSON.parse(C.corpoLinkShopee(PRODUTO, subId)).variables, {
@@ -99,10 +113,9 @@ test('Sub_id: com SHOPEE_SUBID_CAMPO preenchido, vai em advancedLinkParams no ca
 });
 
 test('Sub_id: só alfanumérico (1 a 30); qualquer outro valor é recusado (null), com o campo vazio ou preenchido', () => {
-  const C = puras({}, comCampo(TRECHO, 'subId1'));
   for (const subId of SUBIDS_RUINS) {
-    assert.equal(X.corpoLinkShopee(PRODUTO, subId), null, `vazio: ${String(subId)}`);
-    assert.equal(C.corpoLinkShopee(PRODUTO, subId), null, `preenchido: ${String(subId)}`);
+    assert.equal(XV.corpoLinkShopee(PRODUTO, subId), null, `vazio: ${String(subId)}`);
+    assert.equal(X.corpoLinkShopee(PRODUTO, subId), null, `preenchido: ${String(subId)}`);
   }
 });
 
@@ -326,7 +339,7 @@ test('extensão: link_shopee logado devolve só { id, ok, link, longo, sub_id_ap
   assert.deepEqual(r.criadas, [{ url: `${PORTAL}/offer/custom_link`, active: false, pinned: true }]);
   assert.equal(r.injecoes.length, 1);
   assert.equal(r.injecoes[0].world, 'MAIN');
-  assert.equal(JSON.parse(r.injecoes[0].args[0]).variables.linkParams[0].originalLink, PRODUTO);
+  assert.equal(r.injecoes[0].args[0], CORPO_DE_HOJE(PRODUTO), 'sem Sub_id no job, o corpo de hoje (CA9)');
   assert.equal(r.pedidosPortal.at(-1).headers['csrf-token'], CSRF);
   assert.deepEqual(r.consoleUsado, []);
   assert.ok(!JSON.stringify(r.resultados).includes(CSRF) && !JSON.stringify(r.armazenado).includes(CSRF));
@@ -396,28 +409,48 @@ test('extensão: job com url fora de https://shopee.com.br/ é recusado sem toca
 });
 
 test('extensão (CA9): job com Sub_id e campo vazio manda ao portal o corpo de hoje e responde sub_id_aplicado: false', async () => {
-  const r = await rodarExtensao({ jobs: [{ id: 20, type: 'link_shopee', url: PRODUTO, subId: 'g1' }] });
+  const r = await rodarExtensao({ fonte: FONTE_SEM_CAMPO, jobs: [{ id: 20, type: 'link_shopee', url: PRODUTO, subId: 'g1' }] });
   assert.deepEqual(r.resultados, [{ id: 20, ok: true, link: ITEM_OK.shortLink, longo: ITEM_OK.longLink, sub_id_aplicado: false }]);
   assert.equal(r.injecoes.length, 1);
   assert.equal(r.injecoes[0].args[0], CORPO_DE_HOJE(PRODUTO), 'o que vai à aba');
   assert.equal(r.pedidosPortal.at(-1).body, CORPO_DE_HOJE(PRODUTO), 'o que sai da aba para o portal');
 });
 
-test('extensão: com o campo preenchido, o Sub_id vai em advancedLinkParams e a resposta diz sub_id_aplicado: true', async () => {
+test('extensão (CA2): o Sub_id vai em advancedLinkParams.subId1 e a resposta diz sub_id_aplicado: true; sem Sub_id, false', async () => {
   const r = await rodarExtensao({
-    fonte: FONTE_COM_CAMPO,
-    jobs: [{ id: 21, type: 'link_shopee', url: PRODUTO, subId: 'bloco7' }, { id: 22, type: 'link_shopee', url: PRODUTO }],
+    jobs: [
+      { id: 21, type: 'link_shopee', url: PRODUTO, subId: 'bloco7' }, { id: 22, type: 'link_shopee', url: PRODUTO },
+      { id: 23, type: 'link_shopee', url: PRODUTO, subId: '' }, { id: 24, type: 'link_shopee', url: PRODUTO, subId: null },
+    ],
   });
   assert.deepEqual(r.resultados, [
     { id: 21, ok: true, link: ITEM_OK.shortLink, longo: ITEM_OK.longLink, sub_id_aplicado: true },
-    { id: 22, ok: true, link: ITEM_OK.shortLink, longo: ITEM_OK.longLink, sub_id_aplicado: false },
+    ...[22, 23, 24].map((id) => ({ id, ok: true, link: ITEM_OK.shortLink, longo: ITEM_OK.longLink, sub_id_aplicado: false })),
   ]);
-  const posts = r.pedidosPortal.filter((q) => q.method === 'POST').map((q) => JSON.parse(q.body).variables.linkParams);
-  assert.deepEqual(posts, [[{ originalLink: PRODUTO, advancedLinkParams: { subId1: 'bloco7' } }], [{ originalLink: PRODUTO }]]);
+  const posts = r.pedidosPortal.filter((q) => q.method === 'POST').map((q) => q.body);
+  assert.deepEqual(JSON.parse(posts[0]).variables.linkParams, [{ originalLink: PRODUTO, advancedLinkParams: { subId1: 'bloco7' } }]);
+  assert.deepEqual(posts.slice(1), [1, 2, 3].map(() => CORPO_DE_HOJE(PRODUTO)), 'sem Sub_id, o corpo de hoje (CA9)');
+  assert.deepEqual(r.consoleUsado, []);
+  assert.ok(!JSON.stringify(r.resultados).includes(CSRF) && !JSON.stringify(r.armazenado).includes(CSRF));
+});
+
+test('extensão (CA2): failCode 0 ou "0" com Sub_id vale como aplicado; resposta sem link válido não diz aplicado', async () => {
+  for (const failCode of [0, '0', null]) {
+    const r = await rodarExtensao({
+      jobs: [{ id: 25, type: 'link_shopee', url: PRODUTO, subId: 'g1' }],
+      portal: { gql: () => new Response(respostaGql({ ...ITEM_OK, failCode }), { status: 200 }) },
+    });
+    assert.deepEqual(r.resultados, [{ id: 25, ok: true, link: ITEM_OK.shortLink, longo: ITEM_OK.longLink, sub_id_aplicado: true }], String(failCode));
+  }
+  const r = await rodarExtensao({
+    jobs: [{ id: 26, type: 'link_shopee', url: PRODUTO, subId: 'g1' }],
+    portal: { gql: () => new Response(respostaGql({ ...ITEM_OK, shortLink: '' }), { status: 200 }) },
+  });
+  assert.deepEqual(r.resultados, [{ id: 26, ok: false, error: 'o portal de afiliados da Shopee respondeu num formato inesperado' }]);
 });
 
 test('extensão: Sub_id que não é alfanumérico é recusado sem tocar no portal (campo vazio ou preenchido)', async () => {
-  for (const fonte of [FONTE, FONTE_COM_CAMPO]) {
+  for (const fonte of [FONTE_SEM_CAMPO, FONTE]) {
     const r = await rodarExtensao({
       fonte,
       jobs: [
@@ -433,17 +466,16 @@ test('extensão: Sub_id que não é alfanumérico é recusado sem tocar no porta
   }
 });
 
-test('extensão: falha com Sub_id volta como erro, sem sub_id_aplicado', async () => {
+test('extensão: falha com Sub_id (failCode) volta como erro, sem sub_id_aplicado', async () => {
   const r = await rodarExtensao({
-    fonte: FONTE_COM_CAMPO,
     jobs: [{ id: 40, type: 'link_shopee', url: PRODUTO, subId: 'g1' }],
     portal: { gql: () => new Response(respostaGql({ shortLink: '', longLink: '', failCode: 5 }), { status: 200 }) },
   });
   assert.deepEqual(r.resultados, [{ id: 40, ok: false, error: 'a Shopee recusou o link (código 5)' }]);
 });
 
-test('manifest: permissão nova só para affiliate.shopee.com.br e versão 1.4.0 (Sub_id), sem permissão a mais', () => {
-  assert.equal(MANIFEST.version, '1.4.0');
+test('manifest: permissão nova só para affiliate.shopee.com.br e versão 1.4.1 (Sub_id ligado), sem permissão a mais', () => {
+  assert.equal(MANIFEST.version, '1.4.1');
   assert.deepEqual(MANIFEST.permissions, ['storage', 'alarms', 'scripting']);
   assert.deepEqual(MANIFEST.host_permissions, ['https://*.mercadolivre.com.br/*', 'https://affiliate.shopee.com.br/*', 'http://127.0.0.1/*', 'http://localhost/*']);
   assert.deepEqual(MANIFEST.optional_host_permissions, ['https://*/*']);

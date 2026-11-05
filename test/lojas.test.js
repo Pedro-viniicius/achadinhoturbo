@@ -5,7 +5,7 @@ import {
   SUBID_PELA_EXTENSAO, SubIdIndisponivel,
   RE_ENDERECO_CATALOGO, RE_CAMINHO_TOKEN, ENDERECO_CATALOGO_PADRAO, PARECE_TOKEN, ARQUIVO_TOKEN, caminhoDoArquivoDoToken,
 } from '../src/lojas.js';
-import { createLinkService } from '../src/links.js';
+import { createLinkService, LIMITE_SHOPEE_ATINGIDO } from '../src/links.js';
 import { createAmazon, ErroAmazon, LinkNaoResolvido, HOSTS_AMAZON, MENSAGENS_AMAZON } from '../src/amazon.js';
 import { createShopee, ErroShopee, LinkShopeeNaoResolvido, HOSTS_SHOPEE, MENSAGENS_SHOPEE, URL_API, RE_ID_AFILIADO } from '../src/shopee.js';
 
@@ -750,7 +750,7 @@ function shopeeComCache(op = {}) {
   s.guardarLink = (...a) => { s.chamadas.guardarLink.push(a); mapa.set(chave(a[0], a[1], a[3]), a[2]); return true; };
   return s;
 }
-/** Liga o pedido de Sub_id à extensão (o padrão é desligado enquanto o formato não é capturado, P4). */
+/** Liga o pedido de Sub_id à extensão de forma explícita (o padrão, SUBID_PELA_EXTENSAO, também é ligado desde o P4). */
 const EXT = Object.freeze({ subIdPelaExtensao: true });
 const SUBIDS_RUINS = ['g-1', 'g_1', 'g 1', 'ção', 'a'.repeat(31), 'g1\n', 7, true, {}, ['g1']];
 
@@ -891,22 +891,78 @@ test('Sub_id ponta a ponta com createLinkService (extensão simulada): sub_id_ap
   }
 });
 
-test('Sub_id (economia do teto de 60/h): SUBID_PELA_EXTENSAO desligado nunca pede Sub_id à extensão; a API segue valendo', async () => {
-  assert.equal(SUBID_PELA_EXTENSAO, false, 'desligado até o dono capturar o formato do Sub_id (P4)');
+test('Sub_id (CA2, P4): SUBID_PELA_EXTENSAO ligado; com Sub_id e sem a API, o pedido vai à extensão com subId', async () => {
+  assert.equal(SUBID_PELA_EXTENSAO, true, 'ligado: a extensão aplica o Sub_id em advancedLinkParams.subId1 (P4 capturado)');
+  // sem API útil e sem o sinalizador explícito: o padrão pede à extensão com o Sub_id
+  const aplica = linksShopee({ aplicado: true });
+  assert.deepEqual(await linkAfiliadoShopeeRastreado(URL_SHOPEE, { shopee: shopeeFalso({ apiUtil: false }), links: aplica, idAfiliado: ID_AFILIADO, subId: 'g1' }),
+    { link: CURTO, sub_id: 'g1' });
+  assert.deepEqual(aplica.chamadas, [{ url: URL_SHOPEE, subId: 'g1' }]);
+  // a extensão não aplicou: o link de afiliado sem Sub_id, sub_id null (a falta vai para a cobertura em envios.js)
+  const naoAplica = linksShopee({ aplicado: false });
+  assert.deepEqual(await linkAfiliadoShopeeRastreado(URL_SHOPEE, { shopee: shopeeFalso({ apiUtil: false }), links: naoAplica, idAfiliado: ID_AFILIADO, subId: 'g1' }),
+    { link: CURTO, sub_id: null });
+  assert.deepEqual(naoAplica.chamadas, [{ url: URL_SHOPEE, subId: 'g1' }]);
+  // a API falhou com o Sub_id: a extensão é a reserva, com o mesmo Sub_id
+  const falha = shopeeFalso({ apiUtil: true, erroGerar: new ErroShopee('indisponivel') });
+  const reserva = linksShopee({ aplicado: true });
+  assert.deepEqual(await linkAfiliadoShopeeRastreado(URL_SHOPEE, { shopee: falha, links: reserva, idAfiliado: ID_AFILIADO, subId: 'g1' }), { link: CURTO, sub_id: 'g1' });
+  assert.deepEqual(reserva.chamadas, [{ url: URL_SHOPEE, subId: 'g1' }]);
+  // a API útil continua na frente: nenhum pedido à extensão
+  const api = shopeeFalso({ apiUtil: true });
+  const semPedido = linksShopee({ aplicado: true });
+  assert.deepEqual(await linkAfiliadoShopeeRastreado(URL_SHOPEE, { shopee: api, links: semPedido, idAfiliado: ID_AFILIADO, subId: 'g1' }),
+    { link: 'https://s.shopee.com.br/ApiLink1', sub_id: 'g1' });
+  assert.deepEqual(semPedido.chamadas, []);
+});
+
+test('Sub_id (CA9): extensão antiga (resposta sem sub_id_aplicado) → link de afiliado com sub_id null, sem erro', async () => {
+  // stub do serviço de links de antes do Sub_id (a resposta nem tem o campo)
+  const antigo = linksShopee();
+  assert.deepEqual(await linkAfiliadoShopeeRastreado(URL_SHOPEE, { shopee: shopeeFalso({ apiUtil: false }), links: antigo, idAfiliado: ID_AFILIADO, subId: 'g1' }),
+    { link: CURTO, sub_id: null });
+  assert.deepEqual(antigo.chamadas, [{ url: URL_SHOPEE, subId: 'g1' }]);
+  // ponta a ponta: o createLinkService com a extensão respondendo só { ok, link, longo }
+  const links = createLinkService({ getMode: () => 'extension' });
+  const proximo = links.poll(2000);
+  const r = linkAfiliadoShopeeRastreado(URL_SHOPEE, { links, idAfiliado: ID_AFILIADO, subId: 'g1' });
+  const job = await proximo;
+  assert.deepEqual({ ...job, id: 0 }, { id: 0, type: 'link_shopee', url: URL_SHOPEE, subId: 'g1' });
+  links.submit(job.id, { ok: true, link: CURTO, longo: longoDe(ID_AFILIADO) });
+  assert.deepEqual(await r, { link: CURTO, sub_id: null });
+  // guardado como o link padrão, nunca como o do Sub_id
+  const cache = shopeeComCache();
+  await linkAfiliadoShopeeRastreado(URL_SHOPEE, { shopee: cache, links: linksShopee(), idAfiliado: ID_AFILIADO, subId: 'g1' });
+  assert.deepEqual(cache.chamadas.guardarLink, [[URL_SHOPEE, ID_AFILIADO, CURTO]]);
+});
+
+test('Sub_id (CA9): o pedido com Sub_id à extensão gasta vaga do teto por hora; esgotado → LIMITE_SHOPEE_ATINGIDO, sem ir à fila', async () => {
+  const links = createLinkService({ getMode: () => 'extension', limiteShopeeHora: 1 });
+  const proximo = links.poll(2000);
+  const r = linkAfiliadoShopeeRastreado(URL_SHOPEE, { links, idAfiliado: ID_AFILIADO, subId: 'g1' });
+  const job = await proximo;
+  links.submit(job.id, { ok: true, link: CURTO, longo: longoDe(ID_AFILIADO), sub_id_aplicado: true });
+  assert.deepEqual(await r, { link: CURTO, sub_id: 'g1' });
+  await links.poll(1); // a extensão segue on-line
+  await assert.rejects(linkAfiliadoShopeeRastreado(URL_SHOPEE, { links, idAfiliado: ID_AFILIADO, subId: 'g2' }), (e) => e.message === LIMITE_SHOPEE_ATINGIDO);
+  assert.equal(links.status().pending, 0, 'o pedido recusado não foi para a fila');
+});
+
+test('Sub_id (economia do teto de 60/h): com subIdPelaExtensao desligado, nunca pede Sub_id à extensão; a API segue valendo', async () => {
   // sem API útil: recusa sem pedir nada à extensão; o motivo vai para a cobertura
   const links = linksShopee({ aplicado: true });
-  const e = await linkAfiliadoShopeeRastreado(URL_SHOPEE, { shopee: shopeeFalso({ apiUtil: false }), links, idAfiliado: ID_AFILIADO, subId: 'g1' }).catch((x) => x);
+  const e = await linkAfiliadoShopeeRastreado(URL_SHOPEE, { shopee: shopeeFalso({ apiUtil: false }), links, idAfiliado: ID_AFILIADO, subId: 'g1', subIdPelaExtensao: false }).catch((x) => x);
   assert.ok(e instanceof SubIdIndisponivel, `veio ${e?.name}`);
   assert.equal(e.motivo, 'subid_extensao_indisponivel');
   assert.doesNotMatch(e.message, /g1|98765432101/, 'a mensagem não carrega Sub_id nem ID');
   assert.deepEqual(links.chamadas, [], 'nenhum pedido à extensão');
   // a API falhou com o Sub_id: não cai na extensão com Sub_id; motivo de falha do link
   const falha = shopeeFalso({ apiUtil: true, erroGerar: new ErroShopee('indisponivel') });
-  const e2 = await linkAfiliadoShopeeRastreado(URL_SHOPEE, { shopee: falha, links, idAfiliado: ID_AFILIADO, subId: 'g1' }).catch((x) => x);
+  const e2 = await linkAfiliadoShopeeRastreado(URL_SHOPEE, { shopee: falha, links, idAfiliado: ID_AFILIADO, subId: 'g1', subIdPelaExtensao: false }).catch((x) => x);
   assert.ok(e2 instanceof SubIdIndisponivel);
   assert.equal(e2.motivo, 'falha_link');
   assert.deepEqual(links.chamadas, []);
-  // explicitamente desligado também, e o sinalizador só aceita o true literal
+  // o sinalizador só aceita o true literal
   for (const v of [false, 'true', 1, null]) {
     const e3 = await linkAfiliadoShopeeRastreado(URL_SHOPEE, { shopee: shopeeFalso(), links, idAfiliado: ID_AFILIADO, subId: 'g1', subIdPelaExtensao: v }).catch((x) => x);
     assert.ok(e3 instanceof SubIdIndisponivel, String(v));
@@ -914,21 +970,76 @@ test('Sub_id (economia do teto de 60/h): SUBID_PELA_EXTENSAO desligado nunca ped
   assert.deepEqual(links.chamadas, []);
   // a API útil aplica o Sub_id como antes
   const api = shopeeFalso({ apiUtil: true });
-  assert.deepEqual(await linkAfiliadoShopeeRastreado(URL_SHOPEE, { shopee: api, links, idAfiliado: ID_AFILIADO, subId: 'g1' }),
+  assert.deepEqual(await linkAfiliadoShopeeRastreado(URL_SHOPEE, { shopee: api, links, idAfiliado: ID_AFILIADO, subId: 'g1', subIdPelaExtensao: false }),
     { link: 'https://s.shopee.com.br/ApiLink1', sub_id: 'g1' });
   assert.deepEqual(api.argsGerarLink, [[URL_SHOPEE, { subId: 'g1' }]]);
   // sem Sub_id (ou inválido), a extensão segue sendo a reserva do link padrão, como hoje
   for (const subId of [undefined, '', 'g-1']) {
     const ext = linksShopee();
-    assert.deepEqual(await linkAfiliadoShopeeRastreado(URL_SHOPEE, { shopee: shopeeFalso(), links: ext, idAfiliado: ID_AFILIADO, subId }), { link: CURTO, sub_id: null });
+    assert.deepEqual(await linkAfiliadoShopeeRastreado(URL_SHOPEE, { shopee: shopeeFalso(), links: ext, idAfiliado: ID_AFILIADO, subId, subIdPelaExtensao: false }), { link: CURTO, sub_id: null });
     assert.deepEqual(ext.chamadas, [{ url: URL_SHOPEE }]);
   }
   // o link com Sub_id já guardado (gerado antes pela API) sai sem pedido nenhum
   const guardado = shopeeComCache();
   guardado.guardarLink(URL_SHOPEE, ID_AFILIADO, 'https://s.shopee.com.br/Guardado1', 'g1');
-  assert.deepEqual(await linkAfiliadoShopeeRastreado(URL_SHOPEE, { shopee: guardado, links, idAfiliado: ID_AFILIADO, subId: 'g1' }),
+  assert.deepEqual(await linkAfiliadoShopeeRastreado(URL_SHOPEE, { shopee: guardado, links, idAfiliado: ID_AFILIADO, subId: 'g1', subIdPelaExtensao: false }),
     { link: 'https://s.shopee.com.br/Guardado1', sub_id: 'g1' });
   assert.deepEqual(links.chamadas, []);
+});
+
+test('R3/S2: reservaVagas — com Sub_id, a extensão só é chamada com mais vagas no teto da hora que a reserva; senão limite_shopee sem pedido. O link padrão e a API não passam por ela', async () => {
+  const comVagas = (n, opcoes) => Object.assign(linksShopee(opcoes), { vagasShopee: () => n });
+  // no limite da reserva: recusa sem pedido, com o motivo da cobertura
+  const cheia = comVagas(11, { aplicado: true });
+  const e = await linkAfiliadoShopeeRastreado(URL_SHOPEE, { shopee: shopeeFalso(), links: cheia, idAfiliado: ID_AFILIADO, subId: 'g1', reservaVagas: 11 }).catch((x) => x);
+  assert.ok(e instanceof SubIdIndisponivel, `veio ${e?.name}`);
+  assert.equal(e.motivo, 'limite_shopee');
+  assert.doesNotMatch(e.message, /g1|98765432101/, 'a mensagem não carrega Sub_id nem ID');
+  assert.deepEqual(cheia.chamadas, [], 'nenhum pedido à extensão');
+  // uma vaga acima da reserva: pede, com o Sub_id
+  const livre = comVagas(12, { aplicado: true });
+  assert.deepEqual(await linkAfiliadoShopeeRastreado(URL_SHOPEE, { shopee: shopeeFalso(), links: livre, idAfiliado: ID_AFILIADO, subId: 'g1', reservaVagas: 11 }), { link: CURTO, sub_id: 'g1' });
+  assert.deepEqual(livre.chamadas, [{ url: URL_SHOPEE, subId: 'g1' }]);
+  // o link padrão (sem Sub_id) usa a reserva: é para ele que ela existe
+  for (const subId of [undefined, '']) {
+    const base = comVagas(1);
+    assert.deepEqual(await linkAfiliadoShopeeRastreado(URL_SHOPEE, { shopee: shopeeFalso(), links: base, idAfiliado: ID_AFILIADO, subId, reservaVagas: 11 }), { link: CURTO, sub_id: null });
+    assert.deepEqual(base.chamadas, [{ url: URL_SHOPEE }]);
+    assert.equal(await linkAfiliado('shopee', { urlProduto: URL_SHOPEE }, { shopee: shopeeFalso(), links: comVagas(1), idAfiliado: ID_AFILIADO }), CURTO);
+  }
+  // a API útil gera o link com Sub_id sem olhar as vagas da extensão
+  const api = shopeeFalso({ apiUtil: true });
+  const semVaga = comVagas(0);
+  assert.deepEqual(await linkAfiliadoShopeeRastreado(URL_SHOPEE, { shopee: api, links: semVaga, idAfiliado: ID_AFILIADO, subId: 'g1', reservaVagas: 11 }), { link: 'https://s.shopee.com.br/ApiLink1', sub_id: 'g1' });
+  assert.deepEqual(semVaga.chamadas, []);
+  // o link com Sub_id já guardado também não
+  const guardado = shopeeComCache();
+  guardado.guardarLink(URL_SHOPEE, ID_AFILIADO, 'https://s.shopee.com.br/Guardado1', 'g1');
+  assert.deepEqual(await linkAfiliadoShopeeRastreado(URL_SHOPEE, { shopee: guardado, links: semVaga, idAfiliado: ID_AFILIADO, subId: 'g1', reservaVagas: 11 }), { link: 'https://s.shopee.com.br/Guardado1', sub_id: 'g1' });
+  // sem reserva (o padrão) ou reserva inválida: como antes, só o teto do serviço de links vale
+  for (const reservaVagas of [undefined, 0, -1, 1.5, '11', null, Infinity]) {
+    const l = comVagas(0, { aplicado: true });
+    assert.deepEqual(await linkAfiliadoShopeeRastreado(URL_SHOPEE, { shopee: shopeeFalso(), links: l, idAfiliado: ID_AFILIADO, subId: 'g1', reservaVagas }), { link: CURTO, sub_id: 'g1' }, String(reservaVagas));
+    assert.equal(l.chamadas.length, 1);
+  }
+  // serviço de links sem vagasShopee: não dá para saber, pede como antes
+  const antigo = linksShopee({ aplicado: true });
+  assert.deepEqual(await linkAfiliadoShopeeRastreado(URL_SHOPEE, { shopee: shopeeFalso(), links: antigo, idAfiliado: ID_AFILIADO, subId: 'g1', reservaVagas: 11 }), { link: CURTO, sub_id: 'g1' });
+  // com o serviço real: 12 de teto e reserva 11 → um Sub_id pedido, o 2º recusado, o padrão ainda sai
+  const real = createLinkService({ getMode: () => 'extension', limiteShopeeHora: 12 });
+  const proximo = real.poll(2000);
+  const r = linkAfiliadoShopeeRastreado(URL_SHOPEE, { links: real, idAfiliado: ID_AFILIADO, subId: 'g1', reservaVagas: 11 });
+  real.submit((await proximo).id, { ok: true, link: CURTO, sub_id_aplicado: true });
+  assert.deepEqual(await r, { link: CURTO, sub_id: 'g1' });
+  await real.poll(1);
+  const e2 = await linkAfiliadoShopeeRastreado(URL_SHOPEE, { links: real, idAfiliado: ID_AFILIADO, subId: 'g2', reservaVagas: 11 }).catch((x) => x);
+  assert.equal(e2?.motivo, 'limite_shopee');
+  assert.equal(real.status().pending, 0);
+  const proximo2 = real.poll(2000);
+  const r2 = linkAfiliadoShopeeRastreado(URL_SHOPEE, { links: real, idAfiliado: ID_AFILIADO, reservaVagas: 11 });
+  real.submit((await proximo2).id, { ok: true, link: CURTO });
+  assert.deepEqual(await r2, { link: CURTO, sub_id: null });
+  assert.equal(real.vagasShopee(), 10);
 });
 
 test('R5: o padrão do ID de afiliado da tela Conexões é o RE_ID_AFILIADO de shopee.js', () => {

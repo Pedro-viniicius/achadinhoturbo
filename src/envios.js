@@ -83,6 +83,9 @@ const chaveShopee = (ids) => `SHOPEE:${ids.shopId}.${ids.itemId}`;
 const urlDoAsin = (asin) => `https://www.amazon.com.br/dp/${asin}`;
 // Rastreio (plano dashboard-ganhos, D5): no máximo 10 links com Sub_id por envio da Shopee; do 11º em diante, o base
 export const MAX_SUBIDS_POR_ENVIO = 10;
+// Vagas do teto de links da Shopee por hora (src/links.js) que o Sub_id nunca usa: ficam para o link base, sem o qual a
+// oferta não sai para ninguém (R3/S2). Um envio inteiro (o base e os seus 10 Sub_ids) cabe nelas.
+export const RESERVA_LINK_BASE_SHOPEE = MAX_SUBIDS_POR_ENVIO + 1;
 const ORIGENS_RASTREIO = new Set(['manual', 'catalogo', 'espelho']);
 const MAX_MOTIVO_RASTREIO = 40;
 /** Linha do grupo que fica com o link base da Shopee: sem código, esperado ou não, com o motivo. */
@@ -540,20 +543,24 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
   }
 
   /**
-   * Um link da Shopee com o Sub_id (lojas: guardado → API → extensão, só se SUBID_PELA_EXTENSAO). → { link } se o
-   * Sub_id foi aplicado e o link é s.shopee.com.br; senão { motivo } (limite_shopee, subid_nao_aplicado,
+   * Um link da Shopee com o Sub_id (lojas: guardado → API → extensão, ligada por SUBID_PELA_EXTENSAO). → { link } se o
+   * Sub_id foi aplicado e o link é s.shopee.com.br; senão { motivo, parar } (motivo: limite_shopee, subid_nao_aplicado,
    * subid_extensao_indisponivel ou falha_link). Nunca lança.
+   * A extensão só recebe o Sub_id com mais de RESERVA_LINK_BASE_SHOPEE vagas no teto da hora (senão limite_shopee).
+   * `parar` (o envio não pede mais Sub_id; o motivo vale para os seguintes): todo motivo, menos a falha só da API com a
+   * extensão desligada para o Sub_id (SubIdIndisponivel 'falha_link'), que não gasta o teto e pode passar no próximo.
+   * Com a extensão ligada, falha_link é timeout, falha ou link recusado da extensão, ou erro que se repetiria.
    */
   async function linkComSubId(urlProduto, subId, idAfiliado) {
     try {
-      const r = await lojas.linkAfiliadoShopeeRastreado(urlProduto, { shopee, links, idAfiliado, subId });
-      if (typeof r?.link !== 'string' || !LINK_SHOPEE.test(r.link)) return { motivo: 'falha_link' };
-      if (r.sub_id == null) return { motivo: 'subid_nao_aplicado' };
-      return r.sub_id === subId ? { link: r.link } : { motivo: 'falha_link' };
+      const r = await lojas.linkAfiliadoShopeeRastreado(urlProduto, { shopee, links, idAfiliado, subId, reservaVagas: RESERVA_LINK_BASE_SHOPEE });
+      if (typeof r?.link !== 'string' || !LINK_SHOPEE.test(r.link)) return { motivo: 'falha_link', parar: true };
+      if (r.sub_id == null) return { motivo: 'subid_nao_aplicado', parar: true };
+      return r.sub_id === subId ? { link: r.link } : { motivo: 'falha_link', parar: true };
     } catch (e) {
-      if (e instanceof SubIdIndisponivel) return { motivo: e.motivo };
-      if (e?.message === LIMITE_SHOPEE_ATINGIDO) return { motivo: 'limite_shopee' };
-      return { motivo: 'falha_link' };
+      if (e instanceof SubIdIndisponivel) return { motivo: e.motivo, parar: e.motivo !== 'falha_link' };
+      if (e?.message === LIMITE_SHOPEE_ATINGIDO) return { motivo: 'limite_shopee', parar: true };
+      return { motivo: 'falha_link', parar: true };
     }
   }
 
@@ -561,7 +568,8 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
    * Links da Shopee por Sub_id para os grupos de um envio (plano dashboard-ganhos, D5), gerados ao criar (Disparo
    * manual) ou no "Enviar" do catálogo. `base` é o link de afiliado padrão (já gerado, ou o do catálogo): vale para
    * quem não tem Sub_id e para toda falha. Um pedido por Sub_id distinto, até MAX_SUBIDS_POR_ENVIO; depois do limite
-   * da Shopee (ou sem a API, com a extensão sem Sub_id), os Sub_ids seguintes nem são pedidos.
+   * da Shopee (ou da reserva de vagas do link base), da extensão que não aplicou o Sub_id, de timeout ou falha dela (ou
+   * sem a API, com a extensão sem Sub_id), os Sub_ids seguintes nem são pedidos e ficam com o base e o mesmo motivo.
    * → { [jid]: { link, codigo, nivel, bloco_id, esperado, motivo } }. `base` fora de LINK_SHOPEE → ErroShopee('link_falhou').
    */
   async function linksRastreioShopee({ urlProduto, jids, base } = {}) {
@@ -582,7 +590,7 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
           else {
             pedidos++;
             feito = await linkComSubId(urlProduto, g.codigo, idAfiliado);
-            if (feito.motivo === 'limite_shopee' || feito.motivo === 'subid_extensao_indisponivel') parou = feito.motivo;
+            if (feito.parar) parou = feito.motivo;
           }
           porCodigo.set(g.codigo, feito);
         }

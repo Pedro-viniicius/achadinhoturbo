@@ -786,6 +786,22 @@ test('FATOS: o texto montado do valor não casa com outro valor (a tabela de fat
   }
 });
 
+// A versão da extensão que manda o Sub_id da Shopee (P4) não é um inteiro: fica fora de FATOS, mas segue a mesma ideia. A fonte é
+// extension/manifest.json (a versão com o campo `SHOPEE_SUBID_CAMPO`); README, Docs, TIPS e o painel citam "1.4.1 ou mais nova".
+test('P4: a versão da extensão citada para o Sub_id da Shopee aparece no README, nos Docs, no TIPS e no painel, e o manifest já é essa ou mais nova', () => {
+  const citada = '1.4.1';
+  const texto = new RegExp(`versão ${citada.replace(/\./g, '\\.')} ou mais nova`);
+  assert.match(README, texto, 'README');
+  assert.match(TEXTO_DOCS, texto, 'Docs');
+  assert.match(limpo(lerRaiz('public/ajuda.js')), new RegExp(`versão ${citada.replace(/\./g, '\\.')} ou mais nova`), 'ajuda.js');
+  assert.match(lerRaiz('public/ganhos.js'), new RegExp(`versão ${citada.replace(/\./g, '\\.')} ou mais nova`), 'public/ganhos.js');
+  const versao = JSON.parse(lerRaiz('extension/manifest.json')).version.split('.').map(Number);
+  const pedida = citada.split('.').map(Number);
+  const ok = versao[0] > pedida[0] || (versao[0] === pedida[0] && (versao[1] > pedida[1] || (versao[1] === pedida[1] && versao[2] >= pedida[2])));
+  assert.ok(ok, `o manifest (${versao.join('.')}) é mais velho que a versão citada (${citada})`);
+  assert.match(lerRaiz('extension/background.js'), /const SHOPEE_SUBID_CAMPO = 'subId1';/, 'o campo do Sub_id está ligado na extensão');
+});
+
 /** Primeira coluna de todas as tabelas de uma seção. */
 const primeiraColuna = (cap, secao) => CAPS[cap].secoes.find((s) => s.id === secao).blocos.filter((b) => b.tabela).flatMap((b) => b.tabela.linhas.map((l) => l[0]));
 

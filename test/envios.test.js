@@ -14,7 +14,7 @@ import { buildApp } from '../src/server.js';
 import { createWhatsApp } from '../src/whatsapp.js';
 import { createLinkService, LIMITE_SHOPEE_ATINGIDO } from '../src/links.js';
 import { createScheduler } from '../src/scheduler.js';
-import { createEnvios, proximaOcorrencia, limparErro, semMetadados, MAX_SUBIDS_POR_ENVIO } from '../src/envios.js';
+import { createEnvios, proximaOcorrencia, limparErro, semMetadados, MAX_SUBIDS_POR_ENVIO, RESERVA_LINK_BASE_SHOPEE } from '../src/envios.js';
 import * as rastreio from '../src/rastreio.js';
 import { createAmazon } from '../src/amazon.js';
 import { createShopee, URL_API as URL_API_SHOPEE } from '../src/shopee.js';
@@ -1490,14 +1490,14 @@ function fetchShopee(estado) {
 
 /**
  * Servidor com a Shopee: conexão salva no banco (salvarShopee troca), API como pedido e um serviço de links próprio
- * (`linksShopee`, modo em estado.modo; começa com a extensão off-line).
+ * (`linksShopee`, modo em estado.modo; começa com a extensão off-line; `limiteShopeeHora` é o teto dele).
  */
-async function subirShopee({ conexao = CONEXAO_SHOPEE, api = 'ok', modo = 'extension', ...opcoes } = {}) {
+async function subirShopee({ conexao = CONEXAO_SHOPEE, api = 'ok', modo = 'extension', limiteShopeeHora, ...opcoes } = {}) {
   const s = await subir(opcoes);
   const estado = { api, nos: null, link: LINK_API, modo };
   const fetchF = fetchShopee(estado);
   const shopee = createShopee({ db: s.db, fetch: fetchF });
-  const linksShopee = createLinkService({ getMode: () => estado.modo });
+  const linksShopee = createLinkService({ getMode: () => estado.modo, limiteShopeeHora });
   const salvarShopee = (c) => {
     const config = {}; for (const k of ['id_afiliado', 'app_id']) if (c[k]) config[k] = c[k];
     s.db.prepare(`INSERT INTO conexoes (plataforma, config, segredos, updated_at) VALUES ('shopee', ?, ?, ?)
@@ -2316,21 +2316,176 @@ test('CA2/D5: linksRastreioShopee — limite da Shopee no 2º, teto de Sub_ids p
   } finally { m.db.close(); }
 });
 
-test('CA2 (teto de 60/h): sem a API, nenhum Sub_id é pedido à extensão (SUBID_PELA_EXTENSAO desligado); vai o link base com o motivo', async () => {
+test('CA2 (P4): sem a API, o Sub_id do bloco vai à extensão (SUBID_PELA_EXTENSAO ligado); aplicado → link com Sub_id; extensão antiga → link base com o motivo', async () => {
   const m = montar();
   m.db.prepare("INSERT INTO conexoes (plataforma, config, segredos) VALUES ('shopee', ?, '{}')").run(JSON.stringify({ id_afiliado: ID_AF }));
   bloco(m.db, 1, ['111@g.us']);
   rastreio.salvar(m.db, { loja: 'shopee', alvo_tipo: 'bloco', alvo: '1', codigo: 'b1' });
   const links = createLinkService({ getMode: () => 'extension' });
   const pedidos = [];
-  links.requestLinkShopee = async (a) => { pedidos.push(a); throw new Error('não era para pedir'); };
+  const LINK_SUB = 'https://s.shopee.com.br/SubB1abc';
+  let aplicado = true;
+  links.requestLinkShopee = async (a) => { pedidos.push(a); return { link: LINK_SUB, longo: null, subIdAplicado: aplicado }; };
   const shopee = { apiUtil: () => false, linkGuardado: () => null, guardarLink: () => true };
   const envios = createEnvios({ db: m.db, wa: m.wa, links, ml: m.ml, fast: true, dir: m.dir, shopee });
   try {
     const r = await envios.linksRastreioShopee({ urlProduto: URL_PRODUTO_SHOPEE, jids: ['111@g.us', '222@g.us'], base: LINK_EXT });
-    assert.deepEqual(r['111@g.us'], { link: LINK_EXT, codigo: null, nivel: 'nenhum', bloco_id: null, esperado: 1, motivo: 'subid_extensao_indisponivel' });
+    assert.deepEqual(pedidos.map((p) => p.subId), ['b1'], 'um pedido à extensão, com o Sub_id do bloco');
+    assert.equal(r['111@g.us'].link, LINK_SUB);
+    assert.equal(r['111@g.us'].codigo, 'b1');
+    assert.equal(r['111@g.us'].nivel, 'bloco');
+    assert.equal(r['111@g.us'].motivo, null);
     assert.deepEqual(r['222@g.us'], { link: LINK_EXT, codigo: null, nivel: 'padrao', bloco_id: null, esperado: 0, motivo: null });
-    assert.deepEqual(pedidos, []);
+    // extensão antiga (não diz que aplicou): sai o link base e a falta conta na cobertura
+    aplicado = undefined; pedidos.length = 0;
+    const r2 = await envios.linksRastreioShopee({ urlProduto: 'https://shopee.com.br/produto-i.1.3', jids: ['111@g.us'], base: LINK_EXT });
+    assert.equal(r2['111@g.us'].link, LINK_EXT);
+    assert.equal(r2['111@g.us'].esperado, 1);
+    assert.equal(r2['111@g.us'].motivo, 'subid_nao_aplicado');
+  } finally { m.db.close(); }
+});
+
+// R3/S2 (rodada 2): o pedido de Sub_id à extensão não pode tirar a vaga do link base nem gastar a hora inteira
+/** `n` grupos, cada um num bloco próprio com o Sub_id s1…sn. → os jids, na ordem. */
+function gruposComSubId(db, n) {
+  const jids = [];
+  for (let i = 1; i <= n; i++) {
+    const jid = `8${String(i).padStart(3, '0')}@g.us`; jids.push(jid);
+    db.prepare('INSERT INTO groups (jid, name, size, updated_at) VALUES (?,?,?,?)').run(jid, `R${i}`, 10, Date.now());
+    bloco(db, 100 + i, [jid]);
+    rastreio.salvar(db, { loja: 'shopee', alvo_tipo: 'bloco', alvo: String(100 + i), codigo: `s${i}` });
+  }
+  return jids;
+}
+/** Faz o papel da extensão até `parar()`: responde cada pedido com `resposta(job)` e guarda os pedidos. */
+function extensaoAuto(links, resposta) {
+  const jobs = []; let parar = false;
+  const laco = (async () => {
+    while (!parar) {
+      const job = await links.poll(30);
+      if (!job) continue;
+      jobs.push(job);
+      links.submit(job.id, resposta(job));
+    }
+  })();
+  return { jobs, parar: async () => { parar = true; await laco; } };
+}
+const comSub = (jobs) => jobs.filter((j) => j.subId !== undefined).map((j) => j.subId);
+// sem longLink: o link não é guardado, e cada oferta pede o link base de novo à extensão
+const responde = (job) => (job.subId ? { ok: true, link: `https://s.shopee.com.br/Sub${job.subId}`, sub_id_aplicado: true } : { ok: true, link: LINK_EXT });
+
+test('R3/S2 (a): sem a API, os Sub_ids pela extensão deixam vagas para o link base: com teto de 15/h, a 1ª oferta pede só 3 Sub_ids e as seguintes ainda saem para todos com o link base', async () => {
+  const s = await subirShopee({ conexao: { id_afiliado: ID_AF }, limiteShopeeHora: 15 });
+  const jids = gruposComSubId(s.db, MAX_SUBIDS_POR_ENVIO);
+  const ext = extensaoAuto(s.linksShopee, responde);
+  try {
+    const corpo = { tipo: 'oferta', url: URL_PRODUTO_SHOPEE, template_id: 1, group_jids: jids, ajustes: { title: 'Fone', price: '50' } };
+    const ids = [];
+    for (let i = 0; i < 4; i++) {
+      s.wa.simulated.length = 0;
+      const r = await s.post('/api/envios', corpo);
+      assert.equal(r.status, 200, `oferta ${i + 1}: ${r.txt}`);
+      assert.equal(await terminar(s.db, r.json.id), 'concluido');
+      assert.equal(s.wa.simulated.length, jids.length, `oferta ${i + 1}: todos os grupos recebem`);
+      ids.push(r.json.id);
+    }
+    // 15 vagas: base + 3 Sub_ids (sobram 11, a reserva), depois só o base de cada oferta
+    assert.deepEqual(ext.jobs.map((j) => (j.subId === undefined ? 'base' : 'sub')), ['base', 'sub', 'sub', 'sub', 'base', 'base', 'base']);
+    assert.equal(s.linksShopee.vagasShopee(), 15 - 7);
+    const primeira = rastreados(s.db, ids[0]);
+    assert.deepEqual(primeira.filter((l) => l.codigo).map((l) => l.link).sort(), comSub(ext.jobs).map((sub) => `https://s.shopee.com.br/Sub${sub}`).sort());
+    assert.ok(primeira.filter((l) => !l.codigo).every((l) => l.link === LINK_EXT && l.esperado === 1 && l.motivo === 'limite_shopee'), 'os outros 7 grupos: link base, falta com limite_shopee');
+    for (const id of ids.slice(1)) {
+      assert.ok(rastreados(s.db, id).every((l) => l.link === LINK_EXT && l.codigo === null && l.motivo === 'limite_shopee'), `envio ${id}: link base para todos`);
+    }
+  } finally { await ext.parar(); await s.fechar(); }
+});
+
+test('R3/S2 (b): extensão antiga (sem sub_id_aplicado) → um só pedido de Sub_id por envio; os grupos ficam com o link base e subid_nao_aplicado', async () => {
+  const s = await subirShopee({ conexao: { id_afiliado: ID_AF } });
+  const jids = gruposComSubId(s.db, MAX_SUBIDS_POR_ENVIO);
+  const ext = extensaoAuto(s.linksShopee, () => ({ ok: true, link: LINK_EXT, longo: LONGO_DONO }));
+  const base = { link: LINK_EXT, codigo: null, nivel: 'nenhum', bloco_id: null, esperado: 1, motivo: 'subid_nao_aplicado' };
+  try {
+    for (const url of [URL_PRODUTO_SHOPEE, 'https://shopee.com.br/outro-i.1.2']) {
+      ext.jobs.length = 0;
+      const r = await s.envios.linksRastreioShopee({ urlProduto: url, jids, base: LINK_EXT });
+      assert.equal(comSub(ext.jobs).length, 1, `${url}: um pedido com Sub_id, não ${MAX_SUBIDS_POR_ENVIO}`);
+      assert.deepEqual(r, Object.fromEntries(jids.map((j) => [j, base])));
+    }
+    assert.equal(s.linksShopee.vagasShopee(), 60 - 2);
+  } finally { await ext.parar(); await s.fechar(); }
+});
+
+test('R3/S2 (c): timeout ou falha da extensão no 1º Sub_id → nenhum dos outros 9 é pedido; todos ficam com o link base e falha_link', async () => {
+  const s = await subirShopee({ conexao: { id_afiliado: ID_AF } });
+  const jids = gruposComSubId(s.db, MAX_SUBIDS_POR_ENVIO);
+  const base = { link: LINK_EXT, codigo: null, nivel: 'nenhum', bloco_id: null, esperado: 1, motivo: 'falha_link' };
+  const pedidos = [];
+  const real = s.linksShopee.requestLinkShopee;
+  s.linksShopee.requestLinkShopee = (a) => { pedidos.push(a.subId); return real({ ...a, timeoutMs: 20 }); }; // o timeout de 90 s, encurtado
+  try {
+    // timeout: a extensão está on-line e não responde
+    await s.linksShopee.poll(0);
+    const r = await s.envios.linksRastreioShopee({ urlProduto: URL_PRODUTO_SHOPEE, jids, base: LINK_EXT });
+    assert.deepEqual(pedidos, ['s1'], 'só o 1º Sub_id foi pedido');
+    assert.deepEqual(r, Object.fromEntries(jids.map((j) => [j, base])));
+    assert.equal(s.linksShopee.status().pending, 0);
+    // falha: a extensão responde que não conseguiu
+    pedidos.length = 0;
+    const ext = extensaoAuto(s.linksShopee, () => ({ ok: false, error: 'o portal recusou' }));
+    try {
+      const r2 = await s.envios.linksRastreioShopee({ urlProduto: URL_PRODUTO_SHOPEE, jids, base: LINK_EXT });
+      assert.deepEqual(pedidos, ['s1']);
+      assert.deepEqual(ext.jobs.map((j) => j.subId), ['s1']);
+      assert.deepEqual(r2, Object.fromEntries(jids.map((j) => [j, base])));
+    } finally { await ext.parar(); }
+  } finally { await s.fechar(); }
+});
+
+test('R3/S2 (d): com a API da Shopee nada muda: os 10 Sub_ids saem pela API mesmo sem vaga na extensão, sem pedido nenhum a ela', async () => {
+  const s = await subirShopee({ limiteShopeeHora: 1 });
+  const jids = gruposComSubId(s.db, MAX_SUBIDS_POR_ENVIO);
+  s.estado.link = (consulta) => { const sub = /subIds:\["(\w+)"\]/.exec(consulta)?.[1]; return sub ? `https://s.shopee.com.br/Sub${sub}` : LINK_API; };
+  try {
+    // a única vaga da hora já foi gasta
+    await s.linksShopee.poll(0);
+    await assert.rejects(s.linksShopee.requestLinkShopee({ url: URL_PRODUTO_SHOPEE, timeoutMs: 1 }), /não respondeu a tempo/);
+    assert.equal(s.linksShopee.vagasShopee(), 0);
+    const r = await s.envios.linksRastreioShopee({ urlProduto: URL_PRODUTO_SHOPEE, jids, base: LINK_API });
+    const subs = s.fetchF.chamadas.filter((c) => c.consulta?.startsWith('mutation')).map((c) => /subIds:\["(\w+)"\]/.exec(c.consulta)?.[1]);
+    assert.deepEqual(subs.sort(), jids.map((_, i) => `s${i + 1}`).sort(), 'um pedido à API por Sub_id, todos');
+    jids.forEach((j, i) => assert.deepEqual(r[j], { link: `https://s.shopee.com.br/Subs${i + 1}`, codigo: `s${i + 1}`, nivel: 'bloco', bloco_id: 101 + i, esperado: 1, motivo: null }));
+    assert.equal(s.linksShopee.status().pending, 0, 'a extensão não foi chamada');
+  } finally { await s.fechar(); }
+});
+
+test('R3/S2: o envio pede o Sub_id à extensão com a reserva do link base; só a falha da API com a extensão desligada (SubIdIndisponivel falha_link) não para os seguintes', async () => {
+  const m = montar();
+  m.db.prepare("INSERT INTO conexoes (plataforma, config, segredos) VALUES ('shopee', ?, '{}')").run(JSON.stringify({ id_afiliado: ID_AF }));
+  const jids = gruposComSubId(m.db, 3);
+  const pedidos = [];
+  let falha = () => new lojasPadrao.SubIdIndisponivel('falha_link');
+  const lojas = { ...lojasPadrao, linkAfiliadoShopeeRastreado: async (base, deps) => { pedidos.push([deps.subId, deps.reservaVagas]); throw falha(); } };
+  const envios = createEnvios({ db: m.db, wa: m.wa, links: m.links, ml: m.ml, fast: true, dir: m.dir, shopee: {}, lojas });
+  const gerar = () => envios.linksRastreioShopee({ urlProduto: URL_PRODUTO_SHOPEE, jids, base: LINK_API });
+  try {
+    assert.equal(RESERVA_LINK_BASE_SHOPEE, MAX_SUBIDS_POR_ENVIO + 1);
+    let r = await gerar();
+    assert.deepEqual(pedidos.map(([, reserva]) => reserva), [11, 11, 11], 'os 3 pedidos, cada um com a reserva');
+    assert.ok(jids.every((j) => r[j].motivo === 'falha_link'));
+    // qualquer outro motivo para no 1º
+    for (const [erro, motivo] of [
+      [() => new lojasPadrao.SubIdIndisponivel('limite_shopee'), 'limite_shopee'],
+      [() => new lojasPadrao.SubIdIndisponivel('subid_extensao_indisponivel'), 'subid_extensao_indisponivel'],
+      [() => new Error('a extensão não respondeu a tempo'), 'falha_link'],
+      [() => new Error(LIMITE_SHOPEE_ATINGIDO), 'limite_shopee'],
+    ]) {
+      pedidos.length = 0; falha = erro;
+      r = await gerar();
+      assert.equal(pedidos.length, 1, motivo);
+      assert.ok(jids.every((j) => r[j].motivo === motivo && r[j].link === LINK_API), motivo);
+    }
   } finally { m.db.close(); }
 });
 

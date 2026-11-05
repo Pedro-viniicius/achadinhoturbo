@@ -791,11 +791,14 @@ async function comOperador(t) {
   assert.equal((await api('/equipe/ativar', 'POST', { nome: 'Ana Dona', email: 'ana@exemplo.com', senha: 'senha-forte-123' })).s, 200);
   const convite = await api('/equipe/convites', 'POST', { email: 'bia@exemplo.com', papel: 'operador' });
   assert.equal(convite.s, 201);
-  const comoDono = async () => { await p.js('location.reload()'); await p.esperar("document.querySelector('#pessoa')?.textContent.includes('Ana Dona')", 12000, 'Dono no painel'); };
+  // Depois de recarregar, o #pessoa aparece antes de a Visão Geral terminar de carregar (ela pede /blocks e /overview e depois
+  // sobrescreve #pagina). Quem abre outra tela nesse meio tempo vê o livro sumir. Por isso espera a Visão Geral pronta.
+  const comoDono = async () => { await p.js('location.reload()'); await p.esperar("document.querySelector('#pessoa')?.textContent.includes('Ana Dona')", 12000, 'Dono no painel'); await p.esperar(VISAO_PRONTA, 15000, 'Visão Geral do Dono carregada'); };
   const virarOperador = async () => {
     assert.equal((await api('/convite/aceitar', 'POST', { token: convite.j.link.split('#')[1], nome: 'Bia Operadora', senha: 'senha-da-bia-12345' })).s, 200);
     await p.js("location.hash = '#visao'"); await p.js('location.reload()');
     await p.esperar("document.querySelector('#pessoa')?.textContent.includes('Bia Operadora')", 12000, 'Operador no painel');
+    await p.esperar(VISAO_PRONTA, 15000, 'Visão Geral do Operador carregada');
   };
   return { p, api, comoDono, virarOperador };
 }

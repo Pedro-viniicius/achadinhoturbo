@@ -760,3 +760,11 @@ nav a[href="#ganhos"] { --ic:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3
   .tab-cob .c-num { color:var(--muted); font-size:13px; }
   .tab-cob .c-num::before { content:attr(data-rot) ": "; }
 }
+/* Entrega C: botão do grupo na tabela "Por grupo", período anterior, alvos de toque e campo da data atrás do rodapé fixo */
+.tab-din button.g-grupo { padding:0; border:0; background:none; font:inherit; font-weight:500; color:var(--text); text-align:left; cursor:pointer; text-decoration:underline dotted; text-underline-offset:3px; min-height:24px; white-space:normal; overflow-wrap:anywhere; }
+.tab-din button.g-grupo[aria-pressed="true"] { font-weight:700; }
+.tab-din button.g-grupo[aria-pressed="true"]::before { content:"\25B8\00a0"; }
+.g-ant { display:block; margin-top:4px; }
+#imp-dia, #imp-arq { scroll-margin-bottom:96px; }
+@media (min-width:601px) { #g-sec-grupo .tab-din th:first-child, #g-sec-grupo .tab-din td:first-child { min-width:16rem; } }
+@media (max-width:600px) { .tab-din button.g-grupo { min-height:44px; } p.dica > a.alvo24:only-child { min-height:44px; line-height:44px; } }

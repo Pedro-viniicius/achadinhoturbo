@@ -1,8 +1,15 @@
 // Importador de comissões e cliques por CSV (docs/produto/planos/dashboard-ganhos.md, D7, D8 e etapa 14).
 // O dono baixa o relatório no portal da loja e envia pelo painel (corpo cru text/csv, só Dono). O arquivo é lido
-// em memória (src/csv.js) e nunca vai ao disco; de `importacoes` fica só o sha256 dele.
+// em memória (src/csv.js, que também abre o .zip com um único CSV da Amazon) e nunca vai ao disco; de `importacoes`
+// fica só o sha256 dele (do que foi enviado: o .zip, quando veio .zip).
+// Formatos reais (P5): docs/produto/referencias/relatorios-dos-portais.md. Com loja=amazon, a data `NN-NN-AAAA` com
+// hífen é mês-dia-ano; célula "-" é vazia (0 nos números); relatório sem coluna de data (o "ID de rastreamento" da
+// Amazon) pede o parâmetro `dia`, mas só se nenhuma coluna tem cara de data (R1); relatório de cliques com uma linha
+// por clique (Shopee) conta 1 por linha; em comissões, a linha só de cliques (comissão, venda e quantidade 0) não é
+// gravada e conta em `so_cliques` (R2).
 // Lista branca (LGPD): só as colunas de COLUNAS são lidas (data, código, produto, título, quantidade, venda,
-// comissão, status, devoluções, cliques e o pedido). Nome, endereço, telefone, e-mail ou documento de comprador
+// comissão, status, devoluções, cliques e o pedido); "Número de rastreamento" e afins só na Amazon (S1).
+// Nome, endereço, telefone, e-mail ou documento de comprador
 // nunca são lidos; a resposta lista só os NOMES das colunas ignoradas. O pedido só entra no hash da `chave`.
 // Dedupe: `chave` por (loja, chave) em comissoes; reimportar não duplica, pendente → confirmada atualiza a linha.
 // A chave é HMAC-SHA256 com a `pseudo_key` local (src/privacidade.js), 32 hex: com pedido, de (loja, pedido,
@@ -13,10 +20,14 @@
 // outra linha; mas a linha que entrou sem código nenhum é a mesma venda e ganha o código (R4, `chave_sem_codigo`).
 // Com pedido, o pedido já separa as vendas e o código do parâmetro fica fora da chave (preencher só atualiza).
 // Cliques: total por (loja, dia, código); a última importação vale (substitui, não soma).
+// Avisos de código (Entrega C, D1): a prévia e o resumo contam as linhas novas sem pedido com a mesma data e produto
+// de vendas já gravadas com outro código ou sem código (`outro_codigo`) e as linhas sem código que vão receber o
+// código do arquivo (`recebem_codigo`). Só contagem e frase fixa: não bloqueiam nem mudam o que é gravado.
 // Uma linha pertence à importação que a criou: apagar uma importação apaga só as linhas criadas por ela.
 // Rotas (montarRotas, todas só do Dono, inclusive GET, P2):
-//   POST /api/ganhos/importar?loja=&tipo=comissoes|cliques&codigo=&previa=1 (corpo text/csv ou text/plain, até
-//   5 MB) → resumo; GET /api/ganhos/importacoes → { importacoes }; DELETE /api/ganhos/importacoes/:id.
+//   POST /api/ganhos/importar?loja=&tipo=comissoes|cliques&codigo=&dia=AAAA-MM-DD&previa=1 (corpo text/csv ou
+//   text/plain, até 5 MB; CSV ou .zip com um CSV) → resumo; GET /api/ganhos/importacoes → { importacoes };
+//   DELETE /api/ganhos/importacoes/:id.
 // Erros: { erro } com frase fixa (MENSAGENS_IMPORTADOR, MENSAGENS_CSV), sem nada do conteúdo do arquivo.
 
 import crypto from 'node:crypto';
@@ -39,41 +50,61 @@ const MAX_CODIGOS_DESCONHECIDOS = 20;
 const MAX_NOME_COLUNA = 80;
 const MAX_IMPORTACOES_LISTADAS = 100;
 const RE_PRODUTO = /^[A-Za-z0-9._:-]{1,40}$/; // ASIN, MLB…, SHOPEE:<loja>.<item>
+const RE_ASIN = /^(?:ASIN:)?[A-Z0-9]{10}$/i; // na Amazon, o resto (a linha "Other" do relatório) não é produto
+const RE_DIA = /^\d{4}-\d{2}-\d{2}$/;
+/** Célula que o portal preenche com "-" quando não há valor (Amazon): vazia, ou 0 nos números. */
+const TRACO = '-';
 const RE_CONTROLE = /[\u0000-\u001f\u007f]/;
 
 /**
- * Sinônimos de cabeçalho por campo, já normalizados (normalizarNome). PROVISÓRIOS até os exemplos dos portais
- * (P5): ajustar formato é só acrescentar sinônimo aqui. Quando duas colunas casam com o mesmo campo, vale a do
- * sinônimo que vem antes na lista. A ordem dos campos é a de `colunas_usadas` na resposta.
+ * Sinônimos de cabeçalho por campo, já normalizados (normalizarNome): ajustar formato é só acrescentar sinônimo
+ * aqui. Os da Amazon ("Produto relacionado" em inglês e "ID de rastreamento" em português) e os do relatório de
+ * cliques da Shopee vêm dos relatórios reais (P5); os outros seguem prováveis. Quando duas colunas casam com o
+ * mesmo campo, vale a do sinônimo que vem antes na lista (Total Earnings antes de Items Shipped Earnings).
+ * A ordem dos campos é a de `colunas_usadas` na resposta. `id_clique` (uma linha por clique) só é lido para contar.
  */
 export const COLUNAS = Object.freeze({
-  data: ['data', 'data do pedido', 'hora do pedido', 'data da venda', 'data da compra', 'data de envio', 'date shipped',
-    'order time', 'order date', 'purchase time', 'data da conversao', 'date', 'dia', 'day', 'data do clique', 'hora do clique', 'click time'],
+  data: ['data', 'data do pedido', 'hora do pedido', 'horario do pedido', 'data da venda', 'data da compra', 'data de envio', 'date shipped',
+    'order time', 'order date', 'purchase time', 'data da conversao', 'date', 'dia', 'day', 'data do clique', 'hora do clique', 'click time',
+    'periodo dos cliques'],
   pedido: ['id do pedido', 'order id', 'checkout id', 'numero do pedido', 'id da compra', 'pedido'],
   loja_id: ['id da loja', 'shop id'],
   produto: ['asin', 'mlb', 'id do item', 'item id', 'id do produto', 'product id', 'codigo do produto'],
-  titulo: ['titulo', 'titulo do produto', 'nome do item', 'nome do produto', 'item name', 'product name'],
-  codigo: ['sub id1', 'sub id 1', 'subid1', 'sub id', 'subid', 'tracking id', 'id de rastreamento', 'etiqueta'],
-  venda: ['valor de compra', 'valor da compra', 'valor da venda', 'purchase value', 'order amount', 'revenue', 'receita', 'valor do pedido'],
+  titulo: ['titulo', 'titulo do produto', 'nome do item', 'nome do produto', 'item name', 'product name', 'product title'],
+  codigo: ['sub id1', 'sub id 1', 'subid1', 'sub id', 'subid', 'tracking id', 'id de rastreamento', 'etiqueta', 'numero de rastreamento'],
+  venda: ['valor de compra', 'valor da compra', 'valor da venda', 'purchase value', 'order amount', 'revenue', 'receita', 'valor do pedido',
+    'items shipped revenue', 'receita de produtos enviados'],
   comissao: ['ad fees', 'taxas de publicidade', 'comissao total do item', 'comissao do item', 'comissao', 'commission',
-    'total commission', 'net commission', 'comissao total', 'comissao liquida', 'ganhos', 'comissao total do pedido'],
+    'total commission', 'net commission', 'comissao total', 'comissao liquida', 'ganhos', 'comissao total do pedido',
+    'total earnings', 'items shipped earnings', 'ganhos totais'],
   status: ['status', 'status do pedido', 'order status', 'status da conversao', 'conversion status', 'situacao'],
-  quantidade: ['items shipped', 'itens enviados', 'quantidade', 'qtd', 'qty', 'quantity'],
-  devolucoes: ['returns', 'devolucoes', 'itens devolvidos'],
+  quantidade: ['items shipped', 'itens enviados', 'quantidade', 'qtd', 'qty', 'quantity', 'produtos enviados'],
+  devolucoes: ['returns', 'devolucoes', 'itens devolvidos', 'items returned', 'produtos devolvidos'],
   cliques: ['clicks', 'cliques', 'total de cliques'],
+  id_clique: ['id dos cliques'],
 });
+/**
+ * Sinônimos que só valem com loja=amazon (S1): nas outras lojas, "Número de rastreamento" ou "Tracking ID" pode ser
+ * o código de envio dos Correios de um comprador (dado pessoal); lá a coluna fica nas ignoradas e não é lida.
+ */
+const SO_DA_AMAZON = new Set(['tracking id', 'id de rastreamento', 'numero de rastreamento']);
+/** Nome (normalizado) com cara de data: sem coluna de data reconhecida, ele impede de usar a data do relatório (R1). */
+// começo de palavra ("media"/"mediana" não contam, R7/Q1) ou date/time no fim (OrderDate, ClickTime colados)
+const RE_CARA_DE_DATA = /\b(?:data|date|hora|horario|time|periodo|dia)|(?:date|time)\b/;
 const CAMPOS = Object.freeze({
   comissoes: ['data', 'pedido', 'loja_id', 'produto', 'titulo', 'codigo', 'venda', 'comissao', 'status', 'quantidade', 'devolucoes'],
-  cliques: ['data', 'codigo', 'cliques'],
+  cliques: ['data', 'codigo', 'cliques', 'id_clique'],
 });
-const OBRIGATORIO = Object.freeze({ comissoes: 'comissao', cliques: 'cliques' });
+/** Campos que bastam (um deles) para reconhecer o cabeçalho do tipo, além da data. */
+const OBRIGATORIO = Object.freeze({ comissoes: ['comissao'], cliques: ['cliques', 'id_clique'] });
 
 const formato = 'O portal pode ter mudado o formato. Mande o arquivo de exemplo para a equipe ajustar.';
 export const MENSAGENS_IMPORTADOR = Object.freeze({
   loja: 'Escolha a loja do arquivo: Shopee, Amazon ou Mercado Livre.',
   tipo: 'Escolha o tipo do relatório: comissões ou cliques.',
   codigo: 'O código do arquivo tem caractere inválido ou passa de 100 caracteres.',
-  semData: `Não encontrei a coluna de data (esperada: Data, Data do pedido ou Date Shipped). ${formato}`,
+  semData: 'Este relatório não tem data por linha: informe a data do relatório.',
+  dataDesconhecida: `Não reconheci a coluna de data deste relatório. ${formato}`,
   semComissao: `Não encontrei a coluna de comissão (esperada: Comissão, Commission ou Ad Fees). ${formato}`,
   semCliques: `Não encontrei a coluna de cliques (esperada: Cliques ou Clicks). ${formato}`,
   naoAchei: 'Importação não encontrada.',
@@ -83,8 +114,32 @@ export const MENSAGENS_IMPORTADOR = Object.freeze({
   previa: 'O parâmetro de prévia veio repetido ou inválido. Mande previa=1 uma vez só.',
   semStatus: 'O arquivo não tem coluna de status: as vendas entram como pendentes.',
   jaImportado: 'Este arquivo já foi importado antes. As linhas repetidas não mudam nada.',
+  dia: 'A data do relatório veio inválida ou repetida. Escolha uma data válida (AAAA-MM-DD).',
+  diaUsado: 'O relatório não tem data por linha: todas as linhas usam a data do relatório informada.',
+  diaIgnorado: 'O arquivo tem data em cada linha: a data do relatório informada não vale para ele.',
+  soCliques: Object.freeze([
+    '1 linha só tem cliques (sem venda nem comissão) e ficou de fora. Os cliques entram ao importar o arquivo como cliques.',
+    '{n} linhas só têm cliques (sem venda nem comissão) e ficaram de fora. Os cliques entram ao importar o arquivo como cliques.',
+  ]),
+  // [singular, plural] montadas com plural(n, ...); só a contagem entra no texto (nada do arquivo nem do código)
+  outroCodigoPrevia: Object.freeze([
+    '1 linha tem a mesma data e produto de uma venda já importada com outro código (ou sem código). Se for o mesmo relatório importado de novo, não importe: a venda contaria em dobro.',
+    '{n} linhas têm a mesma data e produto de vendas já importadas com outro código (ou sem código). Se for o mesmo relatório importado de novo, não importe: as vendas contariam em dobro.',
+  ]),
+  outroCodigoGravado: Object.freeze([
+    '1 linha tem a mesma data e produto de uma venda já importada com outro código (ou sem código). Se era o mesmo relatório, apague esta importação em Importações recentes.',
+    '{n} linhas têm a mesma data e produto de vendas já importadas com outro código (ou sem código). Se era o mesmo relatório, apague esta importação em Importações recentes.',
+  ]),
+  recebemCodigoPrevia: Object.freeze([
+    '1 linha importada antes sem código vai receber o código deste arquivo. Se era de outro grupo, não importe: apague a importação antiga e importe os dois arquivos de novo, cada um com o seu código.',
+    '{n} linhas importadas antes sem código vão receber o código deste arquivo. Se eram de outro grupo, não importe: apague a importação antiga e importe os dois arquivos de novo, cada um com o seu código.',
+  ]),
+  recebemCodigoGravado: Object.freeze([
+    '1 linha importada antes sem código recebeu o código deste arquivo. Se era de outro grupo, apague a importação antiga e importe os dois arquivos de novo, cada um com o seu código.',
+    '{n} linhas importadas antes sem código receberam o código deste arquivo. Se eram de outro grupo, apague a importação antiga e importe os dois arquivos de novo, cada um com o seu código.',
+  ]),
 });
-const SEM_COLUNA = { data: 'semData', comissao: 'semComissao', cliques: 'semCliques' };
+const SEM_COLUNA = { data: 'semData', dataDesconhecida: 'dataDesconhecida', comissoes: 'semComissao', cliques: 'semCliques' };
 
 /** Recusa com status HTTP e frase fixa (nunca com conteúdo do arquivo). */
 export class ErroImportacao extends Error {
@@ -148,24 +203,33 @@ export function lerDinheiro(s) {
   return { centavos, milhar };
 }
 
-/** Inteiro não negativo (quantidade, devoluções, cliques), com milhar por ponto ou vírgula; senão null. */
+/**
+ * Inteiro não negativo (quantidade, devoluções, cliques), com milhar por ponto ou vírgula (`1.234`) ou com casa
+ * decimal zerada (`245.0`, `3,00`: a Amazon escreve assim); senão null (`1.5` não é inteiro).
+ */
 function lerInteiro(s) {
   const t = String(s ?? '').replace(/\s/g, '');
   let n = null;
   if (/^\d{1,10}$/.test(t)) n = Number(t);
+  else if (/^\d{1,10}[.,]0{1,2}$/.test(t)) n = Number(t.split(/[.,]/)[0]);
   else if (/^\d{1,3}([.,]\d{3}){1,3}$/.test(t)) n = Number(t.replace(/[.,]/g, ''));
   return n !== null && n <= 1e9 ? n : null;
 }
 
 const diasNoMes = (a, m) => new Date(Date.UTC(a, m, 0)).getUTCDate();
-/** Data → 'AAAA-MM-DD' ou null: `AAAA-MM-DD`, `AAAA/MM/DD`, `DD/MM/AAAA`, `DD-MM-AAAA`, com hora ou fuso depois (ignorados). */
-export function lerData(s) {
+/**
+ * Data → 'AAAA-MM-DD' ou null: `AAAA-MM-DD`, `AAAA/MM/DD`, `DD/MM/AAAA`, `DD-MM-AAAA`, com hora ou fuso depois
+ * (ignorados). Com `loja: 'amazon'`, `NN-NN-AAAA` com hífen é mês-dia-ano (`11-04-2026` = 4 de novembro, como no
+ * relatório da Amazon); com barra continua dia/mês em todas as lojas.
+ */
+export function lerData(s, { loja } = {}) {
   if (typeof s !== 'string') return null;
   const t = s.trim();
   let a; let m; let d;
   let r = /^(\d{4})[-/](\d{1,2})[-/](\d{1,2})(?:$|[ T])/.exec(t);
   if (r) [, a, m, d] = r;
-  else if ((r = /^(\d{1,2})[-/](\d{1,2})[-/](\d{4})(?:$|[ T])/.exec(t))) [, d, m, a] = r;
+  else if ((r = /^(\d{1,2})-(\d{1,2})-(\d{4})(?:$|[ T])/.exec(t))) [, d, m, a] = loja === 'amazon' ? [r[0], r[2], r[1], r[3]] : r;
+  else if ((r = /^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:$|[ T])/.exec(t))) [, d, m, a] = r;
   else return null;
   [a, m, d] = [Number(a), Number(m), Number(d)];
   if (a < 2000 || a > 2100 || m < 1 || m > 12 || d < 1 || d > diasNoMes(a, m)) return null;
@@ -176,7 +240,7 @@ const STATUS = new Map([
   ...['concluido', 'concluida', 'completed', 'complete', 'validado', 'validada', 'validated', 'pago', 'paga', 'paid',
     'confirmado', 'confirmada', 'confirmed', 'aprovado', 'aprovada', 'approved'].map((s) => [s, 'confirmada']),
   ...['pendente', 'pending', 'nao pago', 'nao paga', 'unpaid', 'em andamento', 'processando', 'em processamento',
-    'processing', 'aguardando'].map((s) => [s, 'pendente']),
+    'processing', 'aguardando', 'em revisao'].map((s) => [s, 'pendente']),
   ...['cancelado', 'cancelada', 'cancelled', 'canceled', 'invalido', 'invalida', 'invalid', 'devolvido', 'devolvida',
     'returned', 'refunded', 'reembolsado', 'reembolsada', 'rejeitado', 'rejeitada', 'rejected'].map((s) => [s, 'cancelada']),
 ]);
@@ -197,12 +261,12 @@ const criarHashChave = (segredo) => (partes) => crypto.createHmac('sha256', segr
 
 // ---------- cabeçalho ----------
 
-/** Liga cada campo do tipo à coluna da linha (o sinônimo que vem antes em COLUNAS vence). */
-function mapear(celulas, campos) {
+/** Liga cada campo do tipo à coluna da linha (o sinônimo que vem antes em COLUNAS vence; SO_DA_AMAZON só na Amazon). */
+function mapear(celulas, campos, loja) {
   const melhor = {};
   celulas.forEach((c, idx) => {
     const n = normalizarNome(c);
-    if (!n) return;
+    if (!n || (loja !== 'amazon' && SO_DA_AMAZON.has(n))) return;
     for (const campo of campos) {
       const p = COLUNAS[campo].indexOf(n);
       if (p >= 0 && (!melhor[campo] || p < melhor[campo].p)) melhor[campo] = { idx, p };
@@ -212,17 +276,22 @@ function mapear(celulas, campos) {
 }
 
 /**
- * Procura o cabeçalho nas primeiras LINHAS_PARA_CABECALHO linhas: a primeira com a data e o campo obrigatório do
- * tipo (comissão ou cliques). Sem cabeçalho: erro dizendo qual coluna faltou.
+ * Procura o cabeçalho nas primeiras LINHAS_PARA_CABECALHO linhas: a primeira com um campo obrigatório do tipo
+ * (comissão; cliques ou ID do clique) e com a data. `semDataOk` (veio a data do relatório, `dia`): a data por linha
+ * pode faltar, mas só se nenhuma outra coluna tem cara de data (RE_CARA_DE_DATA), para não juntar num dia só um
+ * relatório com data num formato de coluna que o painel não conhece (R1). Sem cabeçalho: erro dizendo o que faltou
+ * (a coluna do tipo ou, achada ela, a data: 'semData' pede a data do relatório; 'dataDesconhecida' não pede).
  */
-function acharCabecalho(linhas, tipo) {
+function acharCabecalho(linhas, tipo, { loja, semDataOk = false } = {}) {
   const campos = CAMPOS[tipo];
-  const obrigatorio = OBRIGATORIO[tipo];
-  let faltou = obrigatorio;
+  const temObrigatorio = (mapa) => OBRIGATORIO[tipo].some((c) => mapa[c] !== undefined);
+  let faltou = tipo;
   for (let i = 0; i < Math.min(linhas.length, LINHAS_PARA_CABECALHO); i++) {
-    const mapa = mapear(linhas[i], campos);
-    if (mapa.data !== undefined && mapa[obrigatorio] !== undefined) {
-      const usados = new Set(Object.values(mapa));
+    const mapa = mapear(linhas[i], campos, loja);
+    if (!temObrigatorio(mapa)) continue;
+    const usados = new Set(Object.values(mapa));
+    const caraDeData = mapa.data === undefined && linhas[i].some((c, idx) => !usados.has(idx) && RE_CARA_DE_DATA.test(normalizarNome(c)));
+    if (mapa.data !== undefined || (semDataOk && !caraDeData)) {
       return {
         indice: i,
         mapa,
@@ -230,61 +299,75 @@ function acharCabecalho(linhas, tipo) {
         colunas_ignoradas: linhas[i].map((c, idx) => (usados.has(idx) ? '' : textoLimpo(c).slice(0, MAX_NOME_COLUNA))).filter(Boolean),
       };
     }
-    if (mapa[obrigatorio] !== undefined) faltou = 'data';
+    if (faltou !== 'dataDesconhecida') faltou = caraDeData ? 'dataDesconhecida' : 'data';
   }
   throw recusar(400, SEM_COLUNA[faltou]);
 }
 
 // ---------- análise (sem banco) ----------
 
-function validarOpcoes({ loja, tipo, codigo } = {}) {
+function validarOpcoes({ loja, tipo, codigo, dia } = {}) {
   if (typeof loja !== 'string' || !LOJAS.includes(loja)) throw recusar(400, 'loja');
   const t = tipo === undefined || tipo === null || tipo === '' ? 'comissoes' : tipo;
   if (typeof t !== 'string' || !TIPOS.includes(t)) throw recusar(400, 'tipo');
   if (codigo !== undefined && codigo !== null && typeof codigo !== 'string') throw recusar(400, 'codigo');
   const c = lerCodigo(codigo);
   if (c === null) throw recusar(400, 'codigo');
-  return { loja, tipo: t, codigo: c || null };
+  // data do relatório (relatório sem data por linha): AAAA-MM-DD de um dia que existe; vazio = sem data
+  const semDia = dia === undefined || dia === null || dia === '';
+  if (!semDia && (typeof dia !== 'string' || !RE_DIA.test(dia) || lerData(dia) !== dia)) throw recusar(400, 'dia');
+  return { loja, tipo: t, codigo: c || null, dia: semDia ? null : dia };
 }
 
 const plural = (n, um, varios) => (n === 1 ? um : varios).replace('{n}', n);
 
 /**
  * Lê o arquivo e devolve o que seria importado, sem tocar no banco: { loja, tipo, codigo_arquivo, sha256,
- * colunas_usadas, colunas_ignoradas, lidas, ignoradas, linhas_ignoradas, registros, avisos }.
- * `registros` (comissões): { chave, data, codigo, produto, titulo, quantidade, venda_centavos, comissao_centavos,
- * status } e, sem pedido com o código do parâmetro, `chave_sem_codigo` (a chave sem o parâmetro, para achar a linha
- * importada antes sem código); (cliques): { dia, codigo, cliques }, já somados por dia e código. O pedido não sai daqui.
+ * colunas_usadas, colunas_ignoradas, lidas, ignoradas, linhas_ignoradas, so_cliques, registros, avisos }.
+ * `so_cliques` (comissões; null em cliques): linhas com comissão, venda e quantidade 0 depois de lidas, que ficam
+ * fora de `registros` (R2) e não contam como puladas.
+ * `registros` (comissões): { chave, sem_pedido, data, codigo, produto, titulo, quantidade, venda_centavos,
+ * comissao_centavos, status } e, sem pedido com o código do parâmetro, `chave_sem_codigo` (a chave sem o parâmetro,
+ * para achar a linha importada antes sem código); (cliques): { dia, codigo, cliques }, já somados por dia e código.
+ * O pedido não sai daqui. `opcoes.dia` (AAAA-MM-DD): a data de toda linha quando o arquivo não tem coluna de data.
  * `opcoes.hashChave(partes)` faz a chave (importar passa o HMAC com a chave local do banco). Sem ela, usa uma
  * chave aleatória desta chamada: as chaves só servem para comparar linhas do mesmo resultado, nunca para gravar.
  */
 export function analisar(buf, opcoes = {}) {
-  const { loja, tipo, codigo: codigoArquivo } = validarOpcoes(opcoes);
+  const { loja, tipo, codigo: codigoArquivo, dia: diaRelatorio } = validarOpcoes(opcoes);
   const hashChave = typeof opcoes.hashChave === 'function' ? opcoes.hashChave : criarHashChave(crypto.randomBytes(32));
   let csv;
   try { csv = lerCsv(buf); } catch (e) {
     if (e instanceof ErroCsv) throw new ErroImportacao(e.status, e.message);
     throw e;
   }
-  const cab = acharCabecalho(csv.linhas, tipo);
+  const cab = acharCabecalho(csv.linhas, tipo, { loja, semDataOk: diaRelatorio !== null });
   const { mapa } = cab;
+  const usaDia = mapa.data === undefined; // só sem coluna de data (e então veio `dia`)
   const dados = csv.linhas.slice(cab.indice + 1);
   if (dados.length === 0) throw new ErroImportacao(400, MENSAGENS_CSV.vazio);
   const numeros = csv.numeros.slice(cab.indice + 1);
   const sha256 = crypto.createHash('sha256').update(buf).digest('hex');
 
-  let ignoradas = 0; let milhar = 0; let desconhecido = 0;
+  let ignoradas = 0; let milhar = 0; let desconhecido = 0; let soCliques = 0;
   const linhasIgnoradas = [];
   const pular = (i) => { ignoradas++; if (linhasIgnoradas.length < MAX_LINHAS_IGNORADAS_LISTADAS) linhasIgnoradas.push(numeros[i]); };
   const codigoDe = (cel) => { const c = lerCodigo(cel('codigo')); return c === '' ? codigoArquivo : c; };
   const registros = [];
+  // célula como veio (sem espaços nas pontas) e como valor: "-" é vazio; nos números, `traco` diz que vale 0
+  const leitor = (linha) => {
+    const bruto = (campo) => (mapa[campo] === undefined ? '' : String(linha[mapa[campo]] ?? '').trim());
+    const cel = (campo) => { const v = bruto(campo); return v === TRACO ? '' : v; };
+    return { cel, traco: (campo) => bruto(campo) === TRACO, data: () => (usaDia ? diaRelatorio : lerData(cel('data'), { loja })) };
+  };
 
   if (tipo === 'cliques') {
     const somas = new Map();
+    const porLinha = mapa.cliques === undefined; // relatório com uma linha por clique (ID do clique, sem total)
     dados.forEach((linha, i) => {
-      const cel = (campo) => (mapa[campo] === undefined ? '' : String(linha[mapa[campo]] ?? '').trim());
-      const dia = lerData(cel('data'));
-      const n = lerInteiro(cel('cliques'));
+      const { cel, traco, data } = leitor(linha);
+      const dia = data();
+      const n = porLinha ? (cel('id_clique') ? 1 : null) : traco('cliques') ? 0 : lerInteiro(cel('cliques'));
       if (!dia || n === null) return pular(i);
       const codigo = formaDoCodigo(loja)(codigoDe(cel) ?? ''); // Amazon sem caixa (R15), como na atribuição
       const k = JSON.stringify([dia, codigo]);
@@ -296,21 +379,24 @@ export function analisar(buf, opcoes = {}) {
     const iguaisSemParametro = new Map(); // o mesmo, contando como se o arquivo viesse sem o código do parâmetro
     const contar = (mapa, base) => { const n = (mapa.get(base) ?? 0) + 1; mapa.set(base, n); return n; };
     dados.forEach((linha, i) => {
-      const cel = (campo) => (mapa[campo] === undefined ? '' : String(linha[mapa[campo]] ?? '').trim());
-      const data = lerData(cel('data'));
-      const comissao = lerDinheiro(cel('comissao'));
+      const { cel, traco, data: lerDataDaLinha } = leitor(linha);
+      const data = lerDataDaLinha();
+      const comissao = traco('comissao') ? { centavos: 0, milhar: false } : lerDinheiro(cel('comissao'));
       if (!data || !comissao) return pular(i);
       const venda = lerDinheiro(cel('venda'));
-      milhar += (comissao.milhar ? 1 : 0) + (venda?.milhar ? 1 : 0);
-      let quantidade = lerInteiro(cel('quantidade')) ?? 1;
+      let quantidade = traco('quantidade') ? 0 : lerInteiro(cel('quantidade')) ?? 1;
       const devolucoes = lerInteiro(cel('devolucoes')) ?? 0;
+      const devolvida = devolucoes > 0 && devolucoes >= quantidade;
+      if (!devolvida) quantidade -= devolucoes;
+      // só cliques (R2: o produto com cliques e sem venda e a "Other" da Amazon): não é venda; os cliques vêm do tipo cliques
+      if (comissao.centavos === 0 && (venda?.centavos ?? 0) === 0 && quantidade === 0) { soCliques++; return; }
+      milhar += (comissao.milhar ? 1 : 0) + (venda?.milhar ? 1 : 0);
       let status = 'pendente';
       if (mapa.status !== undefined) { status = lerStatus(cel('status')); if (!status) { desconhecido++; status = 'pendente'; } }
-      if (devolucoes > 0 && devolucoes >= quantidade) status = 'cancelada';
-      else quantidade -= devolucoes;
+      if (devolvida) status = 'cancelada';
       const item = cel('produto'); const lojaId = cel('loja_id');
       const p = loja === 'shopee' && item && lojaId ? `SHOPEE:${lojaId}.${item}` : item;
-      const produto = RE_PRODUTO.test(p) ? p : null;
+      const produto = RE_PRODUTO.test(p) && (loja !== 'amazon' || RE_ASIN.test(p)) ? p : null;
       const titulo = textoLimpo(cel('titulo')).slice(0, MAX_TITULO) || null;
       const codigo = codigoDe(cel);
       const valores = { data, codigo, produto, titulo, quantidade, venda_centavos: venda ? venda.centavos : 0, comissao_centavos: comissao.centavos, status };
@@ -321,7 +407,7 @@ export function analisar(buf, opcoes = {}) {
         // o pedido separa as vendas: só o código da coluna entra; preencher o código do arquivo depois só atualiza
         const base = hashChave(['pedido', loja, pedido, produto ?? '', formaDoCodigo(loja)(codigoColuna)]);
         const n = contar(iguais, base);
-        registros.push({ chave: n === 1 ? base : `${base}#${n}`, ...valores });
+        registros.push({ chave: n === 1 ? base : `${base}#${n}`, sem_pedido: false, ...valores });
         return;
       }
       // na chave, o código vai na forma da loja (Amazon sem caixa, R14); a coluna `codigo` guarda como veio
@@ -331,18 +417,20 @@ export function analisar(buf, opcoes = {}) {
       // a chave que a linha teria importada sem o parâmetro (o mesmo #n de então): só para achar a linha sem código
       const baseSem = semPedido(codigoColuna);
       const nSem = contar(iguaisSemParametro, baseSem);
-      registros.push(doParametro ? { chave, chave_sem_codigo: `${baseSem}#${nSem}`, ...valores } : { chave, ...valores });
+      registros.push(doParametro ? { chave, sem_pedido: true, chave_sem_codigo: `${baseSem}#${nSem}`, ...valores } : { chave, sem_pedido: true, ...valores });
     });
   }
 
   const avisos = [];
+  if (diaRelatorio !== null) avisos.push(usaDia ? MENSAGENS_IMPORTADOR.diaUsado : MENSAGENS_IMPORTADOR.diaIgnorado);
   if (tipo === 'comissoes' && mapa.status === undefined) avisos.push(MENSAGENS_IMPORTADOR.semStatus);
   if (desconhecido) avisos.push(plural(desconhecido, '1 linha com status que o painel não conhece entrou como pendente.', '{n} linhas com status que o painel não conhece entraram como pendentes.'));
   if (milhar) avisos.push(plural(milhar, '1 valor como 1.234, sem vírgula, foi lido como milhar. Confira os números.', '{n} valores como 1.234, sem vírgula, foram lidos como milhar. Confira os números.'));
+  if (soCliques) avisos.push(plural(soCliques, ...MENSAGENS_IMPORTADOR.soCliques));
   return {
     loja, tipo, codigo_arquivo: codigoArquivo, sha256,
     colunas_usadas: cab.colunas_usadas, colunas_ignoradas: cab.colunas_ignoradas,
-    lidas: dados.length, ignoradas, linhas_ignoradas: linhasIgnoradas, registros, avisos,
+    lidas: dados.length, ignoradas, linhas_ignoradas: linhasIgnoradas, so_cliques: tipo === 'cliques' ? null : soCliques, registros, avisos,
   };
 }
 
@@ -380,12 +468,14 @@ function codigosConhecidos(db, loja) {
 /**
  * Importa (ou só mostra a prévia, `previa: true`) um arquivo de comissões ou cliques de uma loja.
  * Devolve o resumo: { previa, importacao_id, loja, tipo, codigo_arquivo, lidas, novas, atualizadas, repetidas,
- * ignoradas, linhas_ignoradas, colunas_usadas, colunas_ignoradas, periodo, comissao_centavos, cliques_total,
- * sem_grupo, codigos_desconhecidos, ja_importado, avisos }. Em cliques, novas/atualizadas/repetidas contam
- * pares dia × código (o arquivo pode ter várias linhas por dia). Tudo numa transação: falhou, nada fica.
+ * ignoradas, linhas_ignoradas, so_cliques, colunas_usadas, colunas_ignoradas, periodo, comissao_centavos, cliques_total,
+ * sem_grupo, codigos_desconhecidos, ja_importado, outro_codigo, recebem_codigo, avisos }. Em cliques,
+ * novas/atualizadas/repetidas contam pares dia × código (o arquivo pode ter várias linhas por dia) e
+ * outro_codigo/recebem_codigo/so_cliques são null. `dia`: a data do relatório sem data por linha. Tudo numa transação:
+ * falhou, nada fica.
  */
-export function importar(db, buf, { loja, tipo, codigo, previa = false, userId = null, now = Date.now() } = {}) {
-  const a = analisar(buf, { loja, tipo, codigo, hashChave: criarHashChave(chavePseudo(db)) });
+export function importar(db, buf, { loja, tipo, codigo, dia, previa = false, userId = null, now = Date.now() } = {}) {
+  const a = analisar(buf, { loja, tipo, codigo, dia, hashChave: criarHashChave(chavePseudo(db)) });
   const ehCliques = a.tipo === 'cliques';
   const jaImportado = !!db.prepare('SELECT 1 FROM importacoes WHERE loja = ? AND tipo = ? AND arquivo_sha256 = ?').get(a.loja, a.tipo, a.sha256);
 
@@ -415,12 +505,49 @@ export function importar(db, buf, { loja, tipo, codigo, previa = false, userId =
   };
   const contar = (ops, t) => ops.filter((o) => o.tipo === t).length;
 
+  /**
+   * Avisos de código (D1), contados antes de gravar. recebem: linhas do banco sem código que vão ganhar o código
+   * do arquivo (R4). outro: linhas novas sem pedido, com produto ou título, que casam (data e produto ou título)
+   * com uma linha já gravada de outro código ou sem código; cada linha do banco conta uma vez só, e ficam de fora
+   * as do próprio arquivo, as que vão receber o código e as zeradas (só cliques, R2). Sem produto nem título não há
+   * "mesmo produto".
+   */
+  const contarCodigos = (ops) => {
+    if (ehCliques) return { outro: null, recebem: null };
+    const recebem = ops.filter((o) => o.chaveAntiga).length;
+    const novas = ops.filter((o) => o.tipo === 'nova' && o.r.sem_pedido && (o.r.produto ?? o.r.titulo));
+    if (novas.length === 0) return { outro: 0, recebem };
+    const forma = formaDoCodigo(a.loja);
+    const casamento = (data, produto, titulo) => JSON.stringify([String(data).slice(0, 10), produto ?? titulo ?? '']);
+    const fora = new Set([...a.registros.map((r) => r.chave), ...ops.filter((o) => o.chaveAntiga).map((o) => o.chaveAntiga)]);
+    const datas = novas.map((o) => o.r.data).sort();
+    const doBanco = new Map(); // casamento → códigos (na forma da loja) das linhas gravadas
+    const sql = `SELECT chave, data, produto, titulo, codigo, quantidade, venda_centavos, comissao_centavos FROM comissoes
+      WHERE loja = ? AND substr(data, 1, 10) BETWEEN ? AND ?`;
+    for (const l of db.prepare(sql).all(a.loja, datas[0], datas[datas.length - 1])) {
+      if (fora.has(l.chave)) continue;
+      if (!l.quantidade && !l.venda_centavos && !l.comissao_centavos) continue; // só cliques, gravada antes do R2: não é venda
+      const k = casamento(l.data, l.produto, l.titulo);
+      if (!doBanco.has(k)) doBanco.set(k, []);
+      doBanco.get(k).push(forma(l.codigo ?? ''));
+    }
+    let outro = 0;
+    for (const { r } of novas) {
+      const lista = doBanco.get(casamento(r.data, r.produto, r.titulo));
+      const i = lista ? lista.findIndex((c) => c !== forma(r.codigo ?? '')) : -1;
+      if (i >= 0) { lista.splice(i, 1); outro++; }
+    }
+    return { outro, recebem };
+  };
+
   const gravar = () => {
     const ops = classificar();
-    if (previa) return { ops, id: null };
+    const codigos = contarCodigos(ops);
+    if (previa) return { ops, codigos, id: null };
     const { lastInsertRowid } = db.prepare(`INSERT INTO importacoes (loja, tipo, arquivo_sha256, codigo_arquivo, lidas, novas,
       atualizadas, ignoradas, criado_em, user_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(a.loja, a.tipo, a.sha256, a.codigo_arquivo, a.lidas, contar(ops, 'nova'), contar(ops, 'atualizada'), a.ignoradas, now, userId);
+      .run(a.loja, a.tipo, a.sha256, a.codigo_arquivo, a.lidas, contar(ops, 'nova'), contar(ops, 'atualizada'),
+        a.ignoradas + (a.so_cliques ?? 0), now, userId); // no histórico, as só de cliques vão com as puladas (não são repetidas)
     const id = Number(lastInsertRowid);
     if (ehCliques) {
       const ins = db.prepare('INSERT INTO cliques_loja (loja, dia, codigo, cliques, importacao_id, atualizado_em) VALUES (?, ?, ?, ?, ?, ?)');
@@ -440,9 +567,9 @@ export function importar(db, buf, { loja, tipo, codigo, previa = false, userId =
         else if (t === 'atualizada') upd.run(r.chave, ...v, now, a.loja, chaveAntiga ?? r.chave);
       }
     }
-    return { ops, id };
+    return { ops, codigos, id };
   };
-  const { ops, id } = previa ? gravar() : emTransacao(db, gravar);
+  const { ops, codigos, id } = previa ? gravar() : emTransacao(db, gravar);
 
   const datas = a.registros.map((r) => (ehCliques ? r.dia : r.data)).sort();
   let semGrupo = null; let desconhecidos = null;
@@ -460,15 +587,19 @@ export function importar(db, buf, { loja, tipo, codigo, previa = false, userId =
     avisos.push(plural(a.ignoradas, `1 linha foi pulada por valor ou data inválidos. ${resto}`, `{n} linhas foram puladas por valor ou data inválidos. ${resto}`));
   }
   if (jaImportado) avisos.push(MENSAGENS_IMPORTADOR.jaImportado);
+  const M = MENSAGENS_IMPORTADOR;
+  if (codigos.outro) avisos.push(plural(codigos.outro, ...(previa ? M.outroCodigoPrevia : M.outroCodigoGravado)));
+  if (codigos.recebem) avisos.push(plural(codigos.recebem, ...(previa ? M.recebemCodigoPrevia : M.recebemCodigoGravado)));
   return {
     previa: !!previa, importacao_id: id, loja: a.loja, tipo: a.tipo, codigo_arquivo: a.codigo_arquivo,
     lidas: a.lidas, novas: contar(ops, 'nova'), atualizadas: contar(ops, 'atualizada'), repetidas: contar(ops, 'repetida'),
-    ignoradas: a.ignoradas, linhas_ignoradas: a.linhas_ignoradas,
+    ignoradas: a.ignoradas, linhas_ignoradas: a.linhas_ignoradas, so_cliques: a.so_cliques,
     colunas_usadas: a.colunas_usadas, colunas_ignoradas: a.colunas_ignoradas,
     periodo: datas.length ? { de: datas[0], ate: datas[datas.length - 1] } : null,
     comissao_centavos: ehCliques ? null : a.registros.filter((r) => r.status !== 'cancelada').reduce((s, r) => s + r.comissao_centavos, 0),
     cliques_total: ehCliques ? a.registros.reduce((s, r) => s + r.cliques, 0) : null,
-    sem_grupo: semGrupo, codigos_desconhecidos: desconhecidos, ja_importado: jaImportado, avisos,
+    sem_grupo: semGrupo, codigos_desconhecidos: desconhecidos, ja_importado: jaImportado,
+    outro_codigo: codigos.outro, recebem_codigo: codigos.recebem, avisos,
   };
 }
 
@@ -547,7 +678,7 @@ export function montarRotas(app, ctx) {
     const q = req.query; // parâmetro repetido (?loja=a&loja=b) vira lista e é recusado na validação
     if (q.previa !== undefined && typeof q.previa !== 'string') throw recusar(400, 'previa'); // ?previa=1&previa=1
     return importar(db, req.body, {
-      loja: q.loja, tipo: q.tipo, codigo: q.codigo,
+      loja: q.loja, tipo: q.tipo, codigo: q.codigo, dia: q.dia,
       previa: q.previa === '1' || q.previa === 'true', userId: req.user?.id ?? null,
     });
   }, MENSAGENS_IMPORTADOR.interno));

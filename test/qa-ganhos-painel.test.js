@@ -585,7 +585,7 @@ test('CA3/CA4/CA6: no navegador real, o Dono associa códigos a um bloco e a um 
   assert.match(texto, /Mercado Livre 2 envios, nenhum com código configurado/);
   assert.match(texto, /Amazon 100% Boa/);
   assert.match(texto, /Shopee 50% Baixa/);
-  assert.match(texto, /Atenção\. Parte dos links de Shopee saiu sem código de rastreio/);
+  assert.match(texto, /Atenção\. Parte dos links da Shopee saiu sem Sub_id\. Confira se a extensão está na versão 1\.4\.1 ou mais nova/);
   assert.doesNotMatch(texto, /Atenção\. Parte dos links de (Amazon|Mercado Livre)/);
   assert.doesNotMatch(texto, /NaN|undefined|\bnull\b/);
   assert.equal(await p.js("[...document.querySelectorAll('#pagina tbody tr')].map((r) => r.cells[0].textContent).join('|')"), 'Achados|Casa', 'tabela por grupo, o menos coberto primeiro, com nomes e não JIDs');

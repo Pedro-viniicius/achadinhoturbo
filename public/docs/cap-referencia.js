@@ -65,6 +65,8 @@ docsCapitulo({
           ['Conversão', 'Em [[Ganhos]]: vendas divididas pelos cliques do relatório da loja.'],
           ['Custo por membro novo', 'Em [[Ganhos]]: o gasto com anúncios informado, dividido pelas entradas no mesmo período. Só para quem tem gasto próprio (grupo ou bloco).'],
           ['Retorno', 'Em [[Ganhos]]: comissão menos gasto com anúncios. Positivo é lucro, negativo é prejuízo.'],
+          ['Período anterior', 'Em [[Ganhos]]: os mesmos N dias logo antes do período escolhido, com os mesmos filtros. A variação (“+300%, mais”) compara com ele; se ele deu zero, aparece só o valor.'],
+          ['Data do relatório', 'Em [[Ganhos → Importar comissões]]: o dia em que entram as linhas de um relatório que é um total do período, sem data em cada linha (como o “ID de rastreamento” da Amazon).'],
         ], titulo: 'Rastreio e ganhos' },
         { termos: [
           ['Espelhamento', 'Disparo que copia ofertas da Amazon de grupos de origem para os seus grupos, com a sua tag e a mensagem completa.'],

@@ -276,24 +276,31 @@ async function lerProdutoShopee(url, shopee) {
 }
 
 /**
- * Pedir link com Sub_id à extensão do Chrome? Desligado enquanto a extensão não sabe aplicar o Sub_id
- * (SHOPEE_SUBID_CAMPO vazio em extension/background.js; formato pendente do dono, P4 do plano dashboard-ganhos):
- * cada pedido gastaria uma vaga do teto de links por hora para voltar sem o Sub_id. Desligado, o Sub_id só sai pela
- * Open API; sem ela, linkAfiliadoShopeeRastreado recusa com SubIdIndisponivel e quem envia usa o link padrão.
- * Ligar quando a extensão aplicar o Sub_id (e o teste de src/lojas.js que fixa o valor). Ligar aqui não basta: a
- * extensão só manda o Sub_id ao portal com SHOPEE_SUBID_CAMPO (extension/background.js) preenchido. Mude os dois juntos.
+ * Pedir link com Sub_id à extensão do Chrome? Ligado desde o P4 do plano dashboard-ganhos: a extensão manda o Sub_id
+ * ao "Link personalizado" do portal em advancedLinkParams.subId1 (SHOPEE_SUBID_CAMPO em extension/background.js;
+ * formato em docs/produto/referencias/relatorios-dos-portais.md). Sem a Open API (ou se ela falhar), o pedido com
+ * Sub_id vai à extensão e gasta uma vaga do teto de links por hora (src/links.js; esgotado → LIMITE_SHOPEE_ATINGIDO).
+ * Quem pede o Sub_id guarda vagas desse teto para o link padrão (`reservaVagas`; o envio usa RESERVA_LINK_BASE_SHOPEE
+ * de src/envios.js) e para de pedir Sub_id no envio assim que um não volta aplicado (extensão antiga, timeout, falha).
+ * O Sub_id só conta como aplicado quando a extensão responde sub_id_aplicado: true; a extensão antiga (sem o campo)
+ * devolve o link de afiliado sem Sub_id, com sub_id null. Desligado, o Sub_id só sairia pela Open API e, sem ela,
+ * linkAfiliadoShopeeRastreado recusaria com SubIdIndisponivel. O valor é fixado por test/lojas.test.js; os dois
+ * interruptores (este e SHOPEE_SUBID_CAMPO) mudam juntos.
  */
-export const SUBID_PELA_EXTENSAO = false;
+export const SUBID_PELA_EXTENSAO = true;
 
 /**
  * O link com Sub_id não saiu sem pedir à extensão (ver SUBID_PELA_EXTENSAO). `motivo` vai para a cobertura do
- * rastreio: 'subid_extensao_indisponivel' (sem a API) ou 'falha_link' (a API falhou). Nunca carrega Sub_id nem ID.
+ * rastreio: 'subid_extensao_indisponivel' (sem a API), 'falha_link' (a API falhou) ou 'limite_shopee' (o teto de links
+ * por hora chegou à reserva do link padrão, `reservaVagas`). Nunca carrega Sub_id nem ID.
  */
 export class SubIdIndisponivel extends Error {
   constructor(motivo = 'subid_extensao_indisponivel') {
-    super('O Sub_id da Shopee só sai pela API, que não gerou o link agora.');
+    const limite = motivo === 'limite_shopee';
+    super(limite ? 'O Sub_id da Shopee ficou sem vaga no limite de links por hora; o link padrão segue valendo.'
+      : 'O Sub_id da Shopee só sai pela API, que não gerou o link agora.');
     this.name = 'SubIdIndisponivel';
-    this.motivo = motivo === 'falha_link' ? 'falha_link' : 'subid_extensao_indisponivel';
+    this.motivo = limite || motivo === 'falha_link' ? motivo : 'subid_extensao_indisponivel';
   }
 }
 
@@ -318,8 +325,10 @@ function linkGuardadoShopee(shopee, urlProduto, id, subId) {
  * Link da extensão sem longLink (ou sem an_) sai neste disparo, mas não é guardado.
  * Com Sub_id, a extensão só é chamada se `subIdPelaExtensao === true` (padrão SUBID_PELA_EXTENSAO); senão, sem link
  * da API → SubIdIndisponivel, sem pedido nenhum (o link padrão, sem Sub_id, segue indo pela extensão como hoje).
+ * `reservaVagas` (inteiro > 0; senão sem reserva): com Sub_id, a extensão só é chamada se links.vagasShopee() passa
+ * dela; senão SubIdIndisponivel('limite_shopee'), sem pedido. O link padrão, a API e o link guardado não olham a reserva.
  */
-async function linkAfiliadoShopee(base, { shopee, links, idAfiliado, subId, subIdPelaExtensao = SUBID_PELA_EXTENSAO }) {
+async function linkAfiliadoShopee(base, { shopee, links, idAfiliado, subId, subIdPelaExtensao = SUBID_PELA_EXTENSAO, reservaVagas = 0 }) {
   const id = typeof idAfiliado === 'string' ? idAfiliado.trim() : '';
   if (!RE_ID_AFILIADO.test(id)) throw new ErroShopee('sem_id');
   const sub = typeof subId === 'string' && RE_SUB_ID.test(subId) ? subId : '';
@@ -337,10 +346,13 @@ async function linkAfiliadoShopee(base, { shopee, links, idAfiliado, subId, subI
     try { link = await shopee.gerarLink(urlProduto, ...(sub ? [{ subId: sub }] : [])); } catch { link = null; }
     daApi = link != null;
   }
-  // teto da extensão: sem o formato do Sub_id, o pedido voltaria sem ele (ver SUBID_PELA_EXTENSAO)
+  // desligado (subIdPelaExtensao !== true), o Sub_id não vai à extensão: economiza o teto de links por hora
   if (link == null && sub && subIdPelaExtensao !== true) throw new SubIdIndisponivel(apiTentada ? 'falha_link' : 'subid_extensao_indisponivel');
   if (link == null) {
     if (typeof links?.requestLinkShopee !== 'function') throw new Error('Serviço de links indisponível.');
+    // as últimas vagas da hora ficam para o link padrão, sem o qual a oferta não sai para ninguém (R3/S2)
+    const reserva = Number.isSafeInteger(reservaVagas) && reservaVagas > 0 ? reservaVagas : 0;
+    if (sub && reserva && typeof links.vagasShopee === 'function' && !(links.vagasShopee() > reserva)) throw new SubIdIndisponivel('limite_shopee');
     const r = await links.requestLinkShopee(sub ? { url: urlProduto, subId: sub } : { url: urlProduto });
     link = r?.link;
     longo = r?.longo ?? null;
@@ -361,13 +373,13 @@ async function linkAfiliadoShopee(base, { shopee, links, idAfiliado, subId, subI
 /**
  * Link de afiliado da Shopee com o Sub_id de rastreio (plano dashboard-ganhos, etapa 5) → { link, sub_id }.
  * `base`: o link ou o endereço do produto (tem de ser da Shopee). deps: { shopee, links, idAfiliado, subId? }.
- * `sub_id` é null quando o Sub_id não foi pedido, era inválido ou não foi aplicado (ex.: extensão sem o formato do
- * Sub_id, ou antiga): o link continua de afiliado, o mesmo de sem Sub_id. Erros: os do link padrão e, com Sub_id
+ * `sub_id` é null quando o Sub_id não foi pedido, era inválido ou não foi aplicado (ex.: extensão antiga, que não
+ * responde sub_id_aplicado): o link continua de afiliado, o mesmo de sem Sub_id. Erros: os do link padrão e, com Sub_id
  * válido e sem link da API, SubIdIndisponivel (a extensão só recebe Sub_id com `subIdPelaExtensao: true`; padrão
- * SUBID_PELA_EXTENSAO).
+ * SUBID_PELA_EXTENSAO; nem com o teto da hora na `reservaVagas` do link padrão: motivo 'limite_shopee').
  */
-export async function linkAfiliadoShopeeRastreado(base, { shopee, links, idAfiliado, subId, subIdPelaExtensao = SUBID_PELA_EXTENSAO } = {}) {
-  return linkAfiliadoShopee(exigirLoja('shopee', base), { shopee, links, idAfiliado, subId, subIdPelaExtensao });
+export async function linkAfiliadoShopeeRastreado(base, { shopee, links, idAfiliado, subId, subIdPelaExtensao = SUBID_PELA_EXTENSAO, reservaVagas = 0 } = {}) {
+  return linkAfiliadoShopee(exigirLoja('shopee', base), { shopee, links, idAfiliado, subId, subIdPelaExtensao, reservaVagas });
 }
 
 /**

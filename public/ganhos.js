@@ -5,6 +5,10 @@
 // o diálogo "Importar comissões" (relatório CSV da loja, com prévia antes de gravar) e o diálogo "Gasto com anúncios".
 // Tudo aqui é só do Dono (decisão P2): o Operador não tem o item de menu, a página, a coluna Rastreio nem o fieldset, e o
 // painel nunca chama /api/rastreio nem /api/ganhos como Operador (daria 403).
+// Entrega C (docs/produto/planos/dashboard-ganhos-c.md, etapa 3): variação contra o período anterior nos cartões (M16,
+// comparar=1 só no GET por=grupo), clique no grupo filtrando "Por oferta" (por=oferta&grupo=, sem bloco), link da oferta para
+// a página do produto na loja (sem afiliado), filtros no endereço (#ganhos?periodo=&bloco=&loja=&de=&ate=) e "Ver ganhos" no
+// cartão do bloco. Na importação (P5): .zip com o CSV dentro, "Data do relatório" quando o servidor pede e os avisos de código.
 // Todo texto que veio de um arquivo CSV (título, código, nome de coluna) passa por esc(): o servidor não higieniza HTML.
 // Usa os utilitários globais de app.js ($, $$, esc, api, aviso, tentar, mostrarErros, podeEquipe, rotaAtual, S) e de
 // paineis.js (fmtPct, nomeGrupo); eles só são chamados depois que todos os scripts carregaram.
@@ -29,7 +33,19 @@ const RASTREIO_RE_TAG_AMAZON = /^[A-Za-z0-9_-]{2,64}$/;
 // `foco`: seletor do controle que deve receber o foco quando a página terminar de ser redesenhada por um filtro ('' = não mexer).
 // `ordem`: coluna e sentido da tabela "Por grupo"; `dados`: o que a última carga trouxe ({ blocos, cob, din }), para ordenar e
 // "Mostrar mais" sem pedir tudo de novo.
-const GANHOS = { periodo: '30d', bloco: '', loja: '', de: '', ate: '', todos: false, todosGrupo: false, todasOfertas: false, ordem: { col: 'comissao', dir: 'desc' }, dados: null, ger: 0, foco: '' };
+// `grupo`: o grupo clicado em "Por grupo" ({ jid, nome, dados } de GET por=oferta&grupo=) ou null; some a cada carga (P-C4) e não
+// vai para o endereço. `gerGrupo`: geração do pedido do grupo, para a resposta velha não sobrescrever a escolha mais nova.
+const GANHOS = { periodo: '30d', bloco: '', loja: '', de: '', ate: '', todos: false, todosGrupo: false, todasOfertas: false, ordem: { col: 'comissao', dir: 'desc' }, dados: null, ger: 0, foco: '', grupo: null, gerGrupo: 0 };
+// Página do produto na loja, sem afiliado, como src/ganhos.js urlDaOferta (via lerChave) monta. O painel só faz link do que casa
+// inteiro com o formato da loja da linha (defesa em profundidade): outro domínio, link de afiliado ou parâmetro a mais, sem link.
+const GANHOS_RE_URL_OFERTA = Object.freeze({
+  amazon: /^https:\/\/www\.amazon\.com\.br\/dp\/[A-Z0-9]{10}$/,
+  mercadolivre: /^https:\/\/produto\.mercadolivre\.com\.br\/MLB-\d{1,20}$/,
+  shopee: /^https:\/\/shopee\.com\.br\/product\/\d{1,20}\/\d{1,20}$/,
+});
+const GANHOS_RE_DIA = /^\d{4}-\d{2}-\d{2}$/;
+const GANHOS_RE_BLOCO = /^[1-9]\d{0,14}$/; // id canônico: '01', '1e0' e '+1' não entram pelo endereço
+const GANHOS_CHAVES_ENDERECO = ['periodo', 'bloco', 'loja', 'de', 'ate'];
 /** Associações já carregadas (GET /api/rastreio/codigos). `carregado` falso = não sei: a tela não oferece edição às cegas. */
 const RASTREIO = { codigos: [], carregado: false, fresco: 0 };
 
@@ -45,7 +61,7 @@ const TEXTOS_GANHOS = {
     titulo: 'Códigos de rastreio (opcional)',
     intro: 'Para separar o ganho deste nicho. Sem preencher, nada muda: os links saem como hoje.',
     amazonDica: 'Sem ele, vale a tag padrão da sua conta.',
-    shopeeDica: 'Só no bloco: cada Sub_id pede um link a mais à Shopee. Hoje o Sub_id só sai pela API de afiliados da Shopee; sem ela, o link sai sem Sub_id, como hoje.',
+    shopeeDica: 'Só no bloco: cada Sub_id pede um link a mais à Shopee. O Sub_id sai pela API da Shopee ou pela extensão (versão 1.4.1 ou mais nova). Se não der, o link sai sem Sub_id e a falta aparece na cobertura.',
     mlDica: 'Sem escolher, vale a etiqueta do disparo.',
     atalho: 'Usar a mesma etiqueta do bloco',
     naoCarregou: 'Não consegui carregar os códigos de rastreio agora. Recarregue a página para editá-los.',
@@ -63,9 +79,16 @@ const TEXTOS_GANHOS = {
     amazon: 'O ID de rastreamento da Amazon costuma terminar em -20, como casa-20. Confira em Gerenciar IDs de rastreamento.',
     shopee: 'O Sub_id aceita só letras e números, sem espaços (até 30 caracteres).',
   },
-  shopeeSemApi: 'Hoje o Sub_id só sai pela API de afiliados da Shopee; sem ela, o link sai sem Sub_id.',
+  shopeeSemApi: 'O Sub_id sai pela API da Shopee ou pela extensão (versão 1.4.1 ou mais nova). Se não der, o link sai sem Sub_id e a falta aparece na cobertura.',
   erroDinheiro: 'Não consegui carregar os valores em reais.',
   semMovimento: 'Nenhuma comissão neste período e filtro.',
+  periodoAnterior: 'Período anterior',
+  oferta: {
+    grupo: 'Só as vendas atribuídas a este grupo. A venda atribuída ao bloco inteiro não entra, porque não se divide entre os grupos.',
+    todas: 'Ver todas as ofertas',
+    grupoVazio: 'Nenhuma venda com produto atribuída a este grupo no período e filtro.',
+    link: 'na loja, sem seu link de afiliado (abre em outra aba)',
+  },
   vazio: {
     titulo: 'Ainda não há ganhos para mostrar',
     passo1: ['1. Rastreie os links por grupo', ' (opcional, mas é o que separa o ganho por grupo): em Blocos de análise, informe um código por bloco.'],
@@ -78,22 +101,28 @@ const TEXTOS_GANHOS = {
     'Cliques vêm do relatório de cliques da loja que você importa, não do Rotacionador de Links. Sem esse relatório, ganho por clique e conversão ficam em “—”, e só contam as lojas que têm cliques importados no período.',
     '“Sem grupo identificado” é a venda cujo código não é de nenhum grupo ou bloco seu, ou que saiu com o código padrão da loja. Ela entra no total, mas em nenhum grupo.',
     'Cobertura que não chega ao total quer dizer que algum link saiu sem o código: Sub_id recusado, limite da Shopee ou etiqueta que falhou.',
+    'Período anterior é o mesmo número de dias logo antes do período escolhido, com os mesmos filtros. A porcentagem compara com ele; quando ele é zero, aparece só o valor dele, sem porcentagem.',
     'O gasto é repartido igualmente pelos dias do período informado. Custo por membro novo é o gasto dividido pelas entradas no mesmo período; só existe para quem tem gasto próprio (um grupo ou um bloco). As entradas valem só dentro do prazo de guarda de Ajustes.',
   ],
   importar: {
     titulo: 'Importar comissões ou cliques',
-    intro: 'Baixe o relatório no portal da loja e envie o arquivo CSV. Até 5 MB. Dados de comprador não são lidos nem guardados.',
+    intro: 'Baixe o relatório no portal da loja e envie o arquivo CSV (ou o .zip com o CSV dentro, como o da Amazon). Até 5 MB. Dados de comprador não são lidos nem guardados.',
     semLoja: 'Escolha a loja do arquivo: Shopee, Amazon ou Mercado Livre.',
     semArquivo: 'Escolha o arquivo CSV do relatório.',
     tipoErrado: 'Este arquivo não é um CSV. Baixe o relatório do portal em CSV e tente de novo.',
     grande: 'O arquivo tem mais de 5 MB. Baixe o relatório de um período menor (um mês por vez).',
     semConexao: 'Não consegui importar agora. Nada foi salvo. Tente de novo; se repetir, veja o histórico do programa.',
     soDono: 'Só o Dono pode importar comissões.',
+    // a frase do servidor (src/importador.js MENSAGENS_IMPORTADOR.semData) que faz o campo "Data do relatório" aparecer
+    semDataServidor: 'Este relatório não tem data por linha: informe a data do relatório.',
+    dia: 'Data do relatório',
+    diaDica: 'Só para relatório que é um total do período, sem data em cada linha (como o “ID de rastreamento” da Amazon): todas as linhas entram no dia escolhido. Escolha um dia dentro do período do relatório.',
+    semDia: 'Escolha a data do relatório.',
     dicas: {
       '': 'Escolha a loja para ver onde baixar o relatório.',
-      shopee: 'No portal Shopee Afiliados, baixe o relatório de conversões (vendas) em CSV.',
-      amazon: 'Na Central de Associados da Amazon, baixe o relatório de ganhos (pedidos) em CSV.',
-      mercadolivre: 'Na Central de Afiliados do Mercado Livre, baixe o relatório de comissões em CSV.',
+      shopee: 'No portal Shopee Afiliados, escolha “Relatório de vendas” (ou “Relatório de cliques”) e use o botão “Exportar”.',
+      amazon: 'Na Central de Associados da Amazon, baixe o relatório “Produto relacionado” (comissões) ou “ID de rastreamento”. Pode ser o .zip. O “ID de rastreamento” não tem data por linha e pede a “Data do relatório”.',
+      mercadolivre: 'Ainda não há relatório para importar do Mercado Livre.',
       cliques: 'Relatório de cliques por dia da loja, em CSV. É dele que vem o ganho por clique.',
     },
     campos: { data: 'Data', pedido: 'Pedido', loja_id: 'Loja', produto: 'Produto', titulo: 'Título', codigo: 'Código de rastreio', venda: 'Valor da venda', comissao: 'Comissão', status: 'Status', quantidade: 'Quantidade', devolucoes: 'Devoluções', cliques: 'Cliques' },
@@ -138,11 +167,18 @@ function rastreioSelosHtml(v, lojas = ['mercadolivre', 'amazon', 'shopee']) {
   return lojas.filter((l) => v[l]).map((l) => `<span class="chip rastreio-selo">${nome[l]} <b>${esc(v[l])}</b></span>`).join(' ');
 }
 
-/** Linha do cartão do bloco: "Rastreio: …" (só Dono, com os códigos carregados); senão ''. */
+/**
+ * Linhas do cartão do bloco, só para o Dono: "Rastreio: …" (com os códigos carregados) e o atalho "Ver ganhos" para
+ * #ganhos?bloco=<id> (CA6 do plano C; não depende dos códigos). Operador: ''.
+ */
 function rastreioLinhaBloco(id) {
-  if (!podeEquipe() || !RASTREIO.carregado) return '';
+  if (!podeEquipe()) return '';
+  const idOk = GANHOS_RE_BLOCO.test(String(id)) ? String(id) : '';
+  const nome = idOk ? (S.blocks || []).find((b) => String(b.id) === idOk)?.name : '';
+  const ver = idOk ? `<p class="dica" style="margin:0"><a class="alvo24" href="#ganhos?bloco=${idOk}"${nome ? ` aria-label="Ver ganhos do bloco ${esc(nome)}"` : ''}>Ver ganhos</a></p>` : '';
+  if (!RASTREIO.carregado) return ver;
   const selos = rastreioSelosHtml(rastreioDe('bloco', id));
-  return `<p class="dica" style="margin:0">${selos ? `Rastreio: ${selos}` : TEXTOS_GANHOS.bloco.cartaoPadrao}</p>`;
+  return `<p class="dica" style="margin:0">${selos ? `Rastreio: ${selos}` : TEXTOS_GANHOS.bloco.cartaoPadrao}</p>${ver}`;
 }
 
 /**
@@ -373,14 +409,61 @@ function ganhosLerReais(texto) {
   return negativo ? -centavos : centavos;
 }
 
-/** Consulta de GET /api/rastreio/cobertura e de GET /api/ganhos (com `por`) pelos filtros da tela. */
-function ganhosConsulta(por) {
+/**
+ * Consulta de GET /api/rastreio/cobertura e de GET /api/ganhos (com `por`) pelos filtros da tela. `por=grupo` leva comparar=1
+ * (o período anterior dos cartões, M16, vem dele). `grupo`: só as ofertas desse grupo, sem bloco (o servidor recusa os dois).
+ */
+function ganhosConsulta(por, { grupo = '' } = {}) {
+  const p = new URLSearchParams({ periodo: GANHOS.periodo });
+  if (GANHOS.periodo === 'custom') { if (GANHOS.de) p.set('de', GANHOS.de); if (GANHOS.ate) p.set('ate', GANHOS.ate); }
+  if (GANHOS.bloco && !grupo) p.set('bloco', GANHOS.bloco);
+  if (GANHOS.loja) p.set('loja', GANHOS.loja);
+  if (por) p.set('por', por);
+  if (grupo) p.set('grupo', grupo);
+  if (por === 'grupo') p.set('comparar', '1');
+  return '?' + p.toString();
+}
+
+/** Endereço dos filtros atuais (D6): '#ganhos' com tudo no padrão (30 dias, sem bloco, sem loja). O grupo clicado não entra. */
+function ganhosEndereco() {
+  if (GANHOS.periodo === '30d' && !GANHOS.bloco && !GANHOS.loja) return '#ganhos';
   const p = new URLSearchParams({ periodo: GANHOS.periodo });
   if (GANHOS.periodo === 'custom') { if (GANHOS.de) p.set('de', GANHOS.de); if (GANHOS.ate) p.set('ate', GANHOS.ate); }
   if (GANHOS.bloco) p.set('bloco', GANHOS.bloco);
   if (GANHOS.loja) p.set('loja', GANHOS.loja);
-  if (por) p.set('por', por);
-  return '?' + p.toString();
+  return '#ganhos?' + p.toString();
+}
+
+/**
+ * Filtros vindos do endereço (#ganhos?…). Sem nenhuma chave conhecida, nada muda (a navegação pelo menu não perde filtro).
+ * Com alguma, tudo volta ao padrão e só entra o valor que passa na lista ou na regex; repetido (?loja=a&loja=b) é ignorado.
+ * Nenhum valor daqui vai para HTML ou seletor sem passar por essas listas.
+ */
+function ganhosLerEndereco(params) {
+  if (!params || typeof params.getAll !== 'function' || !GANHOS_CHAVES_ENDERECO.some((k) => params.has(k))) return;
+  const um = (k) => { const v = params.getAll(k); return v.length === 1 ? v[0] : ''; };
+  const periodo = um('periodo'); const bloco = um('bloco'); const loja = um('loja');
+  Object.assign(GANHOS, { periodo: '30d', bloco: '', loja: '', de: '', ate: '' });
+  if (GANHOS_PERIODOS.some(([k]) => k === periodo)) GANHOS.periodo = periodo;
+  if (GANHOS_RE_BLOCO.test(bloco)) GANHOS.bloco = bloco;
+  if (GANHOS_LOJAS.some(([k]) => k === loja)) GANHOS.loja = loja;
+  if (GANHOS.periodo === 'custom') {
+    if (GANHOS_RE_DIA.test(um('de'))) GANHOS.de = um('de');
+    if (GANHOS_RE_DIA.test(um('ate'))) GANHOS.ate = um('ate');
+  }
+  ganhosReiniciarListas();
+}
+
+/** URL da página do produto, só se casa inteira com o formato da loja da linha (GANHOS_RE_URL_OFERTA); senão null. */
+const ganhosUrlOferta = (loja, url) => (typeof url === 'string' && Object.hasOwn(GANHOS_RE_URL_OFERTA, loja) && GANHOS_RE_URL_OFERTA[loja].test(url) ? url : null);
+
+/** M16 em texto: "+300%, mais", "−57%, menos", "0%, igual" (o que arredonda a 0); sem base (null) → ''. */
+function ganhosVariacao(v) {
+  if (typeof v !== 'number' || !Number.isFinite(v)) return '';
+  const p = Math.round(v * 100);
+  if (p === 0) return '0%, igual';
+  const n = Math.abs(p).toLocaleString('pt-BR');
+  return p > 0 ? `+${n}%, mais` : `−${n}%, menos`;
 }
 
 function ganhosCoberturaHtml(cob) {
@@ -400,9 +483,9 @@ function ganhosCoberturaHtml(cob) {
       : `<li><b>${ganhosNomeLoja(l.loja)}</b> <span class="dica">${l.envios} ${l.envios === 1 ? 'envio' : 'envios'}, nenhum com código configurado</span></li>`;
   }).join('');
   const avisos = (cob.por_loja || []).filter((l) => ganhosPorcento(l.cobertura) != null && ganhosPorcento(l.cobertura) < GANHOS_LIMIAR_LOJA)
-    .map((l) => `<div class="aviso-impl" role="status"><p><b>Atenção.</b> Parte dos links de ${ganhosNomeLoja(l.loja)} saiu sem código de rastreio. ${l.loja === 'shopee'
-      ? `A Shopee só aceita o código de rastreio quando você conecta sua conta de afiliado. Conecte em <a href="#conexoes">Conexões</a>.`
-      : 'Configure em <a href="#blocos">Blocos de análise</a>.'}</p></div>`).join('');
+    .map((l) => `<div class="aviso-impl" role="status"><p><b>Atenção.</b> ${l.loja === 'shopee'
+      ? 'Parte dos links da Shopee saiu sem Sub_id. Confira se a extensão está na versão 1.4.1 ou mais nova, ou se o limite de 60 links por hora foi atingido.'
+      : `Parte dos links de ${ganhosNomeLoja(l.loja)} saiu sem código de rastreio. Configure em <a href="#blocos">Blocos de análise</a>.`}</p></div>`).join('');
   return `<div class="card cob-card">${titulo}${principal}${lojas ? `<ul class="cob-lojas">${lojas}</ul>` : ''}${avisos}</div>`;
 }
 
@@ -431,22 +514,30 @@ function ganhosCartoesHtml(din, semImp) {
   const semCliques = !t.cliques;
   const temGasto = typeof t.gasto === 'number';
   const retorno = typeof t.retorno === 'number' ? t.retorno : null;
+  // M16 (P-C3: só nestes oito cartões). `dinheiro`: depende de importação; sem nenhuma, o cartão já é "—" e não compara.
+  const a = din.grupo.anterior; const tAnt = a && typeof a.total === 'object' && a.total ? a.total : null; const vars = (a && a.variacao) || {};
+  const ant = (m, fmt, dinheiro = true) => {
+    if (!tAnt || (dinheiro && semImp)) return '';
+    const v = ganhosVariacao(vars[m]);
+    if (tAnt[m] == null) return '';
+    return `<span class="g-ant">${T.periodoAnterior}: ${fmt(tAnt[m])}${v ? ` (${v})` : ''}</span>`;
+  };
   const cartoes = [
-    ganhosCartao('comissao', 'Comissão', imp(ganhosBrl(t.comissao)), semImpNota(`Confirmada: ${ganhosBrl(t.comissao_confirmada)}`)),
+    ganhosCartao('comissao', 'Comissão', imp(ganhosBrl(t.comissao)), semImpNota(`Confirmada: ${ganhosBrl(t.comissao_confirmada)}`) + ant('comissao', ganhosBrl)),
     ganhosCartao('gasto', 'Gasto', ganhosBrl(t.gasto), temGasto ? 'Informado por você.' : '<button type="button" class="leve" id="g-informar">Informar</button>'),
     ganhosCartao('retorno', 'Retorno', imp(ganhosBrl(retorno)),
       semImp ? T.semImportacao : retorno != null ? (retorno > 0 ? 'Deu lucro: comissão menos gasto.' : retorno < 0 ? 'Deu prejuízo: comissão menos gasto.' : 'Sem lucro nem prejuízo.')
         : lojaFiltrada ? 'Não é calculado com filtro de loja.' : 'Informe o gasto para calcular.'),
     ganhosCartao('custo', 'Custo por membro novo', ganhosBrl(t.custo_membro), !temGasto ? 'Informe o gasto para calcular.' : !t.entradas ? 'Sem entradas no período.' : 'Gasto ÷ entradas do período.'),
-    ganhosCartao('receita', 'Valor vendido', imp(ganhosBrl(t.receita)), semImpNota('Soma do valor das compras.'), 'receita'),
-    ganhosCartao('vendas', 'Vendas (itens)', imp(ganhosNum(t.vendas)), semImpNota('Itens vendidos nas linhas importadas.')),
+    ganhosCartao('receita', 'Valor vendido', imp(ganhosBrl(t.receita)), semImpNota('Soma do valor das compras.') + ant('receita', ganhosBrl), 'receita'),
+    ganhosCartao('vendas', 'Vendas (itens)', imp(ganhosNum(t.vendas)), semImpNota('Itens vendidos nas linhas importadas.') + ant('vendas', ganhosNum)),
     ganhosCartao('cliques', 'Cliques', imp(semCliques ? '—' : ganhosNum(t.cliques)),
-      semImp ? T.semImportacao : semCliques ? 'Sem cliques importados no período. Importe o relatório de cliques da loja.' : 'Vêm do relatório da loja que você importou.'),
-    ganhosCartao('epc', 'Ganho por clique', imp(ganhosBrl(t.epc, 4)), semImp ? T.semImportacao : t.epc == null ? 'Sem cliques no período.' : 'Comissão ÷ cliques das lojas com cliques importados.', 'gpc'),
-    ganhosCartao('conversao', 'Conversão', imp(ganhosRazao(t.conversao, 2)), semImp ? T.semImportacao : t.conversao == null ? 'Sem cliques no período.' : 'Vendas ÷ cliques das lojas com cliques importados.'),
-    ganhosCartao('envios', 'Envios', ganhosNum(t.envios), 'Links enviados pelo Turbo no período.'),
+      (semImp ? T.semImportacao : semCliques ? 'Sem cliques importados no período. Importe o relatório de cliques da loja.' : 'Vêm do relatório da loja que você importou.') + ant('cliques', ganhosNum)),
+    ganhosCartao('epc', 'Ganho por clique', imp(ganhosBrl(t.epc, 4)), (semImp ? T.semImportacao : t.epc == null ? 'Sem cliques no período.' : 'Comissão ÷ cliques das lojas com cliques importados.') + ant('epc', (x) => ganhosBrl(x, 4)), 'gpc'),
+    ganhosCartao('conversao', 'Conversão', imp(ganhosRazao(t.conversao, 2)), (semImp ? T.semImportacao : t.conversao == null ? 'Sem cliques no período.' : 'Vendas ÷ cliques das lojas com cliques importados.') + ant('conversao', (x) => ganhosRazao(x, 2))),
+    ganhosCartao('envios', 'Envios', ganhosNum(t.envios), 'Links enviados pelo Turbo no período.' + ant('envios', ganhosNum, false)),
     ganhosCartao('atribuida', 'Comissão com grupo', imp(ganhosRazao(t.atribuida)), semImp ? T.semImportacao : t.atribuida == null ? 'Sem comissão no período.' : `${ganhosBrl(t.comissao_atribuida)} de ${ganhosBrl(t.comissao)} têm grupo ou bloco identificado.`),
-    ganhosCartao('entradas', 'Entradas', ganhosNum(t.entradas), 'Entradas de todos os grupos do filtro.'),
+    ganhosCartao('entradas', 'Entradas', ganhosNum(t.entradas), 'Entradas de todos os grupos do filtro.' + ant('entradas', ganhosNum, false)),
   ];
   return `<div class="kpis ganhos-kpis">${cartoes.join('')}</div>`;
 }
@@ -456,9 +547,9 @@ function ganhosCartoesHtml(din, semImp) {
 /**
  * Tabela do Dashboard dentro de uma `section`: título, `caption` só para leitor de tela, cabeçalho (com botão de ordenar nas
  * colunas que têm `chave`), corpo (`linhas`: html de `tr` já escapado) e rodapé opcional. Em tela estreita, vira lista de cartões
- * (.tab-din). `mais`: botão "Mostrar mais" abaixo.
+ * (.tab-din). `mais`: botão "Mostrar mais" abaixo. `intro`: html entre o título e a tabela.
  */
-function ganhosSecao({ id, titulo, legenda, cols, linhas, rodape = '', mais = '', ordem = null, detalhes = false }) {
+function ganhosSecao({ id, titulo, legenda, cols, linhas, rodape = '', mais = '', ordem = null, detalhes = false, intro = '' }) {
   const cab = cols.map((c) => {
     const aria = ordem && c.chave === ordem.col ? ` aria-sort="${ordem.dir === 'asc' ? 'ascending' : 'descending'}"` : '';
     return `<th scope="col" role="columnheader"${aria}>${c.chave ? `<button type="button" class="leve ord" data-ordem="${c.chave}" aria-label="Ordenar por ${c.rot.toLowerCase()}">${c.rot}</button>` : c.rot}</th>`;
@@ -466,7 +557,7 @@ function ganhosSecao({ id, titulo, legenda, cols, linhas, rodape = '', mais = ''
   const tabela = `<div class="card tabela tab-din"><table role="table"><caption class="sr-only">${legenda}</caption><thead role="rowgroup"><tr role="row">${cab}</tr></thead><tbody role="rowgroup">${linhas.join('')}</tbody>${rodape ? `<tfoot role="rowgroup">${rodape}</tfoot>` : ''}</table></div>${mais}`;
   return detalhes
     ? `<section id="${id}" class="g-sec"><details><summary id="${id}-titulo">${titulo}</summary>${tabela}</details></section>`
-    : `<section id="${id}" class="g-sec"><h2 id="${id}-titulo" tabindex="-1">${titulo}</h2>${tabela}</section>`;
+    : `<section id="${id}" class="g-sec"><h2 id="${id}-titulo" tabindex="-1">${titulo}</h2>${intro}${tabela}</section>`;
 }
 
 /** Célula: `rot` aparece como rótulo em tela estreita; `num` alinha e usa algarismos de largura fixa. */
@@ -491,8 +582,9 @@ const GANHOS_COLUNAS_ORDEM = ['nome', 'comissao', 'vendas', 'cliques', 'epc', 'e
 function ganhosSecaoGrupo(g) {
   const ordenadas = ganhosOrdenar(g.linhas, GANHOS.ordem);
   const vistas = GANHOS.todosGrupo ? ordenadas : ordenadas.slice(0, GANHOS_MAX_GRUPOS);
+  // CA4 (plano C): o nome do grupo é um botão de alternar que filtra "Por oferta" por ele; a linha "Sem grupo" não tem
   const linhas = vistas.map((l) => ganhosTr(l.jid, [
-    ganhosTd('Grupo', esc(l.nome || nomeGrupo(l.jid)), false),
+    ganhosTd('Grupo', `<button type="button" class="leve g-grupo" data-grupo="${esc(l.jid)}" aria-pressed="${GANHOS.grupo?.jid === l.jid}" aria-controls="g-sec-oferta">${esc(l.nome || nomeGrupo(l.jid))}</button>`, false),
     ganhosTd('Bloco', (l.blocos || []).map((b) => esc(b.nome ?? `bloco ${b.id}`)).join(', ') || '—', false),
     ganhosTd('Comissão', ganhosBrl(l.comissao)), ganhosTd('Vendas', ganhosNum(l.vendas)), ganhosTd('Cliques', ganhosNum(l.cliques)),
     ganhosTd('Ganho por clique', ganhosBrl(l.epc, 4)), ganhosTd('Entradas', ganhosNum(l.entradas)),
@@ -547,20 +639,31 @@ function ganhosSecaoLoja(b) {
   });
 }
 
-function ganhosSecaoOferta(o) {
-  const ordenadas = o.linhas; const vistas = GANHOS.todasOfertas ? ordenadas : ordenadas.slice(0, GANHOS_TOP_OFERTAS);
+/**
+ * "Por oferta": todas as ofertas do recorte, ou só as do grupo clicado (`grupo` = { jid, nome }), com "Ver todas as ofertas".
+ * Oferta com produto reconhecido abre a página do produto na loja, sem afiliado, em outra aba (CA5 do plano C).
+ */
+function ganhosSecaoOferta(o, grupo = null) {
+  const TO = TEXTOS_GANHOS.oferta;
+  const ordenadas = Array.isArray(o.linhas) ? o.linhas : []; const vistas = GANHOS.todasOfertas ? ordenadas : ordenadas.slice(0, GANHOS_TOP_OFERTAS);
   const linhas = vistas.map((l) => {
     const curto = String(l.oferta ?? '').length > 24 ? `${String(l.oferta).slice(0, 24)}…` : String(l.oferta ?? '');
     const nome = l.titulo ? String(l.titulo) : `Oferta ${curto}`;
+    const url = ganhosUrlOferta(l.loja, l.url);
+    const rotulo = url
+      ? `<a class="oferta-nome" href="${esc(url)}" target="_blank" rel="noopener noreferrer" title="${esc(l.titulo || l.oferta)}" aria-label="${esc(nome)} ${TO.link}">${esc(nome)}</a>`
+      : `<span class="oferta-nome" title="${esc(l.titulo || l.oferta)}">${esc(nome)}</span>`;
     return ganhosTr(`${l.loja}|${l.oferta}`, [
-      ganhosTd('Oferta', `<span class="oferta-nome" title="${esc(l.titulo || l.oferta)}">${esc(nome)}</span>`, false), ganhosTd('Loja', ganhosNomeLoja(l.loja), false),
+      ganhosTd('Oferta', rotulo, false), ganhosTd('Loja', ganhosNomeLoja(l.loja), false),
       ganhosTd('Vendas', ganhosNum(l.vendas)), ganhosTd('Comissão', ganhosBrl(l.comissao)), ganhosTd('Grupos que enviaram', ganhosNum(l.grupos)),
     ]);
   });
   const resto = ordenadas.length - vistas.length;
+  const intro = grupo ? `<p class="dica">${TO.grupo} <button type="button" id="g-oferta-todas">${TO.todas}</button></p>${ordenadas.length ? '' : `<p class="dica">${TO.grupoVazio}</p>`}` : '';
   return ganhosSecao({
-    id: 'g-sec-oferta', titulo: 'Por oferta', legenda: 'Ofertas que mais renderam, da maior comissão para a menor',
-    cols: ['Oferta', 'Loja', 'Vendas', 'Comissão', 'Grupos que enviaram'].map((rot) => ({ rot })), linhas,
+    id: 'g-sec-oferta', titulo: `${grupo ? `Por oferta: grupo ${esc(grupo.nome)}` : 'Por oferta'} ${q('ganhos.oferta')}`,
+    legenda: grupo ? `Ofertas do grupo ${esc(grupo.nome)}, da maior comissão para a menor` : 'Ofertas que mais renderam, da maior comissão para a menor',
+    cols: ['Oferta', 'Loja', 'Vendas', 'Comissão', 'Grupos que enviaram'].map((rot) => ({ rot })), linhas, intro,
     mais: resto > 0 ? `<button type="button" id="g-mais-oferta">Ver todas (${ordenadas.length})</button>` : '',
   });
 }
@@ -617,7 +720,8 @@ function ganhosDinheiroHtml(cob) {
   if (semMovimento) {
     return `${cartoes}<div class="aviso-impl neutro" role="status"><p>${T.semMovimento} <button type="button" class="leve" id="g-limpar">Limpar filtros</button></p></div>`;
   }
-  return `${cartoes}${ganhosSecaoGrupo(g)}${ganhosSecaoBloco(din.bloco)}${ganhosSecaoLoja(din.loja)}${ganhosSecaoOferta(din.oferta)}${ganhosSecaoDia(din.dia)}`;
+  const grupo = GANHOS.grupo;
+  return `${cartoes}${ganhosSecaoGrupo(g)}${ganhosSecaoBloco(din.bloco)}${ganhosSecaoLoja(din.loja)}${ganhosSecaoOferta(grupo ? grupo.dados : din.oferta, grupo)}${ganhosSecaoDia(din.dia)}`;
 }
 
 function ganhosComoLerHtml() {
@@ -660,10 +764,14 @@ async function ganhosCarregarDinheiro() {
 
 /**
  * Abre a página. `opcoes.quieto`: recarrega por trás de um diálogo (depois de importar ou lançar um gasto) sem "Carregando…"
- * nem mexer no foco; `opcoes.foco`: seletor que recebe o foco quando terminar.
+ * nem mexer no foco; `opcoes.foco`: seletor que recebe o foco quando terminar; `opcoes.endereco`: a consulta de #ganhos?…
+ * (URLSearchParams do roteador), lida por ganhosLerEndereco. Toda carga grava o endereço dos filtros (replaceState, sem hashchange).
  */
 async function paginaGanhos(opcoes = {}) {
   if (!podeEquipe()) return; // o roteador já manda o Operador para a Visão Geral; nunca chama /api/rastreio nem /api/ganhos como Operador
+  if (opcoes.endereco) ganhosLerEndereco(opcoes.endereco);
+  GANHOS.grupo = null; // P-C4: o filtro de grupo some a cada carga (troca de filtro, importação, gasto)
+  if (rotaAtual() === 'ganhos') { const end = ganhosEndereco(); if (location.hash !== end) history.replaceState(null, '', end); }
   const T = TEXTOS_GANHOS; const ger = ++GANHOS.ger; const pg = $('#pagina');
   const quieto = !!opcoes.quieto; const foco = opcoes.foco || (quieto ? '' : GANHOS.foco); GANHOS.foco = '';
   // Primeira vez na página: "Carregando…". Ao trocar um filtro, a tela antiga fica até a nova chegar (o foco não cai no corpo da página).
@@ -698,7 +806,9 @@ function ganhosDesenhar(foco, anunciar) {
   const ate = din.erro ? {} : din.grupo.importado_ate || {};
   const importado = GANHOS_ORDEM_IMPORTADO.filter((l) => ate[l]).map((l) => `${ganhosDiaMes(ate[l])} (${GANHOS_NOME_LOJA[l]})`);
   const vazio = !din.erro && !din.importacoes.length && !din.grupo.gastos_informados && !(cob.total?.envios > 0);
-  pg.innerHTML = `<div class="topo"><div><h1>Ganhos ${q('ganhos')}</h1><p class="sub">${T.sub}${importado.length ? ` Dados importados até ${importado.join(', ')}.` : ''} Período: ${esc(rotuloPeriodo.toLowerCase())}, de ${dia(cob.de)} a ${dia(cob.ate)}.</p></div>
+  const ant = din.erro ? null : din.grupo.anterior;
+  const comparado = ant && ant.dia_de && ant.dia_ate ? ` Comparado com o período anterior, de ${ganhosDataCompleta(ant.dia_de)} a ${ganhosDataCompleta(ant.dia_ate)}.` : '';
+  pg.innerHTML = `<div class="topo"><div><h1>Ganhos ${q('ganhos')}</h1><p class="sub">${T.sub}${importado.length ? ` Dados importados até ${importado.join(', ')}.` : ''} Período: ${esc(rotuloPeriodo.toLowerCase())}, de ${dia(cob.de)} a ${dia(cob.ate)}.${comparado}</p></div>
       <div class="topo-acoes"><button type="button" id="g-importar"${vazio ? '' : ' class="pri"'}>Importar comissões</button><button type="button" id="g-gasto">Gasto com anúncios</button></div></div>
     ${ganhosFiltrosHtml(blocos)}
     ${ganhosCoberturaHtml(cob)}
@@ -710,6 +820,34 @@ function ganhosDesenhar(foco, anunciar) {
   if (anunciar) ganhosVivo().textContent = `Ganhos atualizados: ${rotuloPeriodo}${rotuloBloco ? `, bloco ${rotuloBloco}` : ''}${GANHOS.loja ? `, loja ${GANHOS_NOME_LOJA[GANHOS.loja] || ''}` : ''}${nGrupos ? `, ${vistos} de ${nGrupos} grupos` : ''}.`;
   ganhosLigar();
   ganhosFoco(foco);
+}
+
+/**
+ * CA4 (plano C): "Por oferta" só com as vendas do grupo clicado. Um GET por=oferta&grupo= (sem bloco); o resto da página fica.
+ * Só jid que veio na tabela "Por grupo" vira pedido. Clicar de novo no mesmo grupo volta a todas. Resposta que chega depois
+ * de outra carga ou de outro clique é descartada.
+ */
+async function ganhosFiltrarGrupo(jid) {
+  const din = GANHOS.dados?.din; if (!din || din.erro) return;
+  const linha = (din.grupo?.linhas || []).find((l) => l.jid === jid); if (!linha) return;
+  if (GANHOS.grupo?.jid === jid) { ganhosVerTodasOfertas(); return; }
+  const ger = GANHOS.ger; const gg = ++GANHOS.gerGrupo;
+  let dados;
+  try { dados = await api('/ganhos' + ganhosConsulta('oferta', { grupo: jid })); } catch (e) {
+    if (ger === GANHOS.ger && gg === GANHOS.gerGrupo) aviso(e.message, true);
+    return;
+  }
+  if (ger !== GANHOS.ger || gg !== GANHOS.gerGrupo || rotaAtual() !== 'ganhos') return;
+  const nome = String(linha.nome || nomeGrupo(jid));
+  GANHOS.grupo = { jid, nome, dados: { ...dados, linhas: Array.isArray(dados?.linhas) ? dados.linhas : [] } }; GANHOS.todasOfertas = false;
+  ganhosDesenhar('#g-sec-oferta-titulo', false);
+  ganhosVivo().textContent = `Por oferta: grupo ${nome}.`;
+}
+/** Volta "Por oferta" a todas as ofertas do recorte, que já estavam carregadas (nenhum pedido). */
+function ganhosVerTodasOfertas() {
+  GANHOS.gerGrupo++; GANHOS.grupo = null; GANHOS.todasOfertas = false;
+  ganhosDesenhar('#g-sec-oferta-titulo', false);
+  ganhosVivo().textContent = 'Por oferta: todas as ofertas.';
 }
 
 /** Recarrega a página pedindo tudo de novo; `seletor` volta o foco ao controle clicado. */
@@ -730,6 +868,8 @@ function ganhosLigar() {
   onclick('#g-mais', () => { GANHOS.todos = true; ganhosRecarregar('#g-tabela-titulo'); }); // o botão some: o foco vai para o título da tabela
   // ordenar e "mostrar mais" do Dashboard não pedem nada ao servidor
   onclick('#g-sec-grupo', (e) => {
+    const g = e.target.closest('[data-grupo]'); const jid = g && g.dataset.grupo;
+    if (typeof jid === 'string' && jid) { ganhosFiltrarGrupo(jid); return; }
     const b = e.target.closest('[data-ordem]'); const col = b && b.dataset.ordem;
     if (!col || !GANHOS_COLUNAS_ORDEM.includes(col)) return;
     GANHOS.ordem = GANHOS.ordem.col === col ? { col, dir: GANHOS.ordem.dir === 'asc' ? 'desc' : 'asc' } : { col, dir: col === 'nome' ? 'asc' : 'desc' };
@@ -737,6 +877,7 @@ function ganhosLigar() {
   });
   onclick('#g-mais-grupo', () => { GANHOS.todosGrupo = true; ganhosDesenhar('#g-sec-grupo-titulo', false); });
   onclick('#g-mais-oferta', () => { GANHOS.todasOfertas = true; ganhosDesenhar('#g-sec-oferta-titulo', false); });
+  onclick('#g-oferta-todas', () => ganhosVerTodasOfertas());
   onclick('#g-limpar', () => { Object.assign(GANHOS, { periodo: '30d', bloco: '', loja: '', de: '', ate: '' }); ganhosReiniciarListas(); ganhosRecarregar('#g-per [data-p="30d"]'); });
   onclick('#g-tentar-din', () => paginaGanhos({ quieto: true }));
   onclick('#g-importar', () => ganhosAbrirImportar());
@@ -785,20 +926,24 @@ function ganhosMarcarRadio(raiz, atributo, valor) {
 }
 const ganhosRadioHtml = (atributo, lista, atual) => lista.map(([k, n]) => `<button type="button" data-${atributo}="${k}" role="radio" aria-checked="${k === atual}" tabindex="${k === atual || !atual ? 0 : -1}" class="${k === atual ? 'on' : ''}">${n}</button>`).join('');
 
-/** O arquivo parece CSV? Pela extensão (o `type` do Windows para .csv vem como application/vnd.ms-excel); sem extensão, pelo type. */
+/**
+ * O arquivo parece CSV (ou .zip com o CSV dentro, P5: o da Amazon vem assim)? Pela extensão (o `type` do Windows para .csv vem
+ * como application/vnd.ms-excel); sem extensão, pelo type. O conteúdo do .zip é o servidor que confere.
+ */
 function ganhosArquivoCsv(a) {
   const ext = (/\.([^.]+)$/.exec(String(a.name || '')) || [])[1]?.toLowerCase();
-  if (ext) return ['csv', 'txt', 'tsv'].includes(ext);
-  return !a.type || /^text\//.test(a.type);
+  if (ext) return ['csv', 'txt', 'tsv', 'zip'].includes(ext);
+  return !a.type || /^text\//.test(a.type) || /^application\/(x-)?zip(-compressed)?$/.test(a.type);
 }
 
 /**
  * Manda o arquivo cru (sem ler como texto: a codificação é do servidor) com Content-Type text/csv explícito. `previa`: só mostra
  * o que seria importado, sem gravar. Erro: Error com a frase pronta e `status`; falha de rede → `rede: true` e a frase de "nada foi salvo".
  */
-async function ganhosEnviarCsv(arquivo, { loja, tipo, codigo, previa }) {
+async function ganhosEnviarCsv(arquivo, { loja, tipo, codigo, dia, previa }) {
   const p = new URLSearchParams({ loja, tipo });
   if (codigo) p.set('codigo', codigo);
+  if (dia) p.set('dia', dia); // data do relatório que é um total do período (P5)
   if (previa) p.set('previa', '1');
   let r;
   try { r = await fetch('/api/ganhos/importar?' + p.toString(), { method: 'POST', headers: { 'content-type': 'text/csv' }, body: arquivo }); }
@@ -819,12 +964,20 @@ function ganhosResumoImportacao(r, { previa }) {
   const itens = [`<li>${ganhosNum(r.lidas)} ${ganhosSingPlural(r.lidas, 'linha lida', 'linhas lidas')}</li>`, `<li>${ganhosNum(r.novas)} ${ganhosSingPlural(r.novas, 'nova', 'novas')}</li>`];
   if (r.atualizadas > 0) itens.push(`<li>${ganhosNum(r.atualizadas)} ${ganhosSingPlural(r.atualizadas, 'atualizada', 'atualizadas')} (estavam importadas e mudaram, por exemplo de pendente para confirmada)</li>`);
   itens.push(`<li>${ganhosNum(r.repetidas)} ${ganhosSingPlural(r.repetidas, 'já importada', 'já importadas')} ${previa ? '(serão ignoradas)' : 'e ignoradas'}</li>`);
+  // CA1/CA2 do plano C: contagens que pedem atenção antes de "Importar agora" (a frase completa vem nos avisos, logo abaixo)
+  const outro = Number.isInteger(r.outro_codigo) ? r.outro_codigo : 0; const recebem = Number.isInteger(r.recebem_codigo) ? r.recebem_codigo : 0;
+  if (outro > 0) itens.push(`<li><b>${ganhosNum(outro)} ${ganhosSingPlural(outro, 'pode ser repetida', 'podem ser repetidas')} de outro código</b></li>`);
+  if (recebem > 0) {
+    const verbo = previa ? ganhosSingPlural(recebem, 'vai receber', 'vão receber') : ganhosSingPlural(recebem, 'recebeu', 'receberam');
+    itens.push(`<li><b>${ganhosNum(recebem)} ${ganhosSingPlural(recebem, 'importada', 'importadas')} antes sem código ${verbo} o código deste arquivo</b></li>`);
+  }
   if (r.ignoradas > 0) {
     const nums = (r.linhas_ignoradas || []).filter((n) => Number.isInteger(n));
     const lista = nums.length ? `: ${ganhosSingPlural(nums.length, 'linha', 'linhas')} ${nums.length > 1 ? `${nums.slice(0, -1).join(', ')} e ${nums.at(-1)}` : nums[0]}${r.ignoradas > nums.length ? ' e outras' : ''}` : '';
     itens.push(`<li>${ganhosNum(r.ignoradas)} ${ganhosSingPlural(r.ignoradas, 'pulada', 'puladas')} (valor ou data inválidos)${lista}</li>`);
   }
-  const partes = [`<ul class="g-resumo">${itens.join('')}</ul>`];
+  // avisos do servidor logo depois das contagens, antes do resto: são eles que dizem se é para importar (contagem em dobro, código)
+  const partes = [`<ul class="g-resumo">${itens.join('')}</ul>`, ...(r.avisos || []).map((a) => `<div class="aviso-impl" role="status"><p>${esc(a)}</p></div>`)];
   const extras = [];
   if (r.periodo) extras.push(`Período do arquivo: ${ganhosDiaMes(r.periodo.de)} a ${ganhosDiaMes(r.periodo.ate)}`);
   if (cliques) extras.push(`Cliques no arquivo: ${ganhosNum(r.cliques_total)}`);
@@ -837,7 +990,6 @@ function ganhosResumoImportacao(r, { previa }) {
   const usadas = (r.colunas_usadas || []).map((c) => `${I.campos[c.campo] || esc(c.campo)} (${esc(c.coluna)})`).join(', ');
   const ignoradas = (r.colunas_ignoradas || []).map(esc).join(', ');
   partes.push(`<p class="dica g-colunas">Colunas lidas: ${usadas || '—'}.<br>Colunas ignoradas (o painel não lê): ${ignoradas || 'nenhuma'}.<br>Dados de comprador não são guardados.</p>`);
-  for (const a of r.avisos || []) partes.push(`<div class="aviso-impl" role="status"><p>${esc(a)}</p></div>`);
   return partes.join('');
 }
 
@@ -848,7 +1000,8 @@ function ganhosResumoImportacao(r, { previa }) {
 function ganhosAbrirImportar() {
   if (!podeEquipe()) return;
   const I = TEXTOS_GANHOS.importar; const dlg = $('#dlg');
-  const est = { loja: GANHOS.loja || '', tipo: 'comissoes', arquivo: null, codigo: '', salvou: false, recarregou: false, ocupado: false };
+  // pedeDia: o servidor disse que o arquivo não tem data por linha (P5); o campo "Data do relatório" aparece e `dia` vai junto
+  const est = { loja: GANHOS.loja || '', tipo: 'comissoes', arquivo: null, codigo: '', dia: '', pedeDia: false, salvou: false, recarregou: false, ocupado: false };
   const concluir = () => {
     if (est.salvou && !est.recarregou) { est.recarregou = true; paginaGanhos({ quieto: true, foco: '#g-importar' }); } else $('#g-importar')?.focus();
   };
@@ -861,15 +1014,22 @@ function ganhosAbrirImportar() {
       <div class="campo"><span class="filtro-rot" id="imp-loja-rot">Loja ${REQ}</span><div class="seg" id="imp-loja" role="radiogroup" aria-labelledby="imp-loja-rot">${ganhosRadioHtml('loja', GANHOS_ORDEM_IMPORTADO.map((k) => [k, GANHOS_NOME_LOJA[k]]), est.loja)}</div></div>
       <div class="campo"><span class="filtro-rot" id="imp-tipo-rot">O arquivo traz</span><div class="seg" id="imp-tipo" role="radiogroup" aria-labelledby="imp-tipo-rot">${ganhosRadioHtml('tipo', [['comissoes', 'Comissões (vendas)'], ['cliques', 'Cliques']], est.tipo)}</div></div>
       <p class="dica" id="imp-dica" role="note" style="margin:0"></p>
-      <label class="campo"><span id="imp-arq-rot">Arquivo CSV do relatório</span><input type="file" id="imp-arq" accept=".csv,.txt,text/csv,text/plain" aria-describedby="imp-info"></label>
+      <label class="campo"><span id="imp-arq-rot">Arquivo CSV do relatório</span><input type="file" id="imp-arq" accept=".csv,.txt,.zip,text/csv,text/plain,application/zip" aria-describedby="imp-info"></label>
       <p class="dica" id="imp-info" style="margin:0" role="status"></p>
       <label class="campo"><span>Código do arquivo (opcional)</span><input id="imp-codigo" value="${esc(est.codigo)}" maxlength="100" autocomplete="off" spellcheck="false">
         <small>Se o relatório já veio filtrado por um código (etiqueta, ID de rastreamento ou Sub_id), digite-o aqui: vale para as linhas que não têm coluna de código.</small></label>
+      <div id="imp-dia-campo"${est.pedeDia ? '' : ' hidden'}><label class="campo"><span>${I.dia}</span><input type="date" id="imp-dia" value="${esc(est.dia)}" aria-describedby="imp-dia-dica imp-erro"><small id="imp-dia-dica">${I.diaDica}</small></label></div>
       <div class="rodape"><button type="button" id="imp-cancelar">Cancelar</button><button class="pri" id="imp-ok">Conferir arquivo</button></div></form>`;
     ganhosRadios($('#imp-loja'), 'loja', () => est.loja, (v) => { est.loja = v; atualizar(); });
     ganhosRadios($('#imp-tipo'), 'tipo', () => est.tipo, (v) => { est.tipo = v; atualizar(); });
-    $('#imp-arq').onchange = () => { est.arquivo = $('#imp-arq').files?.[0] || null; mostrarErros(dlg, []); atualizar(); };
+    $('#imp-arq').onchange = () => {
+      est.arquivo = $('#imp-arq').files?.[0] || null; mostrarErros(dlg, []);
+      // outro arquivo pode ter data por linha: o campo da data some até o servidor pedir de novo
+      est.pedeDia = false; est.dia = ''; $('#imp-dia-campo').hidden = true; $('#imp-dia').value = '';
+      atualizar();
+    };
     $('#imp-codigo').oninput = () => { est.codigo = $('#imp-codigo').value; };
+    $('#imp-dia').oninput = () => { est.dia = $('#imp-dia').value; };
     $('#imp-cancelar').onclick = fechar;
     $('#f').onsubmit = tentar(conferir);
     atualizar();
@@ -883,6 +1043,11 @@ function ganhosAbrirImportar() {
     if (!(est.loja && est.arquivo)) $('#imp-info').textContent = est.arquivo ? `${$('#imp-info').textContent}. Escolha a loja para continuar.` : 'Escolha a loja e o arquivo para continuar.';
     $('#imp-ok').disabled = est.ocupado || !(est.loja && est.arquivo);
   };
+  // D3: a caixa de erro fica depois do campo, logo acima do rodapé fixo: liga-a ao campo e o traz para o meio da tela
+  const ligarErroDia = () => {
+    const box = $('.erros', dlg); if (box) box.id = 'imp-erro';
+    if (document.activeElement === $('#imp-dia')) $('#imp-dia').scrollIntoView({ block: 'center' });
+  };
   /** Erros que o navegador já sabe (loja, arquivo, tamanho, tipo): saem antes de enviar. */
   const errosLocais = () => {
     const erros = [];
@@ -890,20 +1055,26 @@ function ganhosAbrirImportar() {
     if (!est.arquivo) erros.push({ msg: I.semArquivo, el: $('#imp-arq') });
     else if (Number(est.arquivo.size) > GANHOS_MAX_BYTES) erros.push({ msg: I.grande, el: $('#imp-arq') });
     else if (!ganhosArquivoCsv(est.arquivo)) erros.push({ msg: I.tipoErrado, el: $('#imp-arq') });
+    if (est.pedeDia && !GANHOS_RE_DIA.test(est.dia)) erros.push({ msg: I.semDia, el: $('#imp-dia') });
     return erros;
   };
-  const opcoes = (previa) => ({ loja: est.loja, tipo: est.tipo, codigo: String($('#imp-codigo')?.value ?? est.codigo).trim(), previa });
+  // `dia` vem de est (lido do campo em conferir): na prévia o campo já não existe, e gravar manda o mesmo dia
+  const opcoes = (previa) => ({ loja: est.loja, tipo: est.tipo, codigo: String($('#imp-codigo')?.value ?? est.codigo).trim(), dia: est.pedeDia ? est.dia : '', previa });
   async function conferir(ev) {
     ev?.preventDefault?.();
     if (est.ocupado) return;
-    if (mostrarErros(dlg, errosLocais(), 'Não deu para importar:')) return;
+    if (est.pedeDia) est.dia = String($('#imp-dia')?.value ?? est.dia).trim();
+    if (mostrarErros(dlg, errosLocais(), 'Não deu para importar:')) { ligarErroDia(); return; }
     est.ocupado = true; est.codigo = opcoes(true).codigo;
     $('#imp-ok').disabled = true; $('#imp-ok').textContent = 'Conferindo…'; $('#imp-ok').setAttribute('aria-busy', 'true');
     let r;
     try { r = await ganhosEnviarCsv(est.arquivo, opcoes(true)); } catch (e) {
       est.ocupado = false; $('#imp-ok').removeAttribute('aria-busy');
       $('#imp-ok').textContent = e.rede || e.status >= 500 ? 'Tentar de novo' : 'Conferir arquivo'; atualizar();
-      mostrarErros(dlg, [{ msg: e.message }], 'Não consegui importar:'); return;
+      // P5: relatório que é um total do período, sem data por linha: o servidor pede a data, e o campo aparece com o foco
+      const semData = e.status === 400 && e.message === I.semDataServidor;
+      if (semData) { est.pedeDia = true; $('#imp-dia-campo').hidden = false; }
+      mostrarErros(dlg, [{ msg: e.message, el: semData ? $('#imp-dia') : null }], 'Não consegui importar:'); ligarErroDia(); return;
     }
     est.ocupado = false;
     previa(r);

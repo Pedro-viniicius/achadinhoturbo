@@ -38,11 +38,11 @@ Teste feito com o consentimento do dono, na sessão dele, convertendo 1 link pú
   {
     "operationName": "batchGetCustomLink",
     "query": "query batchGetCustomLink($linkParams: [CustomLinkParam!], $sourceCaller: SourceCaller){ batchCustomLink(linkParams: $linkParams, sourceCaller: $sourceCaller){ shortLink longLink failCode } }",
-    "variables": { "linkParams": [{ "originalLink": "<url da Shopee>", "advancedLinkParams": <objeto dos Sub_ids ou omitido> }], "sourceCaller": "CUSTOM_LINK_CALLER" }
+    "variables": { "linkParams": [{ "originalLink": "<url da Shopee>", "advancedLinkParams": { "subId1": "<Sub_id>" } }], "sourceCaller": "CUSTOM_LINK_CALLER" }
   }
   ```
 - Resposta: por link, `shortLink` (ex.: `https://s.shopee.com.br/…`), `longLink` e `failCode`.
-- Autenticação: a sessão do navegador no `affiliate.shopee.com.br` (cookies). O cliente da página é um axios próprio que pode acrescentar cabeçalhos (ex.: token anti-CSRF lido de cookie) — **a confirmar** pela extensão antes de implementar. O formato exato de `advancedLinkParams` (Sub_ids) não foi capturado; não é necessário para gerar o link.
+- Autenticação: a sessão do navegador no `affiliate.shopee.com.br` (cookies). O cliente da página é um axios próprio que pode acrescentar cabeçalhos (ex.: token anti-CSRF lido de cookie) — **a confirmar** pela extensão antes de implementar. Sub_id: `advancedLinkParams` é `{ "subId1": "<Sub_id>" }` (Sub_id 1 do formulário; só alfanumérico) e, sem Sub_id, a página omite o campo — capturado em 05/11/2026, ver `docs/produto/referencias/relatorios-dos-portais.md` (Shopee, P4). Não é necessário para gerar o link.
 - É endpoint interno (não documentado): pode mudar sem aviso, como a Central de Afiliados do ML. Mesmo modelo de risco da extensão atual.
 
 ### Cabeçalhos do "Link personalizado" (confirmado em 03/11/2026, só nomes — nenhum valor registrado)

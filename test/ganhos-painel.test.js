@@ -659,18 +659,21 @@ test('D1: o anúncio "Ganhos atualizados" mora numa região aria-live estável, 
   assert.match(fonte('ganhos.js'), /setAttribute\('aria-live', 'polite'\)/);
 });
 
-test('R6: a dica do Sub_id e a prévia dizem que hoje o Sub_id só sai pela API da Shopee; sem ela o link sai sem Sub_id', () => {
+test('R6/P4: a dica do Sub_id e a prévia dizem que o Sub_id sai pela API da Shopee ou pela extensão 1.4.1; sem os dois, o link sai sem Sub_id e a falta aparece na cobertura', () => {
   const t = tela(); preparar(t, { codigos: [] });
   t.rodar('formBloco()');
   const h = t.el('#dlg').innerHTML;
   const dica = h.match(/name="rastreio_shopee"[^]*?<small>([^<]*)<\/small>/)[1];
-  assert.match(dica, /API de afiliados da Shopee/); assert.match(dica, /sem ela, o link sai sem Sub_id/i);
+  assert.match(dica, /pela API da Shopee ou pela extensão \(versão 1\.4\.1 ou mais nova\)/); assert.match(dica, /o link sai sem Sub_id e a falta aparece na cobertura/);
+  assert.doesNotMatch(dica, /só sai pela API/, 'P4: a extensão também pede o Sub_id');
   campo(t, 'rastreio_shopee', 'casa');
   t.rodar('rastreioPrevia($("#dlg"), "bloco")');
-  assert.match(t.el('#dlg').querySelector('[data-previa]').textContent, /Shopee: usa o Sub_id casa\. Hoje o Sub_id só sai pela API de afiliados da Shopee; sem ela, o link sai sem Sub_id\./);
+  const previa = t.el('#dlg').querySelector('[data-previa]').textContent;
+  assert.match(previa, /Shopee: usa o Sub_id casa\. O Sub_id sai pela API da Shopee ou pela extensão \(versão 1\.4\.1 ou mais nova\)\. Se não der, o link sai sem Sub_id e a falta aparece na cobertura\./);
+  assert.doesNotMatch(previa, /só sai pela API/);
 });
 
-test('R6: Shopee abaixo de 80% manda o dono para a API da Shopee (Conexões), não para Blocos; as outras lojas seguem para Blocos', async () => {
+test('R6: Shopee abaixo de 80% manda o dono conferir a extensão (1.4.1) e o limite de 60 links por hora, sem mandar para Blocos nem para a API; as outras lojas seguem para Blocos', async () => {
   const t = tela(); preparar(t);
   const baixa = COB(); baixa.por_loja = [{ loja: 'shopee', ...contas(8, 8, 2) }, { loja: 'amazon', ...contas(6, 4, 1) }]; baixa.total = contas(14, 12, 3);
   rotasGanhos(t, { cobertura: baixa });
@@ -678,7 +681,8 @@ test('R6: Shopee abaixo de 80% manda o dono para a API da Shopee (Conexões), n�
   const h = pagina(t);
   const avisos = [...h.matchAll(/<div class="aviso-impl" role="status">[^]*?<\/div>/g)].map((m) => m[0]);
   const shopee = avisos.find((a) => /Shopee/.test(a)); const amazon = avisos.find((a) => /Amazon/.test(a));
-  assert.match(shopee, /só aceita o código de rastreio quando você conecta sua conta de afiliado/); assert.doesNotMatch(shopee, /Sub_id|API/, 'sem jargão'); assert.match(shopee, /href="#conexoes"/);
+  assert.match(shopee, /Parte dos links da Shopee saiu sem Sub_id\. Confira se a extensão está na versão 1\.4\.1 ou mais nova, ou se o limite de 60 links por hora foi atingido\./);
+  assert.doesNotMatch(shopee, /só aceita o código de rastreio|conecta sua conta de afiliado/, 'a frase velha (só pela API) deixou de ser verdade');
   assert.doesNotMatch(shopee, /href="#blocos"/, 'o dono já configurou o Sub_id em Blocos: mandar de volta para lá é enganar');
   assert.match(amazon, /href="#blocos"/);
 });
@@ -1344,4 +1348,418 @@ test('D3/D4/D5/S4: cartões principais primeiro; diálogo e confirmação com te
   assert.match(fonte, /Escolha a loja e o arquivo para continuar\./);
   assert.match(fonte, /só atualizou linhas de uma importação anterior; apagá-la não desfaz essas mudanças/);
   assert.doesNotMatch(fonte, /os números voltam ao que eram antes/);
+});
+
+// =========================================================================================== Entrega C (etapa 3): comparar, grupo, link, endereço
+// Plano docs/produto/planos/dashboard-ganhos-c.md, etapa 3 (CA3, CA4, CA5, CA6, CA10) e as mudanças de tela do P5 (formatos
+// reais: .zip, data do relatório, avisos de código) e do P4 (Sub_id também pela extensão). Os contratos do servidor estão em
+// src/ganhos.js (comparar, grupo, url) e src/importador.js (dia, outro_codigo, recebem_codigo).
+
+const { MENSAGENS_IMPORTADOR } = await import('../src/importador.js');
+const { MENSAGENS_CSV } = await import('../src/csv.js');
+const pluralServ = (n, [um, varios]) => (n === 1 ? um : varios).replace('{n}', n);
+
+/** `anterior` de GET /api/ganhos?comparar=1 (M16), com os valores do C1 do plano C (06–10/10 contra 01–05/10). */
+const ANTERIOR = (o = {}) => ({
+  dia_de: '2026-09-01', dia_ate: '2026-09-30',
+  total: { ...TOTAL_C1, comissao: 300, receita: 5000, vendas: 1, cliques: 60, epc: 5, conversao: 1 / 60, envios: 16, entradas: 0 },
+  variacao: { comissao: 3, receita: 3.8, vendas: 4, cliques: 1.5, epc: 0.6, conversao: 1, envios: -0.5714, entradas: null },
+  ...o,
+});
+const DIN_COMPARADO = (anterior = ANTERIOR(), grupo = {}) => ({ grupo: { ...DIN_C1('grupo'), anterior, ...grupo }, loja: DIN_C1('loja'), bloco: DIN_C1('bloco'), oferta: DIN_C1('oferta'), dia: DIN_C1('dia') });
+
+test('CA3/M16: a carga pede comparar=1 só no GET por=grupo e continua com os mesmos 5 GETs de /api/ganhos', async () => {
+  const t = await abrirGanhos({ din: DIN_COMPARADO() });
+  const cs = consultasGanhos(t);
+  assert.equal(cs.length, 5, 'nenhum GET a mais');
+  assert.deepEqual(cs.filter((c) => c.get('comparar') === '1').map((c) => c.get('por')), ['grupo']);
+  assert.ok(cs.filter((c) => c.get('por') !== 'grupo').every((c) => c.get('comparar') === null));
+});
+
+test('CA3/M16: os cartões mostram o valor do período anterior e a variação com sinal e palavra; sem base, só o valor anterior', async () => {
+  const t = await abrirGanhos({ din: DIN_COMPARADO() }); const h = pagina(t);
+  const ant = (m) => (notaDe(h, m).match(/Período anterior: [^)]*\)?/) || [''])[0].trim();
+  assert.equal(ant('comissao'), 'Período anterior: R$ 3,00 (+300%, mais)');
+  assert.equal(ant('receita'), 'Período anterior: R$ 50,00 (+380%, mais)');
+  assert.equal(ant('vendas'), 'Período anterior: 1 (+400%, mais)');
+  assert.equal(ant('cliques'), 'Período anterior: 60 (+150%, mais)');
+  assert.equal(ant('epc'), 'Período anterior: R$ 0,05 (+60%, mais)');
+  assert.equal(ant('conversao'), 'Período anterior: 1,67% (+100%, mais)');
+  assert.equal(ant('envios'), 'Período anterior: 16 (−57%, menos)', 'sinal de menos e a palavra: a cor nunca é o único sinal');
+  assert.equal(ant('entradas'), 'Período anterior: 0', 'sem base para comparar (zero antes): só o valor, sem %');
+  for (const m of ['gasto', 'custo', 'retorno', 'atribuida']) assert.doesNotMatch(notaDe(h, m), /Período anterior/, `P-C3: ${m} sem variação`);
+  assert.match(notaDe(h, 'comissao'), /Confirmada: R\$ 13,00/, 'a nota de antes continua');
+  assert.match(textoPagina(h), /Comparado com o período anterior, de 01\/09\/2026 a 30\/09\/2026\./);
+  assert.ok(!/NaN|undefined|null|Infinity/.test(h));
+});
+
+test('CA3/M16: variação que arredonda a 0 diz "0%, igual"; anterior null (servidor sem comparação) não mostra nada', async () => {
+  const quase = ANTERIOR({ variacao: { comissao: 0.004, receita: -0.004, vendas: 0, cliques: null, epc: null, conversao: null, envios: null, entradas: null } });
+  const t = await abrirGanhos({ din: DIN_COMPARADO(quase) }); const h = pagina(t);
+  assert.match(notaDe(h, 'comissao'), /Período anterior: R\$ 3,00 \(0%, igual\)/);
+  assert.match(notaDe(h, 'receita'), /Período anterior: R\$ 50,00 \(0%, igual\)/, '−0,4% arredonda a 0: sem "−0%"');
+  assert.match(notaDe(h, 'vendas'), /Período anterior: 1 \(0%, igual\)/);
+  assert.match(notaDe(h, 'cliques'), /Período anterior: 60$/);
+  const sem = await abrirGanhos({ din: DIN_COMPARADO(null) }); const hs = pagina(sem);
+  for (const m of ['comissao', 'receita', 'vendas', 'cliques', 'epc', 'conversao', 'envios', 'entradas']) assert.doesNotMatch(notaDe(hs, m), /Período anterior/, m);
+  assert.doesNotMatch(textoPagina(hs), /Comparado com/);
+});
+
+test('CA3/M16: sem nenhuma importação, os cartões de dinheiro ficam em "—" sem comparação; Envios e Entradas comparam', async () => {
+  const t = await abrirGanhos({ din: DIN_COMPARADO(), importacoes: [] }); const h = pagina(t);
+  for (const m of ['comissao', 'receita', 'vendas', 'cliques', 'epc', 'conversao']) assert.doesNotMatch(notaDe(h, m), /Período anterior/, m);
+  assert.match(notaDe(h, 'envios'), /Período anterior: 16 \(−57%, menos\)/);
+});
+
+test('CA3: "Como ler estes números" explica o período anterior', async () => {
+  const t = await abrirGanhos({ din: DIN_COMPARADO() });
+  const como = flat(pagina(t)).match(/<details class="g-como">[^]*?<\/details>/)[0];
+  assert.match(como, /período anterior[^.]*mesmo número de dias logo antes[^.]*mesmos filtros/i);
+  assert.match(como, /zero[^.]*só o valor/i);
+});
+
+// ------------------------------------------------------------------------------------------- CA4: clique no grupo
+
+const OFERTAS_DO_GRUPO = (jid = 'a@g.us') => ({ ...DIN_C1('oferta'), grupo: jid, nao_atribuida: null,
+  linhas: [{ loja: 'shopee', oferta: 'SHOPEE:1.2', titulo: 'Panela de pressão elétrica 6 litros', url: 'https://shopee.com.br/product/1/2', comissao: 500, comissao_confirmada: 300, receita: 9000, vendas: 2, envios: 4, grupos: 1 }] });
+const cliqueGrupo = (t, jid) => t.el('#g-sec-grupo').onclick({ target: { closest: (s) => (s === '[data-grupo]' ? { dataset: { grupo: jid } } : null) } });
+
+function rotasComGrupo(t, { porGrupo = (jid) => [200, OFERTAS_DO_GRUPO(jid)] } = {}) {
+  rotasGanhos(t, { din: 'c1' });
+  const geral = t.rotas['GET /api/ganhos'];
+  t.rotas['GET /api/ganhos'] = (r) => { const jid = new URLSearchParams(r.consulta).get('grupo'); return jid ? porGrupo(jid) : geral(r); };
+}
+const porGrupo = (t) => consultasGanhos(t).filter((c) => c.get('grupo') !== null);
+
+test('CA4: o nome do grupo em "Por grupo" é um botão com aria-pressed; a linha "Sem grupo identificado" não tem botão', async () => {
+  const t = await abrirGanhos({ din: 'c1' });
+  const linhas = linhasSecao(pagina(t), 'g-sec-grupo');
+  for (const jid of ['a@g.us', 'b@g.us', 'c@g.us']) {
+    assert.match(linhas.find((l) => l.k === jid).html, new RegExp(`<button type="button"[^>]*data-grupo="${jid.replace('.', '\\.')}"[^>]*aria-pressed="false"`), jid);
+  }
+  assert.doesNotMatch(linhas.find((l) => l.k === 'sem-grupo').html, /<button/);
+  assert.equal(celulaDe(linhas[0].html, 'Grupo'), 'Achados', 'o texto da célula continua o nome');
+});
+
+test('CA4: clicar no grupo faz 1 GET por=oferta&grupo=… sem bloco, mostra "Por oferta: grupo X" e "Ver todas as ofertas" volta sem GET novo', async () => {
+  const t = tela(); preparar(t); rotasComGrupo(t);
+  t.rodar('GANHOS.bloco = "1"; GANHOS.loja = "shopee"'); await t.rodar('paginaGanhos()');
+  const antes = t.pedidos.length;
+  cliqueGrupo(t, 'a@g.us');
+  await ate(() => /Por oferta: grupo Achados/.test(pagina(t)));
+  const novos = t.pedidos.slice(antes);
+  assert.equal(novos.length, 1, 'só o recorte por oferta: nada de cobertura, blocos nem os outros recortes');
+  const c = new URLSearchParams(novos[0].consulta);
+  assert.equal(novos[0].caminho, '/api/ganhos');
+  assert.equal(c.get('por'), 'oferta'); assert.equal(c.get('grupo'), 'a@g.us'); assert.equal(c.get('bloco'), null, 'grupo e bloco não vão juntos (400 do servidor)');
+  assert.equal(c.get('loja'), 'shopee'); assert.equal(c.get('periodo'), '30d'); assert.equal(c.get('comparar'), null);
+  const h = pagina(t);
+  assert.deepEqual(linhasSecao(h, 'g-sec-oferta').map((l) => l.k), ['shopee|SHOPEE:1.2']);
+  assert.match(secao(h, 'g-sec-oferta'), /<button type="button"[^>]*id="g-oferta-todas"[^>]*>Ver todas as ofertas<\/button>/);
+  assert.match(linhasSecao(h, 'g-sec-grupo').find((l) => l.k === 'a@g.us').html, /aria-pressed="true"/);
+  assert.match(linhasSecao(h, 'g-sec-grupo').find((l) => l.k === 'b@g.us').html, /aria-pressed="false"/);
+  assert.equal(t.foco.at(-1), '#g-sec-oferta-titulo', 'o foco vai para o título da tabela filtrada');
+  assert.match(t.el('#g-vivo').textContent, /Por oferta: grupo Achados/);
+  // voltar a todas: sem GET novo
+  const n = t.pedidos.length;
+  t.el('#g-oferta-todas').onclick();
+  await ate(() => !/Por oferta: grupo/.test(pagina(t)));
+  assert.equal(t.pedidos.length, n, 'as ofertas de todos já estavam carregadas');
+  assert.deepEqual(linhasSecao(pagina(t), 'g-sec-oferta').map((l) => l.k), ['shopee|SHOPEE:1.2', 'amazon|B0ABC12345']);
+  assert.doesNotMatch(pagina(t), /id="g-oferta-todas"/);
+  assert.equal(t.foco.at(-1), '#g-sec-oferta-titulo');
+  // clicar de novo no grupo já escolhido também volta a todas (o botão é de alternar)
+  cliqueGrupo(t, 'b@g.us'); await ate(() => /Por oferta: grupo Casa/.test(pagina(t)));
+  const m = t.pedidos.length;
+  cliqueGrupo(t, 'b@g.us'); await ate(() => !/Por oferta: grupo/.test(pagina(t)));
+  assert.equal(t.pedidos.length, m);
+});
+
+test('CA4/P-C4: o filtro de grupo some ao trocar qualquer filtro e não vai para o endereço; grupo que não está na tabela não vira pedido', async () => {
+  const t = tela(); preparar(t); rotasComGrupo(t); await t.rodar('paginaGanhos()');
+  cliqueGrupo(t, 'a@g.us'); await ate(() => /Por oferta: grupo Achados/.test(pagina(t)));
+  assert.match(pagina(t), /Por oferta: grupo Achados/);
+  assert.equal(t.ctx.location.hash, '#ganhos', 'o grupo não entra no endereço');
+  const antes = consultasGanhos(t).length;
+  cliqueGanhos(t, '#g-loja', 'loja', 'amazon');
+  await ate(() => consultasGanhos(t).length >= antes + 5 && !/Por oferta: grupo/.test(pagina(t)));
+  assert.doesNotMatch(pagina(t), /Por oferta: grupo|id="g-oferta-todas"/);
+  assert.ok(consultasGanhos(t).slice(antes).every((c) => c.get('grupo') === null));
+  const n = t.pedidos.length;
+  cliqueGrupo(t, 'x@g.us'); cliqueGrupo(t, ''); cliqueGrupo(t, 'sem-grupo');
+  await ate(() => false, 10);
+  assert.equal(t.pedidos.length, n, 'jid de fora da tabela não vai ao servidor');
+});
+
+test('CA4: grupo apagado (404) avisa com a frase do servidor e a tabela continua com todas as ofertas; nome do grupo é escapado no título', async () => {
+  const t = tela(); preparar(t); rotasComGrupo(t, { porGrupo: () => [404, { erro: 'Este grupo não existe mais.' }] }); await t.rodar('paginaGanhos()');
+  cliqueGrupo(t, 'a@g.us'); await ate(() => /não existe mais/.test(t.el('#toast').textContent));
+  assert.equal(t.el('#toast').textContent, 'Este grupo não existe mais.');
+  assert.doesNotMatch(pagina(t), /Por oferta: grupo/);
+  assert.equal(linhasSecao(pagina(t), 'g-sec-oferta').length, 2);
+  // nome com marcação
+  const x = tela(); preparar(x); rotasGanhos(x, { din: { ...DIN_COMPARADO(null, { linhas: [{ jid: 'z@g.us', nome: XSS, blocos: [], ...linhaDin({ comissao: 100 }) }] }) } });
+  const geral = x.rotas['GET /api/ganhos'];
+  x.rotas['GET /api/ganhos'] = (r) => (new URLSearchParams(r.consulta).get('grupo') ? [200, OFERTAS_DO_GRUPO('z@g.us')] : geral(r));
+  await x.rodar('paginaGanhos()');
+  cliqueGrupo(x, 'z@g.us'); await ate(() => /Por oferta: grupo/.test(pagina(x)));
+  semMarcacao(secao(pagina(x), 'g-sec-oferta'), 'título do grupo'); assert.ok(secao(pagina(x), 'g-sec-oferta').includes(XSS_ESC));
+  assert.match(x.el('#g-vivo').textContent, /Por oferta: grupo /, 'a região viva usa textContent (o nome não vira marcação)');
+});
+
+test('CA4: resposta do grupo que chega depois de trocar o filtro não sobrescreve a página nova', async () => {
+  const t = tela(); preparar(t);
+  let solta; const espera = new Promise((r) => { solta = r; });
+  rotasComGrupo(t, { porGrupo: async () => { await espera; return [200, OFERTAS_DO_GRUPO()]; } });
+  await t.rodar('paginaGanhos()');
+  cliqueGrupo(t, 'a@g.us');
+  const antes = consultasGanhos(t).length;
+  cliqueGanhos(t, '#g-loja', 'loja', 'amazon');
+  await ate(() => consultasGanhos(t).length >= antes + 5 && /loja Amazon/.test(t.el('#g-vivo').textContent));
+  assert.equal(porGrupo(t).length, 1, 'o pedido do grupo saiu antes da troca de filtro');
+  solta(); await ate(() => false, 20);
+  assert.doesNotMatch(pagina(t), /Por oferta: grupo/);
+});
+
+// ------------------------------------------------------------------------------------------- CA5: link da oferta
+
+test('CA5/CA10: oferta com url do servidor vira link para a página do produto em outra aba (noopener noreferrer); url fora do padrão, de outra loja ou null não vira link', async () => {
+  const of = (loja, oferta, titulo, url) => ({ loja, oferta, titulo, ...(url === undefined ? {} : { url }), comissao: 10, comissao_confirmada: 0, receita: 0, vendas: 1, envios: 0, grupos: 0 });
+  const linhas = [
+    of('shopee', 'SHOPEE:1.2', XSS, 'https://shopee.com.br/product/1/2'),
+    of('amazon', 'B0ABC12345', null, 'https://www.amazon.com.br/dp/B0ABC12345'),
+    of('mercadolivre', 'MLB-123', 'Fone', 'https://produto.mercadolivre.com.br/MLB-123'),
+    of('amazon', 'B0JS', 'Javascript', 'javascript:alert(1)'),
+    of('amazon', 'B0DOM', 'Outro domínio', 'https://www.amazon.com.br.evil.example/dp/B0ABC12345'),
+    of('shopee', 'SHOPEE:3.4', 'Loja trocada', 'https://www.amazon.com.br/dp/B0ABC12345'),
+    of('shopee', 'SHOPEE:5.6', 'Afiliado', 'https://s.shopee.com.br/abc'),
+    of('amazon', 'B0TAG', 'Com tag', 'https://www.amazon.com.br/dp/B0ABC12345?tag=x-20'),
+    of('mercadolivre', 'MLB1', 'Sem url', null),
+    of('mercadolivre', 'MLB2', 'Servidor antigo', undefined),
+  ];
+  const t = await abrirGanhos({ din: { ...DIN_COMPARADO(null), oferta: { ...DIN_C1('oferta'), linhas } } });
+  const ls = linhasSecao(pagina(t), 'g-sec-oferta');
+  const link = (i) => (ls[i].html.match(/<a [^>]*>/) || [null])[0];
+  const esperado = [['https://shopee.com.br/product/1/2', `${XSS_ESC} na loja`], ['https://www.amazon.com.br/dp/B0ABC12345', 'Oferta B0ABC12345 na loja'], ['https://produto.mercadolivre.com.br/MLB-123', 'Fone na loja']];
+  esperado.forEach(([href, rotulo], i) => {
+    const a = link(i); assert.ok(a, `linha ${i}: link`);
+    assert.ok(a.includes(`href="${href}"`), a); assert.match(a, /target="_blank"/); assert.match(a, /rel="noopener noreferrer"/);
+    assert.ok(a.includes(`aria-label="${rotulo}, sem seu link de afiliado (abre em outra aba)"`), a);
+  });
+  for (let i = 3; i < ls.length; i++) assert.equal(link(i), null, `linha ${i} (${ls[i].k}) não tem link`);
+  semMarcacao(secao(pagina(t), 'g-sec-oferta'), 'ofertas com link');
+  assert.match(celulaDe(ls[0].html, 'Oferta'), /&lt;img/, 'o título continua visível como texto');
+});
+
+test('CA5: o link da oferta vale também na tabela filtrada por grupo; o título "Por oferta" tem o "?" ganhos.oferta', async () => {
+  const t = tela(); preparar(t); rotasComGrupo(t);
+  t.rodar("TIPS['ganhos.oferta'] = 'Ofertas que renderam no período; o link abre a página do produto na loja.'");
+  await t.rodar('paginaGanhos()');
+  assert.match(secao(pagina(t), 'g-sec-oferta'), /<h2 id="g-sec-oferta-titulo"[^>]*>Por oferta <span class="q"/);
+  cliqueGrupo(t, 'a@g.us'); await ate(() => /Por oferta: grupo Achados/.test(pagina(t)));
+  assert.match(secao(pagina(t), 'g-sec-oferta'), /Por oferta: grupo Achados <span class="q"/);
+  assert.match(linhasSecao(pagina(t), 'g-sec-oferta')[0].html, /<a [^>]*href="https:\/\/shopee\.com\.br\/product\/1\/2"/);
+  assert.match(fonte('ganhos.js'), /q\('ganhos\.oferta'\)/);
+});
+
+// ------------------------------------------------------------------------------------------- CA6: endereço #ganhos?…
+
+/** Liga o painel no endereço `hash` como o navegador faria (o roteador), com o histórico espionado. */
+async function abrirPeloEndereco(hash, { usuario = dono, antes = '' } = {}) {
+  const t = tela({ hash }); preparar(t, { usuario }); rotasGanhos(t, { din: 'c1' });
+  const rs = []; const orig = t.ctx.history.replaceState; t.ctx.history.replaceState = (a, b, h) => { rs.push(h); orig(a, b, h); };
+  t.rodar('globalThis.__visao = 0; paginaVisao = () => { globalThis.__visao++; }');
+  if (antes) t.rodar(antes);
+  t.rodar('ir()');
+  await ate(() => consultasGanhos(t).length >= 5 && /Ganhos atualizados/.test(t.el('#g-vivo').textContent));
+  return Object.assign(t, { rs });
+}
+const consultaDoEndereco = (t) => Object.fromEntries(new URLSearchParams(t.ctx.location.hash.split('?')[1] || ''));
+const coberturasConsulta = (t) => t.pedidos.filter((p) => p.caminho === '/api/rastreio/cobertura').map((p) => new URLSearchParams(p.consulta));
+
+test('CA6: #ganhos?bloco=1&loja=shopee&periodo=30d abre Ganhos com esses filtros (cobertura e os 5 recortes) e o endereço os mantém', async () => {
+  const t = await abrirPeloEndereco('#ganhos?bloco=1&loja=shopee&periodo=30d');
+  const cs = consultasGanhos(t);
+  assert.equal(cs.length, 5);
+  assert.ok(cs.every((c) => c.get('bloco') === '1' && c.get('loja') === 'shopee' && c.get('periodo') === '30d'));
+  assert.ok(coberturasConsulta(t).every((c) => c.get('bloco') === '1' && c.get('loja') === 'shopee'));
+  assert.deepEqual(consultaDoEndereco(t), { periodo: '30d', bloco: '1', loja: 'shopee' });
+  assert.match(pagina(t), /data-b="1" aria-pressed="true"/); assert.match(pagina(t), /data-loja="shopee" aria-pressed="true"/);
+});
+
+test('CA6: periodo=custom com de/ate entra; de/ate sem custom e valores inválidos (loja=x, bloco=01, periodo=zz, data fora do formato) são ignorados', async () => {
+  const c = await abrirPeloEndereco('#ganhos?periodo=custom&de=2026-10-01&ate=2026-10-10');
+  assert.ok(consultasGanhos(c).every((q) => q.get('periodo') === 'custom' && q.get('de') === '2026-10-01' && q.get('ate') === '2026-10-10'));
+  assert.deepEqual(consultaDoEndereco(c), { periodo: 'custom', de: '2026-10-01', ate: '2026-10-10' });
+  // consulta com chave conhecida volta tudo ao padrão antes de aplicar só o que vale
+  const r = await abrirPeloEndereco('#ganhos?loja=x&bloco=01&periodo=zz&de=2026-10-01', { antes: 'GANHOS.loja = "amazon"; GANHOS.bloco = "2"' });
+  assert.ok(consultasGanhos(r).every((q) => q.get('periodo') === '30d' && q.get('bloco') === null && q.get('loja') === null && q.get('de') === null));
+  assert.equal(r.ctx.location.hash, '#ganhos', 'tudo no padrão: o endereço volta a #ganhos');
+  const d = await abrirPeloEndereco('#ganhos?periodo=custom&de=<b>&ate=2026-1-1&bloco=1e0');
+  assert.ok(consultasGanhos(d).every((q) => q.get('periodo') === 'custom' && q.get('de') === null && q.get('ate') === null && q.get('bloco') === null));
+  semMarcacao(pagina(d), 'filtros do endereço');
+});
+
+test('CA6/D6: consulta vazia (#ganhos pelo menu) mantém os filtros atuais e o endereço passa a mostrá-los; chave desconhecida conta como vazia', async () => {
+  const t = await abrirPeloEndereco('#ganhos', { antes: 'GANHOS.loja = "amazon"; GANHOS.periodo = "7d"' });
+  assert.ok(consultasGanhos(t).every((q) => q.get('loja') === 'amazon' && q.get('periodo') === '7d'));
+  assert.deepEqual(consultaDoEndereco(t), { periodo: '7d', loja: 'amazon' });
+  const u = await abrirPeloEndereco('#ganhos?utm=1', { antes: 'GANHOS.loja = "shopee"' });
+  assert.ok(consultasGanhos(u).every((q) => q.get('loja') === 'shopee'));
+});
+
+test('CA6: trocar um filtro reescreve o endereço por replaceState (sem hashchange); tudo no padrão volta a #ganhos', async () => {
+  const t = await abrirPeloEndereco('#ganhos');
+  assert.equal(t.ctx.location.hash, '#ganhos');
+  const n = t.rs.length;
+  cliqueGanhos(t, '#g-loja', 'loja', 'amazon');
+  await ate(() => consultasGanhos(t).length >= 10);
+  assert.deepEqual(consultaDoEndereco(t), { periodo: '30d', loja: 'amazon' });
+  assert.ok(t.rs.length > n, 'pelo histórico, não por location.hash (que dispararia hashchange e outra carga)');
+  cliqueGanhos(t, '#g-blc', 'b', '2'); await ate(() => consultasGanhos(t).length >= 15);
+  assert.deepEqual(consultaDoEndereco(t), { periodo: '30d', bloco: '2', loja: 'amazon' });
+  cliqueGanhos(t, '#g-per', 'p', 'mes'); await ate(() => consultasGanhos(t).length >= 20);
+  assert.equal(consultaDoEndereco(t).periodo, 'mes');
+  t.el('#g-limpar').onclick?.(); // pode não existir com dados; volta pelo clique nos filtros
+  cliqueGanhos(t, '#g-per', 'p', '30d'); await ate(() => consultasGanhos(t).length >= 25);
+  cliqueGanhos(t, '#g-blc', 'b', ''); await ate(() => consultasGanhos(t).length >= 30);
+  cliqueGanhos(t, '#g-loja', 'loja', ''); await ate(() => consultasGanhos(t).length >= 35 && t.ctx.location.hash === '#ganhos');
+  assert.equal(t.ctx.location.hash, '#ganhos');
+});
+
+test('CA6/CA10: o Operador em #ganhos?bloco=3 vai para a Visão Geral sem chamar /api/ganhos nem /api/rastreio (pelo roteador e pelo menu)', async () => {
+  const t = tela({ hash: '#ganhos?bloco=3' }); preparar(t, { usuario: operador }); rotasGanhos(t, { din: 'c1' });
+  t.rodar('globalThis.__visao = 0; paginaVisao = () => { globalThis.__visao++; }');
+  t.rodar('ir()');
+  await ate(() => false, 10);
+  assert.equal(t.ctx.location.hash, '#visao'); assert.equal(t.ctx.__visao, 1);
+  assert.equal(t.pedidos.filter((p) => p.caminho.startsWith('/api/ganhos') || p.caminho.startsWith('/api/rastreio')).length, 0);
+  // pintarConta (papel trocado com a página aberta) também confere a rota pelo prefixo antes do "?"
+  const m = tela({ hash: '#ganhos?bloco=3' }); preparar(m, { usuario: operador }); rotasGanhos(m, { din: 'c1' });
+  m.rodar('globalThis.__visao = 0; paginaVisao = () => { globalThis.__visao++; }');
+  m.rodar('pintarConta()');
+  await ate(() => false, 10);
+  assert.equal(m.ctx.__visao, 1); assert.equal(m.ctx.location.hash, '#visao');
+  assert.equal(m.pedidos.filter((p) => p.caminho.startsWith('/api/ganhos')).length, 0);
+});
+
+test('CA6: o cartão do bloco tem "Ver ganhos" para #ganhos?bloco=<id> (Dono, mesmo sem os códigos carregados); o Operador não tem', async () => {
+  const t = tela({ hash: '#blocos' }); preparar(t);
+  rotasBloco(t, { codigos: [] });
+  t.rodar(`S.blocks = [${JSON.stringify(bloco(1, XSS, 7, ['a@g.us']))}]`);
+  t.rotas['GET /api/blocks'] = () => [200, [bloco(1, XSS, 7, ['a@g.us']), bloco(2, 'Beleza', null, ['b@g.us'])]];
+  await t.rodar('paginaBlocos()');
+  const h = pagina(t);
+  const c1 = h.match(/<article[^>]*data-id="1"[^]*?<\/article>/)[0]; const c2 = h.match(/<article[^>]*data-id="2"[^]*?<\/article>/)[0];
+  assert.match(c1, /<a class="alvo24" href="#ganhos\?bloco=1"[^>]*>Ver ganhos<\/a>/); assert.match(c2, /<a class="alvo24" href="#ganhos\?bloco=2"[^>]*aria-label="Ver ganhos do bloco Beleza"[^>]*>Ver ganhos<\/a>/);
+  semMarcacao(c1, 'nome do bloco no rótulo do link');
+  // sem os códigos (falhou o GET), o atalho continua: ele não depende do rastreio
+  const s = tela({ hash: '#blocos' }); preparar(s); rotasBloco(s); s.rotas['GET /api/rastreio/codigos'] = () => [500, { erro: 'falhou' }];
+  await s.rodar('paginaBlocos()');
+  assert.match(pagina(s), /href="#ganhos\?bloco=1"/); assert.doesNotMatch(pagina(s), /Rastreio:/);
+  // Operador: sem o link (a página é só do Dono)
+  const o = tela({ hash: '#blocos' }); preparar(o, { usuario: operador }); rotasBloco(o);
+  await o.rodar('paginaBlocos()');
+  assert.doesNotMatch(pagina(o), /#ganhos/);
+});
+
+// ------------------------------------------------------------------------------------------- P5: formatos reais na importação
+
+test('P5: o arquivo pode ser .zip com o CSV dentro (Amazon): accept com .zip, a checagem local aceita e o envio segue como text/csv', async () => {
+  const t = await abrirGanhos({ din: 'c1' });
+  t.rotas['POST /api/ganhos/importar'] = () => [200, PREVIA({ loja: 'amazon' })];
+  await abrirImportar(t, { loja: 'amazon', arquivo: ARQUIVO({ name: '123-Tracking-Id-abc-CSV.zip', type: 'application/zip' }) });
+  const accept = t.el('#dlg').innerHTML.match(/<input type="file" id="imp-arq" accept="([^"]*)"/)[1].split(',');
+  for (const a of ['.csv', '.zip', 'application/zip', 'text/csv']) assert.ok(accept.includes(a), `accept tem ${a}`);
+  await enviarImp(t);
+  assert.equal(posts(t).length, 1, '.zip passa pela checagem local');
+  assert.equal(posts(t)[0].tipo, 'text/csv', 'o servidor abre o .zip; o envio continua text/csv');
+  // .zip que o servidor recusa (mais de um CSV dentro): a frase pronta (415)
+  const z = await abrirGanhos({ din: 'c1' });
+  z.rotas['POST /api/ganhos/importar'] = () => [415, { erro: MENSAGENS_CSV.zip }];
+  await abrirImportar(z, { arquivo: ARQUIVO({ name: 'r.ZIP', type: '' }) });
+  await enviarImp(z);
+  assert.equal(posts(z).length, 1);
+  assert.match(z.el('.erros').innerHTML, /Este \.zip não tem um único arquivo CSV/);
+  // .xlsx continua recusado antes de enviar
+  const x = await abrirGanhos({ din: 'c1' });
+  await abrirImportar(x, { arquivo: ARQUIVO({ name: 'r.xlsx', type: 'application/zip' }) });
+  await enviarImp(x);
+  assert.equal(posts(x).length, 0);
+});
+
+test('P5: o 400 "informe a data do relatório" mostra o campo "Data do relatório" (type=date) com a explicação; com a data, o envio leva dia=…', async () => {
+  const t = await abrirGanhos({ din: 'c1' });
+  t.rotas['POST /api/ganhos/importar'] = ({ consulta }) => (new URLSearchParams(consulta).get('dia')
+    ? [200, PREVIA({ loja: 'amazon', periodo: { de: '2026-10-31', ate: '2026-10-31' }, avisos: [MENSAGENS_IMPORTADOR.diaUsado] })]
+    : [400, { erro: MENSAGENS_IMPORTADOR.semData }]);
+  await abrirImportar(t, { loja: 'amazon' });
+  assert.match(t.el('#dlg').innerHTML, /<div id="imp-dia-campo" hidden>/, 'escondido até o servidor pedir');
+  await enviarImp(t);
+  assert.equal(posts(t).length, 1); assert.equal(new URLSearchParams(posts(t)[0].consulta).get('dia'), null);
+  assert.equal(t.el('#imp-dia-campo').hidden, false, 'o campo aparece');
+  assert.ok(t.el('.erros').innerHTML.includes(MENSAGENS_IMPORTADOR.semData));
+  assert.equal(t.foco.at(-1), '#imp-dia', 'o foco vai para o campo novo');
+  const h = t.el('#dlg').innerHTML;
+  assert.match(h, /<label class="campo"><span>Data do relatório<\/span><input type="date" id="imp-dia"/);
+  assert.match(h, /id="imp-dia-dica"[^>]*>[^<]*total do período[^<]*</, 'diz que serve só para relatório que é um total do período');
+  // campo vazio: recusa sem enviar
+  await enviarImp(t);
+  assert.equal(posts(t).length, 1); assert.match(t.el('.erros').innerHTML, /Escolha a data do relatório/);
+  // com a data: dia=… e a prévia mostra o aviso do servidor
+  t.el('#imp-dia').value = '2026-10-31';
+  await enviarImp(t);
+  assert.equal(posts(t).length, 2); assert.equal(new URLSearchParams(posts(t)[1].consulta).get('dia'), '2026-10-31');
+  assert.match(textoPagina(t.el('#dlg').innerHTML), new RegExp(MENSAGENS_IMPORTADOR.diaUsado.replace(/[.:]/g, '\\$&')));
+  // Voltar: o campo segue à vista com a data; gravar leva o dia também
+  t.el('#imp-voltar').onclick();
+  assert.match(t.el('#dlg').innerHTML, /<div id="imp-dia-campo">/); assert.match(t.el('#dlg').innerHTML, /id="imp-dia" value="2026-10-31"/);
+  // trocar o arquivo esconde o campo e esquece a data (o outro arquivo pode ter data por linha)
+  t.el('#imp-arq').files = [ARQUIVO({ name: 'outro.csv' })]; t.el('#imp-arq').onchange({});
+  assert.equal(t.el('#imp-dia-campo').hidden, true); assert.equal(t.el('#imp-dia').value, '');
+  await enviarImp(t);
+  assert.equal(new URLSearchParams(posts(t).at(-1).consulta).get('dia'), null);
+});
+
+test('P5: a frase do painel que pede a data é a mesma do servidor (é por ela que o campo aparece)', () => {
+  const t = tela();
+  assert.equal(t.rodar('TEXTOS_GANHOS.importar.semDataServidor'), MENSAGENS_IMPORTADOR.semData);
+});
+
+test('CA1/CA2 (plano C): a prévia mostra as contagens outro_codigo e recebem_codigo e os avisos antes das colunas e de "Importar agora"', async () => {
+  const M = MENSAGENS_IMPORTADOR;
+  const t = await abrirGanhos({ din: 'c1' });
+  t.rotas['POST /api/ganhos/importar'] = ({ consulta }) => {
+    const previa = new URLSearchParams(consulta).get('previa') === '1';
+    return [200, PREVIA({ previa, outro_codigo: 2, recebem_codigo: 1, avisos: [pluralServ(2, previa ? M.outroCodigoPrevia : M.outroCodigoGravado), pluralServ(1, previa ? M.recebemCodigoPrevia : M.recebemCodigoGravado)] })];
+  };
+  await abrirImportar(t); await enviarImp(t);
+  const h = flat(t.el('#dlg').innerHTML); const txt = textoPagina(h);
+  assert.match(txt, /2 podem ser repetidas de outro código/);
+  assert.match(txt, /1 importada antes sem código vai receber o código deste arquivo/);
+  const aviso = pluralServ(2, M.outroCodigoPrevia);
+  assert.ok(txt.includes(aviso), 'a frase do servidor');
+  assert.ok(h.indexOf(aviso) < h.indexOf('Colunas lidas'), 'o aviso vem antes da lista de colunas');
+  assert.ok(h.indexOf(aviso) < h.indexOf('id="imp-gravar"'), 'e antes de "Importar agora"');
+  await enviarImp(t);
+  const g = textoPagina(t.el('#dlg').innerHTML);
+  assert.match(g, /1 importada antes sem código recebeu o código deste arquivo/);
+  assert.ok(g.includes(pluralServ(2, M.outroCodigoGravado)));
+  // sem nada a avisar (0, ou null nos cliques), nenhuma linha nova
+  const z = await abrirGanhos({ din: 'c1' });
+  z.rotas['POST /api/ganhos/importar'] = () => [200, PREVIA({ outro_codigo: 0, recebem_codigo: null })];
+  await abrirImportar(z); await enviarImp(z);
+  assert.doesNotMatch(textoPagina(z.el('#dlg').innerHTML), /outro código|receber o código/);
+});
+
+test('Rodada 2 (D1-D7): textos das dicas, período anterior em bloco, sem linha para anterior nulo, alvo24', async () => {
+  const src = (await import('node:fs')).readFileSync(new URL('../public/ganhos.js', import.meta.url), 'utf8');
+  assert.match(src, /mercadolivre: 'Ainda não há relatório para importar do Mercado Livre\.'/);
+  assert.match(src, /amazon: [^\n]*Produto relacionado[^\n]*ID de rastreamento[^\n]*\.zip[^\n]*Data do relatório/);
+  assert.match(src, /shopee: [^\n]*Relatório de vendas[^\n]*Relatório de cliques[^\n]*Exportar/);
+  assert.doesNotMatch(src, /<br><span class="g-ant">/);
+  assert.match(src, /if \(tAnt\[m\] == null\) return ''/);
+  const css = (await import('node:fs')).readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
+  assert.match(css, /\.g-ant \{ display:block; margin-top:4px; \}/);
+  assert.match(css, /button\.g-grupo\[aria-pressed="true"\]::before/);
 });

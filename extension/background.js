@@ -93,13 +93,14 @@ const SHOPEE_ABA = `${SHOPEE_PORTAL}/offer/custom_link`;
 // foi extraído (docs/produto/referencias/shopee-api-afiliados.md). Vazio = o cabeçalho não vai. Se o teste com a
 // sessão do dono mostrar que ele é obrigatório, copie aqui o valor da requisição "Obter link" vista no DevTools.
 const SHOPEE_TIPO_PROGRAMA = '';
-// Nome do campo do Sub_id1 dentro de `advancedLinkParams` do "Link personalizado". Ponto único: o formato ainda não
-// foi capturado (pendência P4 do plano dashboard-ganhos). Vazio = o Sub_id nunca vai ao portal: o corpo é o de sempre
-// e a resposta diz sub_id_aplicado: false (o link sai de afiliado, sem Sub_id). Ao capturar no DevTools o corpo de
-// "Obter link" com o Sub_id1 preenchido, copie aqui só o nome do campo (nunca cookie nem cabeçalho).
-// Preencher só esta constante não basta: o servidor só pede link com Sub_id à extensão com SUBID_PELA_EXTENSAO
-// (src/lojas.js) em true. Para ligar o Sub_id pela extensão, mude os dois juntos.
-const SHOPEE_SUBID_CAMPO = '';
+// Nome do campo do Sub_id1 dentro de `advancedLinkParams` do "Link personalizado". Ponto único. Formato capturado
+// no portal em 05/11/2026 (pendência P4 do plano dashboard-ganhos, só o corpo, sem cookies):
+// linkParams: [{ originalLink, advancedLinkParams: { subId1: "<Sub_id>" } }]; sem Sub_id, a página omite
+// advancedLinkParams. Vazio = o Sub_id nunca vai ao portal: o corpo é o de sempre e a resposta diz
+// sub_id_aplicado: false (o link sai de afiliado, sem Sub_id).
+// Esta constante não basta: o servidor só pede link com Sub_id à extensão com SUBID_PELA_EXTENSAO (src/lojas.js) em
+// true. Para ligar ou desligar o Sub_id pela extensão, mude os dois juntos.
+const SHOPEE_SUBID_CAMPO = 'subId1';
 // Cópia do RE_SUB_ID de src/shopee.js (fonte única do formato; a extensão não importa do servidor). Mudar lá pede
 // mudar aqui (o portal só aceita alfanumérico).
 const RE_SUB_ID = /^[A-Za-z0-9]{1,30}$/;
@@ -248,7 +249,8 @@ async function recarregarShopee(tabId) {
 
 /**
  * Gera o link na aba do portal; sem sessão (ou fora do portal, ex.: página de login), recarrega uma vez.
- * sub_id_aplicado: o Sub_id do pedido foi no corpo (só com SHOPEE_SUBID_CAMPO preenchido).
+ * sub_id_aplicado: o Sub_id do pedido foi no corpo (só com SHOPEE_SUBID_CAMPO preenchido) e a Shopee devolveu o
+ * link sem failCode (com failCode, o pedido volta como erro, sem o campo).
  */
 async function gerarLinkShopee(job) {
   const url = urlProdutoShopee(job.url);

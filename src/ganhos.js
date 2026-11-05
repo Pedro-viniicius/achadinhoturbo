@@ -7,9 +7,12 @@
 // Recorte de bloco: a comissão e o clique atribuídos ao bloco mais os atribuídos aos grupos que estão hoje nele; o gasto
 // (M12), só o lançado para o próprio bloco.
 // Nenhum dado de pessoa passa por aqui: as entradas são contadas em group_events, sem ler o participante.
+// Entrega C (docs/produto/planos/dashboard-ganhos-c.md, etapa 2): M16 (comparar com o período anterior), filtro de
+// grupo em por=oferta e a URL da página do produto (sem afiliado) em cada oferta.
 
 import { periodRange, dayOf } from './analytics.js';
 import { cobertura as coberturaRastreio, LOJAS } from './rastreio.js';
+import { lerChave } from './catalogo-itens.js';
 
 export const POR = Object.freeze(['grupo', 'bloco', 'loja', 'oferta', 'dia']);
 export const PERIODOS = Object.freeze(['hoje', 'ontem', '7d', '30d', 'mes', 'mes_passado', 'custom']);
@@ -29,6 +32,9 @@ export const MENSAGENS_GANHOS = Object.freeze({
   periodo_consulta: 'Período inválido. Use datas como 2026-10-31.',
   bloco: 'Este bloco não existe mais.',
   grupo: 'Este grupo não existe mais.',
+  grupo_por: 'O filtro de grupo vale só para a tabela Por oferta.',
+  grupo_e_bloco: 'Filtre por grupo ou por bloco, não pelos dois.',
+  comparar: 'O parâmetro de comparação veio repetido ou inválido. Mande comparar=1 uma vez só.',
   corpo: 'Envie o gasto.',
   alvo: 'Escolha um grupo ou bloco.',
   periodo: 'Escolha o período do gasto.',
@@ -149,21 +155,67 @@ function custos(comissao, gasto, entradas, comLoja) {
 /** Chave para casar a oferta da comissão (produto) com a do envio (oferta_chave): o ASIN vem com ou sem 'ASIN:'. */
 const chaveOferta = (loja, produto) => `${loja}|${loja === 'amazon' ? produto.replace(/^ASIN:/i, '') : produto}`;
 
+const RE_ASIN_OFERTA = /^(?:ASIN:)?([A-Z0-9]{10})$/i;
+const RE_MLB_OFERTA = /^MLB-?(\d{1,20})$/i;
+/** Loja de lerChave (src/catalogo-itens.js) → loja dos ganhos. */
+const LOJA_DA_CHAVE = Object.freeze({ ml: 'mercadolivre', amazon: 'amazon', shopee: 'shopee' });
+
+/**
+ * Página do produto na loja, sem afiliado (D5), para o produto de uma comissão; null se o produto não fecha.
+ * Só monta a URL pelas regex de lerChave, com domínio fixo: nada do arquivo importado passa inteiro para a URL.
+ * Nunca é o link de afiliado (o clique do dono não entra no relatório da loja).
+ */
+export function urlDaOferta(loja, produto) {
+  if (typeof produto !== 'string') return null;
+  let chave = null;
+  if (loja === 'amazon') {
+    const m = RE_ASIN_OFERTA.exec(produto);
+    if (m) chave = `ASIN:${m[1].toUpperCase()}`;
+  } else if (loja === 'mercadolivre') {
+    const m = RE_MLB_OFERTA.exec(produto);
+    if (m) chave = `MLB${m[1]}`;
+  } else if (loja === 'shopee') chave = produto;
+  const r = chave === null ? null : lerChave(chave);
+  return r && LOJA_DA_CHAVE[r.loja] === loja ? r.url : null;
+}
+
+/**
+ * Confere o filtro de grupo (D4): jid de até MAX_JID caracteres (senão 404, como grupo que não existe), só com
+ * por=oferta e sem bloco (400). Frases fixas, sem o valor recebido. A existência em `groups` fica com metricas.
+ */
+function conferirGrupo(grupo, por, bloco) {
+  if (typeof grupo !== 'string' || !grupo || grupo.length > MAX_JID) throw new ErroGanhos(404, M.grupo);
+  if (por !== 'oferta') throw new ErroGanhos(400, M.grupo_por);
+  if (bloco != null) throw new ErroGanhos(400, M.grupo_e_bloco);
+}
+
+/** M16: as métricas dos cartões que ganham variação contra o período anterior. */
+const CAMPOS_VARIACAO = Object.freeze(['comissao', 'receita', 'vendas', 'cliques', 'epc', 'conversao', 'envios', 'entradas']);
+/** M16 = (X − X_ant) ÷ X_ant; null sem base (X_ant 0 ou null) ou sem valor no período (X null). */
+const variacao = (x, xAnt) => (x == null || xAnt == null || xAnt === 0 ? null : (x - xAnt) / xAnt);
+
 const porNome = (a, b) => String(a ?? '').localeCompare(String(b ?? ''), 'pt-BR');
 const porComissao = (nome) => (a, b) => b.comissao - a.comissao || porNome(nome(a), nome(b));
 
 /**
  * Métricas do período [de, ate] (ms, dias de negócio de periodRange com `viradaMin`), recortadas por `por`
- * ('grupo' | 'bloco' | 'loja' | 'oferta' | 'dia'), com filtros opcionais de `loja` e de `bloco` (id).
- * Devolve `{ de, ate, dia_de, dia_ate, por, loja, bloco, total, nao_atribuida, cobertura: {total, por_loja}, linhas,
- * importado_ate, gastos_informados }`. Erros: ErroGanhos 400 (por, loja) ou 404 (bloco); período não numérico: TypeError.
+ * ('grupo' | 'bloco' | 'loja' | 'oferta' | 'dia'), com filtros opcionais de `loja`, de `bloco` (id) e de `grupo`
+ * (jid; só com por='oferta' e sem bloco: as vendas atribuídas a esse grupo, não as do bloco inteiro, D4).
+ * `comparar: true` acrescenta `anterior = { dia_de, dia_ate, total, variacao }` (M16): os mesmos N dias de negócio
+ * logo antes, com os mesmos filtros; sem ele, `anterior: null`.
+ * Devolve `{ de, ate, dia_de, dia_ate, por, loja, bloco, grupo, total, nao_atribuida, cobertura: {total, por_loja}, linhas,
+ * importado_ate, gastos_informados, anterior }`. Erros: ErroGanhos 400 (por, loja, combinação do grupo) ou 404 (bloco,
+ * grupo); período não numérico: TypeError.
  */
-export function metricas(db, { de, ate, por = 'grupo', loja = null, bloco = null, viradaMin = 0 } = {}) {
+export function metricas(db, { de, ate, por = 'grupo', loja = null, bloco = null, grupo = null, comparar = false, viradaMin = 0 } = {}) {
   if (!Number.isFinite(de) || !Number.isFinite(ate)) throw new TypeError('ganhos: período inválido');
   if (!POR.includes(por)) throw new ErroGanhos(400, M.por);
   if (loja != null && !LOJAS.includes(loja)) throw new ErroGanhos(400, M.loja);
+  if (grupo != null) conferirGrupo(grupo, por, bloco);
   const blocoId = bloco == null ? null : idBloco(bloco);
   if (bloco != null && (blocoId === null || !db.prepare('SELECT 1 FROM blocks WHERE id = ?').get(blocoId))) throw new ErroGanhos(404, M.bloco);
+  const grupoJid = grupo == null ? null : grupo;
+  if (grupoJid !== null && !db.prepare('SELECT 1 FROM groups WHERE jid = ?').get(grupoJid)) throw new ErroGanhos(404, M.grupo);
   const v = viradaMin;
   const diaDe = dayOf(de, v); const diaAte = dayOf(ate, v);
 
@@ -181,8 +233,10 @@ export function metricas(db, { de, ate, por = 'grupo', loja = null, bloco = null
     gruposDoBloco.get(id).push(jid);
   }
   const blocosDoAlvo = (alvo) => (!alvo ? [] : alvo.alvo_tipo === 'bloco' ? [alvo.bloco_id] : blocosDoGrupo.get(alvo.jid) || []);
-  const jidsRecorte = blocoId === null ? null : gruposDoBloco.get(blocoId) || [];
-  const noRecorte = (alvo) => blocoId === null || blocosDoAlvo(alvo).includes(blocoId);
+  // recorte de grupo: só o atribuído ao próprio grupo (a venda atribuída ao bloco não se divide, ADR-006)
+  const jidsRecorte = grupoJid !== null ? [grupoJid] : blocoId === null ? null : gruposDoBloco.get(blocoId) || [];
+  const noRecorte = grupoJid !== null ? (alvo) => alvo?.alvo_tipo === 'grupo' && alvo.jid === grupoJid
+    : (alvo) => blocoId === null || blocosDoAlvo(alvo).includes(blocoId);
 
   // comissões válidas e cliques do período, já atribuídos e recortados
   const atribuidor = criarAtribuidor(db, v);
@@ -232,13 +286,14 @@ export function metricas(db, { de, ate, por = 'grupo', loja = null, bloco = null
   const accTotal = novoAcc(); const accSem = novoAcc(); let linhasSem = 0;
   for (const f of comissoes) { somarComissao(accTotal, f); if (!f.alvo) { somarComissao(accSem, f); linhasSem++; } }
   for (const f of cliques) { somarCliques(accTotal, f); if (!f.alvo) somarCliques(accSem, f); }
-  const gastoTotal = blocoId === null ? gastoTodos : gastoDoBloco(blocoId);
-  const entradasTotal = blocoId === null ? [...entradasGrupo.values()].reduce((s, n) => s + n, 0) : entradasDoBloco(blocoId);
+  const gastoTotal = grupoJid !== null ? gastoGrupo.get(grupoJid) ?? null : blocoId === null ? gastoTodos : gastoDoBloco(blocoId);
+  const entradasTotal = grupoJid !== null ? entradasGrupo.get(grupoJid) || 0
+    : blocoId === null ? [...entradasGrupo.values()].reduce((s, n) => s + n, 0) : entradasDoBloco(blocoId);
   const total = {
     ...dinheiro(accTotal), ...envios(cob.total), ...atribuicao(accTotal),
     ...custos(accTotal.comissao, gastoTotal, entradasTotal, comLoja),
   };
-  const naoAtribuida = blocoId !== null ? null
+  const naoAtribuida = blocoId !== null || grupoJid !== null ? null
     : { linhas: linhasSem, comissao: accSem.comissao, receita: accSem.receita, vendas: accSem.vendas, cliques: accSem.cliques };
 
   /** Acumuladores por chave da linha: `chaves(f)` diz em quais linhas cada comissão/clique entra. */
@@ -302,7 +357,7 @@ export function metricas(db, { de, ate, por = 'grupo', loja = null, bloco = null
     linhas = [...ofertas].map(([k, o]) => {
       const d = dinheiro(o.acc); const e = enviados.get(k);
       return {
-        loja: o.loja, oferta: o.oferta, titulo: o.titulo,
+        loja: o.loja, oferta: o.oferta, titulo: o.titulo, url: urlDaOferta(o.loja, o.oferta),
         comissao: d.comissao, comissao_confirmada: d.comissao_confirmada, receita: d.receita, vendas: d.vendas,
         envios: e ? Number(e.envios) : 0, grupos: e ? Number(e.grupos) : 0,
       };
@@ -323,11 +378,28 @@ export function metricas(db, { de, ate, por = 'grupo', loja = null, bloco = null
   for (const r of db.prepare('SELECT loja, MAX(substr(data, 1, 10)) AS ate FROM comissoes GROUP BY loja').all()) {
     if (LOJAS.includes(r.loja)) importadoAte[r.loja] = r.ate;
   }
+  // M16: os mesmos N dias de negócio logo antes (a regra da Visão Geral), com os mesmos filtros. O recorte mais
+  // barato que dá o total: por loja; com grupo, por oferta (o grupo só vale nele).
+  let anterior = null;
+  if (comparar === true) {
+    const n = Math.max(1, nAte - nDe + 1); // periodRange nunca dá de > ate; chamada direta com período invertido vale 1 dia
+    const diaDeAnt = diaTexto(nDe - n); const diaAteAnt = diaTexto(nDe - 1);
+    const tAnt = metricas(db, {
+      de: limitesDoDia(diaDeAnt, v).de, ate: limitesDoDia(diaAteAnt, v).ate, por: grupoJid !== null ? 'oferta' : 'loja',
+      loja, bloco: blocoId, grupo: grupoJid, viradaMin: v,
+    }).total;
+    anterior = {
+      dia_de: diaDeAnt, dia_ate: diaAteAnt, total: tAnt,
+      variacao: Object.fromEntries(CAMPOS_VARIACAO.map((k) => [k, variacao(total[k], tAnt[k])])),
+    };
+  }
+
   return {
-    de, ate, dia_de: diaDe, dia_ate: diaAte, por, loja: loja ?? null, bloco: blocoId,
+    de, ate, dia_de: diaDe, dia_ate: diaAte, por, loja: loja ?? null, bloco: blocoId, grupo: grupoJid,
     total, nao_atribuida: naoAtribuida, cobertura: { total: envios(cob.total), por_loja: cob.por_loja }, linhas,
     importado_ate: importadoAte,
     gastos_informados: Number(db.prepare('SELECT COUNT(*) AS n FROM gastos_anuncio').get().n),
+    anterior,
   };
 }
 
@@ -424,11 +496,12 @@ const responder = (fn) => (req, res) => {
 
 /**
  * Consulta de GET /api/ganhos → argumentos de metricas. Vazio vale o padrão (mês atual, por grupo, todas as lojas,
- * todos os blocos); parâmetro repetido (vira lista) ou fora do formato → ErroGanhos com frase fixa.
+ * todos os blocos, sem grupo, sem comparar); parâmetro repetido (vira lista) ou fora do formato → ErroGanhos com
+ * frase fixa. `comparar` só aceita '1'; `grupo` só com por=oferta e sem bloco (a existência fica com metricas).
  */
 export function lerConsulta(q = {}, viradaMin = 0, now = Date.now()) {
   const recusa = { periodo: [400, M.periodo_consulta], de: [400, M.periodo_consulta], ate: [400, M.periodo_consulta],
-    por: [400, M.por], loja: [400, M.loja], bloco: [404, M.bloco] };
+    por: [400, M.por], loja: [400, M.loja], bloco: [404, M.bloco], grupo: [404, M.grupo], comparar: [400, M.comparar] };
   const texto = (campo, padrao) => {
     const x = q[campo];
     if (x == null || x === '') return padrao;
@@ -440,12 +513,19 @@ export function lerConsulta(q = {}, viradaMin = 0, now = Date.now()) {
   const de = texto('de', ''); const ate = texto('ate', '');
   if ((de && diaNum(de) === null) || (ate && diaNum(ate) === null)) throw new ErroGanhos(400, M.periodo_consulta);
   const faixa = periodRange(periodo, now, { de, ate }, viradaMin);
-  return { de: faixa.de, ate: faixa.ate, por: texto('por', 'grupo'), loja: texto('loja', null), bloco: texto('bloco', null), viradaMin };
+  const por = texto('por', 'grupo'); const loja = texto('loja', null); const bloco = texto('bloco', null);
+  const grupo = texto('grupo', null); const comparar = texto('comparar', null);
+  if (comparar !== null && comparar !== '1') throw new ErroGanhos(400, M.comparar);
+  if (grupo !== null) {
+    if (!POR.includes(por)) throw new ErroGanhos(400, M.por); // a mesma recusa de metricas, antes da do grupo
+    conferirGrupo(grupo, por, bloco);
+  }
+  return { de: faixa.de, ate: faixa.ate, por, loja, bloco, grupo, comparar: comparar === '1', viradaMin };
 }
 
 /**
  * Rotas dos ganhos, montadas por buildApp depois do Host/Origin e do login. Todas só do Dono, inclusive GET (D9, P2):
- *   GET /api/ganhos?periodo=&de=&ate=&por=grupo|bloco|loja|oferta|dia&loja=&bloco= → metricas(…)
+ *   GET /api/ganhos?periodo=&de=&ate=&por=grupo|bloco|loja|oferta|dia&loja=&bloco=&grupo=&comparar=1 → metricas(…)
  *   GET /api/ganhos/gastos → { gastos }; POST /api/ganhos/gastos → { gasto, aviso, gastos };
  *   DELETE /api/ganhos/gastos/:id → { gastos }. Erros: { erro } com frase fixa de MENSAGENS_GANHOS, sem eco.
  * `ctx.viradaMin()` (opcional) dá a virada do dia de negócio, como a Visão Geral.

@@ -323,3 +323,31 @@ test('S2: o teto conta só pedidos que foram à extensão (off-line e simulaçã
     await assert.rejects(l.requestLinkShopee({ url: URL_SHOPEE, timeoutMs: 1 }), /Limite de links da Shopee/, String(limiteShopeeHora));
   }
 });
+
+test('R3/S2: vagasShopee() diz quantos pedidos link_shopee ainda cabem na janela de 1 h (off-line, URL inválida e simulação não gastam)', async () => {
+  const rel = { t: 1_700_000_000_000 };
+  const links = createLinkService({ getMode: () => 'extension', limiteShopeeHora: 3, agora: () => rel.t });
+  assert.equal(links.vagasShopee(), 3);
+  await assert.rejects(links.requestLinkShopee({ url: URL_SHOPEE }), /não está conectada/);
+  await assert.rejects(links.requestLinkShopee({ url: 'https://evil.com/x' }), /inválido/);
+  assert.equal(links.vagasShopee(), 3, 'off-line e URL inválida não gastam vaga');
+  await pedidosQueExpiram(links, 1);
+  rel.t += 30 * 60000;
+  await comExtensao(links, () => links.requestLinkShopee({ url: URL_SHOPEE, subId: 'b1' }), { ok: true, link: CURTO, sub_id_aplicado: true });
+  assert.equal(links.vagasShopee(), 1, 'com ou sem Sub_id, com ou sem resposta, cada pedido entregue gasta uma vaga');
+  await pedidosQueExpiram(links, 1);
+  assert.equal(links.vagasShopee(), 0);
+  await assert.rejects(links.requestLinkShopee({ url: URL_SHOPEE, timeoutMs: 1 }), /Limite de links da Shopee por hora atingido/);
+  assert.equal(links.vagasShopee(), 0, 'nunca fica negativo');
+  // a janela anda: o 1º pedido sai dela depois de 1 h; os outros dois, 30 min depois
+  rel.t += 30 * 60000 + 1;
+  assert.equal(links.vagasShopee(), 1);
+  rel.t += 30 * 60000;
+  assert.equal(links.vagasShopee(), 3);
+  // simulação: o teto não vale, as vagas não mudam
+  const fake = createLinkService({ getMode: () => 'fake', limiteShopeeHora: 2 });
+  for (let i = 0; i < 3; i++) await fake.requestLinkShopee({ url: URL_SHOPEE, subId: 'b1' });
+  assert.equal(fake.vagasShopee(), 2);
+  // limite inválido vale o padrão (60)
+  assert.equal(createLinkService({ getMode: () => 'extension', limiteShopeeHora: 0 }).vagasShopee(), 60);
+});
