@@ -168,6 +168,17 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_rem_msg ON remetente_itens (remetente_id, 
 CREATE INDEX IF NOT EXISTS idx_rem_status ON remetente_itens (status, ts);
 CREATE INDEX IF NOT EXISTS idx_rem_dedupe ON remetente_itens (remetente_id, chave, status, decidido_em);
 CREATE INDEX IF NOT EXISTS idx_rem_hora ON remetente_itens (remetente_id, ts);
+-- Grupo vivo: rotinas recorrentes de mensagem ou enquete. No horário, a rotina grava uma ocorrência 'agora' em envios.
+-- conteudos: lista JSON de 1 a 5 (mensagem: ["texto",…]; enquete: [{pergunta,opcoes,multipla}]), em rodízio ou sorteio.
+-- repetir: {dias:[0..6], horarios:['HH:MM'] 1..6}, igual ao do Disparar mensagem. next_run_at NULL = desligada.
+CREATE TABLE IF NOT EXISTS rotinas (
+  id INTEGER PRIMARY KEY, nome TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
+  tipo TEXT NOT NULL CHECK (tipo IN ('mensagem','enquete')),
+  conteudos TEXT NOT NULL DEFAULT '[]',
+  ordem TEXT NOT NULL DEFAULT 'rodizio' CHECK (ordem IN ('rodizio','sorteio')), proximo_indice INTEGER NOT NULL DEFAULT 0,
+  group_jids TEXT NOT NULL DEFAULT '[]', repetir TEXT NOT NULL,
+  next_run_at INTEGER, last_run_at INTEGER, ultimo_envio_id INTEGER, created_at INTEGER, updated_at INTEGER);
+CREATE INDEX IF NOT EXISTS idx_rotinas_fila ON rotinas (enabled, next_run_at);
 `;
 
 // Colunas acrescentadas depois da primeira versão (ALTER TABLE só se faltar).
@@ -183,6 +194,8 @@ const EXTRA_COLUMNS = [
   // mensagem, que pode chegar atrasada) e quantos links a linha 'limite' representa (a resposta "Recebi N links")
   ['remetente_itens', 'chegou_em', 'INTEGER'],
   ['remetente_itens', 'qtd_links', 'INTEGER'],
+  // grade de horários da regra (JSON {dias, horarios:[{hora, qtd, template_id}]}); NULL = ritmo por intervalo, o de antes
+  ['rules', 'grade', 'TEXT'],
 ];
 
 // "[ … ]" é um pedaço opcional: some sozinho quando algum placeholder dentro dele está vazio (renderTemplate).
@@ -265,6 +278,20 @@ function parseSources(r) {
   return [{ type: r.source_type || 'list', config: JSON.parse(r.source_config || '{}'), tag_id: null }];
 }
 
+/**
+ * Grade de horários da regra: o objeto gravado, ou null (modo intervalo) se vier vazia, ilegível ou fora de forma.
+ * Nunca lança: uma regra com grade quebrada não pode travar o tick. A forma completa é conferida ao salvar (src/grade.js).
+ */
+function parseGrade(valor) {
+  if (typeof valor !== 'string' || !valor.trim()) return null;
+  try {
+    const g = JSON.parse(valor);
+    return g && typeof g === 'object' && !Array.isArray(g) ? g : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Linha do banco -> objeto de regra com os campos JSON já lidos. */
 export function parseRule(r) {
   if (!r) return null;
@@ -275,6 +302,7 @@ export function parseRule(r) {
     group_jids: JSON.parse(r.group_jids || '[]'),
     source_config: JSON.parse(r.source_config || '{}'),
     sources: parseSources(r),
+    grade: parseGrade(r.grade),
   };
 }
 

@@ -16,7 +16,7 @@ const TEXTOS_DISPAROS = {
   },
   mensagem: {
     titulo: 'Disparar mensagem', ajuda: 'mensagem',
-    sub: 'Uma mensagem comum (com foto, se quiser) ou uma enquete para os grupos que você escolher. Envie agora, agende ou repita nos dias da semana.',
+    sub: 'Uma mensagem comum (com foto, se quiser) ou uma enquete para os grupos que você escolher. Envie agora, agende ou repita nos dias da semana. Para rotinas que se repetem (bom dia, enquete da semana), use <a href="#grupo-vivo">Grupo vivo</a>.',
   },
   // estados gerais
   semConexao: 'Sem resposta do programa. Confira se ele está rodando e tente de novo.',

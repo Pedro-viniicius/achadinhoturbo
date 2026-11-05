@@ -769,6 +769,17 @@ const FATOS = [
   { nome: 'links por mensagem do remetente', valor: 5, texto: (v) => new RegExp(`[Aa]té (?:${numero(v)}) links por mensagem`), codigo: [['src/oferta-texto.js', /export const MAX_URLS = (\d+);/]] },
   { nome: 'link parado do remetente na fila (horas)', valor: 2, texto: (v) => new RegExp(`parado na fila por mais de ${v} h expira`), codigo: [['src/remetentes.js', /const PARADO_MAX = (\d+) \* HORA;/]] },
   { nome: 'respostas por hora ao remetente', valor: 20, texto: (v) => new RegExp(`até ${v} respostas por hora`), codigo: [['src/remetentes.js', /const MAX_RESPOSTAS_HORA = (\d+);/]] },
+  // Grade de horários e Grupo vivo (plano grade-de-disparos, etapa 9, CA14)
+  { nome: 'horários da grade', valor: 48, texto: (v) => new RegExp(`até ${v} horários`), codigo: [['src/grade.js', /export const MAX_HORARIOS_GRADE = (\d+);/]] },
+  { nome: 'minutos entre dois horários da grade', valor: 10, texto: (v) => new RegExp(`pelo menos ${v} min entre`), codigo: [['src/grade.js', /export const INTERVALO_MIN_GRADE = (\d+);/]] },
+  { nome: 'ofertas por horário da grade', valor: 20, texto: (v) => new RegExp(`de 1 a ${v} ofertas por horário`), codigo: [['src/grade.js', /export const MAX_QTD_GRADE = (\d+);/]] },
+  { nome: 'tolerância de um horário perdido (min)', valor: 30, texto: (v) => new RegExp(`atrasou até ${v} min`), codigo: [['src/grade.js', /export const TOLERANCIA_MIN = (\d+);/]] },
+  { nome: 'textos ou enquetes por rotina do Grupo vivo', valor: 5, texto: (v) => new RegExp(`até (?:${numero(v)}) (?:textos|enquetes)`), codigo: [['src/rotinas.js', /export const MAX_CONTEUDOS = (\d+);/]] },
+  { nome: 'horários por rotina do Grupo vivo', valor: 6, texto: (v) => new RegExp(`até ${v} horários por rotina`), codigo: [['src/rotinas.js', /export const MAX_HORARIOS_ROTINA = (\d+);/]] },
+  { nome: 'rotinas do Grupo vivo', valor: 50, texto: (v) => new RegExp(`até ${v} rotinas`), codigo: [['src/rotinas.js', /export const MAX_ROTINAS = (\d+);/]] },
+  { nome: '"Enviar agora" de uma rotina do Grupo vivo (min entre dois)', valor: 1, texto: (v) => new RegExp(`um(?: “Enviar agora”)? a cada ${v} min\\b`), codigo: [['src/rotinas.js', /export const ENVIAR_AGORA_INTERVALO_MIN = (\d+);/]] },
+  { nome: 'atualização automática da lista do Grupo vivo (s)', valor: 10, texto: (v) => new RegExp(`se atualiza sozinha a cada ${v} s\\b`), codigo: [['public/app.js', /rotaAtual\(\) === 'grupo-vivo' && !\$\('#dlg'\)\.open\) gvAtualizar\(\)\.catch\(\(\) => \{\}\); \}, (\d+)000\);/]] },
+  { nome: 'mensagens por dia que ativam o aviso', valor: 400, texto: (v) => new RegExp(`mais de ${milhar(v)} mensagens por dia`), codigo: [['public/grade.js', /const AVISO_MENSAGENS_DIA = (\d+);/]] },
 ];
 
 test('FATOS: cada número aparece nos Docs e no README e bate com a constante do código', () => {
@@ -1066,4 +1077,200 @@ test('R1: simular usa uma pasta separada, sem "pare o serviço antes", com PORT=
     assert.match(txt, /não mexe nos seus dados/, onde);
     assert.doesNotMatch(txt, /pare-o antes|pare o serviço antes|se o painel já estiver ligado, pare/i, onde);
   }
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// Grade de horários e Grupo vivo (plano grade-de-disparos, etapa 9, CA14): verbetes, seções dos capítulos, glossário,
+// limites e README. As frases do Histórico citadas nos Docs têm de ser as do código (src/scheduler.js, src/rotinas.js,
+// src/server.js): o texto da documentação é conferido contra elas.
+// ---------------------------------------------------------------------------------------------------------------
+const TIPS_GRADE = ['regras.modo_grade', 'regras.grade_horarios', 'regras.grade_modelos', 'grupovivo', 'grupovivo.rodizio'];
+const JARGAO = /\b(json|payload|endpoint|cron|slot|tick|sqlite|jid|baileys|api)\b/i;
+const secaoTxt = (cap, id) => { const s = CAPS[cap].secoes.find((x) => x.id === id); assert.ok(s, `${cap}/${id} não existe`); return limpo(strings(s.blocos).join('\n')); };
+/** Parte do README de um título `## …` até o próximo `## `. */
+const readmeSecao = (titulo) => {
+  const i = README_BRUTO.search(new RegExp(`^## ${titulo}`, 'm')); assert.ok(i >= 0, `README sem a seção "${titulo}"`);
+  const resto = README_BRUTO.slice(i + 3); const fim = resto.search(/^## /m);
+  return limpo(resto.slice(0, fim < 0 ? undefined : fim));
+};
+/** O motivo do horário pulado, como está no código (uma só fonte para o Histórico da grade e a frase dos Docs). */
+const motivoPulado = () => /const MOTIVO_PULADO = '([^']+)';/.exec(lerRaiz('src/scheduler.js'))[1];
+/** Vários horários pulados, como o código escreve: o agendador (o 1º de outro dia leva a data) e as rotinas. */
+const PULADOS_GRADE_DIAS = new RegExp(`\\d+ horários pulados \\(\\d\\d:\\d\\d de \\d\\d/\\d\\d a \\d\\d:\\d\\d\\): ${escRe(motivoPulado())}`);
+const PULADOS_ROTINA = new RegExp(`\\d+ horários pulados, o último de \\d\\d/\\d\\d \\d\\d:\\d\\d: ${escRe(motivoPulado())}`);
+
+test('Grade e Grupo vivo: nenhuma frase de horário pulado que o código não escreve ("Vários horários pulados desde…")', () => {
+  for (const [onde, txt] of [['README', README], ['Docs', TEXTO_DOCS]]) {
+    assert.doesNotMatch(txt, /Vários horários pulados|horários pulados desde|primeiro horário perdido/, onde);
+  }
+  for (const arq of ['src/scheduler.js', 'src/rotinas.js']) assert.doesNotMatch(lerRaiz(arq), /Vários horários|pulados desde/, arq);
+});
+
+test('Grade e Grupo vivo: os cinco verbetes de TIPS existem, em linguagem simples, com os números certos', () => {
+  const T = tipsDoPainel();
+  for (const k of TIPS_GRADE) {
+    assert.ok(typeof T[k] === 'string' && T[k].length >= 60 && T[k].length <= 520, `TIPS.${k}: ${T[k]?.length}`);
+    assert.doesNotMatch(T[k], JARGAO, `TIPS.${k}: jargão`);
+  }
+  const m = T['regras.modo_grade'];
+  assert.match(m, /A cada X minutos/); assert.match(m, /Em horários marcados/); assert.match(m, /Funciona das\/até/); assert.match(m, /não vale/);
+  const h = T['regras.grade_horarios'];
+  assert.match(h, /\b48 horários/); assert.match(h, /1 a 20 ofertas/); assert.match(h, /10 min/); assert.match(h, /30 min/); assert.match(h, /Histórico/);
+  const mo = T['regras.grade_modelos'];
+  assert.match(mo, /Montar…/); assert.match(mo, /Substituir horários/); assert.match(mo, /Acrescentar/); assert.match(mo, /horário final/);
+  const g = T['grupovivo'];
+  assert.match(g, /até 5 textos ou enquetes/); assert.match(g, /até 6 horários/); assert.match(g, /sem foto/i); assert.match(g, /Grupo vivo: /); assert.match(g, /ofertas/);
+  const r = T['grupovivo.rodizio'];
+  assert.match(r, /Um depois do outro/); assert.match(r, /Sorteio/); assert.match(r, /sem repetir o último/); assert.match(r, /Enviar agora/);
+});
+
+test('Grade e Grupo vivo: cada verbete leva ao "Ler mais" da seção certa, e a seção existe', () => {
+  const noop = () => {};
+  const ctx = vm.createContext({ document: { addEventListener: noop, getElementById: () => null }, addEventListener: noop, innerWidth: 1280, innerHeight: 800 });
+  vm.runInContext(fonte('ajuda.js'), ctx, { filename: 'public/ajuda.js' });
+  const LEIA = JSON.parse(vm.runInContext('JSON.stringify(LEIA_MAIS)', ctx));
+  const esperado = { 'regras.modo_grade': 'disparo-automatico/horarios-marcados', 'regras.grade_horarios': 'disparo-automatico/horarios-marcados',
+    'regras.grade_modelos': 'disparo-automatico/horarios-marcados', grupovivo: 'mensagens/grupo-vivo', 'grupovivo.rodizio': 'mensagens/grupo-vivo' };
+  for (const [k, destino] of Object.entries(esperado)) {
+    assert.equal(LEIA[k], destino, k);
+    const [cap, sec] = destino.split('/'); assert.ok(CAPS[cap].secoes.some((s) => s.id === sec), `${destino} não existe`);
+  }
+});
+
+test('Grade: a seção "horarios-marcados" do Disparo automático cobre o formulário, os limites e a conversão do ritmo atual', () => {
+  const sec = CAPS['disparo-automatico'].secoes.find((s) => s.id === 'horarios-marcados');
+  assert.ok(sec, 'seção horarios-marcados em disparo-automatico');
+  assert.match(sec.onde, /Ritmo de envio → Em horários marcados/);
+  const ids = CAPS['disparo-automatico'].secoes.map((s) => s.id);
+  assert.ok(ids.indexOf('horarios-marcados') === ids.indexOf('ritmo') + 1, 'logo depois de "Ritmo e horário"');
+  assert.ok(ids.indexOf('na-hora-marcada') === ids.indexOf('horarios-marcados') + 1, '"O que acontece na hora marcada" logo depois');
+  const txt = secaoTxt('disparo-automatico', 'horarios-marcados');
+  // o formulário, com os rótulos de public/grade.js
+  for (const r of [/Como enviar/, /A cada X minutos/, /Em horários marcados/, /Em quais dias/, /Modelos rápidos/, /Montar…/, /Substituir horários/, /Acrescentar/, /\+ Adicionar horário/, /Padrão do disparo/, /Horário/, /Ofertas/, /Template/, /Salvar/]) assert.match(txt, r);
+  for (const r of [/A cada 30 min, 8h às 22h/, /A cada hora, 8h às 22h/, /Manhã, tarde e noite/, /Horários de pico/]) assert.match(txt, r);
+  // limites (os da virada do dia valem: 23:55 e 00:00 são recusados)
+  for (const r of [/até 48 horários/, /pelo menos 10 min entre/, /de 1 a 20 ofertas por horário/]) assert.match(txt, r);
+  assert.match(txt, /sem horário repetido/i); assert.match(txt, /23:55 e 00:00 não cabem juntos/);
+  // continua opcional e o padrão é o intervalo; a janela não vale
+  assert.match(txt, /padrão continua sendo “A cada X minutos”/); assert.match(txt, /opcional/);
+  assert.match(txt, /“Funciona das\/até” não vale/); assert.match(txt, /ficam guardados/);
+  // conversão do ritmo atual: o horário final não entra; os modelos incluem o final
+  assert.match(txt, /“a cada 60 min, das 8h às 22h” vira 14 horários, das 08:00 às 21:00/);
+  assert.match(txt, /horário final não entra/); assert.match(txt, /modelos rápidos e o “Montar…” incluem o horário final/);
+  assert.match(txt, /15 horários/);
+  assert.match(txt, /O cartão/); assert.match(txt, /selo “Grade”/);
+  // o resto mora na outra seção e a primeira leva até ela
+  assert.match(txt, /#docs\/disparo-automatico\/na-hora-marcada/);
+  assert.doesNotMatch(txt, /sai só o mais recente|atrasou até 30 min|mais de 400 mensagens/);
+});
+
+test('Grade: a seção "na-hora-marcada" cobre o que sai, o horário perdido, Enviar agora, o template em uso e o aviso de volume', () => {
+  const sec = CAPS['disparo-automatico'].secoes.find((s) => s.id === 'na-hora-marcada');
+  assert.ok(sec, 'seção na-hora-marcada em disparo-automatico'); assert.match(sec.titulo, /O que acontece na hora marcada/);
+  const txt = secaoTxt('disparo-automatico', 'na-hora-marcada');
+  assert.match(txt, /atrasou até 30 min/);
+  // o que sai, e quando faltam ofertas
+  assert.match(txt, /sem acumular/); assert.match(txt, /Sem ofertas novas dentro dos filtros desta vez/);
+  // horário perdido
+  assert.match(txt, /sai só o mais recente/); assert.match(txt, /pulado/); assert.match(txt, PULADOS_GRADE_DIAS);
+  // Enviar agora e Ver ofertas
+  assert.match(txt, /“Enviar agora”[^.]*não pula esse horário/); assert.match(txt, /“Ver ofertas”/); assert.match(txt, /quantidade e o template do próximo horário/);
+  // template em uso: a frase do servidor, em bloco próprio (destacada), e a explicação em palavras do dono
+  assert.ok(sec.blocos.some((b) => typeof b.exemplo === 'string' && /^A regra "[^"]+" usa este template no horário \d\d:\d\d\.$/.test(b.exemplo)), 'frase do template em uso em destaque');
+  assert.match(txt, /qual disparo e qual horário o usam/);
+  // aviso de volume: só aviso
+  assert.match(txt, /mais de 400 mensagens por dia/); assert.match(txt, /nunca bloqueia|nada é bloqueado/);
+  assert.match(txt, /Grupo vivo/);
+});
+
+test('Grade: as duas seções têm o tamanho das outras (no máximo 8 blocos) e dizem "disparo", não "regra" (fora das frases do servidor)', () => {
+  for (const id of ['horarios-marcados', 'na-hora-marcada']) {
+    const sec = CAPS['disparo-automatico'].secoes.find((s) => s.id === id);
+    assert.ok(sec.blocos.length <= 8, `${id}: ${sec.blocos.length} blocos`);
+    const sobra = secaoTxt('disparo-automatico', id)
+      .replace(/template da regra/g, '').replace(/A regra "[^"]+" usa/g, '').replace(/“da regra”/g, '').replace(/escreve “regra”/g, '');
+    assert.doesNotMatch(sobra, /\bregra\b/i, `${id}: "regra" fora das frases do programa`);
+  }
+  assert.doesNotMatch(tipsDoPainel()['regras.grade_horarios'], /\bregra\b/i);
+});
+
+test('Grade: as frases do Histórico citadas nos Docs e no README são as que o código escreve', () => {
+  const sched = lerRaiz('src/scheduler.js'); const server = lerRaiz('src/server.js');
+  const motivo = motivoPulado();
+  const docs = secaoTxt('disparo-automatico', 'na-hora-marcada'); const readme = readmeSecao('Horários marcados e Grupo vivo');
+  for (const [onde, txt] of [['Docs', docs], ['README', readme]]) {
+    assert.ok(txt.includes(`Horário 10:00 pulado: ${motivo}`), `${onde}: frase do horário pulado`);
+    assert.match(txt, new RegExp(`\\d+ horários pulados \\(\\d\\d:\\d\\d a \\d\\d:\\d\\d\\): ${escRe(motivo)}`), `${onde}: vários pulados`);
+    assert.match(txt, new RegExp(`\\d+ horários pulados \\(\\d\\d:\\d\\d de \\d\\d/\\d\\d a \\d\\d:\\d\\d\\): ${escRe(motivo)}`), `${onde}: vários pulados desde outro dia`);
+    assert.match(txt, /Horário 10:00: saíram 5 de 8 ofertas; não havia mais ofertas novas dentro dos filtros\./, `${onde}: saíram N de M`);
+    assert.match(txt, /Horário 10:00: o template escolhido para este horário não existe mais\. As ofertas saíram com o template da regra\./, `${onde}: template apagado`);
+    assert.match(txt, /A regra "[^"]+" usa este template no horário \d\d:\d\d\./, `${onde}: template em uso`);
+  }
+  // e o código ainda escreve exatamente isso
+  assert.ok(sched.includes('Horário ${quandoDe(pulados[0], agora)} pulado')); assert.ok(sched.includes('${pulados.length} horários pulados ('));
+  assert.ok(sched.includes('${quandoDe(pulados[0], agora)} a ${quandoDe(pulados.at(-1), agora)})')); assert.ok(sched.includes('return `${horaDe(ts)} de ${pad2(d.getDate())}/${pad2(d.getMonth() + 1)}`;'), 'outro dia: "10:00 de 03/11"');
+  assert.ok(sched.includes('aíram ${summary.offers} de ${want} ofertas; não havia mais ofertas novas dentro dos filtros.'));
+  assert.ok(sched.includes('o template escolhido para este horário não existe mais. As ofertas saíram com o template da regra.'));
+  assert.ok(server.includes('A regra "${naGrade.regra}" usa este template no horário ${naGrade.hora}.'));
+});
+
+test('Grupo vivo: a seção "grupo-vivo" do capítulo de mensagens cobre rotinas, galeria, rodízio, Enviar agora, horário perdido e Histórico', () => {
+  const sec = CAPS.mensagens.secoes.find((s) => s.id === 'grupo-vivo');
+  assert.ok(sec, 'seção grupo-vivo em mensagens'); assert.match(sec.onde, /Grupo vivo/);
+  const txt = secaoTxt('mensagens', 'grupo-vivo');
+  for (const r of [/Nova mensagem/, /Nova enquete/, /Modelos/, /Usar este modelo/, /Criar rotina/, /Nome/, /Ordem/, /Um depois do outro/, /Sorteio/, /Dias da semana/, /Horários/, /Enviar agora/, /Editar/, /Copiar/, /Excluir/]) assert.match(txt, r);
+  for (const r of [/até 5 textos ou enquetes/, /até 6 horários por rotina/, /mais de 400 mensagens por dia/, /atrasou até 30 min/]) assert.match(txt, r);
+  assert.match(txt, /Sem foto por enquanto\./); assert.doesNotMatch(txt, /7 dias|metadados|EXIF/i, 'sem a explicação das fotos');
+  assert.match(txt, /até 50 rotinas/); assert.match(txt, /“Enviar agora” a cada 1 min/);
+  assert.match(txt, PULADOS_ROTINA); assert.match(txt, /#docs\/disparo-automatico\/na-hora-marcada/);
+  assert.match(txt, /sem repetir o último/); assert.match(txt, /10 modelos/);
+  assert.match(txt, /só preenche o formulário|só preenchem o formulário/); assert.match(txt, /nada é salvo até/);
+  assert.match(txt, /“Enviar agora”[^.]*avança o rodízio[^.]*não muda o próximo horário/);
+  assert.match(txt, /Grupo vivo: Bom dia/); assert.match(txt, /sai só o mais recente/);
+  assert.match(txt, /Disparar mensagem[^.]*envios pontuais|envios pontuais[^.]*Disparar mensagem/);
+  assert.match(txt, /nunca bloqueia|nada é bloqueado/);
+  // a frase de horário perdido do Grupo vivo é a de src/rotinas.js
+  const rot = lerRaiz('src/rotinas.js');
+  assert.ok(rot.includes('Horário de ${hora(ultimo)} pulado')); assert.ok(rot.includes('${pulados.length} horários pulados, o último de ${hora(ultimo)}'));
+  assert.ok(rot.includes("const PERDIDO = '" + motivoPulado() + "'"), 'o motivo é o mesmo da grade');
+  assert.match(txt, new RegExp(`Horário de \\d\\d/\\d\\d \\d\\d:\\d\\d pulado: ${escRe(motivoPulado())}`));
+  // os dez modelos da galeria: os nomes citados existem em public/grupovivo.js
+  const gv = fonte('grupovivo.js');
+  for (const nome of ['Bom dia', 'Regras do grupo', 'Aviso de segurança', 'Prova social (convite)', 'Preço muda', 'Boa noite', 'Enquete: o que ver mais', 'Enquete: já comprou', 'Enquete: melhor horário', 'Enquete: sextou']) assert.ok(gv.includes(`titulo: '${nome}'`), `modelo ${nome}`);
+  assert.equal([...gv.matchAll(/^  \{ id: '[a-z-]+', titulo: /gm)].length, 10);
+});
+
+test('Grade e Grupo vivo: glossário, tabela de limites, Histórico e ritmo apontam para as seções novas', () => {
+  const g = CAPS.referencia.secoes.find((s) => s.id === 'glossario').blocos.filter((b) => b.termos).flatMap((b) => b.termos);
+  for (const t of ['Horários marcados', 'Grupo vivo', 'Rotina']) assert.equal(g.filter(([x]) => x === t).length, 1, `glossário: ${t}`);
+  assert.match(g.find(([x]) => x === 'Horários marcados')[1], /Disparo automático/); assert.match(g.find(([x]) => x === 'Grupo vivo')[1], /mensagens e enquetes/);
+  const col = primeiraColuna('referencia', 'limites');
+  assert.ok(col.some((x) => /^Horários marcados/.test(x)) && col.some((x) => /^Grupo vivo/.test(x)), 'limites: as duas linhas novas');
+  const lim = textoDe('referencia', 'limites');
+  for (const r of [/até 48 horários/, /pelo menos 10 min entre/, /de 1 a 20 ofertas por horário/, /atrasou até 30 min/, /até 5 textos ou enquetes/, /até 6 horários por rotina/, /até 50 rotinas/, /“Enviar agora” por minuto/, /mais de 400 mensagens por dia/]) assert.match(lim, r);
+  const hist = textoDe('resultados', 'historico');
+  assert.match(hist, /Grupo vivo: nome da rotina/); assert.match(hist, /só em “Tudo”|aparece em “Tudo”/); assert.match(hist, /Horário 10:00 pulado/); assert.match(hist, /Horário de 05\/11 10:00 pulado/); assert.match(hist, /\d+ horários pulados \(\d\d:\d\d de \d\d\/\d\d a \d\d:\d\d\): …/); assert.match(hist, /\d+ horários pulados, o último de \d\d\/\d\d \d\d:\d\d: …/); assert.match(hist, /#docs\/disparo-automatico\/na-hora-marcada/);
+  assert.match(textoDe('disparo-automatico', 'ritmo'), /Em horários marcados[^.]*#docs\/disparo-automatico\/horarios-marcados|horários marcados\]\(#docs\/disparo-automatico\/horarios-marcados\)/i);
+  assert.match(strings(CAPS['disparo-automatico'].aprenda).join(' '), /horários marcados/i);
+  assert.match(strings(CAPS.mensagens.aprenda).join(' '), /Grupo vivo/);
+});
+
+test('Grade e Grupo vivo: o README tem a linha de resumo, o menu, a seção, os limites e a prova de que é só aviso', () => {
+  const linhas = README_BRUTO.split('\n');
+  assert.match(linhas[6], /^Você configura:/); assert.match(limpo(linhas[6]), /horários marcados/); assert.match(limpo(linhas[6]), /Grupo vivo/);
+  assert.match(limpo(README_BRUTO.slice(README_BRUTO.search(/^## Menu do painel/m), README_BRUTO.search(/^### Docs do painel/m))), /Disparar mensagem, Grupo vivo, Templates/);
+  const txt = readmeSecao('Horários marcados e Grupo vivo');
+  for (const r of [/Em horários marcados/, /A cada X minutos/, /Modelos rápidos/, /Montar…/, /Grupo vivo/, /Nova mensagem/, /Nova enquete/, /Um depois do outro/, /Sorteio/, /Criar rotina/, /Enviar agora/, /sem foto/i, /10 modelos/]) assert.match(txt, r);
+  for (const r of [/até 48 horários/, /pelo menos 10 min entre/, /de 1 a 20 ofertas por horário/, /atrasou até 30 min/, /até 5 textos ou enquetes/, /até 6 horários por rotina/, /até 50 rotinas/, /mais de 400 mensagens por dia/]) assert.match(txt, r);
+  assert.match(txt, /23:55 e 00:00 não cabem juntos/); assert.match(txt, /Próximo: 13:00\./); assert.doesNotMatch(txt, /Padrão da regra/);
+  assert.match(txt, /só vale um a cada 1 min/);
+  assert.match(txt, /se atualiza sozinha a cada 10 s/); assert.match(txt, /Somando os outros disparos e rotinas ligados, este número…/);
+  const sem = txt.replace(/[*"“”]/g, ''); // o README usa aspas retas e itálico onde os Docs usam aspas curvas
+  assert.match(sem, /a cada 60 min, das 8h às 22h vira 14 horários, das 08:00 às 21:00/); assert.match(txt, /horário final não entra/);
+  const [daGrade, doGrupoVivo] = txt.split('### Grupo vivo'); // a regra do horário perdido é dita nas duas partes
+  assert.match(daGrade, PULADOS_GRADE_DIAS); assert.match(doGrupoVivo, PULADOS_ROTINA);
+  assert.match(daGrade, /sai só o mais recente/); assert.match(doGrupoVivo, /sai só o mais recente/); assert.match(sem, /Enviar agora[^.]*não pula esse horário/); assert.match(sem, /Enviar agora[^.]*avança o rodízio[^.]*não muda o próximo horário/);
+  assert.match(txt, /nunca bloqueia/); assert.match(txt, /não foi testado contra o WhatsApp real|não testado contra o WhatsApp real/i);
+  assert.match(txt, /A regra "[^"]+" usa este template no horário/);
+  assert.match(txt, /Grupo vivo: nome da rotina/);
 });

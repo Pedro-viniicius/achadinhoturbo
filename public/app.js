@@ -82,12 +82,13 @@ function cartaoRegra(r) {
   const lista = r.sources?.length ? r.sources : [{ type: r.source_type, config: r.source_config }]; const fontes = lista.map(resumoFonte);
   const fonte = fontes.length === 1 ? fontes[0] : `${fontes.length} fontes intercaladas (${fontes.join('; ')})`;
   const cat = lista.some((f) => f?.type === 'catalogo') ? fcatCartao(r) : { chips: '', prox: '' }; // revisão e "Catálogo indisponível"
+  const g = r.grade ? gradeCartao(r) : null; // horários marcados (grade.js); sem grade, o cartão de sempre
   return `<article class="card regra" data-id="${r.id}">
     <h2><label class="chave" title="Ligar ou pausar"><input type="checkbox" data-act="ligar" ${r.enabled ? 'checked' : ''} aria-label="Disparo automático ativo"><span></span></label>
-      ${esc(r.name)} ${tag ? `<span class="chip etq">${esc(tag.name)}</span>` : '<span class="chip">sem etiqueta</span>'}${cat.chips}</h2>
-    <p class="res">${r.per_run} ${r.per_run === 1 ? 'oferta' : 'ofertas'} a cada ${r.interval_min} min, das ${esc(r.window_start)} às ${esc(r.window_end)}, para ${r.group_jids.length} ${r.group_jids.length === 1 ? 'grupo' : 'grupos'}.
-      Fonte: ${fonte}. Template: ${esc(tpl?.name || '—')}.</p>
-    <div class="prox">${proximo(r)}</div>${cat.prox}
+      ${esc(r.name)} ${tag ? `<span class="chip etq">${esc(tag.name)}</span>` : '<span class="chip">sem etiqueta</span>'}${g ? g.chip : ''}${cat.chips}</h2>
+    <p class="res">${g ? g.res : `${r.per_run} ${r.per_run === 1 ? 'oferta' : 'ofertas'} a cada ${r.interval_min} min, das ${esc(r.window_start)} às ${esc(r.window_end)}, para ${r.group_jids.length} ${r.group_jids.length === 1 ? 'grupo' : 'grupos'}.`}
+      Fonte: ${fonte}. ${g ? g.tpls : `Template: ${esc(tpl?.name || '—')}.`}</p>
+    <div class="prox">${g ? g.prox : proximo(r)}</div>${cat.prox}
     <div class="acoes">
       <button class="pri" data-act="rodar" ${r.em_andamento ? 'disabled' : ''}>Enviar agora</button>
       <button data-act="ver">Ver ofertas</button><button data-act="editar">Editar</button>
@@ -428,11 +429,11 @@ function formRegra(r) {
       <label class="campo">Desconto mínimo (%)<input name="min_discount" type="number" min="0" max="99" value="${r.min_discount ?? ''}" placeholder="Qualquer"></label></div></fieldset>
     <fieldset><legend>Grupos que vão receber ${REQ} ${q('regras.grupos')} <span id="cont" class="dica"></span></legend>
       ${grupos.html}</fieldset>
-    <fieldset><legend>Ritmo de envio</legend><div class="grade">
-      <label class="campo"><span>Ofertas por envio ${REQ} ${q('regras.por_envio')}</span><input name="per_run" type="number" min="1" max="20" value="${r.per_run}"><small>Cada oferta vai para todos os grupos, uma atrás da outra.</small></label>
-      <label class="campo"><span>Intervalo entre envios (minutos) ${REQ} ${q('regras.intervalo')}</span><input name="interval_min" type="number" min="1" value="${r.interval_min}"></label>
-      <label class="campo"><span>Funciona das ${q('regras.janela')}</span><input name="window_start" type="time" value="${esc(r.window_start)}"></label>
-      <label class="campo">Até<input name="window_end" type="time" value="${esc(r.window_end)}"></label>
+    <fieldset><legend>Ritmo de envio</legend>${gradeModoHtml(r.grade ? 'grade' : 'intervalo')}${gradeHtml(r)}<div class="grade">
+      <label class="campo r-intervalo"><span>Ofertas por envio ${REQ} ${q('regras.por_envio')}</span><input name="per_run" type="number" min="1" max="20" value="${r.per_run}"><small>Cada oferta vai para todos os grupos, uma atrás da outra.</small></label>
+      <label class="campo r-intervalo"><span>Intervalo entre envios (minutos) ${REQ} ${q('regras.intervalo')}</span><input name="interval_min" type="number" min="1" value="${r.interval_min}"></label>
+      <label class="campo r-intervalo"><span>Funciona das ${q('regras.janela')}</span><input name="window_start" type="time" value="${esc(r.window_start)}"></label>
+      <label class="campo r-intervalo">Até<input name="window_end" type="time" value="${esc(r.window_end)}"></label>
       <label class="campo"><span>Não repetir a mesma oferta por (dias) ${q('regras.dedupe')}</span><input name="dedupe_days" type="number" min="0" value="${r.dedupe_days}"><small>0 = pode repetir.</small></label>
       <label class="campo"><span>Foto do produto ${q('regras.foto')}</span><select name="send_image"><option value="1">Enviar com foto, quando houver</option><option value="0" ${r.send_image ? '' : 'selected'}>Só texto</option></select></label></div></fieldset>
     <div class="rodape"><button type="button" id="cancelar">Cancelar</button><button class="pri" id="salvar">${nova ? 'Criar disparo automático' : 'Salvar'}</button></div></form>`;
@@ -483,7 +484,10 @@ function formRegra(r) {
     } finally { reler.disabled = false; }
   };
   $('#add-fonte').onclick = () => { lerFontes(); if (fontes.length < MAXF) fontes.push({ type: 'afiliados', config: { paginas: 3 } }); pintaFontes(); };
-  grupos.ligar(dlg, { contador: $('#cont', dlg), aoBloco: (b) => { if (b.tag_id) $('select[name=tag_id]', dlg).value = b.tag_id; } });
+  // "Como enviar": a cada X minutos (padrão) ou em horários marcados (grade.js); os campos do intervalo só ficam escondidos
+  const ritmo = gradeLigar(dlg, { regra: r, nGrupos: () => grupos.marcados(dlg).length,
+    lerIntervalo: () => Object.fromEntries(['per_run', 'interval_min', 'window_start', 'window_end'].map((n) => [n, $(`[name=${n}]`, dlg).value])) });
+  grupos.ligar(dlg, { contador: $('#cont', dlg), aoMudar: () => ritmo.atualizar(), aoBloco: (b) => { if (b.tag_id) $('select[name=tag_id]', dlg).value = b.tag_id; } });
   $('#cancelar').onclick = () => dlg.close();
   $('#f').onsubmit = tentar(async (ev) => {
     ev.preventDefault(); const f = new FormData($('#f'));
@@ -494,7 +498,15 @@ function formRegra(r) {
       min_price: g('min_price'), max_price: g('max_price'), min_discount: g('min_discount'),
       per_run: g('per_run'), interval_min: g('interval_min'), window_start: g('window_start'), window_end: g('window_end'),
       dedupe_days: g('dedupe_days'), send_image: g('send_image') === '1', enabled: nova ? true : r.enabled,
+      grade: ritmo.corpo(), // sempre explícito: null = "A cada X minutos" (o PUT sem grade também grava NULL)
     };
+    if (ritmo.modo() === 'grade') {
+      // D1: em "Em horários marcados" estes dois campos ficam escondidos e não podem virar erro: vai o digitado, se
+      // válido; senão o salvo na regra, se válido; senão o padrão (3 ofertas, 60 min). As checagens abaixo ficam iguais.
+      const valido = (v, ok, salvo, padrao) => (ok(v) ? v : ok(salvo) ? String(salvo) : padrao);
+      corpo.per_run = valido(corpo.per_run, (v) => Number(v) >= 1 && Number(v) <= 20, r.per_run, '3');
+      corpo.interval_min = valido(corpo.interval_min, (v) => Number(v) >= 1, r.interval_min, '60');
+    }
     const erros = [];
     if (!String(corpo.name || '').trim()) erros.push({ msg: 'Dê um nome ao disparo automático.', el: $('[name=name]', dlg) });
     if (!corpo.tag_id && fcatPrecisaEtiqueta(fontes)) erros.push({ msg: 'Escolha a etiqueta ML padrão (cadastre em Conexões > Mercado Livre se ainda não tiver).', el: $('[name=tag_id]', dlg) });
@@ -508,6 +520,7 @@ function formRegra(r) {
     if (!corpo.group_jids.length) erros.push({ msg: 'Marque ao menos um grupo que vai receber as ofertas.', el: $('#gr', dlg) });
     if (!(Number(corpo.per_run) >= 1 && Number(corpo.per_run) <= 20)) erros.push({ msg: 'Ofertas por envio: de 1 a 20.', el: $('[name=per_run]', dlg) });
     if (!(Number(corpo.interval_min) >= 1)) erros.push({ msg: 'Intervalo entre envios: ao menos 1 minuto.', el: $('[name=interval_min]', dlg) });
+    erros.push(...ritmo.erros()); // grade: as mesmas frases do servidor (src/grade.js)
     if (mostrarErros(dlg, erros)) return;
     try { await api(nova ? '/rules' : `/rules/${r.id}`, nova ? 'POST' : 'PUT', corpo); } catch (e) {
       // 400 da fonte Catálogo: frase fixa do servidor, com o campo e a fonte (1, 2…) para marcar
@@ -671,11 +684,11 @@ function paginaAjustes() {
 
 // ---------- navegação e atualização ----------
 // Uma rota por hash. As páginas novas ficam nos próprios arquivos (disparos.js, relatorios.js, conexoes.js,
-// equipe.js, carregados antes deste); aqui a função só é procurada na hora de abrir a página.
+// equipe.js, grupovivo.js, carregados antes deste); aqui a função só é procurada na hora de abrir a página.
 const ROTAS = {
   visao: () => paginaVisao(), ganhos: (_, params) => paginaGanhos({ endereco: params }), links: () => paginaLinks(), grupos: () => paginaGrupos(), blocos: () => paginaBlocos(),
   'disparo-manual': () => paginaDisparoManual(), 'disparo-automatico': () => paginaRegras(),
-  'disparar-mensagem': () => paginaDispararMensagem(), templates: () => paginaTemplates(),
+  'disparar-mensagem': () => paginaDispararMensagem(), 'grupo-vivo': () => paginaGrupoVivo(), templates: () => paginaTemplates(),
   relatorios: () => paginaRelatorios(),
   conexoes: (pedido) => paginaConexoes({ rolarPara: pedido === 'etiquetas' ? 'ml-etiquetas' : '' }),
   numeros: () => paginaNumeros(), equipe: () => paginaEquipe(),
@@ -782,3 +795,5 @@ carregar().then(() => {
 }).catch((e) => aviso(e.message, true));
 setInterval(() => atualizarEstado().catch(() => {}), 3000);
 setInterval(() => { if (rotaAtual() === 'disparo-automatico' && !$('#dlg').open) recarregarRegras().catch(() => {}); }, 10000);
+// Grupo vivo: o próximo horário e a contagem de 24 h chegam sem recarregar (gvAtualizar não repinta à toa nem rouba o foco)
+setInterval(() => { if (rotaAtual() === 'grupo-vivo' && !$('#dlg').open) gvAtualizar().catch(() => {}); }, 10000);

@@ -595,3 +595,373 @@ test('rastreio, CA4: ML do catálogo gera um link por etiqueta distinta e regist
     ['333@g.us', 'mercadolivre', 'MLB4000000003', 'etiquetaB', 'grupo', 1],
   ]);
 });
+
+// ---------- grade de horários (plano grade-de-disparos, etapa 3: D3 e D4) ----------
+// Relógio fixo (t.mock.timers, só Date): 02/11/2026 é segunda-feira. Os horários vêm da hora local, como no agendador.
+const dia = (d, h, m = 0) => new Date(2026, 10, d, h, m).getTime();
+const relogio = (t, ts) => t.mock.timers.enable({ apis: ['Date'], now: ts });
+const comGrade = (db, id, grade, next = null) => db.prepare('UPDATE rules SET grade = ?, next_run_at = ? WHERE id = ?').run(JSON.stringify(grade), next, id);
+const linhaRegra = (db, id) => ({ ...db.prepare('SELECT next_run_at, last_run_at, grade FROM rules WHERE id = ?').get(id) });
+const avisosDe = (db) => db.prepare("SELECT message FROM log WHERE level = 'aviso' ORDER BY id").all().map((l) => l.message);
+const titulos = (wa) => wa.simulated.map((m) => m.text.split('\n')[0]);
+const novoTemplate = (db, nome, prefixo) => Number(db.prepare('INSERT INTO templates (name, body, created_at) VALUES (?,?,?)')
+  .run(nome, `${prefixo} {TITULO_PRODUTO}\n{LINK}`, Date.now()).lastInsertRowid);
+const regraJanela = (db, janela, o = {}) => {
+  const id = addRule(db, { name: 'Grade', tag: 1, groups: ['111@g.us'], items: ITEMS, per: 3, ...o });
+  db.prepare('UPDATE rules SET window_start = ?, window_end = ? WHERE id = ?').run(janela[0], janela[1], id);
+  return id;
+};
+
+test('regra sem grade: next_run_at igual ao de antes (intervalo, janela, virada da noite e retry de 60 s)', async (t) => {
+  // [janela, agora, intervalo, próximo esperado = alignToWindow(agora + intervalo, janela)]
+  const casos = [
+    [['08:00', '22:00'], dia(2, 10, 0), 60, dia(2, 11, 0)],
+    [['08:00', '22:00'], dia(2, 21, 30), 60, dia(3, 8, 0)],
+    [['20:00', '02:00'], dia(2, 1, 30), 45, dia(2, 20, 0)],
+    [['20:00', '02:00'], dia(2, 23, 50), 30, dia(3, 0, 20)],
+    [['00:00', '00:00'], dia(2, 23, 50), 90, dia(3, 1, 20)],
+  ];
+  for (const [janela, agora, intervalo, esperado] of casos) {
+    const { db, wa, scheduler } = setup();
+    relogio(t, agora);
+    const id = regraJanela(db, janela, { per: 1, interval: intervalo });
+    await scheduler.runRule(id);
+    assert.equal(wa.simulated.length, 1);
+    assert.equal(esperado, alignToWindow(agora + intervalo * 60000, janela[0], janela[1]), 'o esperado é a fórmula de hoje');
+    assert.deepEqual(linhaRegra(db, id), { next_run_at: esperado, last_run_at: agora, grade: null }, `${janela} ${new Date(agora)}`);
+    t.mock.timers.reset();
+  }
+  // WhatsApp fora: tenta de novo em 60 s
+  const { db, wa, scheduler } = setup();
+  relogio(t, dia(2, 10, 0));
+  const id = regraJanela(db, ['08:00', '22:00']);
+  wa.isReady = () => false;
+  await scheduler.runRule(id);
+  assert.equal(linhaRegra(db, id).next_run_at, dia(2, 10, 0) + 60000);
+  // pelo tick, fora da janela: só realinha, sem enviar; WhatsApp fora dentro da janela: não mexe
+  wa.isReady = () => true;
+  t.mock.timers.setTime(dia(2, 23, 0));
+  db.prepare('UPDATE rules SET next_run_at = NULL WHERE id = ?').run(id);
+  await scheduler.tick();
+  assert.equal(wa.simulated.length, 0);
+  assert.equal(linhaRegra(db, id).next_run_at, dia(3, 8, 0));
+  t.mock.timers.setTime(dia(3, 8, 1));
+  wa.isReady = () => false;
+  await scheduler.tick();
+  assert.equal(linhaRegra(db, id).next_run_at, dia(3, 8, 0), 'WhatsApp fora: o tick não mexe');
+  wa.isReady = () => true;
+  await scheduler.tick();
+  assert.equal(wa.simulated.length, 3, 'per_run da regra');
+  assert.equal(linhaRegra(db, id).next_run_at, dia(3, 9, 1));
+  assert.deepEqual(avisosDe(db), [], 'regra sem grade não ganha aviso novo');
+});
+
+test('grade: next_run_at NULL não envia e grava o próximo horário; no futuro, espera', async (t) => {
+  const { db, wa, scheduler } = setup();
+  relogio(t, dia(2, 9, 5));
+  const id = regraJanela(db, ['00:00', '23:59']);
+  comGrade(db, id, { dias: [0, 1, 2, 3, 4, 5, 6], horarios: [{ hora: '09:00', qtd: 1, template_id: null }, { hora: '12:00', qtd: 2, template_id: null }] });
+  await scheduler.tick();
+  assert.equal(wa.simulated.length, 0, 'o 09:00 que passou não sai');
+  assert.equal(linhaRegra(db, id).next_run_at, dia(2, 12, 0));
+  t.mock.timers.setTime(dia(2, 11, 59));
+  await scheduler.tick();
+  assert.equal(wa.simulated.length, 0);
+  assert.equal(linhaRegra(db, id).next_run_at, dia(2, 12, 0));
+  assert.deepEqual(avisosDe(db), []);
+  // só nos dias marcados: segunda (1) e quarta (3); 12:00 de segunda já passou → quarta 09:00
+  comGrade(db, id, { dias: [1, 3], horarios: [{ hora: '09:00', qtd: 1, template_id: null }] });
+  t.mock.timers.setTime(dia(2, 12, 30));
+  await scheduler.tick();
+  assert.equal(linhaRegra(db, id).next_run_at, dia(4, 9, 0));
+  // grade sem horário que valha (só um banco editado à mão): nunca envia nem trava o tick
+  comGrade(db, id, {});
+  await scheduler.tick();
+  assert.deepEqual([wa.simulated.length, linhaRegra(db, id).next_run_at], [0, null]);
+});
+
+test('grade: horário vencido sai com a quantidade e o template da linha, e o próximo é o horário seguinte', async (t) => {
+  const { db, wa, scheduler } = setup();
+  const rapido = novoTemplate(db, 'Rápido', 'RAPIDO');
+  relogio(t, dia(2, 10, 0) + 5000);
+  const id = regraJanela(db, ['00:00', '23:59'], { per: 5 });
+  db.prepare("UPDATE rules SET group_jids = '[\"111@g.us\",\"222@g.us\"]' WHERE id = ?").run(id);
+  comGrade(db, id, { dias: [0, 1, 2, 3, 4, 5, 6], horarios: [
+    { hora: '09:00', qtd: 1, template_id: null }, { hora: '10:00', qtd: 2, template_id: rapido },
+  ] }, dia(2, 10, 0));
+  await scheduler.tick();
+  assert.equal(wa.simulated.length, 4, '2 ofertas (não as 5 da regra) × 2 grupos');
+  assert.ok(titulos(wa).every((l) => l.startsWith('RAPIDO ')), 'template da linha');
+  assert.deepEqual(linhaRegra(db, id), { next_run_at: dia(3, 9, 0), last_run_at: dia(2, 10, 0) + 5000, grade: linhaRegra(db, id).grade });
+  // o 09:00 do dia seguinte: 1 oferta com o template da regra
+  t.mock.timers.setTime(dia(3, 9, 0) + 1000);
+  await scheduler.tick();
+  assert.equal(wa.simulated.length, 6);
+  assert.ok(titulos(wa).slice(4).every((l) => /^\*.+\*$/.test(l)), 'template padrão da regra');
+  assert.equal(linhaRegra(db, id).next_run_at, dia(3, 10, 0));
+  assert.deepEqual(avisosDe(db), []);
+});
+
+test('grade: a janela "Funciona das/até" não vale, e o tick não realinha a regra', async (t) => {
+  const { db, wa, scheduler } = setup();
+  relogio(t, dia(2, 9, 0) + 1000);
+  const id = regraJanela(db, ['22:00', '23:00']);
+  comGrade(db, id, { dias: [0, 1, 2, 3, 4, 5, 6], horarios: [{ hora: '09:00', qtd: 1, template_id: null }, { hora: '15:30', qtd: 2, template_id: null }] }, dia(2, 9, 0));
+  await scheduler.tick();
+  assert.equal(wa.simulated.length, 1, 'fora da janela antiga, sai mesmo assim');
+  assert.equal(linhaRegra(db, id).next_run_at, dia(2, 15, 30), 'sem alignToWindow (seria 22:00)');
+  t.mock.timers.setTime(dia(2, 15, 30));
+  await scheduler.tick();
+  assert.equal(wa.simulated.length, 3);
+  assert.equal(linhaRegra(db, id).next_run_at, dia(3, 9, 0));
+});
+
+test('grade: atraso de 29 min sai; de 31 min pula com aviso; vários vencidos saem só o último', async (t) => {
+  const { db, wa, scheduler } = setup();
+  const grade = { dias: [0, 1, 2, 3, 4, 5, 6], horarios: [
+    { hora: '08:00', qtd: 1, template_id: null }, { hora: '08:30', qtd: 1, template_id: null },
+    { hora: '09:00', qtd: 2, template_id: null }, { hora: '10:00', qtd: 1, template_id: null },
+  ] };
+  relogio(t, dia(2, 9, 29));
+  const id = regraJanela(db, ['00:00', '23:59']);
+  comGrade(db, id, grade, dia(2, 9, 0));
+  await scheduler.tick();
+  assert.equal(wa.simulated.length, 2, '29 min: o 09:00 sai');
+  assert.equal(linhaRegra(db, id).next_run_at, dia(2, 10, 0));
+
+  t.mock.timers.setTime(dia(2, 10, 31));
+  await scheduler.tick();
+  assert.equal(wa.simulated.length, 2, '31 min: o 10:00 não sai');
+  assert.deepEqual(avisosDe(db), ['Horário 10:00 pulado: o programa estava desligado, o WhatsApp desconectado ou outro envio demorou. Próximo: 08:00 de 03/11.']);
+  assert.equal(linhaRegra(db, id).next_run_at, dia(3, 8, 0));
+
+  // programa desligado das 07:00 às 09:10: 08:00 e 08:30 pulados, o 09:00 (10 min) sai sozinho, com a qtd dele
+  t.mock.timers.setTime(dia(3, 9, 10));
+  await scheduler.tick();
+  assert.equal(wa.simulated.length, 4, 'só o mais recente, sem rajada');
+  assert.equal(avisosDe(db).at(-1), '2 horários pulados (08:00 a 08:30): o programa estava desligado, o WhatsApp desconectado ou outro envio demorou. O das 09:00 sai agora.');
+  assert.equal(linhaRegra(db, id).next_run_at, dia(3, 10, 0));
+  t.mock.timers.setTime(dia(3, 9, 30));
+  await scheduler.tick();
+  assert.equal(wa.simulated.length, 4, 'nada sai antes do próximo');
+});
+
+test('grade: com o WhatsApp fora o horário fica guardado; passados 30 min, é pulado com aviso', async (t) => {
+  const { db, wa, scheduler } = setup();
+  relogio(t, dia(2, 9, 5));
+  const id = regraJanela(db, ['00:00', '23:59']);
+  comGrade(db, id, { dias: [0, 1, 2, 3, 4, 5, 6], horarios: [{ hora: '09:00', qtd: 1, template_id: null }, { hora: '11:00', qtd: 1, template_id: null }] }, dia(2, 9, 0));
+  wa.isReady = () => false;
+  await scheduler.tick();
+  assert.equal(linhaRegra(db, id).next_run_at, dia(2, 9, 0), 'mantém o horário');
+  assert.equal(db.prepare('SELECT COUNT(*) n FROM log').get().n, 0, 'sem linha de erro a cada tick');
+  wa.isReady = () => true;
+  t.mock.timers.setTime(dia(2, 9, 20));
+  await scheduler.tick();
+  assert.equal(wa.simulated.length, 1, 'voltou dentro dos 30 min: sai');
+  assert.equal(linhaRegra(db, id).next_run_at, dia(2, 11, 0));
+
+  wa.isReady = () => false;
+  t.mock.timers.setTime(dia(2, 11, 31));
+  await scheduler.tick();
+  assert.equal(wa.simulated.length, 1);
+  assert.match(avisosDe(db).at(-1), /^Horário 11:00 pulado: .* Próximo: 09:00 de 03\/11\.$/);
+  assert.equal(linhaRegra(db, id).next_run_at, dia(3, 9, 0));
+
+  // runRule com o WhatsApp fora (corrida com o tick): o horário vencido fica, como o retry de 60 s do intervalo
+  t.mock.timers.setTime(dia(3, 9, 1));
+  await scheduler.runRule(id, { horario: dia(3, 9, 0) });
+  assert.equal(linhaRegra(db, id).next_run_at, dia(3, 9, 0));
+  assert.match(db.prepare("SELECT message FROM log WHERE level = 'erro' ORDER BY id DESC").get().message, /WhatsApp desconectado/);
+  // 09:00 pulado e o 11:00 vencido há 10 min com o WhatsApp fora: o aviso não promete que ele sai agora
+  t.mock.timers.setTime(dia(3, 11, 10));
+  await scheduler.tick();
+  assert.equal(avisosDe(db).at(-1), `Horário 09:00 pulado: ${'o programa estava desligado, o WhatsApp desconectado ou outro envio demorou.'} Próximo: 11:00.`);
+  assert.deepEqual([wa.simulated.length, linhaRegra(db, id).next_run_at], [1, dia(3, 11, 0)]);
+});
+
+test('grade: template da linha apagado sai com o template da regra e deixa aviso', async (t) => {
+  const { db, wa, scheduler } = setup();
+  const rapido = novoTemplate(db, 'Rápido', 'RAPIDO');
+  relogio(t, dia(2, 10, 0));
+  const id = regraJanela(db, ['00:00', '23:59']);
+  comGrade(db, id, { dias: [0, 1, 2, 3, 4, 5, 6], horarios: [{ hora: '10:00', qtd: 2, template_id: rapido }] }, dia(2, 10, 0));
+  db.prepare('DELETE FROM templates WHERE id = ?').run(rapido);
+  await scheduler.tick();
+  assert.equal(wa.simulated.length, 2);
+  assert.ok(titulos(wa).every((l) => /^\*.+\*$/.test(l)), 'template da regra');
+  assert.deepEqual(avisosDe(db), ['Horário 10:00: o template escolhido para este horário não existe mais. As ofertas saíram com o template da regra.']);
+  assert.equal(linhaRegra(db, id).next_run_at, dia(3, 10, 0));
+  // "Enviar agora" com a mesma linha: o mesmo aviso, sem dizer que o horário saiu
+  t.mock.timers.setTime(dia(2, 10, 30));
+  await scheduler.runRule(id, { manual: true });
+  assert.equal(wa.simulated.length, 4);
+  assert.equal(avisosDe(db).at(-1), 'Enviar agora (como no horário das 10:00): o template escolhido para este horário não existe mais. As ofertas saíram com o template da regra.');
+});
+
+test('grade editada à mão no banco com quantidade ou template fora de forma não trava o tick', async (t) => {
+  const { db, wa, scheduler } = setup();
+  relogio(t, dia(2, 10, 0));
+  const id = regraJanela(db, ['00:00', '23:59'], { per: 2 });
+  const outra = addRule(db, { name: 'Outra', tag: 1, groups: ['222@g.us'], items: ITEMS, per: 1 });
+  comGrade(db, id, { horarios: [null, { hora: '10:00', qtd: 'muitas', template_id: { x: 1 } }], dias: [0, 1, 2, 3, 4, 5, 6] }, dia(2, 10, 0));
+  await scheduler.tick();
+  assert.equal(wa.simulated.filter((m) => m.jid === '111@g.us').length, 2, 'per_run e o template da regra');
+  assert.equal(wa.simulated.filter((m) => m.jid === '222@g.us').length, 1, 'a regra seguinte também roda');
+  assert.equal(linhaRegra(db, id).next_run_at, dia(3, 10, 0));
+  assert.ok(linhaRegra(db, outra).next_run_at > dia(2, 10, 0));
+});
+
+test('grade: com menos ofertas que o pedido, sai o que houver com aviso "saíram N de M"; com 0, a mensagem de hoje', async (t) => {
+  const { db, wa, scheduler } = setup();
+  relogio(t, dia(2, 10, 0));
+  const id = regraJanela(db, ['00:00', '23:59']);
+  comGrade(db, id, { dias: [0, 1, 2, 3, 4, 5, 6], horarios: [{ hora: '10:00', qtd: 8, template_id: null }, { hora: '11:00', qtd: 2, template_id: null }] }, dia(2, 10, 0));
+  await scheduler.tick();
+  assert.equal(wa.simulated.length, 5);
+  assert.deepEqual(avisosDe(db), ['Horário 10:00: saíram 5 de 8 ofertas; não havia mais ofertas novas dentro dos filtros.']);
+  t.mock.timers.setTime(dia(2, 11, 0));
+  await scheduler.tick();
+  assert.equal(wa.simulated.length, 5);
+  assert.equal(avisosDe(db).length, 1, 'sem "saíram 0 de 2"');
+  assert.equal(db.prepare('SELECT message FROM log ORDER BY id DESC').get().message, 'Sem ofertas novas dentro dos filtros desta vez.');
+  assert.equal(linhaRegra(db, id).next_run_at, dia(3, 10, 0), 'não acumula para o próximo');
+});
+
+test('grade: "Enviar agora" usa a linha do próximo horário e não mexe no próximo horário', async (t) => {
+  const { db, wa, scheduler } = setup();
+  const rapido = novoTemplate(db, 'Rápido', 'RAPIDO');
+  relogio(t, dia(2, 9, 30));
+  const id = regraJanela(db, ['00:00', '23:59'], { per: 4 });
+  comGrade(db, id, { dias: [0, 1, 2, 3, 4, 5, 6], horarios: [{ hora: '09:00', qtd: 1, template_id: null }, { hora: '10:00', qtd: 2, template_id: rapido }] }, dia(2, 10, 0));
+  const r = await scheduler.runRule(id, { manual: true });
+  assert.deepEqual([r.offers, wa.simulated.length], [2, 2]);
+  assert.ok(titulos(wa).every((l) => l.startsWith('RAPIDO ')));
+  assert.deepEqual([linhaRegra(db, id).next_run_at, linhaRegra(db, id).last_run_at], [dia(2, 10, 0), dia(2, 9, 30)]);
+  // o 10:00 sai no horário, mesmo depois do "Enviar agora"
+  t.mock.timers.setTime(dia(2, 10, 0));
+  await scheduler.tick();
+  assert.equal(wa.simulated.length, 4);
+  assert.equal(linhaRegra(db, id).next_run_at, dia(3, 9, 0));
+  // sem próximo gravado (regra acabou de ser salva): o manual não grava nada; o tick calcula sem enviar
+  db.prepare('UPDATE rules SET next_run_at = NULL WHERE id = ?').run(id);
+  t.mock.timers.setTime(dia(2, 10, 30));
+  await scheduler.runRule(id, { manual: true });
+  assert.equal(wa.simulated.length, 5, 'linha do 09:00 de amanhã: 1 oferta');
+  assert.equal(linhaRegra(db, id).next_run_at, null);
+  await scheduler.tick();
+  assert.deepEqual([wa.simulated.length, linhaRegra(db, id).next_run_at], [5, dia(3, 9, 0)]);
+});
+
+test('grade: com um horário vencido guardado (WhatsApp fora), "Enviar agora" e a prévia usam a linha dele, como o cartão', async (t) => {
+  const { db, wa, scheduler } = setup();
+  const rapido = novoTemplate(db, 'Rápido', 'RAPIDO');
+  relogio(t, dia(2, 10, 5));
+  const id = regraJanela(db, ['00:00', '23:59'], { per: 4 });
+  comGrade(db, id, { dias: [0, 1, 2, 3, 4, 5, 6], horarios: [{ hora: '10:00', qtd: 2, template_id: rapido }, { hora: '11:00', qtd: 1, template_id: null }] }, dia(2, 10, 0));
+  const prev = await scheduler.previewOffers(id);
+  assert.equal(prev.length, 2);
+  assert.ok(prev.every((o) => o.text.startsWith('RAPIDO ')), 'linha das 10:00');
+  await scheduler.runRule(id, { manual: true });
+  assert.equal(wa.simulated.length, 2);
+  assert.equal(linhaRegra(db, id).next_run_at, dia(2, 10, 0), 'o 10:00 continua para o tick');
+  // passada a tolerância, vale o primeiro horário depois de agora (11:00: 1 oferta, template da regra)
+  t.mock.timers.setTime(dia(2, 10, 31));
+  const depois = await scheduler.previewOffers(id);
+  assert.equal(depois.length, 1);
+  assert.ok(depois[0].text.startsWith('*'));
+});
+
+test('grade: regra salva no meio da execução não tem o próximo horário sobrescrito', async (t) => {
+  const { db, links, scheduler } = setup();
+  relogio(t, dia(2, 10, 0));
+  const id = regraJanela(db, ['00:00', '23:59']);
+  comGrade(db, id, { dias: [0, 1, 2, 3, 4, 5, 6], horarios: [{ hora: '10:00', qtd: 1, template_id: null }] }, dia(2, 10, 0));
+  const pedir = links.requestLink;
+  links.requestLink = async (o) => { db.prepare('UPDATE rules SET next_run_at = NULL WHERE id = ?').run(id); return pedir(o); }; // o PUT zera
+  await scheduler.tick();
+  assert.equal(linhaRegra(db, id).next_run_at, null, 'o tick seguinte calcula com a grade nova');
+  assert.equal(linhaRegra(db, id).last_run_at, dia(2, 10, 0));
+});
+
+test('grade: a prévia ("Ver ofertas") usa a quantidade e o template do próximo horário', async (t) => {
+  const { db, scheduler } = setup();
+  const rapido = novoTemplate(db, 'Rápido', 'RAPIDO');
+  relogio(t, dia(2, 9, 30));
+  const id = regraJanela(db, ['00:00', '23:59'], { per: 4 });
+  assert.equal((await scheduler.previewOffers(id)).length, 4, 'sem grade: per_run');
+  comGrade(db, id, { dias: [0, 1, 2, 3, 4, 5, 6], horarios: [{ hora: '09:00', qtd: 1, template_id: null }, { hora: '10:00', qtd: 2, template_id: rapido }] }, dia(2, 10, 0));
+  const prev = await scheduler.previewOffers(id);
+  assert.equal(prev.length, 2);
+  assert.ok(prev.every((o) => o.text.startsWith('RAPIDO ')));
+  db.prepare('DELETE FROM templates WHERE id = ?').run(rapido);
+  assert.ok((await scheduler.previewOffers(id)).every((o) => o.text.startsWith('*')), 'template apagado: o da regra');
+  assert.deepEqual(avisosDe(db), [], 'a prévia não escreve no Histórico');
+});
+
+// Rodada 2 (Q1): a regra trocada de ritmo no meio de uma execução. Sem grade, o fim da execução é o de sempre (CA1);
+// salva em "horários marcados", o próximo do intervalo não pode ficar gravado, nem pela cópia velha da lista do tick.
+test('sem grade (CA1): regra editada no intervalo durante a execução grava o próximo como hoje (o do intervalo lido no começo)', async (t) => {
+  const { db, links, scheduler } = setup();
+  relogio(t, dia(2, 10, 0));
+  const id = regraJanela(db, ['08:00', '22:00'], { per: 1, interval: 60 });
+  const pedir = links.requestLink;
+  links.requestLink = async (o) => { db.prepare('UPDATE rules SET interval_min = 15, next_run_at = NULL WHERE id = ?').run(id); return pedir(o); }; // o PUT
+  await scheduler.runRule(id);
+  assert.deepEqual(linhaRegra(db, id), { next_run_at: alignToWindow(dia(2, 10, 0) + 60 * 60000, '08:00', '22:00'), last_run_at: dia(2, 10, 0), grade: null });
+});
+
+test('grade (Q1): salva em "horários marcados" enquanto roda pelo intervalo, o próximo do intervalo não fica gravado', async (t) => {
+  const { db, wa, links, scheduler } = setup();
+  relogio(t, dia(2, 10, 0));
+  const id = regraJanela(db, ['00:00', '23:59'], { per: 1, interval: 60 });
+  const grade = { dias: [0, 1, 2, 3, 4, 5, 6], horarios: [{ hora: '10:30', qtd: 2, template_id: null }] };
+  const pedir = links.requestLink;
+  links.requestLink = async (o) => { comGrade(db, id, grade); return pedir(o); }; // o PUT grava a grade e zera o next_run_at
+  await scheduler.runRule(id);
+  links.requestLink = pedir;
+  assert.deepEqual([linhaRegra(db, id).next_run_at, linhaRegra(db, id).last_run_at], [null, dia(2, 10, 0)], 'sem o 11:00 do intervalo');
+  await scheduler.tick();
+  assert.deepEqual([wa.simulated.length, linhaRegra(db, id).next_run_at], [1, dia(2, 10, 30)], 'o tick calcula pela grade, sem enviar');
+});
+
+test('grade (Q1): regra salva em "horários marcados" enquanto outra roda no mesmo tick não sai pelo intervalo (lista velha)', async (t) => {
+  const { db, wa, links, scheduler } = setup();
+  relogio(t, dia(2, 10, 0));
+  const a = addRule(db, { name: 'A', tag: 1, groups: ['111@g.us'], items: ITEMS, per: 1 });
+  const b = addRule(db, { name: 'B', tag: 1, groups: ['222@g.us'], items: ITEMS, per: 2 });
+  const pedir = links.requestLink;
+  let primeira = true;
+  links.requestLink = async (o) => {
+    if (primeira) { primeira = false; comGrade(db, b, { dias: [0, 1, 2, 3, 4, 5, 6], horarios: [{ hora: '12:00', qtd: 1, template_id: null }] }); }
+    return pedir(o);
+  };
+  await scheduler.tick();
+  assert.equal(wa.simulated.filter((m) => m.jid === '111@g.us').length, 1, 'a regra A roda pelo intervalo, como hoje');
+  assert.equal(wa.simulated.filter((m) => m.jid === '222@g.us').length, 0, 'a B não sai fora do horário marcado');
+  assert.equal(linhaRegra(db, b).next_run_at, dia(2, 12, 0));
+  assert.equal(linhaRegra(db, a).next_run_at, dia(2, 11, 0));
+});
+
+test('grade (Q2): next_run_at que não é horário da grade (editado à mão) é trocado pelo próximo horário, sem enviar, como o cartão anuncia', async (t) => {
+  const { db, wa, scheduler } = setup();
+  relogio(t, dia(2, 10, 10));
+  const id = regraJanela(db, ['00:00', '23:59'], { per: 4 });
+  comGrade(db, id, { dias: [0, 1, 2, 3, 4, 5, 6], horarios: [{ hora: '10:00', qtd: 1, template_id: null }, { hora: '12:00', qtd: 2, template_id: null }] }, dia(2, 10, 7));
+  await scheduler.tick();
+  assert.deepEqual([wa.simulated.length, linhaRegra(db, id).next_run_at], [0, dia(2, 12, 0)], 'nada de per_run às 10:10');
+  assert.deepEqual(avisosDe(db), []);
+  t.mock.timers.setTime(dia(2, 12, 0) + 5000);
+  await scheduler.tick();
+  assert.equal(wa.simulated.length, 2, 'a linha das 12:00');
+});
+
+test('grade (Q2): hora sem zero à esquerda e qtd como texto (banco editado à mão) saem pela linha, não pelo per_run', async (t) => {
+  const { db, wa, scheduler } = setup();
+  relogio(t, dia(2, 9, 0) + 5000);
+  const id = regraJanela(db, ['00:00', '23:59'], { per: 4 });
+  comGrade(db, id, { dias: [0, 1, 2, 3, 4, 5, 6], horarios: [{ hora: '9:00', qtd: '2', template_id: null }, { hora: '15:00', qtd: 1, template_id: null }] }, dia(2, 9, 0));
+  await scheduler.tick();
+  assert.equal(wa.simulated.length, 2);
+  assert.equal(linhaRegra(db, id).next_run_at, dia(2, 15, 0));
+});

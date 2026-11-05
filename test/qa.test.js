@@ -635,7 +635,7 @@ test('CA8: menu em grupos na ordem da spec, rodapé, rotas e aliases, verbetes d
   assert.deepEqual(grupos, [
     { grupo: '', itens: ['#visao'] },
     { grupo: 'Principal', itens: ['#links', '#grupos', '#blocos'] },
-    { grupo: 'Disparos', itens: ['#disparo-manual', '#disparo-automatico', '#disparar-mensagem', '#templates'] },
+    { grupo: 'Disparos', itens: ['#disparo-manual', '#disparo-automatico', '#disparar-mensagem', '#grupo-vivo', '#templates'] }, // Grupo vivo: etapa 8 da grade
     { grupo: 'Comunicação', itens: ['#relatorios'] },
     { grupo: 'Conta', itens: ['#conexoes', '#numeros'] }, // Equipe entra por app.js só para o Dono
   ]);
@@ -1132,7 +1132,9 @@ test('Ler mais (etapa 11): toda chave de LEIA_MAIS existe em TIPS e todo destino
     'links.proximo': 'grupos/proximo-grupo', relatorios: 'resultados/avisos', 'relatorios.virada': 'resultados/avisos',
     ganhos: 'grupos/ganhos', 'ganhos.cobertura': 'grupos/ganhos', 'ganhos.comissao': 'grupos/ganhos', 'ganhos.receita': 'grupos/ganhos', 'ganhos.vendas': 'grupos/ganhos', 'ganhos.cliques': 'grupos/ganhos', 'ganhos.gpc': 'grupos/ganhos', 'ganhos.conversao': 'grupos/ganhos', 'ganhos.envios': 'grupos/ganhos', 'ganhos.atribuida': 'grupos/ganhos', 'ganhos.entradas': 'grupos/ganhos', 'ganhos.custo': 'grupos/ganhos', 'ganhos.retorno': 'grupos/ganhos', 'ganhos.oferta': 'grupos/ganhos', 'ganhos.importar': 'grupos/importar', 'ganhos.gasto': 'grupos/importar',
     rastreio: 'grupos/rastreio', 'rastreio.etiqueta': 'grupos/rastreio', 'rastreio.amazon': 'grupos/rastreio',
-    'rastreio.shopee': 'grupos/rastreio', 'rastreio.grupo': 'grupos/rastreio', 'blocos.etiqueta': 'grupos/rastreio', 'remetente': 'disparo-automatico/remetentes' };
+    'rastreio.shopee': 'grupos/rastreio', 'rastreio.grupo': 'grupos/rastreio', 'blocos.etiqueta': 'grupos/rastreio', 'remetente': 'disparo-automatico/remetentes',
+    'regras.modo_grade': 'disparo-automatico/horarios-marcados', 'regras.grade_horarios': 'disparo-automatico/horarios-marcados', 'regras.grade_modelos': 'disparo-automatico/horarios-marcados',
+    grupovivo: 'mensagens/grupo-vivo', 'grupovivo.rodizio': 'mensagens/grupo-vivo' };
   assert.deepEqual(LEIA, SPEC);
   // todo ícone q('chave') de uma tela com destino sai com data-docs; os demais seguem sem
   for (const chave of Object.keys(TIPS)) {

@@ -283,6 +283,7 @@ docsCapitulo({
           'Leia a coluna “Resultado”: ela diz o que aconteceu com cada oferta.',
         ] },
         { p: 'O tipo Espelhamento lista cada oferta espelhada, com o motivo de ter sido descartada ou de estar na fila. O tipo Catálogo mostra o que passou pelo catálogo e o que espera revisão. O tipo Remetente mostra cada link que um remetente mandou e o que aconteceu com ele. Veja [Espelhar ofertas da Amazon](#docs/espelhamento/fila), [Revisão de ofertas](#docs/revisao/motivos) e [Receber links de um remetente](#docs/disparo-automatico/remetentes).' },
+        { p: 'As rotinas do [Grupo vivo](#docs/mensagens/grupo-vivo) aparecem como “Grupo vivo: nome da rotina” e só em “Tudo”: não há tipo próprio para elas. Os avisos dos horários marcados de um disparo automático aparecem em “Tudo” e em “Disparo automático”.' },
         { tabela: {
           colunas: ['Mensagem no Histórico', 'O que fazer'],
           linhas: [
@@ -290,6 +291,8 @@ docsCapitulo({
             ['a extensão do Chrome não está conectada…', 'Abra o Chrome com a extensão instalada e logado na Central de Afiliados.'],
             ['não há sessão de afiliado neste Chrome…', 'Entre na sua conta da Central de Afiliados do Mercado Livre, no mesmo Chrome da extensão.'],
             ['perdeu o horário: passou mais de 2 h…', 'O envio agendado não saiu porque o WhatsApp ou o programa ficou fora. Agende de novo.'],
+            ['Horário 10:00 pulado: … (disparo) ou Horário de 05/11 10:00 pulado: … (rotina do Grupo vivo)', 'Um horário marcado atrasou mais de 30 min e não saiu. O próximo sai normalmente. Veja [O que acontece na hora marcada](#docs/disparo-automatico/na-hora-marcada).'],
+            ['8 horários pulados (09:00 de 03/11 a 13:00): … (disparo) ou 7 horários pulados, o último de 05/11 08:00: … (rotina do Grupo vivo)', 'Vários horários passaram sem sair, por exemplo com o programa dias desligado: o Histórico traz um aviso só. O de um disparo diz o primeiro e o último horário pulados; o de uma rotina, o último.'],
           ],
         } },
         { nota: 'dica', texto: 'Avisos não travam o envio. Uma fonte que falhou, por exemplo, vira aviso, e as outras fontes do disparo seguem normalmente.' },

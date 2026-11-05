@@ -5,13 +5,14 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
-import { openDb } from '../src/db.js';
+import { openDb, parseRule } from '../src/db.js';
 import { buildApp, criarServicos } from '../src/server.js';
 import { createWhatsApp } from '../src/whatsapp.js';
 import { createLinkService } from '../src/links.js';
 import { IMAGEM_SHOPEE, URL_API as URL_API_SHOPEE } from '../src/shopee.js';
 import { ERROS_FONTE } from '../src/catalogo.js';
 import { RESPOSTAS } from '../src/remetentes.js';
+import { proximoHorario, MAX_HORARIOS_GRADE } from '../src/grade.js';
 
 const HOST = 'disparador.exemplo.com.br';
 const SENHA = 'senha-de-teste-123';
@@ -957,4 +958,306 @@ test('remetente (CA10): falha no passo dos remetentes não trava o tick e vai ao
     assert.ok(saida.every((l) => !l.includes(NUMERO_REM.slice(-8))), 'o número (mensagem do erro) não vai ao console');
     assert.ok(saida.some((l) => l.includes('ERR_SQLITE_ERROR')));
   } finally { s.scheduler.stop(); await s.fechar(); }
+});
+
+// ---------- grade de horários do Disparo automático (plano grade-de-disparos, etapa 4, D5) ----------
+const pad2 = (n) => String(n).padStart(2, '0');
+/** 'HH:MM' local de daqui a `min` minutos (horários longe do agora: o "próximo" não muda durante o teste). */
+const horaDaqui = (min) => { const d = new Date(Date.now() + min * 60000); return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`; };
+const corpoRegra = (mais = {}) => ({ name: 'Regra grade', enabled: true, tag_id: null, template_id: 1, group_jids: [], sources: [{ type: 'list', config: { items: 'https://x/MLB-1-a' } }], per_run: 4, interval_min: 45, window_start: '07:00', window_end: '20:00', ...mais });
+async function comLogin() {
+  const s = await subir();
+  const h = { cookie: sidDe(await login(s.port)), origin: `http://127.0.0.1:${s.port}` };
+  const api = (caminho, method = 'GET', body) => req(s.port, caminho, { method, headers: h, body });
+  return { s, api };
+}
+const linhaRegra = (db, id) => ({ ...db.prepare('SELECT * FROM rules WHERE id = ?').get(id) });
+const criarTemplate = async (api, name) => (await api('/api/templates', 'POST', { name, body: `${name}: {TITULO} {LINK}` })).json.id;
+
+test('grade (CA1): POST e PUT sem grade gravam NULL e respondem como hoje; GET traz grade null e proximo_horario null', async () => {
+  const { s, api } = await comLogin();
+  try {
+    const post = await api('/api/rules', 'POST', corpoRegra());
+    assert.equal(post.status, 200, JSON.stringify(post.json));
+    assert.deepEqual(Object.keys(post.json), ['id'], 'o POST continua devolvendo só o id');
+    const id = post.json.id;
+    const linha = linhaRegra(s.db, id);
+    assert.equal(linha.grade, null);
+    const lida = (await api('/api/rules')).json.find((r) => r.id === id);
+    assert.deepEqual(lida, { ...parseRule(linha), em_andamento: false, proximo_horario: null }, 'a regra sem grade tem os campos de hoje, mais grade e proximo_horario nulos');
+    assert.equal(lida.grade, null);
+
+    // grade: null explícito grava exatamente o mesmo que não mandar o campo
+    const comNull = (await api('/api/rules', 'POST', corpoRegra({ grade: null }))).json.id;
+    const semData = ({ id: _i, created_at: _c, ...resto }) => resto;
+    assert.deepEqual(semData(linhaRegra(s.db, comNull)), semData(linha));
+
+    s.db.prepare('UPDATE rules SET next_run_at = ? WHERE id = ?').run(Date.now() + 3600000, id);
+    const put = await api(`/api/rules/${id}`, 'PUT', corpoRegra({ name: 'Renomeada' }));
+    assert.equal(put.status, 200);
+    assert.deepEqual(put.json, { ok: true });
+    const depois = linhaRegra(s.db, id);
+    assert.equal(depois.grade, null); assert.equal(depois.next_run_at, null, 'o PUT continua zerando next_run_at');
+    assert.equal(depois.name, 'Renomeada'); assert.equal(depois.per_run, 4); assert.equal(depois.interval_min, 45);
+  } finally { await s.fechar(); }
+});
+
+test('grade (CA2, CA3): grade válida volta normalizada; PUT com grade zera next_run_at; PUT sem grade volta ao intervalo com o ritmo guardado', async () => {
+  const { s, api } = await comLogin();
+  try {
+    const cupom = await criarTemplate(api, 'Cupom');
+    const grade = { dias: [5, 1, '3', 1], horarios: [{ hora: '9:00', qtd: '3', template_id: cupom }, { hora: ' 08:30 ', qtd: 2, template_id: '' }, { hora: '21:45', qtd: 20, template_id: null }] };
+    const post = await api('/api/rules', 'POST', corpoRegra({ grade }));
+    assert.equal(post.status, 200, JSON.stringify(post.json));
+    assert.deepEqual(Object.keys(post.json), ['id']);
+    const id = post.json.id;
+    const esperada = { dias: [1, 3, 5], horarios: [{ hora: '08:30', qtd: 2, template_id: null }, { hora: '09:00', qtd: 3, template_id: cupom }, { hora: '21:45', qtd: 20, template_id: null }] };
+    assert.deepEqual(JSON.parse(linhaRegra(s.db, id).grade), esperada, 'grava a grade normalizada');
+    const lida = (await api('/api/rules')).json.find((r) => r.id === id);
+    assert.deepEqual(lida.grade, esperada);
+    assert.equal(lida.per_run, 4); assert.equal(lida.interval_min, 45); assert.equal(lida.window_start, '07:00'); assert.equal(lida.window_end, '20:00');
+
+    // sem dias: todos
+    const semDias = (await api('/api/rules', 'POST', corpoRegra({ grade: { horarios: [{ hora: '10:00', qtd: 1 }] } }))).json.id;
+    assert.deepEqual((await api('/api/rules')).json.find((r) => r.id === semDias).grade, { dias: [0, 1, 2, 3, 4, 5, 6], horarios: [{ hora: '10:00', qtd: 1, template_id: null }] });
+
+    s.db.prepare('UPDATE rules SET next_run_at = ? WHERE id = ?').run(Date.now() + 3600000, id);
+    const novaGrade = { horarios: [{ hora: '12:00', qtd: 5, template_id: null }] };
+    assert.equal((await api(`/api/rules/${id}`, 'PUT', corpoRegra({ grade: novaGrade }))).status, 200);
+    const comGrade = linhaRegra(s.db, id);
+    assert.deepEqual(JSON.parse(comGrade.grade), { dias: [0, 1, 2, 3, 4, 5, 6], horarios: [{ hora: '12:00', qtd: 5, template_id: null }] });
+    assert.equal(comGrade.next_run_at, null, 'o tick recalcula o próximo horário (D3)');
+
+    // volta para "A cada X minutos": o ritmo anterior continua lá
+    assert.equal((await api(`/api/rules/${id}`, 'PUT', corpoRegra())).status, 200);
+    const volta = linhaRegra(s.db, id);
+    assert.equal(volta.grade, null);
+    assert.deepEqual([volta.per_run, volta.interval_min, volta.window_start, volta.window_end], [4, 45, '07:00', '20:00']);
+  } finally { await s.fechar(); }
+});
+
+test('grade (CA3): grade inválida volta 400 com a frase de tela e não grava nada, no POST e no PUT', async () => {
+  const { s, api } = await comLogin();
+  try {
+    const linha = (hora, qtd, extra = {}) => ({ hora, qtd, template_id: null, ...extra });
+    const muitas = Array.from({ length: MAX_HORARIOS_GRADE + 1 }, (_, i) => linha(`${pad2(Math.floor((i * 20) / 60))}:${pad2((i * 20) % 60)}`, 1));
+    const casos = [
+      [{ horarios: muitas }, 'A grade aceita no máximo 48 horários.'],
+      [{ horarios: [linha('09:00', 1), linha('09:09', 1)] }, 'Os horários 09:00 e 09:09 estão a menos de 10 min um do outro.'],
+      [{ horarios: [linha('09:00', 1), linha('9:00', 2)] }, 'Já existe um horário às 09:00.'],
+      [{ horarios: [linha('09:00', 0)] }, 'Horário 09:00: ofertas de 1 a 20.'],
+      [{ horarios: [linha('09:00', 21)] }, 'Horário 09:00: ofertas de 1 a 20.'],
+      [{ horarios: [{ hora: '09:00', template_id: null }] }, 'Horário 09:00: ofertas de 1 a 20.'],
+      [{ horarios: [linha('09:00', 1, { template_id: 999 })] }, 'Horário 09:00: o template escolhido não existe mais. Escolha outro.'],
+      [{ horarios: [linha('09:00', 1, { cor: 'azul' })] }, 'A grade tem um formato inválido.'],
+      [{ horarios: [linha('09:00', 1)], extra: 1 }, 'A grade tem um formato inválido.'],
+      [[{ hora: '09:00', qtd: 1 }], 'A grade tem um formato inválido.'],
+      ['09:00', 'A grade tem um formato inválido.'],
+      [{ horarios: [] }, 'Adicione ao menos um horário.'],
+      [{ dias: [], horarios: [linha('09:00', 1)] }, 'Marque ao menos um dia.'],
+      [{ dias: [7], horarios: [linha('09:00', 1)] }, 'Marque ao menos um dia.'],
+      [{ horarios: [linha('25:00', 1)] }, 'Horário inválido: use HH:MM.'],
+    ];
+    const antes = s.db.prepare('SELECT COUNT(*) AS n FROM rules').get().n;
+    for (const [grade, frase] of casos) {
+      const r = await api('/api/rules', 'POST', corpoRegra({ grade }));
+      assert.equal(r.status, 400, frase);
+      assert.deepEqual(r.json, { erro: frase });
+    }
+    assert.equal(s.db.prepare('SELECT COUNT(*) AS n FROM rules').get().n, antes, 'nenhuma regra gravada');
+
+    const id = (await api('/api/rules', 'POST', corpoRegra({ grade: { horarios: [linha('10:00', 2)] } }))).json.id;
+    const gravada = linhaRegra(s.db, id);
+    for (const [grade, frase] of casos) {
+      const r = await api(`/api/rules/${id}`, 'PUT', corpoRegra({ name: 'Outro nome', grade }));
+      assert.equal(r.status, 400, frase);
+      assert.deepEqual(r.json, { erro: frase });
+    }
+    assert.deepEqual(linhaRegra(s.db, id), gravada, 'o PUT recusado não mexe na regra');
+  } finally { await s.fechar(); }
+});
+
+test('grade (CA9): GET /api/rules traz proximo_horario { ts, hora, qtd, template_id } do próximo horário da grade', async () => {
+  const { s, api } = await comLogin();
+  try {
+    const cupom = await criarTemplate(api, 'Cupom');
+    const h1 = horaDaqui(180); const h2 = horaDaqui(300);
+    const id = (await api('/api/rules', 'POST', corpoRegra({ grade: { horarios: [{ hora: h2, qtd: 7, template_id: cupom }, { hora: h1, qtd: 2, template_id: null }] } }))).json.id;
+    const proximo = async () => (await api('/api/rules')).json.find((r) => r.id === id).proximo_horario;
+    const grade = parseRule(linhaRegra(s.db, id)).grade;
+
+    // next_run_at NULL (regra nova ou editada): o próximo horário depois de agora
+    const ts1 = proximoHorario(grade, Date.now());
+    assert.deepEqual(await proximo(), { ts: ts1, hora: h1, qtd: 2, template_id: null });
+
+    // next_run_at gravado pelo agendador: é ele o próximo envio
+    const ts2 = proximoHorario(grade, ts1);
+    s.db.prepare('UPDATE rules SET next_run_at = ? WHERE id = ?').run(ts2, id);
+    assert.deepEqual(await proximo(), { ts: ts2, hora: h2, qtd: 7, template_id: cupom });
+
+    // horário vencido há até 30 min ainda sai (CA6): continua sendo o próximo envio
+    const vencido = new Date(); vencido.setSeconds(0, 0); vencido.setMinutes(vencido.getMinutes() - 20);
+    const hv = `${pad2(vencido.getHours())}:${pad2(vencido.getMinutes())}`;
+    const id2 = (await api('/api/rules', 'POST', corpoRegra({ grade: { horarios: [{ hora: hv, qtd: 3 }] } }))).json.id;
+    s.db.prepare('UPDATE rules SET next_run_at = ? WHERE id = ?').run(vencido.getTime(), id2);
+    const p2 = (await api('/api/rules')).json.find((r) => r.id === id2).proximo_horario;
+    assert.deepEqual(p2, { ts: vencido.getTime(), hora: hv, qtd: 3, template_id: null });
+
+    // vencido há mais de 30 min (vai ser pulado) ou fora da grade: o próximo depois de agora
+    s.db.prepare('UPDATE rules SET next_run_at = ? WHERE id = ?').run(ts1 - 86400000 * 2, id);
+    assert.deepEqual(await proximo(), { ts: ts1, hora: h1, qtd: 2, template_id: null });
+    s.db.prepare('UPDATE rules SET next_run_at = ? WHERE id = ?').run(ts1 + 60000, id);
+    assert.deepEqual(await proximo(), { ts: ts1, hora: h1, qtd: 2, template_id: null }, 'next_run_at que não é horário da grade não vale');
+
+    // grade quebrada no banco (editada à mão) não derruba a lista
+    s.db.prepare('UPDATE rules SET grade = ? WHERE id = ?').run('{"horarios":5}', id);
+    s.db.prepare('UPDATE rules SET grade = ? WHERE id = ?').run('{"dias":[],"horarios":[{"hora":"10:00","qtd":1}]}', id2);
+    const lista = await api('/api/rules');
+    assert.equal(lista.status, 200);
+    assert.equal(lista.json.find((r) => r.id === id).proximo_horario, null);
+    assert.equal(lista.json.find((r) => r.id === id2).proximo_horario, null, 'sem dia válido: sem próximo horário');
+  } finally { await s.fechar(); }
+});
+
+test('grade (Q2): proximo_horario anuncia o que o agendador usa com a grade editada à mão (hora sem zero, qtd fora de forma, template sumido)', async () => {
+  const { s, api } = await comLogin();
+  try {
+    const cupom = await criarTemplate(api, 'Cupom');
+    const h1 = horaDaqui(180); const h2 = horaDaqui(300);
+    const id = (await api('/api/rules', 'POST', corpoRegra({ grade: { horarios: [{ hora: h1, qtd: 2, template_id: cupom }, { hora: h2, qtd: 3 }] } }))).json.id;
+    const proximo = async () => (await api('/api/rules')).json.find((r) => r.id === id).proximo_horario;
+    const ts = proximoHorario(parseRule(linhaRegra(s.db, id)).grade, Date.now());
+    const semZero = h1.startsWith('0') ? h1.slice(1) : ` ${h1} `; // '9:05' ou ' 13:05 ': o que o proximaOcorrencia também lê
+    const gravar = (l1) => s.db.prepare('UPDATE rules SET grade = ? WHERE id = ?').run(JSON.stringify({ dias: [0, 1, 2, 3, 4, 5, 6], horarios: [l1, { hora: h2, qtd: 3, template_id: null }] }), id);
+    gravar({ hora: semZero, qtd: '2', template_id: String(cupom) });
+    assert.deepEqual(await proximo(), { ts, hora: h1, qtd: 2, template_id: cupom }, 'hora normalizada, qtd e template lidos como o agendador');
+    gravar({ hora: h1, qtd: 99, template_id: cupom });
+    assert.deepEqual(await proximo(), { ts, hora: h1, qtd: 4, template_id: cupom }, 'qtd fora de 1 a 20: o per_run da regra');
+    s.db.prepare('DELETE FROM templates WHERE id = ?').run(cupom); // à mão: a API bloqueia
+    assert.deepEqual(await proximo(), { ts, hora: h1, qtd: 4, template_id: null }, 'template sumido: o da regra');
+  } finally { await s.fechar(); }
+});
+
+test('grade: /api/state traz os limites da grade e os do Grupo vivo (max_conteudos, max_horarios_rotina)', async () => {
+  const { s, api } = await comLogin();
+  try {
+    const st = await api('/api/state');
+    assert.equal(st.status, 200);
+    assert.deepEqual(st.json.grade, { max_horarios: 48, intervalo_min: 10, tolerancia_min: 30, max_qtd: 20, max_conteudos: 5, max_horarios_rotina: 6 });
+  } finally { await s.fechar(); }
+});
+
+test('grade (CA10): apagar template usado num horário de grade é bloqueado com a regra e o horário; sem uso, apaga', async () => {
+  const { s, api } = await comLogin();
+  try {
+    const usado = await criarTemplate(api, 'Usado');
+    const livre = await criarTemplate(api, 'Livre');
+    const total = () => s.db.prepare('SELECT COUNT(*) AS n FROM templates').get().n;
+    // regra com grade quebrada no banco antes da que usa: é ignorada, sem derrubar a checagem
+    const quebrada = (await api('/api/rules', 'POST', corpoRegra({ name: 'Quebrada' }))).json.id;
+    s.db.prepare('UPDATE rules SET grade = ? WHERE id = ?').run('{não é json', quebrada);
+    const id = (await api('/api/rules', 'POST', corpoRegra({ name: 'Ofertas da manhã', grade: { horarios: [{ hora: '08:00', qtd: 1 }, { hora: '10:00', qtd: 2, template_id: usado }, { hora: '12:00', qtd: 2, template_id: usado }] } }))).json.id;
+
+    const antes = total();
+    const r = await api(`/api/templates/${usado}`, 'DELETE');
+    assert.equal(r.status, 400);
+    assert.deepEqual(r.json, { erro: 'A regra "Ofertas da manhã" usa este template no horário 10:00.' });
+    assert.equal(total(), antes, 'o template continua lá');
+
+    assert.equal((await api(`/api/templates/${livre}`, 'DELETE')).status, 200, 'template sem uso apaga');
+    assert.equal(total(), antes - 1);
+
+    // a regra deixa de usar (volta ao intervalo): agora apaga
+    assert.equal((await api(`/api/rules/${id}`, 'PUT', corpoRegra({ name: 'Ofertas da manhã' }))).status, 200);
+    assert.equal((await api(`/api/templates/${usado}`, 'DELETE')).status, 200);
+
+    // o template da regra continua bloqueado como antes
+    const r1 = await api('/api/templates/1', 'DELETE');
+    assert.equal(r1.status, 400);
+    assert.match(r1.json.erro, /^A regra "[^"]+" usa este template\.$/);
+  } finally { await s.fechar(); }
+});
+
+// ---------- Grupo vivo ligado ao agendador e ao servidor (plano grade-de-disparos, etapa 6, D7) ----------
+const GRUPO_VIVO = '500@g.us';
+const corpoRotina = (mais = {}) => ({ nome: 'Bom dia', tipo: 'mensagem', conteudos: ['Bom dia, grupo!', 'Boa semana a todos!'], ordem: 'rodizio',
+  group_jids: [GRUPO_VIVO], repetir: { dias: [0, 1, 2, 3, 4, 5, 6], horarios: ['09:00'] }, enabled: true, ...mais });
+const gravarGrupoVivo = (db) => db.prepare('INSERT INTO groups (jid, name, size, updated_at) VALUES (?,?,?,?)').run(GRUPO_VIVO, 'Grupo das Ofertas', 10, Date.now());
+
+test('Grupo vivo (CA11): rotina vencida sai pelo tick, pela fila de envios, com "Grupo vivo: <nome>" no Histórico', async () => {
+  const { s, api } = await comLogin();
+  try {
+    assert.ok(s.scheduler.rotinas, 'o agendador cria e expõe o serviço das rotinas');
+    gravarGrupoVivo(s.db);
+    const criada = await api('/api/rotinas', 'POST', corpoRotina());
+    assert.equal(criada.status, 200, criada.txt);
+    const id = criada.json.id;
+    await s.scheduler.tick();
+    assert.equal(s.db.prepare('SELECT COUNT(*) AS n FROM envios').get().n, 0, 'antes do horário, nada sai');
+
+    s.db.prepare('UPDATE rotinas SET next_run_at = ? WHERE id = ?').run(Date.now() - 60000, id); // venceu há 1 min
+    await s.scheduler.tick();
+    const envios = s.db.prepare('SELECT * FROM envios').all();
+    assert.equal(envios.length, 1, 'uma ocorrência só');
+    assert.equal(envios[0].status, 'concluido', 'saiu no mesmo tick (acordar → laço do tick)');
+    assert.deepEqual(JSON.parse(envios[0].payload).origem, { tipo: 'rotina', rotina_id: id, nome: 'Bom dia' });
+    assert.deepEqual(s.wa.simulated.filter((m) => m.jid === GRUPO_VIVO).map((m) => m.text), ['Bom dia, grupo!']);
+    const log = s.db.prepare('SELECT rule_name, level FROM log ORDER BY id').all().map((l) => ({ ...l }));
+    assert.ok(log.some((l) => l.rule_name === 'Grupo vivo: Bom dia' && l.level === 'ok'), JSON.stringify(log));
+    assert.ok(!JSON.stringify(log).includes(GRUPO_VIVO), 'o Histórico leva o nome do grupo, não o JID');
+    const rotina = s.db.prepare('SELECT next_run_at, proximo_indice FROM rotinas WHERE id = ?').get(id);
+    assert.ok(rotina.next_run_at > Date.now(), 'o próximo horário fica no futuro');
+    assert.equal(rotina.proximo_indice, 1, 'o rodízio avançou');
+
+    await s.scheduler.tick();
+    assert.equal(s.db.prepare('SELECT COUNT(*) AS n FROM envios').get().n, 1, 'o tick seguinte não repete a ocorrência');
+  } finally { await s.fechar(); }
+});
+
+test('Grupo vivo (D7): o passo das rotinas roda antes das regras e depois de cada regra (intervalo e grade); a falha dele não trava o tick e vai ao console só com o código', async (t) => {
+  const { s, api } = await comLogin();
+  try {
+    // duas regras sem grupo que rodam neste tick e terminam como "Regra incompleta": uma sempre dentro da janela e uma
+    // com grade, com o horário de 5 min atrás vencido (dentro da tolerância)
+    const regra = (await api('/api/rules', 'POST', corpoRegra({ name: 'Regra do tick', window_start: '00:00', window_end: '00:00' }))).json.id;
+    const h = new Date(Date.now() - 5 * 60000); h.setSeconds(0, 0);
+    const comGrade = (await api('/api/rules', 'POST', corpoRegra({ name: 'Regra da grade', grade: { horarios: [{ hora: `${pad2(h.getHours())}:${pad2(h.getMinutes())}`, qtd: 1 }] } }))).json.id;
+    s.db.prepare('UPDATE rules SET next_run_at = ? WHERE id = ?').run(h.getTime(), comGrade);
+    const saida = []; t.mock.method(console, 'error', (...a) => saida.push(a.join(' ')));
+    const chamadas = [];
+    const segredo = 'Bom dia, grupo! 5535999990000';
+    const avisosTick = s.scheduler.avisos.tick;
+    s.scheduler.avisos.tick = async () => { chamadas.push('avisos'); return avisosTick(); };
+    const espelhoProcessar = s.scheduler.espelho.processarPendentes;
+    s.scheduler.espelho.processarPendentes = async (...a) => { chamadas.push('espelho'); return espelhoProcessar(...a); };
+    s.scheduler.rotinas.processarPendentes = async () => {
+      chamadas.push('rotinas');
+      const e = new Error(`falhou com ${segredo}`); e.code = 'ERR_SQLITE_ERROR'; throw e;
+    };
+    await s.scheduler.tick();
+    assert.deepEqual(chamadas, ['espelho', 'avisos', 'rotinas', 'espelho', 'rotinas', 'espelho', 'rotinas'], 'antes das regras e de novo depois de cada regra');
+    for (const id of [regra, comGrade]) {
+      const linhas = s.db.prepare('SELECT message FROM log WHERE rule_id = ?').all(id).map((l) => l.message);
+      assert.ok(linhas.some((m) => m.includes('Regra incompleta')), `a regra ${id} rodou mesmo com a falha das rotinas: ${JSON.stringify(linhas)}`);
+    }
+    const doGrupoVivo = saida.filter((l) => l.startsWith('[agendador] grupo vivo'));
+    assert.equal(doGrupoVivo.length, 3, saida.join('\n'));
+    assert.ok(doGrupoVivo.every((l) => l.includes('ERR_SQLITE_ERROR')));
+    assert.ok(saida.every((l) => !l.includes('5535999990000') && !l.includes('Bom dia')), 'a mensagem do erro não vai ao console');
+  } finally { await s.fechar(); }
+});
+
+test('Grupo vivo (D7): /api/rotinas montada depois do login: sem login 401; com login 200', async () => {
+  const s = await subir();
+  try {
+    gravarGrupoVivo(s.db);
+    assert.equal((await req(s.port, '/api/rotinas')).status, 401);
+    const cookie = sidDe(await login(s.port));
+    const origin = `http://127.0.0.1:${s.port}`;
+    const criada = await req(s.port, '/api/rotinas', { method: 'POST', headers: { cookie, origin }, body: corpoRotina() });
+    assert.equal(criada.status, 200, criada.txt);
+    const r = await req(s.port, '/api/rotinas', { headers: { cookie } });
+    assert.equal(r.status, 200, r.txt);
+    assert.deepEqual(r.json.map((x) => [x.nome, x.tipo, x.enabled]), [['Bom dia', 'mensagem', true]]);
+  } finally { await s.fechar(); }
 });

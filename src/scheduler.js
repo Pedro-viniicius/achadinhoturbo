@@ -8,6 +8,8 @@ import { createAvisos } from './avisos.js';
 import { createEspelho } from './espelho.js';
 import { agrupar, registrar as registrarRastreio } from './rastreio.js';
 import { createRemetentes } from './remetentes.js';
+import { createRotinas } from './rotinas.js';
+import { proximoHorario, horarioDe, resolverVencido, proximoEnvio, qtdDaLinha, templateDaLinha } from './grade.js';
 import { sleep, jitter } from './util.js';
 
 // Pausas entre mensagens: moram em ./util.js (src/envios.js usa o mesmo ritmo anti-bloqueio); reexportadas aqui.
@@ -33,6 +35,28 @@ const TEXTO_ESPERA = {
 const qtdOfertas = (n) => `${n} ${n === 1 ? 'oferta' : 'ofertas'}`;
 
 const toMin = (hhmm) => { const [h, m] = String(hhmm).split(':').map(Number); return h * 60 + (m || 0); };
+
+// Grade de horários (plano grade-de-disparos, D3 e D4): textos do Histórico
+const pad2 = (n) => String(n).padStart(2, '0');
+const horaDe = (ts) => { const d = new Date(ts); return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`; };
+const mesmoDia = (a, b) => new Date(a).toDateString() === new Date(b).toDateString();
+/** "10:00" se for no dia de `agora`; senão "10:00 de 03/11". */
+const quandoDe = (ts, agora) => {
+  if (mesmoDia(ts, agora)) return horaDe(ts);
+  const d = new Date(ts);
+  return `${horaDe(ts)} de ${pad2(d.getDate())}/${pad2(d.getMonth() + 1)}`;
+};
+const MOTIVO_PULADO = 'o programa estava desligado, o WhatsApp desconectado ou outro envio demorou.';
+/**
+ * Aviso de horário perdido (CA6): um ou vários pulados e o que vem em seguida. `saiAgora`: o horário seguinte já
+ * venceu e vai sair neste tick (com o WhatsApp fora, ele só fica marcado como o próximo).
+ */
+function textoPulados(pulados, { seguinte, saiAgora }, agora) {
+  const quais = pulados.length === 1 ? `Horário ${quandoDe(pulados[0], agora)} pulado`
+    : `${pulados.length} horários pulados (${quandoDe(pulados[0], agora)} a ${quandoDe(pulados.at(-1), agora)})`;
+  const depois = seguinte == null ? '' : saiAgora ? ` O das ${horaDe(seguinte)} sai agora.` : ` Próximo: ${quandoDe(seguinte, agora)}.`;
+  return `${quais}: ${MOTIVO_PULADO}${depois}`;
+}
 
 /** O horário de funcionamento pode virar a noite (ex.: 20:00 até 02:00). */
 export function inWindow(ts, start, end) {
@@ -64,6 +88,8 @@ export function alignToWindow(ts, start, end) {
  * Remetentes (src/remetentes.js, plano envio-pelo-socio D9): o ouvinte privado do WhatsApp (ligado em src/server.js)
  * entrega a remetentes.receber(); o tick responde às mensagens já decididas e decide os itens recebidos logo depois
  * do espelho, e o que sai vai pela mesma fila de envios.
+ * Grupo vivo (src/rotinas.js, plano grade-de-disparos D7): no horário, cada rotina ligada grava uma ocorrência 'agora'
+ * na mesma fila de envios e acorda o tick; o passo das rotinas roda antes das regras e depois de cada regra.
  */
 export function createScheduler({ db, wa, links, ml = mlDefault, fast = false, dir = null, amazon = null, shopee = null, catalogo = null, catalogoItens = null }) {
   const running = new Set();
@@ -76,6 +102,8 @@ export function createScheduler({ db, wa, links, ml = mlDefault, fast = false, d
   const espelho = createEspelho({ db, wa, amazon, envios, acordar });
   // idem para a mensagem privada de um remetente cadastrado (receber) e para cada envio que ela cria
   const remetentes = createRemetentes({ db, wa, envios, acordar });
+  // rotinas do Grupo vivo: a ocorrência vencida grava um envio 'agora' e acorda o tick (sai no laço "acordado")
+  const rotinas = createRotinas({ db, wa, envios, acordar });
 
   const getRule = (id) => parseRule(db.prepare('SELECT * FROM rules WHERE id = ?').get(id));
   const delays = () => fast ? { group: 0, offer: 0 } : {
@@ -313,10 +341,46 @@ export function createScheduler({ db, wa, links, ml = mlDefault, fast = false, d
     return picked;
   }
 
-  async function runRule(id, { manual = false } = {}) {
+  /**
+   * Linha da grade que vale para esta execução (D4): a do horário executado pelo tick ou, sem ele ("Enviar agora" e
+   * prévia), a do próximo envio, na mesma conta do cartão (proximoEnvio, src/grade.js). null = regra sem grade ou
+   * horário sem linha (vale per_run e o template da regra).
+   */
+  function linhaDaGrade(rule, horario, agora) {
+    if (!rule.grade) return null;
+    return horarioDe(rule.grade, horario ?? proximoEnvio(rule.grade, rule.next_run_at, agora));
+  }
+
+  /** Ofertas da execução: a qtd da linha (qtdDaLinha, a mesma conta do cartão) ou per_run. */
+  const qtdDa = (rule, linha) => qtdDaLinha(linha, rule.per_run);
+
+  /** Template da execução: o da linha da grade, se existir; senão o da regra. `sumiu`: a linha pedia um que não existe mais. */
+  function templateDa(rule, linha) {
+    const daRegra = rule.template_id && db.prepare('SELECT * FROM templates WHERE id = ?').get(rule.template_id);
+    const idDaLinha = templateDaLinha(linha);
+    if (idDaLinha == null) return { tpl: daRegra, sumiu: false };
+    const daLinha = db.prepare('SELECT * FROM templates WHERE id = ?').get(idDaLinha);
+    return daLinha ? { tpl: daLinha, sumiu: false } : { tpl: daRegra, sumiu: true };
+  }
+
+  /**
+   * A regra está, no banco, em "horários marcados" (a mesma leitura de parseRule: grade ilegível = intervalo). Serve a
+   * quem tem uma cópia velha dela (o fim de uma execução pelo intervalo, a lista do tick). Nunca lança.
+   */
+  const comGradeAgora = (id) => { try { return !!getRule(id)?.grade; } catch { return false; } };
+
+  /**
+   * `horario` (regra com grade, vindo do tick): o horário da grade que esta execução cumpre. `manual` ("Enviar agora"):
+   * numa regra com grade, usa a linha do próximo horário e não mexe em next_run_at (CA8).
+   */
+  async function runRule(id, { manual = false, horario = null } = {}) {
     const rule = getRule(id);
     if (!rule) throw new Error('Regra não encontrada');
     if (running.has(id)) return { skipped: 'já está em andamento' };
+    const linha = linhaDaGrade(rule, horario, Date.now());
+    // começo dos avisos da grade: o horário cumprido ou, no "Enviar agora", o horário cuja linha foi usada
+    const prefixo = horario != null ? `Horário ${horaDe(horario)}: `
+      : linha ? `Enviar agora (como no horário das ${linha.hora}): ` : '';
     running.add(id);
     const summary = { offers: 0, messages: 0, errors: 0, revisao: 0 };
     const exec = novaExecucao();
@@ -328,15 +392,19 @@ export function createScheduler({ db, wa, links, ml = mlDefault, fast = false, d
         retrySoon = true; summary.errors++; return summary;
       }
       const tag = rule.tag_id && db.prepare('SELECT * FROM tags WHERE id = ?').get(rule.tag_id);
-      const tpl = rule.template_id && db.prepare('SELECT * FROM templates WHERE id = ?').get(rule.template_id);
+      const { tpl, sumiu } = templateDa(rule, linha);
+      if (sumiu) {
+        log(rule, { level: 'aviso', message: `${prefixo}o template escolhido para este horário não existe mais. As ofertas saíram com o template da regra.` });
+      }
       const groups = rule.group_jids
         .map((jid) => db.prepare('SELECT * FROM groups WHERE jid = ?').get(jid)).filter(Boolean);
       // etiqueta do ML só se alguma fonte pode trazer oferta do ML (D8, CA6)
       const problem = !tag && precisaEtiqueta(rule.sources) ? 'escolha uma etiqueta' : !tpl ? 'escolha um template' : !groups.length ? 'escolha ao menos um grupo' : null;
       if (problem) { log(rule, { level: 'erro', message: `Regra incompleta: ${problem}.` }); summary.errors++; return summary; }
 
+      const want = qtdDa(rule, linha);
       let picked;
-      try { picked = await pickOffers(rule, rule.per_run, exec); } catch (e) {
+      try { picked = await pickOffers(rule, want, exec); } catch (e) {
         log(rule, { level: 'erro', message: 'Não consegui buscar ofertas: ' + e.message }); summary.errors++; return summary;
       }
       if (!picked.length) { log(rule, { level: 'info', message: 'Sem ofertas novas dentro dos filtros desta vez.' }); return summary; }
@@ -409,23 +477,78 @@ export function createScheduler({ db, wa, links, ml = mlDefault, fast = false, d
         }
         if (i < picked.length - 1) await sleep(jitter(d.offer));
       }
+      // faltaram ofertas no horário da grade (CA7): sai o que houver, sem acumular para o próximo
+      if (rule.grade && picked.length < want) {
+        const frase = `aíram ${summary.offers} de ${want} ofertas; não havia mais ofertas novas dentro dos filtros.`;
+        log(rule, { level: 'aviso', message: prefixo ? `${prefixo}s${frase}` : `S${frase}` });
+      }
       return summary;
     } finally {
       fecharCatalogo(rule, exec); // avisos de espera e cursor do catálogo, no fim (nunca na pré-visualização)
       const now = Date.now();
-      const next = retrySoon ? now + 60000 : alignToWindow(now + rule.interval_min * 60000, rule.window_start, rule.window_end);
-      db.prepare('UPDATE rules SET last_run_at = ?, next_run_at = ? WHERE id = ?').run(now, next, id);
+      if (rule.grade) fecharGrade(rule, { manual, horario, retrySoon }, now);
+      else if (comGradeAgora(id)) {
+        // salva em "horários marcados" durante esta execução pelo intervalo (o PUT zerou o next_run_at): o próximo do
+        // intervalo não fica gravado, e o tick calcula o próximo horário pela grade nova
+        db.prepare('UPDATE rules SET last_run_at = ? WHERE id = ?').run(now, id);
+      } else {
+        const next = retrySoon ? now + 60000 : alignToWindow(now + rule.interval_min * 60000, rule.window_start, rule.window_end);
+        db.prepare('UPDATE rules SET last_run_at = ?, next_run_at = ? WHERE id = ?').run(now, next, id);
+      }
       running.delete(id);
     }
+  }
+
+  /**
+   * Fim da execução de uma regra com grade (D4). "Enviar agora" e WhatsApp fora mantêm o next_run_at (o horário
+   * vencido fica para o tick, que o pula depois de 30 min). Fora isso, o próximo é o horário seguinte ao executado,
+   * mesmo que já tenha passado: o tick resolve (D3). Só troca se ninguém mexeu no meio: a regra salva durante a
+   * execução fica com next_run_at NULL e o tick calcula com a grade nova.
+   */
+  function fecharGrade(rule, { manual, horario, retrySoon }, now) {
+    db.prepare('UPDATE rules SET last_run_at = ? WHERE id = ?').run(now, rule.id);
+    if (manual || retrySoon) return;
+    db.prepare('UPDATE rules SET next_run_at = ? WHERE id = ? AND next_run_at IS ?')
+      .run(proximoHorario(rule.grade, horario ?? now), rule.id, rule.next_run_at);
+  }
+
+  /**
+   * Passo do tick para uma regra com grade (D3). `pronto`: o WhatsApp está conectado (só muda a frase do aviso: o
+   * tick é quem não executa sem ele). Devolve o horário a executar agora, ou null. next_run_at NULL grava o
+   * próximo horário sem enviar; horário vencido passa por resolverVencido (só o mais recente, até 30 min de atraso),
+   * com um aviso no Histórico para os pulados. A janela "Funciona das/até" nunca vale aqui.
+   */
+  function horarioVencido(r, now, pronto) {
+    const regra = getRule(r.id); // a lista do tick pode estar velha (a regra salva enquanto outra rodava)
+    if (!regra?.enabled || !regra.grade) return null;
+    const grava = (next) => db.prepare('UPDATE rules SET next_run_at = ? WHERE id = ? AND next_run_at IS ?').run(next, regra.id, regra.next_run_at);
+    // sem horário, ou com um que não é da grade (grade editada à mão, sobra de outro ritmo): grava o próximo sem enviar,
+    // como o cartão anuncia (proximoEnvio)
+    if (regra.next_run_at == null || !horarioDe(regra.grade, regra.next_run_at)) {
+      const next = proximoHorario(regra.grade, now);
+      if (next !== regra.next_run_at) grava(next);
+      return null;
+    }
+    if (regra.next_run_at > now) return null;
+    const res = resolverVencido((h) => proximoHorario(regra.grade, h), regra.next_run_at, now);
+    // o que vai sair fica gravado: com o WhatsApp fora, ele espera (e vence) como qualquer horário
+    const next = res.executar ?? res.proximo;
+    if (res.pulados.length) {
+      log(regra, { level: 'aviso', message: textoPulados(res.pulados, { seguinte: next, saiAgora: pronto && res.executar != null }, now) });
+    }
+    if (next !== regra.next_run_at) grava(next);
+    return res.executar;
   }
 
   async function previewOffers(id) {
     const rule = getRule(id);
     if (!rule) throw new Error('Regra não encontrada');
-    const tpl = rule.template_id && db.prepare('SELECT * FROM templates WHERE id = ?').get(rule.template_id);
+    // com grade: a quantidade e o template do próximo horário (CA8), sem aviso no Histórico
+    const linha = linhaDaGrade(rule, null, Date.now());
+    const { tpl } = templateDa(rule, linha);
     // execução própria e descartada: nada vai a catalogo_itens, catalogo_cursores, sent_offers nem ao log do
     // catálogo; Novidades sem cursor pronto não lê (a regra mostra primeira_leitura na fonte, em GET /api/rules)
-    const picked = await pickOffers(rule, rule.per_run, novaExecucao(), { previa: true });
+    const picked = await pickOffers(rule, qtdDa(rule, linha), novaExecucao(), { previa: true });
     const nome = (id) => db.prepare('SELECT name FROM tags WHERE id = ?').get(id)?.name;
     const linkPrevia = (o) => (!o.catalogo || o.loja === 'ml' ? LINK_ML_PREVIA
       : o.loja === 'amazon' ? `https://www.amazon.com.br/dp/${o.asin}?tag=•••` : o.link);
@@ -475,9 +598,15 @@ export function createScheduler({ db, wa, links, ml = mlDefault, fast = false, d
     await passo('remetentes (respostas)', semDetalhe(() => remetentes.responderPendentes()));
     await passo('remetentes', semDetalhe(() => remetentes.processarPendentes()));
   }
+  /**
+   * Grupo vivo (D7): grava as ocorrências das rotinas vencidas (cada uma vira um envio 'agora' e acorda o tick). Sem a
+   * mensagem do erro no console (semDetalhe): a do banco pode trazer o texto da rotina.
+   */
+  const passoRotinas = () => passo('grupo vivo', semDetalhe(() => rotinas.processarPendentes()));
 
-  // Ordem: envios vencidos → espelho → remetentes → avisos → regras, com espelho, remetentes e envios de novo depois
-  // de cada regra (um agendado, uma oferta espelhada ou um link de remetente espera no máximo a regra em andamento).
+  // Ordem: envios vencidos → espelho → remetentes → avisos → rotinas → regras, com espelho, remetentes, rotinas e envios
+  // de novo depois de cada regra (um agendado, uma oferta espelhada, um link de remetente ou uma rotina do Grupo vivo
+  // espera no máximo a regra em andamento).
   async function tick() {
     if (ticking) return; ticking = true; acordado = false;
     try {
@@ -487,9 +616,24 @@ export function createScheduler({ db, wa, links, ml = mlDefault, fast = false, d
       await passoEspelho();
       await passoRemetentes();
       await passo('avisos', () => avisos.tick());
+      await passoRotinas();
       const rules = db.prepare('SELECT * FROM rules WHERE enabled = 1').all().map(parseRule);
       for (const r of rules) {
         const now = Date.now();
+        // a lista pode estar velha: a regra salva em "horários marcados" enquanto outra rodava já vai pela grade
+        if (r.grade || comGradeAgora(r.id)) {
+          // regra com grade (D3): pelos horários marcados, sem a janela
+          if (running.has(r.id)) continue;
+          const pronto = wa.isReady();
+          const horario = horarioVencido(r, now, pronto);
+          if (horario == null || !pronto) continue;
+          await runRule(r.id, { horario });
+          await passoEspelho();
+          await passoRemetentes();
+          await passoRotinas();
+          await passoEnvios();
+          continue;
+        }
         if (running.has(r.id) || (r.next_run_at && r.next_run_at > now)) continue;
         if (!inWindow(now, r.window_start, r.window_end)) {
           db.prepare('UPDATE rules SET next_run_at = ? WHERE id = ?').run(alignToWindow(now, r.window_start, r.window_end), r.id);
@@ -499,6 +643,7 @@ export function createScheduler({ db, wa, links, ml = mlDefault, fast = false, d
         await runRule(r.id);
         await passoEspelho();
         await passoRemetentes();
+        await passoRotinas();
         await passoEnvios();
       }
       // "agora" criado (ou mensagem espelhada ou de remetente recebida) depois da última passada: sai neste tick, não
@@ -511,7 +656,7 @@ export function createScheduler({ db, wa, links, ml = mlDefault, fast = false, d
 
   return {
     // acordar: o "Enviar" aprovado na revisão do catálogo (src/catalogo-itens.js) pede o tick já
-    runRule, previewOffers, tick, acordar, envios, avisos, amazon, shopee, espelho, remetentes, catalogo, catalogoItens,
+    runRule, previewOffers, tick, acordar, envios, avisos, amazon, shopee, espelho, remetentes, rotinas, catalogo, catalogoItens,
     start() {
       if (timer) return;
       // o que ficou 'enviando' (envios) ou 'processando' (espelho e remetentes) quando o serviço caiu volta antes do

@@ -39,6 +39,9 @@ const TIPS = {
   'regras.por_envio': 'Quantas ofertas saem em cada ciclo. Cada oferta vai para todos os grupos marcados, uma atrás da outra.',
   'regras.intervalo': 'Tempo entre um ciclo e o próximo. Intervalos curtos aumentam o risco de o WhatsApp restringir o número; 30 a 60 min é um bom ritmo.',
   'regras.janela': 'Horário em que o disparo pode enviar. Pode virar a noite (ex.: das 20:00 até 02:00).',
+  'regras.modo_grade': 'Como este disparo decide a hora de enviar. “A cada X minutos” manda um lote de tempos em tempos, dentro do “Funciona das/até”. “Em horários marcados” manda só nas horas que você listar, cada uma com a sua quantidade de ofertas e o seu template; nesse modo o “Funciona das/até” não vale. Dá para voltar atrás sem perder o ritmo anterior.',
+  'regras.grade_horarios': 'Cada linha é um horário do dia, com quantas ofertas saem e qual template usar (vazio = o do disparo). Até 48 horários, de 1 a 20 ofertas cada, com pelo menos 10 min entre um e outro. O horário sai se atrasou até 30 min (programa desligado, por exemplo); depois disso é pulado, com um aviso no Histórico.',
+  'regras.grade_modelos': 'Atalhos que preenchem a lista de horários de uma vez. “Montar…” cria horários de um “De” até um “Até”, de tantos em tantos minutos, e o horário final entra na lista. “Substituir horários” troca a lista; “Acrescentar” soma ao que já está nela. Nada fica salvo até você clicar em Salvar.',
   'regras.dedupe': 'Por quantos dias a mesma oferta não se repete neste disparo. 0 = pode repetir.',
   'regras.foto': 'Envia a foto do produto com a mensagem como legenda. Se a foto falhar, vai só o texto.',
   // visão geral
@@ -112,6 +115,9 @@ const TIPS = {
   'mensagem.enquete': 'A enquete tem uma pergunta e de 2 a 12 opções. Marque “mais de uma resposta” se a pessoa puder votar em várias.',
   'mensagem.imagem': 'Foto com legenda: a foto vai com o texto embaixo (JPG ou PNG, até 5 MB). Prévia do link: o WhatsApp mostra título e imagem do site do link; só funciona com links do Mercado Livre.',
   'mensagem.quando': 'Agora, em um dia e horário, ou repetido nos dias da semana e em até 6 horários. Na lista ao lado, as repetidas podem ser pausadas; agendadas e repetidas podem ser canceladas.',
+  // grupo vivo (rotinas de mensagem e enquete)
+  'grupovivo': 'Rotinas que mandam sozinhas mensagens e enquetes que mostram que o grupo tem gente por trás: bom dia, regras, avisos, perguntas. Cada rotina tem até 5 textos ou enquetes, os grupos, os dias e até 6 horários. Sem foto. Não é oferta: as ofertas saem pelo Disparo automático. No Histórico aparece como “Grupo vivo: nome da rotina”.',
+  'grupovivo.rodizio': 'Com mais de um texto ou enquete, a ordem decide qual sai a cada envio. “Um depois do outro” segue a lista e volta ao primeiro. “Sorteio” escolhe ao acaso, sem repetir o último. “Enviar agora” também avança a vez, mas não muda o próximo horário.',
   // relatórios e avisos
   'relatorios': 'Números de WhatsApp que recebem avisos e o resumo diário dos blocos escolhidos. É por onde você fica sabendo de um grupo lotando ou de um envio que falhou.',
   'relatorios.virada': 'Hora em que um “dia” termina nos relatórios. Entradas antes dela contam para o dia anterior. Útil se seus picos passam da meia-noite.',
@@ -212,6 +218,11 @@ const LEIA_MAIS = {
   'rastreio.grupo': 'grupos/rastreio',
   'blocos.etiqueta': 'grupos/rastreio',
   'remetente': 'disparo-automatico/remetentes',
+  'regras.modo_grade': 'disparo-automatico/horarios-marcados',
+  'regras.grade_horarios': 'disparo-automatico/horarios-marcados',
+  'regras.grade_modelos': 'disparo-automatico/horarios-marcados',
+  'grupovivo': 'mensagens/grupo-vivo',
+  'grupovivo.rodizio': 'mensagens/grupo-vivo',
 };
 const LEIA_MAIS_DESTINO = /^[a-z0-9-]+\/[a-z0-9-]+$/; // único formato que vira href do link (sempre interno)
 const leiaMaisDe = (chave) => (typeof chave === 'string' && Object.hasOwn(LEIA_MAIS, chave) && LEIA_MAIS_DESTINO.test(LEIA_MAIS[chave]) ? LEIA_MAIS[chave] : '');

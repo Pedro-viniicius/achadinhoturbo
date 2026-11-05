@@ -45,7 +45,8 @@ import { sleep, jitter } from './util.js';
 
 const { PLATAFORMAS, LojaNaoConectada, SubIdIndisponivel } = lojasPadrao;
 
-const HHMM = /^([01]?\d|2[0-3]):([0-5]\d)$/;
+/** Hora 'H:MM' ou 'HH:MM' (00:00 a 23:59), a do Repetir; também a da grade (src/grade.js) e das rotinas (src/rotinas.js). */
+export const HHMM = /^([01]?\d|2[0-3]):([0-5]\d)$/;
 const DATA = /^(\d{4})-(\d{2})-(\d{2})$/;
 const DIA = 86400000;
 const ATRASO_MAX = 2 * 3600000;    // agendado único com mais que isso de atraso não sai mais (vira erro)
@@ -63,10 +64,13 @@ const QUANDOS = ['agora', 'agendado', 'repetir'];
 const IMAGENS = ['nenhuma', 'upload', 'previa'];
 const ATIVOS = ['pendente', 'enviando', 'pausado'];
 const ORIGEM = { oferta: 'Disparo manual', mensagem: 'Mensagem', enquete: 'Enquete' }; // vai em log.rule_name
+// payload.origem.tipo de um envio `e` no SQL; payload ilegível dá NULL (json_extract sozinho lançaria erro)
+const ORIGEM_DO_ENVIO = "(CASE WHEN json_valid(e.payload) THEN json_extract(e.payload, '$.origem.tipo') END)";
 const CAMPOS_OFERTA = ['key', 'title', 'price', 'oldPrice', 'discountPct', 'sold', 'freeShipping', 'coupon', 'image'];
 const LINK_EXEMPLO = 'https://meli.la/(gerado no envio)';
 const NAO_RECONHECI = 'Não reconheci este link. Cole o endereço completo da página do produto.';
 const PERDEU = 'perdeu o horário: passou mais de 2 h (WhatsApp desconectado ou programa desligado).';
+const SEM_TEXTO = 'Escreva a mensagem.';
 // Amazon (plano espelhamento-amazon, decisão 6): o navegador só ajusta estes campos; `image` e `link` são sempre do servidor
 const MAX_TITULO = 200;
 const MAX_CUPOM = 30;
@@ -342,8 +346,22 @@ function validarRepetir(r) {
   return { dias: dias.sort((a, b) => a - b), horarios };
 }
 
-/** Enquete com a mesma regra de quem envia (montarEnquete) mais os limites de tamanho. */
-function validarEnquete(b) {
+/**
+ * Texto de uma mensagem com os limites de Disparar mensagem: CRLF vira LF, sem espaços nas pontas, até 4096 caracteres.
+ * Vazio só passa com `vazioOk` (foto sem legenda). Também é o texto das rotinas do Grupo vivo (src/rotinas.js).
+ */
+export function validarTextoMensagem(v, { vazioOk = false } = {}) {
+  const texto = typeof v === 'string' ? v.replace(/\r\n/g, '\n').trim() : '';
+  if (texto.length > MAX_TEXTO) throw new Error(`A mensagem passa de ${MAX_TEXTO} caracteres.`);
+  if (!texto && !vazioOk) throw new Error(SEM_TEXTO);
+  return texto;
+}
+
+/**
+ * Enquete com a mesma regra de quem envia (montarEnquete) mais os limites de tamanho. Também é a das rotinas do Grupo
+ * vivo (src/rotinas.js). → { pergunta, opcoes, multipla }, sem outros campos
+ */
+export function validarEnquete(b) {
   if (typeof b.pergunta !== 'string') throw new Error('A enquete precisa de uma pergunta.');
   if (!Array.isArray(b.opcoes) || b.opcoes.some((o) => typeof o !== 'string')) throw new Error('A enquete precisa de 2 a 12 opções.');
   const multipla = b.multipla === true;
@@ -381,11 +399,11 @@ export function proximaOcorrencia(repetir, depoisDe = Date.now()) {
 
 /**
  * Nome da origem no log (log.rule_name): "Disparo manual", "Mensagem", "Enquete", "Espelho: <nome>",
- * "Catálogo: <regra>" (oferta do catálogo aprovada na revisão, src/catalogo-itens.js) ou "Remetente: <nome>" (link
- * mandado pelo sócio no privado, src/remetentes.js).
+ * "Catálogo: <regra>" (oferta do catálogo aprovada na revisão, src/catalogo-itens.js), "Remetente: <nome>" (link
+ * mandado pelo sócio no privado, src/remetentes.js) ou "Grupo vivo: <nome>" (rotina, src/rotinas.js).
  */
 function origemDoLog(tipo, p) {
-  const prefixo = { espelho: 'Espelho', catalogo: 'Catálogo', remetente: 'Remetente' }[p?.origem?.tipo];
+  const prefixo = { espelho: 'Espelho', catalogo: 'Catálogo', remetente: 'Remetente', rotina: 'Grupo vivo' }[p?.origem?.tipo];
   if (prefixo) {
     const nome = String(p.origem.nome ?? '').replace(/\s+/g, ' ').trim().slice(0, 80);
     return `${prefixo}: ${nome || 'sem nome'}`;
@@ -446,11 +464,10 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
 
   /** Mensagem sem o que depende de rede. → { texto, imagem, upload?, previa_url? } */
   function validarMensagem(b) {
-    const texto = typeof b.texto === 'string' ? b.texto.replace(/\r\n/g, '\n').trim() : '';
-    if (texto.length > MAX_TEXTO) throw new Error(`A mensagem passa de ${MAX_TEXTO} caracteres.`);
+    const texto = validarTextoMensagem(b.texto, { vazioOk: true }); // o vazio é conferido depois da imagem, como antes
     const imagem = b.imagem == null || b.imagem === '' ? 'nenhuma' : b.imagem;
     if (!IMAGENS.includes(imagem)) throw new Error('Imagem: sem imagem, foto ou prévia do link.');
-    if (!texto && imagem !== 'upload') throw new Error('Escreva a mensagem.');
+    if (!texto && imagem !== 'upload') throw new Error(SEM_TEXTO);
     if (imagem === 'upload') {
       const up = typeof b.upload === 'string' ? b.upload : '';
       if (!UPLOAD_ID.test(up)) throw new Error('Escolha a foto de novo.');
@@ -1261,12 +1278,15 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
     return rodaram;
   }
 
-  /** Dados da tela: tipo 'oferta' (F1) ou 'mensagem' (F2: mensagens e enquetes). Contadores dos últimos 30 dias. */
+  /**
+   * Dados da tela: tipo 'oferta' (F1) ou 'mensagem' (F2: mensagens e enquetes). Contadores dos últimos 30 dias.
+   * As ocorrências das rotinas do Grupo vivo (origem 'rotina') ficam de fora: são da tela delas (plano grade-de-disparos, D7).
+   */
   function painel(tipo) {
     const tipos = tipo === 'oferta' ? ['oferta'] : tipo === 'mensagem' ? ['mensagem', 'enquete'] : null;
     if (!tipos) throw new Error('Tipo inválido: use oferta ou mensagem.');
     const desde = Date.now() - 30 * DIA;
-    const em = `e.tipo IN (${tipos.map(() => '?').join(',')})`;
+    const em = `e.tipo IN (${tipos.map(() => '?').join(',')}) AND ${ORIGEM_DO_ENVIO} IS NOT 'rotina'`;
     const semResultado = 'NOT EXISTS (SELECT 1 FROM envio_resultados r WHERE r.envio_id = e.id)';
     const nomes = new Map(db.prepare('SELECT jid, name FROM groups').all().map((g) => [g.jid, g.name]));
     const nomeDe = (jid) => nomes.get(jid) || '(grupo removido)';

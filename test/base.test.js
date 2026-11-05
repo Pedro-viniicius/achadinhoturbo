@@ -7,7 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import { DatabaseSync } from 'node:sqlite';
-import { openDb, getSetting, setSetting, addLog } from '../src/db.js';
+import { openDb, getSetting, setSetting, addLog, parseRule } from '../src/db.js';
 import { createScheduler, sleep, jitter } from '../src/scheduler.js';
 import * as util from '../src/util.js';
 import { createWhatsApp } from '../src/whatsapp.js';
@@ -112,9 +112,11 @@ test('esquema: banco da versão anterior reabre com os dados intactos e ganha ta
     const db = openDb(dir);
     // A semente "Amazon" entrou em 02/11/2026 (etapa 1 do plano espelhamento-amazon): fora a marca e o template dela, nada muda.
     const semSemente = { settings: " WHERE key <> 'tpl_amazon_seed'", templates: " WHERE name <> 'Amazon'" };
-    for (const t of ['settings', 'tags', 'templates', 'groups', 'rules']) {
+    for (const t of ['settings', 'tags', 'templates', 'groups']) {
       assert.deepEqual(linhas(db, `SELECT * FROM ${t}${semSemente[t] || ''} ORDER BY rowid`), antes[t], `${t} intacta (abertura ${abertura})`);
     }
+    // A coluna rules.grade entrou em 05/11/2026 (plano grade-de-disparos, etapa 1): nula = ritmo por intervalo, como antes.
+    assert.deepEqual(linhas(db, 'SELECT * FROM rules ORDER BY rowid'), antes.rules.map((r) => ({ ...r, grade: null })), `rules intacta, com grade nula (abertura ${abertura})`);
     assert.deepEqual(linhas(db, 'SELECT * FROM sessions ORDER BY rowid'), antes.sessions.map((s) => ({ ...s, user_id: null })), `sessão aberta continua, com user_id nulo (abertura ${abertura})`);
     for (const tabela of Object.keys(TABELAS_NOVAS)) assert.ok(existe(db, 'table', tabela), `tabela ${tabela} criada (abertura ${abertura})`);
     for (const indice of Object.keys(INDICES_NOVOS)) assert.ok(existe(db, 'index', indice), `índice ${indice} criado (abertura ${abertura})`);
@@ -827,6 +829,174 @@ test('remetentes rodada 2: banco da versão anterior com itens ganha chegou_em e
     assert.deepEqual(linhas(db, 'SELECT * FROM remetentes'), remetentes, `remetentes intactos (abertura ${abertura})`);
     db.close();
   }
+});
+
+// Grade de horários e Grupo vivo (plano grade-de-disparos, etapa 1): a migração só acrescenta rules.grade (JSON; NULL = ritmo
+// por intervalo, o de hoje) e a tabela rotinas com o índice da fila. Regra que já existe não muda em nada (CA1).
+const COLUNAS_ROTINAS = ['id', 'nome', 'enabled', 'tipo', 'conteudos', 'ordem', 'proximo_indice', 'group_jids', 'repetir',
+  'next_run_at', 'last_run_at', 'ultimo_envio_id', 'created_at', 'updated_at'];
+const objetosDe = (db) => linhas(db, 'SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name');
+
+function conferirGradeERotinas(db, quando) {
+  const grade = db.prepare('PRAGMA table_info(rules)').all().filter((c) => c.name === 'grade');
+  assert.equal(grade.length, 1, `rules.grade existe uma vez (${quando})`);
+  assert.deepEqual({ type: grade[0].type, notnull: grade[0].notnull, dflt_value: grade[0].dflt_value, pk: grade[0].pk },
+    { type: 'TEXT', notnull: 0, dflt_value: null, pk: 0 }, `rules.grade é TEXT, aceita nulo e não tem padrão (${quando})`);
+  assert.ok(existe(db, 'table', 'rotinas'), `tabela rotinas (${quando})`);
+  assert.deepEqual(colunas(db, 'rotinas'), COLUNAS_ROTINAS, `colunas de rotinas (${quando})`);
+  assert.equal(db.prepare("SELECT tbl_name FROM sqlite_master WHERE type = 'index' AND name = 'idx_rotinas_fila'").get()?.tbl_name, 'rotinas', `índice da fila (${quando})`);
+  assert.deepEqual(db.prepare('PRAGMA index_info(idx_rotinas_fila)').all().map((c) => c.name), ['enabled', 'next_run_at'], `colunas do índice da fila (${quando})`);
+  assert.equal(db.prepare('PRAGMA index_list(rotinas)').all().find((i) => i.name === 'idx_rotinas_fila')?.unique, 0, `o índice da fila não é único (${quando})`);
+  assert.deepEqual(objetosDe(db).filter((o) => o.tbl_name === 'rotinas').map((o) => o.name).sort(), ['idx_rotinas_fila', 'rotinas'],
+    `só a tabela rotinas e o índice da fila, sem duplicar (${quando})`);
+}
+
+test('grade etapa 1: banco novo tem rules.grade e a tabela rotinas com o índice; reabrir não cria nem altera nada', () => {
+  const dir = tmp();
+  const db1 = openDb(dir);
+  conferirGradeERotinas(db1, 'primeira abertura');
+  assert.equal(db1.prepare('SELECT COUNT(*) AS n FROM rotinas').get().n, 0, 'rotinas nasce vazia');
+  const { lastInsertRowid: id } = db1.prepare("INSERT INTO rules (name, created_at) VALUES ('Nova', 1)").run();
+  assert.equal(db1.prepare('SELECT grade FROM rules WHERE id = ?').get(id).grade, null, 'regra criada sem grade fica no modo intervalo');
+  db1.prepare(`INSERT INTO rotinas (nome, tipo, conteudos, group_jids, repetir, next_run_at, created_at)
+    VALUES ('Bom dia', 'mensagem', '["Bom dia!"]', '["g1@g.us"]', '{"dias":[1],"horarios":["08:00"]}', 5, 1)`).run();
+  const esquema = objetosDe(db1);
+  const dados = { rules: linhas(db1, 'SELECT * FROM rules'), rotinas: linhas(db1, 'SELECT * FROM rotinas') };
+  db1.close();
+
+  const db2 = openDb(dir);
+  conferirGradeERotinas(db2, 'segunda abertura');
+  assert.deepEqual(objetosDe(db2), esquema, 'reabrir não cria nem altera nada');
+  assert.deepEqual(linhas(db2, 'SELECT * FROM rules'), dados.rules, 'regras intactas ao reabrir');
+  assert.deepEqual(linhas(db2, 'SELECT * FROM rotinas'), dados.rotinas, 'rotinas intactas ao reabrir');
+  db2.close();
+});
+
+test('grade etapa 1 (CA1): banco da versão anterior, com regras e dados, abre sem perder nada; grade fica NULL e parseRule devolve o mesmo de antes', () => {
+  const dir = tmp();
+  // Banco como o do serviço antes desta etapa: esquema atual sem rules.grade e sem rotinas, com dados em todas as áreas.
+  const velho = openDb(dir);
+  velho.exec('DROP TABLE IF EXISTS rotinas');
+  if (colunas(velho, 'rules').includes('grade')) velho.exec('ALTER TABLE rules DROP COLUMN grade');
+  velho.exec(`
+    INSERT INTO settings (key, value) VALUES ('delay_group_s', '9'), ('delay_offer_s', '12');
+    INSERT INTO tags (id, name, created_at) VALUES (1, 'etiqueta1', 1), (2, 'etiqueta2', 1);
+    INSERT INTO templates (id, name, body, created_at) VALUES (7, 'Meu template', '{TITULO_PRODUTO} {LINK}', 1);
+    INSERT INTO groups (jid, name, size, updated_at, invite_code, is_admin) VALUES ('g1@g.us', 'Grupo 1', 250, 1, 'abc', 1), ('g2@g.us', 'Grupo 2', 90, 1, NULL, 0);
+    INSERT INTO rules (id, name, enabled, tag_id, template_id, group_jids, source_type, source_config, min_price, max_price, min_discount,
+      per_run, interval_min, window_start, window_end, dedupe_days, send_image, next_run_at, last_run_at, created_at, sources)
+      VALUES (3, 'Ofertas tech', 1, 1, 7, '["g1@g.us","g2@g.us"]', 'list', '{"items":"https://produto.mercadolivre.com.br/MLB-1-a | A | 10"}',
+        10, 500.5, 20, 5, 45, '07:30', '23:15', 3, 0, 1730000000000, 1729990000000, 1, '[{"type":"catalogo","config":{"lojas":["ml"]},"tag_id":2}]'),
+      (4, 'Noturna', 0, 2, 1, '[]', 'list', '{}', NULL, NULL, NULL, 2, 120, '22:00', '02:00', 7, 1, NULL, NULL, 2, NULL);
+    INSERT INTO sent_offers (rule_id, offer_key, sent_at) VALUES (3, 'MLB123', 1730000000000);
+    INSERT INTO log (ts, rule_id, rule_name, level, group_name, offer_title, message) VALUES (1730000000000, 3, 'Ofertas tech', 'ok', 'Grupo 1', 'Fone', 'enviado');
+    INSERT INTO envios (id, tipo, payload, group_jids, quando, repetir, status, next_run_at, created_at)
+      VALUES (5, 'mensagem', '{"texto":"oi"}', '["g1@g.us"]', 'repetir', '{"dias":[1],"horarios":["08:00"]}', 'pendente', 1730000000000, 1);
+    INSERT INTO envio_resultados (envio_id, ocorrencia, ts, jid, group_name, ok) VALUES (5, 1, 2, 'g1@g.us', 'Grupo 1', 1);
+    INSERT INTO espelhos (id, nome, created_at) VALUES (2, 'Espelho', 1);
+    INSERT INTO catalogo_itens (rule_id, chave, loja, status, oferta, criado_em) VALUES (3, 'MLB1', 'ml', 'enviado', '{}', 1);
+    INSERT INTO catalogo_cursores (rule_id, filtro, cursor) VALUES (3, '0123456789abcdef', 'c1');
+    INSERT INTO remetentes (nome, jid, created_at) VALUES ('Sócio', '5531999990000@s.whatsapp.net', 1);
+  `);
+  assert.ok(!existe(velho, 'table', 'rotinas') && !existe(velho, 'index', 'idx_rotinas_fila'), 'o banco simulado não tem rotinas');
+  assert.ok(!colunas(velho, 'rules').includes('grade'), 'o banco simulado não tem rules.grade');
+  const objetosAntigos = objetosDe(velho);
+  const tabelasAntigas = objetosAntigos.filter((o) => o.type === 'table').map((o) => o.name);
+  const colunasRegraAntes = velho.prepare('PRAGMA table_info(rules)').all().map((c) => ({ ...c }));
+  const antes = {};
+  for (const t of tabelasAntigas) antes[t] = linhas(velho, `SELECT * FROM ${t} ORDER BY rowid`);
+  // parseRule de antes desta etapa sobre as regras gravadas (sem a coluna grade): é o que tem de continuar saindo.
+  const regraDeAntes = (r) => ({ ...r, enabled: !!r.enabled, send_image: !!r.send_image, group_jids: JSON.parse(r.group_jids || '[]'),
+    source_config: JSON.parse(r.source_config || '{}'),
+    sources: r.sources ? JSON.parse(r.sources).map((s) => ({ type: s.type, config: s.config, tag_id: s.tag_id ?? null }))
+      : [{ type: r.source_type, config: JSON.parse(r.source_config), tag_id: null }] });
+  const parseadasAntes = antes.rules.map(regraDeAntes);
+  assert.deepEqual(parseadasAntes.map((r) => [r.sources[0].type, r.sources[0].tag_id, r.enabled, r.send_image]),
+    [['catalogo', 2, true, false], ['list', null, false, true]], 'referência de "antes" montada com as duas formas de fonte');
+  velho.close();
+
+  for (let abertura = 1; abertura <= 2; abertura++) {
+    const db = openDb(dir);
+    conferirGradeERotinas(db, `abertura ${abertura}`);
+    for (const t of tabelasAntigas.filter((t) => t !== 'rules')) {
+      assert.deepEqual(linhas(db, `SELECT * FROM ${t} ORDER BY rowid`), antes[t], `${t} intacta (abertura ${abertura})`);
+    }
+    const regras = linhas(db, 'SELECT * FROM rules ORDER BY rowid');
+    assert.deepEqual(regras, antes.rules.map((r) => ({ ...r, grade: null })), `regras intactas, com grade NULL (abertura ${abertura})`);
+    assert.deepEqual(db.prepare('PRAGMA table_info(rules)').all().map((c) => ({ ...c })),
+      [...colunasRegraAntes, { cid: colunasRegraAntes.length, name: 'grade', type: 'TEXT', notnull: 0, dflt_value: null, pk: 0 }],
+      `rules só ganha grade no fim; as outras colunas não mudam (abertura ${abertura})`);
+    assert.deepEqual(objetosDe(db).filter((o) => o.tbl_name !== 'rotinas' && !(o.type === 'table' && o.name === 'rules')),
+      objetosAntigos.filter((o) => !(o.type === 'table' && o.name === 'rules')), `nenhuma outra tabela ou índice muda (abertura ${abertura})`);
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM rotinas').get().n, 0, `rotinas nasce vazia (abertura ${abertura})`);
+    assert.deepEqual(regras.map(parseRule), parseadasAntes.map((r) => ({ ...r, grade: null })),
+      `parseRule devolve o mesmo de antes, fora grade: null (abertura ${abertura})`);
+    db.close();
+  }
+});
+
+test('grade etapa 1: parseRule lê grade como objeto e devolve null se vier vazia, ilegível ou fora de forma, sem nunca lançar', () => {
+  const base = { id: 1, name: 'R', enabled: 1, send_image: 1, group_jids: '["g1@g.us"]', source_type: 'list', source_config: '{}', sources: null };
+  const semGrade = parseRule(base);
+  assert.equal(semGrade.grade, null, 'linha sem a coluna grade (código ou banco de antes) vira grade: null');
+  assert.ok(Object.hasOwn(semGrade, 'grade'), 'o campo grade sempre existe no objeto da regra');
+
+  const grade = { dias: [1, 2, 3, 4, 5], horarios: [{ hora: '09:00', qtd: 3, template_id: null }, { hora: '12:30', qtd: 5, template_id: 7 }] };
+  const comGrade = parseRule({ ...base, grade: JSON.stringify(grade) });
+  assert.deepEqual(comGrade.grade, grade, 'grade gravada volta como objeto');
+  assert.deepEqual({ ...comGrade, grade: null }, semGrade, 'a grade não mexe em nenhum outro campo');
+
+  const invalidas = [null, undefined, '', '   ', '{', '{"dias":[1],', 'null', '[]', '[{"hora":"09:00"}]', '"09:00"', '5', 'true', 'NaN',
+    new Uint8Array([123, 125]), Buffer.from('{"dias":[1]}'), 7]; // só texto: BLOB nunca vira grade
+  for (const valor of invalidas) {
+    let r;
+    assert.doesNotThrow(() => { r = parseRule({ ...base, grade: valor }); }, `parseRule não lança com grade ${String(valor)}`);
+    assert.equal(r.grade, null, `grade ${typeof valor === 'string' ? JSON.stringify(valor) : String(valor)} vira null`);
+    assert.deepEqual({ ...r }, semGrade, 'o resto da regra sai igual');
+  }
+  assert.equal(parseRule(null), null, 'sem linha continua null');
+  assert.equal(parseRule(undefined), null);
+});
+
+test('grade etapa 1 (CA1): no agendador, regra com grade NULL ou ilegível roda pelo intervalo, como hoje, e não trava o tick', async () => {
+  const { db, wa, scheduler } = montarAgendador();
+  const nula = novaRegra(db, { name: 'Sem grade' });
+  const quebrada = novaRegra(db, { name: 'Grade quebrada', groups: ['222@g.us'] });
+  db.prepare("UPDATE rules SET grade = '{quebrado' WHERE id = ?").run(quebrada);
+  await scheduler.tick();
+  assert.deepEqual(wa.simulated.map((m) => m.jid), ['111@g.us', '222@g.us'], 'as duas regras enviaram no mesmo tick');
+  for (const id of [nula, quebrada]) {
+    const prox = db.prepare('SELECT next_run_at FROM rules WHERE id = ?').get(id).next_run_at;
+    assert.ok(prox > Date.now() + 59 * 60000 && prox <= Date.now() + 60 * 60000, `próximo envio da regra ${id} pelo intervalo de 60 min`);
+  }
+  db.close();
+});
+
+test('grade etapa 1 (CA11): rotinas tem padrões, tipo e ordem só dos valores do plano, e os obrigatórios', () => {
+  const db = openDb(tmp());
+  const ins = db.prepare('INSERT INTO rotinas (nome, tipo, repetir) VALUES (?, ?, ?)');
+  const { lastInsertRowid: id } = ins.run('Bom dia', 'mensagem', '{"dias":[0,1,2,3,4,5,6],"horarios":["08:00"]}');
+  assert.deepEqual({ ...db.prepare('SELECT * FROM rotinas WHERE id = ?').get(id) }, {
+    id: Number(id), nome: 'Bom dia', enabled: 1, tipo: 'mensagem', conteudos: '[]', ordem: 'rodizio', proximo_indice: 0,
+    group_jids: '[]', repetir: '{"dias":[0,1,2,3,4,5,6],"horarios":["08:00"]}', next_run_at: null, last_run_at: null,
+    ultimo_envio_id: null, created_at: null, updated_at: null,
+  });
+  ins.run('Enquete da sexta', 'enquete', '{"dias":[5],"horarios":["18:00"]}');
+  assert.throws(() => ins.run('Foto', 'foto', '{}'), /CHECK/, 'tipo só mensagem ou enquete');
+  assert.throws(() => ins.run('Maiúscula', 'Mensagem', '{}'), /CHECK/, 'tipo diferencia caixa');
+  const comOrdem = db.prepare("INSERT INTO rotinas (nome, tipo, repetir, ordem) VALUES ('O', 'mensagem', '{}', ?)");
+  comOrdem.run('sorteio');
+  assert.throws(() => comOrdem.run('aleatorio'), /CHECK/, 'ordem só rodizio ou sorteio');
+  const vals = { nome: 'X', tipo: 'mensagem', repetir: '{}' };
+  for (const col of Object.keys(vals)) {
+    const v = { ...vals, [col]: null };
+    assert.throws(() => ins.run(v.nome, v.tipo, v.repetir), /NOT NULL/, `${col} é obrigatório`);
+  }
+  for (const col of ['enabled', 'conteudos', 'ordem', 'proximo_indice', 'group_jids']) {
+    assert.throws(() => db.prepare(`INSERT INTO rotinas (nome, tipo, repetir, ${col}) VALUES ('X', 'mensagem', '{}', NULL)`).run(), /NOT NULL/, `${col} nunca é nulo`);
+  }
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM rotinas').get().n, 3);
+  db.close();
 });
 
 // R1 (docs-do-sistema, rodada 1): a simulação roda o agendador de verdade (encerra agendados vencidos, marca o resumo
