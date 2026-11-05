@@ -6,7 +6,7 @@ argument-hint: "[servico | simular | terminal]  (padrão: servico)"
 
 # Rodar o Achadinho Turbo localmente
 
-Projeto: `~/Documentos/achadinhoturbo` (Node 22, `src/server.js`). Responda sempre em português do Brasil.
+Projeto: `~/Documentos/saas/achadinho_turbo` (Node 22, `src/server.js`). Responda sempre em português do Brasil.
 
 O app roda como serviço de usuário do systemd `achadinhoturbo` (porta 3737, `node --watch-path=src`, ligado no login). Mudança em `src/` reinicia sozinha; mudança em `public/` só pede recarregar o painel (Ctrl+Shift+R).
 
@@ -32,7 +32,7 @@ Escolha o modo pelo argumento (`$ARGUMENTS`) ou pelo pedido. Sem argumento, use 
 
 Rode em segundo plano (Bash com `run_in_background: true`), na pasta do projeto:
 ```bash
-cd ~/Documentos/achadinhoturbo && PORT=3799 npm run simular
+cd ~/Documentos/saas/achadinho_turbo && PORT=3799 npm run simular
 ```
 Confira com `curl -s --retry 20 --retry-connrefused --retry-delay 1 -o /dev/null -w '%{http_code}\n' http://localhost:3799/login.html` (esperado `200`) e entregue **http://localhost:3799**. Usa a pasta `data-simulacao/` (fora do git) e pode rodar junto com o serviço. Ao fim da sessão, ou quando o dono pedir, pare esse processo pelo PID (nunca `pkill -f` com padrão amplo: já derrubou o shell).
 
@@ -41,13 +41,13 @@ Confira com `curl -s --retry 20 --retry-connrefused --retry-delay 1 -o /dev/null
 Não rode isto você mesmo (fica preso em primeiro plano). Passe ao dono:
 ```bash
 systemctl --user stop achadinhoturbo
-cd ~/Documentos/achadinhoturbo && npm start
+cd ~/Documentos/saas/achadinho_turbo && npm start
 # Ctrl+C para encerrar, depois:
 systemctl --user start achadinhoturbo
 ```
 E o atalho opcional, para criar uma vez:
 ```bash
-echo "alias turbo='systemctl --user stop achadinhoturbo; cd ~/Documentos/achadinhoturbo && npm start; systemctl --user start achadinhoturbo'" >> ~/.bashrc && source ~/.bashrc
+echo "alias turbo='systemctl --user stop achadinhoturbo; cd ~/Documentos/saas/achadinho_turbo && npm start; systemctl --user start achadinhoturbo'" >> ~/.bashrc && source ~/.bashrc
 ```
 
 ## Regras
