@@ -23,7 +23,7 @@
 // Remetente (plano envio-pelo-socio, D4 e D5): a oferta de um link mandado pelo sócio no privado sai pela mesma montagem
 // do Disparo manual (montarOferta; o criar faz as mesmas duas metades e o INSERT), com o texto da mensagem completando
 // os dados da loja (mesclarOferta) e só com o link do dono: situacaoLink diz, sem rede, o que impede o link; o preparar
-// barra o ML no modo direto; o ML só vai à Central com o endereço de um produto, sem parâmetros (urlDeProdutoMl: nem o
+// barra o ML no modo direto; o ML só vai à Central com o endereço de um produto, sem parâmetros (produtoMl: nem o
 // meli.la nem a vitrine de outro afiliado). Os erros que o remetente distingue levam `.codigo` ('sem_dados',
 // 'link_invalido'), com a mensagem de sempre.
 
@@ -231,9 +231,6 @@ export function produtoMl(url) {
   return anuncio ? { url: u.origin + u.pathname, chave: `MLB${anuncio[1]}` } : null;
 }
 
-/** O endereço do produtoMl (origin + pathname) ou null. */
-const urlDeProdutoMl = (url) => produtoMl(url)?.url ?? null;
-
 /**
  * Dados da loja com o texto do remetente completando campo a campo (mesclarOferta: a loja primeiro, a imagem só da
  * loja). `causa` (a API não respondeu) = nada veio da loja. Sem complemento, os dados da loja como vieram.
@@ -425,6 +422,9 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
    */
   function gravarRastreio(e, p, jid, linha) {
     if (e.tipo !== 'oferta' || !linha?.link || !rastreio.LOJAS.includes(p.loja)) return;
+    // O envio do remetente (origem.tipo 'remetente') entra como 'manual' de propósito (achados R2/S2 do merge com o
+    // Remetente): o CHECK de rastreio_envios.origem (src/db.js) não tem 'remetente', e acrescentar exigiria recriar a
+    // tabela. A linha continua ligada ao envio por envio_id; o painel do ganho não separa as duas origens.
     const origem = ORIGENS_RASTREIO.has(p.origem?.tipo) ? p.origem.tipo : 'manual';
     try {
       rastreio.registrar(db, {
@@ -715,18 +715,23 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
   /**
    * Oferta do Mercado Livre: o produto lido na página (o meli.la de afiliado leva ao produto de verdade, e é ele que
    * vai à Central no envio), completado pelo `complemento`. Origem só com afiliação (remetente, catálogo): só sai o
-   * endereço de um produto, sem parâmetros (urlDeProdutoMl); o resto (o meli.la que não levou a um produto, a vitrine
+   * endereço de um produto, sem parâmetros (produtoMl); o resto (o meli.la que não levou a um produto, a vitrine
    * de outro afiliado) é recusado com `link_invalido`, mesmo com nome e preço no texto, porque seria o link de outro
-   * afiliado. → campos do payload (fonte_dados só com complemento)
+   * afiliado. Nessas origens a `key` da oferta é a do produto achado (produtoMl: 'MLB…' ou 'CATALOGO:MLB…'), não a da
+   * leitura, que é a do link colado (o meli.la do sócio): ela vai a rastreio_envios.oferta_chave, guardada por 400
+   * dias, e casa com o produto das comissões. → campos do payload (fonte_dados só com complemento)
    */
   async function ofertaMercadoLivre(lojaId, url, origem, { complemento = null, exigirPreco = false } = {}) {
     const lida = await lerOfertaComUrl(lojaId, url, { ml, amazon, lojas });
     let urlProduto = lida.url;
+    let chave = null;
     if (SO_COM_AFILIACAO.has(origem?.tipo)) {
-      urlProduto = urlDeProdutoMl(lida.url);
-      if (!urlProduto) throw comCodigo(new Error(SEM_PRODUTO_ML), 'link_invalido');
+      const produto = produtoMl(lida.url);
+      if (!produto) throw comCodigo(new Error(SEM_PRODUTO_ML), 'link_invalido');
+      ({ url: urlProduto, chave } = produto);
     }
-    const { dados: offer, fonte } = completarComTexto(lida.offer, null, complemento);
+    const { dados, fonte } = completarComTexto(lida.offer, null, complemento);
+    const offer = chave ? { ...dados, key: chave } : dados;
     if (exigirPreco && !offer.title) throw semDados(SEM_TITULO_ML);
     if (exigirPreco && offer.price == null) throw semDados(SEM_PRECO);
     return { url: urlProduto, ...(complemento ? { fonte_dados: fonte } : {}), offer };

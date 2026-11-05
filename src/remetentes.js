@@ -280,9 +280,22 @@ function complementoDoTexto(texto) {
 }
 
 /**
+ * Payload com os links da Shopee por Sub_id (links_rastreio) só dos grupos que vão receber o envio: os grupos podem ter
+ * mudado durante a rede. O grupo novo fica sem linha e sai com o base no envio (associado: conta como não rastreado);
+ * sem nenhum grupo com associação, o mapa sai e o payload fica como antes (CA9).
+ */
+function comLinksDosDestinos(payload, destinos) {
+  const mapa = payload?.links_rastreio;
+  if (!mapa || typeof mapa !== 'object') return payload;
+  const { links_rastreio: _mapa, ...semMapa } = payload;
+  const dosDestinos = Object.fromEntries(destinos.filter((j) => Object.hasOwn(mapa, j)).map((j) => [j, mapa[j]]));
+  return Object.values(dosDestinos).some((l) => l?.esperado) ? { ...semMapa, links_rastreio: dosDestinos } : semMapa;
+}
+
+/**
  * Remetentes. `wa`: o WhatsApp (sendText, isReady, meuJid e, no cadastro, resolverNumero e lidDe); `envios`: a fila de
- * src/envios.js (montarOferta, situacaoLink e, sem `acordar`, processarPendentes); `acordar`: pede um tick do agendador
- * já; `agora`: relógio (testes).
+ * src/envios.js (montarOferta, situacaoLink, linksRastreioShopee e, sem `acordar`, processarPendentes); `acordar`:
+ * pede um tick do agendador já; `agora`: relógio (testes).
  */
 export function createRemetentes({ db, wa = null, envios = null, acordar = null, agora = Date.now } = {}) {
   const respostasPorRemetente = new Map(); // remetente_id → horários das respostas da última hora (D8, em memória)
@@ -476,7 +489,8 @@ export function createRemetentes({ db, wa = null, envios = null, acordar = null,
     const bloqueio = envios?.situacaoLink ? envios.situacaoLink(item.loja, { tag_id: rem.tag_id }) : 'falha';
     if (bloqueio) return decidir(item, rem, porCodigo(MOTIVOS[bloqueio] ? bloqueio : 'falha'), now);
     if (!templateOk(rem.template_id)) return decidir(item, rem, porCodigo('sem_template'), now);
-    if (!destinosDe(rem).length) return decidir(item, rem, porCodigo('sem_grupos'), now);
+    const destinosAntes = destinosDe(rem);
+    if (!destinosAntes.length) return decidir(item, rem, porCodigo('sem_grupos'), now);
 
     // rede: leitura da loja e link do dono, pela montagem do Disparo manual (D4)
     let payload;
@@ -486,6 +500,13 @@ export function createRemetentes({ db, wa = null, envios = null, acordar = null,
         complemento: lerJson(item.complemento, null),
         exigirPreco: true,
       });
+      // Shopee com Sub_id por bloco (dashboard-ganhos, CA2; achado R1 do merge): os links saem agora, como no Disparo
+      // manual e no "Enviar" do catálogo, com o base como fallback, para os grupos lidos antes da rede. O teto de links
+      // por hora e a parada no primeiro motivo ficam em linksRastreioShopee. Sem a função, sai só o base.
+      if (payload?.loja === 'shopee' && typeof envios.linksRastreioShopee === 'function') {
+        const porGrupo = await envios.linksRastreioShopee({ urlProduto: payload.url, jids: destinosAntes, base: payload.link_afiliado });
+        if (Object.values(porGrupo).some((l) => l.esperado)) payload = { ...payload, links_rastreio: porGrupo };
+      }
     } catch (e) {
       if (e?.codigo === 'sem_dados' || e?.codigo === 'link_invalido') return decidir(item, rem, porCodigo(e.codigo), now);
       return decidir(item, rem, porCodigo('falha', { nota: semNumero(e) }), now);
@@ -506,7 +527,7 @@ export function createRemetentes({ db, wa = null, envios = null, acordar = null,
       if (rep) return decidir(item, atual, { status: 'duplicado', ...rep, chave, oferta: payload.offer, fonte }, now);
       const destinos = destinosDe(atual);
       if (!destinos.length) return decidir(item, atual, porCodigo('sem_grupos', { chave, oferta: payload.offer, fonte }), now);
-      envioId = gravarEnvio(payload, atual, destinos, now);
+      envioId = gravarEnvio(comLinksDosDestinos(payload, destinos), atual, destinos, now);
       return decidir(item, atual, { status: 'enviado', chave, oferta: payload.offer, fonte, envioId }, now);
     });
     if (envioId != null) pedirEnvio();

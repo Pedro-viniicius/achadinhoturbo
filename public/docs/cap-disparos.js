@@ -303,6 +303,7 @@ docsCapitulo({
           ['Amazon', 'O endereço do produto com a sua tag de associado.', 'A tag em [[Conexões → Amazon]].'],
           ['Shopee', 'Um link curto gerado pela sua conta, pela API ou pela extensão.', 'O ID de afiliado em [[Conexões → Shopee]] e a API da Shopee ou a extensão do Chrome conectada.'],
         ] } },
+        { p: 'Os links do remetente seguem o código de rastreio de cada grupo, como no [[Disparo manual]]: a etiqueta do grupo vence a escolhida no remetente e, na Shopee, o link sai com o Sub_id do bloco. Veja [Rastreio por grupo](#docs/grupos/rastreio).' },
         { p: 'Título, preço e foto vêm da loja. Quando a loja não informa algum campo, o programa completa com o que o remetente escreveu na mensagem (título na primeira linha, “De R$”, “Por R$”, “NN% OFF”, frete e cupom), mas só quando a mensagem tem um link só. Sem título ou sem preço a oferta não sai, e o remetente é orientado a mandar o link junto com o nome e o preço. Veja [Como escrever a mensagem](#docs/espelhamento/formato).' },
         { p: '**O que o remetente recebe.** Com “Responder ao remetente no WhatsApp” ligado, ele recebe uma frase por mensagem, depois que os envios terminam. A resposta nunca leva link, número, nome de grupo nem o texto que ele mandou.' },
         { tabela: { colunas: ['Situação', 'Frase que o remetente recebe'], linhas: [

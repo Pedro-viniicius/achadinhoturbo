@@ -100,7 +100,7 @@ Para saber de qual grupo veio uma venda, cada link enviado pode sair com um **c�
 - **A associação vence a etiqueta escolhida** no *Disparo manual* e na regra de *Disparo automático*: o grupo que tem etiqueta de rastreio recebe o link com ela, mesmo que o disparo tenha outra etiqueta. Já o campo *Etiqueta do Mercado Livre para o disparo* do bloco não separa o ganho.
 - **Amazon:** o painel confere só o formato (letras, números e hífen, ex.: `casa-20`), **não** se o ID existe na sua conta: confira a grafia, porque um ID errado gera link sem comissão. Não pode ser a tag padrão de *Conexões → Amazon*.
 - **Mercado Livre:** a etiqueta precisa existir em *Conexões → Mercado Livre*. O painel não deixa apagar uma etiqueta que é código de rastreio (tire a associação antes); se ela sumir mesmo assim, o link sai com a padrão e a cobertura cai.
-- **Shopee:** cada Sub_id pede um link a mais à Shopee e conta no teto de 60 links por hora pela extensão; por isso ele é por bloco e há **até 10 Sub_ids por envio** (o que passar disso sai com o link base, sem Sub_id). **O Sub_id sai pela API de afiliados da Shopee ou pela extensão** (versão **1.4.1 ou mais nova**; depois de atualizar, recarregue a extensão em `chrome://extensions`). Cada Sub_id gasta uma vaga do teto de 60 links por hora da extensão. Se a extensão for antiga, o envio **para de pedir Sub_id já no primeiro** pedido. O painel também **guarda vagas** do limite de 60 links por hora para o link normal: quando sobram poucas, o link sai sem Sub_id. Quando não entra, o link sai sem Sub_id e a falta aparece na cobertura.
+- **Shopee:** cada Sub_id pede um link a mais à Shopee e conta no teto de 60 links por hora pela extensão; por isso ele é por bloco e há **até 10 Sub_ids por envio** (o que passar disso sai com o link base, sem Sub_id). **O Sub_id sai pela API de afiliados da Shopee ou pela extensão** (versão **1.4.1 ou mais nova**; depois de atualizar, recarregue a extensão em `chrome://extensions`). Cada Sub_id gasta uma vaga do teto de 60 links por hora da extensão. Se a extensão for antiga, o envio **para de pedir Sub_id já no primeiro** pedido. O painel também **guarda vagas** do limite de 60 links por hora para o link normal: quando sobram poucas, o link sai sem Sub_id. Quando não entra, o link sai sem Sub_id e a falta aparece na cobertura. Todo envio da Shopee pede o Sub_id: o *Disparo manual*, a revisão do [Catálogo do Etiqueta](#catálogo-do-etiqueta) e os links de um [remetente](#remetente-links-enviados-por-outro-número).
 - **Equipe:** o Operador não vê nem muda códigos, não apaga um bloco que tem código ou gasto com anúncio e não troca os grupos dele (o painel responde que só o Dono pode). Ninguém apaga uma etiqueta que é código de rastreio: tire a associação antes.
 
 ### Página Ganhos
@@ -178,7 +178,7 @@ Precisa da **tag de associado** salva em *Conexões → Amazon*. Sem ela o botã
 
 ### Disparo manual com um link da Shopee
 
-A Shopee funciona só no **Disparo manual** (agora ou agendado para hoje). **O espelhamento da Shopee não existe**, e as regras do *Disparo automático* só enviam a Shopee pela fonte [Catálogo do Etiqueta](#catálogo-do-etiqueta), sempre depois de revisão do Dono (o espelhamento, veja [Espelhamento da Amazon](#espelhamento-da-amazon), só trata a Amazon).
+A Shopee funciona no **Disparo manual** (agora ou agendado para hoje) e nos links que um [remetente](#remetente-links-enviados-por-outro-número) manda no privado. **O espelhamento da Shopee não existe**, e as regras do *Disparo automático* só enviam a Shopee pela fonte [Catálogo do Etiqueta](#catálogo-do-etiqueta), sempre depois de revisão do Dono (o espelhamento, veja [Espelhamento da Amazon](#espelhamento-da-amazon), só trata a Amazon).
 
 **O link de afiliado nunca é montado à mão.** O link que vai ao grupo é sempre `https://s.shopee.com.br/<código>`, gerado pela própria Shopee na sua conta, por um de dois caminhos:
 
@@ -487,6 +487,8 @@ O programa **nunca reenvia o link que o remetente mandou**: ele lê o produto e 
 | Mercado Livre | Um `meli.la` novo, gerado pela extensão do Chrome, com a etiqueta escolhida no remetente | A etiqueta em *Conexões → Mercado Livre* e a extensão conectada. No modo de link direto o Mercado Livre não sai |
 | Amazon | O endereço do produto (`/dp/<ASIN>`) com a sua tag de associado | A tag em *Conexões → Amazon* |
 | Shopee | Um link curto gerado pela sua conta, pela API ou pela extensão | O ID de afiliado em *Conexões → Shopee* e a API da Shopee ou a extensão do Chrome conectada |
+
+Os links do remetente seguem o [código de rastreio](#rastreio-por-grupo-e-página-ganhos) de cada grupo, como no *Disparo manual*: a etiqueta do grupo vence a escolhida no remetente e, na Shopee, o link sai com o Sub_id do bloco.
 
 Título, preço e foto vêm da loja. Quando a loja não informa algum campo, o programa completa com o que o remetente escreveu na mensagem (título na primeira linha, "De R$", "Por R$", "NN% OFF", frete e cupom), mas **só quando a mensagem tem um link só**; veja [Formato de mensagem de origem que funciona](#formato-de-mensagem-de-origem-que-funciona). **Sem título ou sem preço a oferta não sai**: o remetente é orientado a mandar o link junto com o nome e o preço. Um link do Mercado Livre que o programa não consegue ligar a um produto também é recusado.
 

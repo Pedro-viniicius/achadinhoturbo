@@ -622,6 +622,17 @@ test('CA7 (real): dois meli.la diferentes do mesmo produto na mesma mensagem sae
   assert.equal(s.gravados().length, 1);
 });
 
+test('S1 (merge do Remetente, leitor real): o meli.la do sócio que leva ao catálogo grava no rastreio a chave do produto, nunca o meli.la', async () => {
+  const s = montar();
+  s.cadastrar();
+  comLeitorRealDoMl(s);
+  s.msg('Olha esse https://meli.la/1AbCdEf'); await s.rodar(); await s.rodar();
+  assert.deepEqual(s.itens().map(statusDe), [['enviado', null]]);
+  const linhas = s.db.prepare('SELECT jid, loja, oferta_chave, link FROM rastreio_envios ORDER BY id').all();
+  assert.deepEqual(linhas.map((l) => [l.jid, l.loja, l.oferta_chave]), [[DEST1, 'mercadolivre', 'CATALOGO:MLB79725856'], [DEST2, 'mercadolivre', 'CATALOGO:MLB79725856']]);
+  assert.ok(linhas.every((l) => !/meli\.la\/1AbCdEf/.test(JSON.stringify(l))), 'o meli.la do sócio não vai ao rastreio');
+});
+
 // ------------------------------------------------------------------------------------------------ CA9/CA12: servidor de verdade
 
 async function subirServidor() {

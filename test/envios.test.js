@@ -1908,8 +1908,10 @@ test('S2: só o Disparo manual pede o link da Shopee: o espelho, as regras e o e
   // Sub_id (dashboard-ganhos, etapa 7): os links por código saem só ao criar (Disparo manual) e no "Enviar" do catálogo
   assert.deepEqual(chamadas(/\blinkAfiliadoShopeeRastreado\(/g).filter((c) => !c.startsWith('lojas.js:')), ['envios.js:linkComSubId']);
   assert.deepEqual(chamadas(/(?<!function )\blinkComSubId\(/g), ['envios.js:linksRastreioShopee']);
-  // server.js:criarServicos só repassa a chamada da revisão do catálogo (catalogo-itens.js:enviar) à fila de envios
-  assert.deepEqual(chamadas(/(?<!function )\blinksRastreioShopee\(/g).sort(), ['catalogo-itens.js:enviar', 'envios.js:criar', 'server.js:criarServicos']);
+  // server.js:criarServicos só repassa a chamada da revisão do catálogo (catalogo-itens.js:enviar) à fila de envios;
+  // o remetente (remetentes.js:processarItem, achado R1 do merge) pede os Sub_ids depois do montarOferta, como o catálogo
+  assert.deepEqual(chamadas(/(?<!function )\blinksRastreioShopee\(/g).sort(),
+    ['catalogo-itens.js:enviar', 'envios.js:criar', 'remetentes.js:processarItem', 'server.js:criarServicos']);
   assert.match(fontes['envios.js'].slice(fontes['envios.js'].indexOf('async function criar(')), /origem: \{ tipo: 'manual' \}/, 'criar é o Disparo manual');
   for (const arq of ['espelho.js', 'scheduler.js', 'avisos.js']) {
     assert.doesNotMatch(fontes[arq], /requestLinkShopee|gerarLink|linkAfiliado\(\s*['"]shopee/, arq);
@@ -2620,6 +2622,20 @@ test('etapa 4 (CA5): montarOferta do ML com complemento: a loja primeiro e o tex
     const so = await s.envios.montarOferta({ url: URL_MELI, template_id: 1 }, { origem: { tipo: 'manual' } });
     assert.deepEqual([so.tag_id, so.etiqueta, so.fonte_dados, so.offer.coupon, so.offer.oldPrice], [1, 'etiquetaA', undefined, null, null]);
   } finally { s.db.close(); }
+});
+
+test('S1 (merge do Remetente): no ML do remetente, a key da oferta é a do produto achado (MLB… ou CATALOGO:MLB…), nunca o meli.la lido; o Disparo manual segue com a da leitura', async () => {
+  // o leitor real (src/ml.js resolveOffer) devolve como key a do link colado: o meli.la do sócio
+  const s = montarLojas({ ml: mlPagina({ url: URL_ML_ACHADO, key: URL_MELI }) });
+  const catalogo = montarLojas({ ml: mlPagina({ url: 'https://www.mercadolivre.com.br/tablet-x/p/MLB79725856?matt_tool=1', key: URL_MELI }) });
+  try {
+    const p = await s.envios.montarOferta({ url: URL_MELI, template_id: 1 }, { origem: ORIGEM_REM, exigirPreco: true });
+    assert.deepEqual([p.url, p.offer.key], [URL_ML_ACHADO, 'MLB9876543210']);
+    const c = await catalogo.envios.montarOferta({ url: URL_MELI, template_id: 1 }, { origem: ORIGEM_REM, exigirPreco: true });
+    assert.deepEqual([c.url, c.offer.key], ['https://www.mercadolivre.com.br/tablet-x/p/MLB79725856', 'CATALOGO:MLB79725856']);
+    const manual = await s.envios.montarOferta({ url: URL_MELI, template_id: 1 }, { origem: { tipo: 'manual' } });
+    assert.equal(manual.offer.key, URL_MELI, 'o Disparo manual não muda');
+  } finally { s.db.close(); catalogo.db.close(); }
 });
 
 test('etapa 4: criar = montarOferta + INSERT (o payload gravado é o mesmo, nas 3 lojas)', async () => {

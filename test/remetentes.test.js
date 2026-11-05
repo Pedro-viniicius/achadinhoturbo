@@ -17,6 +17,7 @@ import { createAmazon } from '../src/amazon.js';
 import { createShopee, URL_API as URL_API_SHOPEE } from '../src/shopee.js';
 import { extractItemId } from '../src/ml.js';
 import { createRemetentes, RESPOSTAS } from '../src/remetentes.js';
+import * as rastreio from '../src/rastreio.js';
 
 let acessosRede = 0;
 globalThis.fetch = async () => { acessosRede++; throw new Error('rede proibida no teste'); };
@@ -95,20 +96,32 @@ function fetchAmazon() {
   return f;
 }
 
-/** fetch falso da Shopee: a Open API (produto e link curto). Guarda as URLs. */
+/**
+ * fetch falso da Shopee: a Open API (produto e link curto; com Sub_id, `https://s.shopee.com.br/Sub<sub_id>`). Guarda
+ * as URLs e, em `consultas`, as consultas da API. `f.antes(consulta)`, se houver, roda antes de cada resposta da API.
+ */
 function fetchShopee() {
   const chamadas = [];
+  const consultas = [];
   const f = async (url, init = {}) => {
     const u = String(url);
     chamadas.push(u);
     if (u === URL_API_SHOPEE) {
-      if (JSON.parse(init.body).query.startsWith('mutation')) return respJson(200, { data: { generateShortLink: { shortLink: LINK_SHOPEE } } });
+      const consulta = JSON.parse(init.body).query;
+      consultas.push(consulta);
+      if (f.antes) await f.antes(consulta);
+      if (consulta.startsWith('mutation')) {
+        const sub = /subIds:\["(\w+)"\]/.exec(consulta)?.[1];
+        return respJson(200, { data: { generateShortLink: { shortLink: sub ? `https://s.shopee.com.br/Sub${sub}` : LINK_SHOPEE } } });
+      }
       return respJson(200, { data: { productOfferV2: { nodes: [{ itemId: Number(ITEM), productName: 'Fone Bom Sem Fio', priceMin: '89.90', priceMax: '99.90',
         priceDiscountRate: 15, sales: 1234, ratingStar: '4.83', imageUrl: IMG_SHOPEE, shopName: 'Loja Oficial' }] } } });
     }
     throw new Error('rede não prevista no teste');
   };
   f.chamadas = chamadas;
+  f.consultas = consultas;
+  f.antes = null;
   return f;
 }
 
@@ -331,6 +344,123 @@ test('CA6: as 3 lojas ponta a ponta: item → envios (origem remetente, só os g
   assert.equal(RESPOSTAS.enviadoTodos(2), 'Enviado para 2 grupos.');
 });
 
+// ------------------------------------------------------------------------------------------------ rastreio por grupo
+// Dashboard de ganhos (brief dashboard-ganhos, CA1, CA2 e CA9; achados R1 e S1 do merge com o Remetente): a oferta do
+// remetente ganha uma linha de rastreio por grupo, a Shopee pede o Sub_id do bloco como o Disparo manual e o catálogo,
+// e o ML guarda a chave do produto, nunca o meli.la do sócio.
+const DEST3 = '400@g.us';
+const LINK_SUB_B1 = 'https://s.shopee.com.br/Subb1';
+/** Bloco `id` com os grupos `jids` e o Sub_id `codigo` da Shopee (como as telas de Blocos e de Ganhos gravam). */
+function blocoComSubId(db, id, jids, codigo) {
+  db.prepare('INSERT INTO blocks (id, name, created_at) VALUES (?,?,?)').run(id, `Bloco ${id}`, Date.now());
+  for (const j of jids) db.prepare('INSERT INTO block_groups (block_id, jid) VALUES (?,?)').run(id, j);
+  rastreio.salvar(db, { loja: 'shopee', alvo_tipo: 'bloco', alvo: String(id), codigo });
+}
+const rastreados = (db) => db.prepare(`SELECT jid, loja, origem, rule_id, envio_id, oferta_chave, link, codigo, nivel, bloco_id, esperado, motivo
+  FROM rastreio_envios ORDER BY id`).all().map((x) => ({ ...x }));
+/** Pedidos de link à API da Shopee, na ordem: 'base' (sem Sub_id) ou o Sub_id pedido. */
+const mutacoes = (s) => s.fetchS.consultas.filter((c) => c.startsWith('mutation')).map((c) => /subIds:\["(\w+)"\]/.exec(c)?.[1] ?? 'base');
+const linkShopeeDe = (m) => /https:\/\/s\.shopee\.com\.br\/\w+/.exec(m.text)?.[0] ?? null;
+
+test('R1/CA1/CA2: Shopee do remetente com Sub_id no bloco: o grupo do bloco recebe o link com o Sub_id, o rastreio guarda o código e o outro grupo sai com o base', async (t) => {
+  const erros = t.mock.method(console, 'error', () => {});
+  const s = montar();
+  blocoComSubId(s.db, 1, [DEST1], 'b1');
+  s.cadastrar();
+  assert.equal(s.msg(URL_SHOPEE), 1);
+  await s.rodar();
+  assert.deepEqual(s.itens().map(statusDe), [['enviado', null]]);
+  assert.deepEqual(mutacoes(s), ['base', 'b1'], 'o base primeiro (o fallback de todos), depois um pedido por Sub_id');
+  const [e] = s.gravados();
+  assert.equal(e.status, 'concluido');
+  assert.equal(e.payload.link_afiliado, LINK_SHOPEE, 'o link base continua no payload');
+  assert.deepEqual(e.payload.links_rastreio, {
+    [DEST1]: { link: LINK_SUB_B1, codigo: 'b1', nivel: 'bloco', bloco_id: 1, esperado: 1, motivo: null },
+    [DEST2]: { link: LINK_SHOPEE, codigo: null, nivel: 'padrao', bloco_id: null, esperado: 0, motivo: null },
+  }, 'só os grupos do envio (o que sumiu fica de fora)');
+  assert.deepEqual(s.nosGrupos().map((m) => [m.jid, linkShopeeDe(m)]), [[DEST1, LINK_SUB_B1], [DEST2, LINK_SHOPEE]]);
+  const base = { loja: 'shopee', origem: 'manual', rule_id: null, envio_id: e.id, oferta_chave: `SHOPEE:${SHOP}.${ITEM}` };
+  assert.deepEqual(rastreados(s.db), [
+    { jid: DEST1, ...base, link: LINK_SUB_B1, codigo: 'b1', nivel: 'bloco', bloco_id: 1, esperado: 1, motivo: null },
+    { jid: DEST2, ...base, link: LINK_SHOPEE, codigo: null, nivel: 'padrao', bloco_id: null, esperado: 0, motivo: null },
+  ]);
+  assert.deepEqual(s.respostas(), ['Enviado para 2 grupos.']);
+  assert.equal(erros.mock.callCount(), 0);
+});
+
+test('R1/CA9: sem Sub_id associado, a Shopee do remetente sai como antes (um pedido de link, payload sem links_rastreio); ML e Amazon não pedem Sub_id', async () => {
+  const s = montar();
+  s.cadastrar();
+  s.msg(URL_SHOPEE); s.msg(URL_ML); s.msg(URL_AMAZON);
+  await s.rodar();
+  assert.deepEqual(s.itens().map(statusDe), [['enviado', null], ['enviado', null], ['enviado', null]]);
+  assert.deepEqual(mutacoes(s), ['base']);
+  for (const e of s.gravados()) assert.equal(Object.hasOwn(e.payload, 'links_rastreio'), false, e.payload.loja);
+  const shopee = rastreados(s.db).filter((l) => l.loja === 'shopee');
+  assert.deepEqual(shopee.map((l) => [l.jid, l.link, l.codigo, l.nivel, l.esperado, l.motivo]),
+    [[DEST1, LINK_SHOPEE, null, 'padrao', 0, null], [DEST2, LINK_SHOPEE, null, 'padrao', 0, null]]);
+  assert.equal(rastreados(s.db).length, 6, 'uma linha por grupo nas 3 lojas');
+});
+
+test('R1: os grupos do remetente mudam durante a leitura da Shopee: vale a lista nova; o Sub_id do grupo que saiu não fica e o grupo novo associado sai com o base e conta como não rastreado', async () => {
+  const s = montar();
+  s.db.prepare('INSERT INTO groups (jid, name, size, updated_at) VALUES (?,?,?,?)').run(DEST3, 'Tech Três', 10, Date.now());
+  blocoComSubId(s.db, 1, [DEST1], 'b1');
+  blocoComSubId(s.db, 2, [DEST3], 'b3');
+  const id = s.cadastrar({ destino_jids: JSON.stringify([DEST1, DEST2]) });
+  s.fetchS.antes = () => {
+    // o dono troca os grupos enquanto o programa lê a loja (uma vez só)
+    s.fetchS.antes = null;
+    s.db.prepare('UPDATE remetentes SET destino_jids = ? WHERE id = ?').run(JSON.stringify([DEST2, DEST3]), id);
+  };
+  s.msg(URL_SHOPEE);
+  await s.rodar();
+  assert.deepEqual(mutacoes(s), ['base', 'b1'], 'os Sub_ids pedidos são os dos grupos lidos antes da rede');
+  const [e] = s.gravados();
+  assert.deepEqual(e.group_jids, [DEST2, DEST3]);
+  assert.equal(Object.hasOwn(e.payload, 'links_rastreio'), false, 'nenhum dos grupos novos tem um Sub_id pronto: o payload fica como antes');
+  assert.deepEqual(s.nosGrupos().map((m) => [m.jid, linkShopeeDe(m)]), [[DEST2, LINK_SHOPEE], [DEST3, LINK_SHOPEE]]);
+  assert.deepEqual(rastreados(s.db).map((l) => [l.jid, l.link, l.codigo, l.nivel, l.esperado, l.motivo]), [
+    [DEST2, LINK_SHOPEE, null, 'padrao', 0, null],
+    [DEST3, LINK_SHOPEE, null, 'nenhum', 1, 'sem_link_rastreio'],
+  ]);
+  assert.ok(!JSON.stringify(s.db.prepare('SELECT payload FROM envios').all()).includes(LINK_SUB_B1), 'o link do grupo que saiu não fica no payload');
+});
+
+test('CA1: ML do remetente com etiqueta de rastreio no grupo: o grupo recebe o link com ela (vence a do remetente) e o rastreio guarda o código', async () => {
+  const s = montar();
+  s.db.prepare("INSERT INTO tags (name, created_at) VALUES ('etiquetaB', 1)").run();
+  rastreio.salvar(s.db, { loja: 'mercadolivre', alvo_tipo: 'grupo', alvo: DEST1, codigo: 'etiquetaB' });
+  s.cadastrar();
+  s.msg(URL_ML);
+  await s.rodar();
+  const [e] = s.gravados();
+  assert.equal(e.payload.etiqueta, 'etiquetaA', 'a etiqueta do remetente (a primeira)');
+  const meli = (m) => /https:\/\/meli\.la\/fake-(\w+)-\d+/.exec(m.text)?.[1] ?? null;
+  assert.deepEqual(s.nosGrupos().map((m) => [m.jid, meli(m)]), [[DEST1, 'etiquetaB'], [DEST2, 'etiquetaA']]);
+  assert.deepEqual(rastreados(s.db).map((l) => [l.jid, l.origem, l.oferta_chave, l.codigo, l.nivel, l.esperado]), [
+    [DEST1, 'manual', 'MLB1234567890', 'etiquetaB', 'grupo', 1],
+    [DEST2, 'manual', 'MLB1234567890', 'etiquetaA', 'padrao', 0],
+  ]);
+});
+
+test('S1/CA1: ML do remetente pelo meli.la: o envio e o rastreio guardam a chave do produto (MLB…), nunca o meli.la do sócio', async () => {
+  const s = montar();
+  // como o leitor real (src/ml.js resolveOffer): a key da leitura é a do link colado, o meli.la do sócio
+  s.estado.mlCampos[URL_ML] = { key: URL_MELI };
+  s.cadastrar();
+  s.msg(URL_MELI);
+  await s.rodar();
+  assert.deepEqual(s.itens().map((i) => [i.status, i.chave]), [['enviado', 'MLB1234567890']]);
+  const [e] = s.gravados();
+  assert.equal(e.payload.offer.key, 'MLB1234567890');
+  const linhas = rastreados(s.db);
+  assert.deepEqual(linhas.map((l) => [l.jid, l.loja, l.oferta_chave]), [[DEST1, 'mercadolivre', 'MLB1234567890'], [DEST2, 'mercadolivre', 'MLB1234567890']]);
+  assert.ok(linhas.every((l) => l.oferta_chave.startsWith('MLB')));
+  assert.doesNotMatch(JSON.stringify(s.db.prepare('SELECT * FROM rastreio_envios').all()), /meli\.la\/1AbCdEf/);
+  assert.doesNotMatch(JSON.stringify(s.db.prepare('SELECT payload FROM envios').all()), /meli\.la\/1AbCdEf/);
+});
+
 test('CA5: o texto completa a oferta só com 1 link de loja e é guardado mascarado; o texto da mensagem nunca é guardado', async () => {
   const s = montar();
   s.cadastrar();
@@ -503,7 +633,7 @@ test('Q1: a chave do ML vem do endereço do produto; catálogo (/p/MLB…) tem c
   assert.equal(s.itens().at(-1).chave, null);
 });
 
-// Q4 e resíduo do S1 (rodada 2): a chave do ML segue as regras do urlDeProdutoMl de src/envios.js (não divergem)
+// Q4 e resíduo do S1 (rodada 2): a chave do ML segue as regras do produtoMl de src/envios.js (não divergem)
 test('Q4/S1: chave do ML só para o endereço de um produto: porta, %73ocial, MLB… fora do começo do caminho e a busca (lista.) ficam sem chave', () => {
   const s = montar();
   s.cadastrar({ max_por_hora: 60 });
