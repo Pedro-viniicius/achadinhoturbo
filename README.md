@@ -4,7 +4,7 @@ Programa **pessoal** que roda no seu computador e envia ofertas da sua **Central
 
 Além das regras automáticas, o painel faz **disparo manual** de uma oferta (do Mercado Livre ou da Amazon), **mensagens e enquetes** (agora, agendadas ou repetidas), **espelha ofertas da Amazon** postadas em outros grupos (veja [Espelhamento da Amazon](#espelhamento-da-amazon)), usa as ofertas do seu app Etiqueta como fonte (veja [Catálogo do Etiqueta](#catálogo-do-etiqueta)), publica os links que um **remetente** de confiança manda no privado (veja [Remetente](#remetente-links-enviados-por-outro-número)) e manda **resumo diário e avisos** para o seu WhatsApp.
 
-Você configura: grupos, template, quantas ofertas por envio, intervalo, horário de funcionamento e quanto tempo sem repetir a mesma oferta.
+Você configura: grupos, template, quantas ofertas por envio e o ritmo (a cada tantos minutos, dentro do horário de funcionamento, ou em **horários marcados**, cada um com a sua quantidade e o seu template), quanto tempo sem repetir a mesma oferta e, se quiser, as rotinas do **Grupo vivo** (mensagens e enquetes que mostram que o grupo tem gente por trás; veja [Horários marcados e Grupo vivo](#horários-marcados-e-grupo-vivo)).
 
 ## Como funciona
 
@@ -60,7 +60,7 @@ O menu lateral é dividido em grupos:
 
 - **Visão Geral**
 - **Principal**: Rotacionador de Links, Grupos, Blocos de análise
-- **Disparos**: Disparo manual, Disparo automático (antes chamado *Regras*; é onde ficam os botões *Novo espelhamento* e *Novo remetente*), Disparar mensagem, Templates
+- **Disparos**: Disparo manual, Disparo automático (antes chamado *Regras*; é onde ficam os botões *Novo espelhamento* e *Novo remetente*), Disparar mensagem, Grupo vivo, Templates
 - **Comunicação**: Relatórios e avisos
 - **Conta**: Conexões, Números de WhatsApp, Equipe (só o Dono vê)
 - No rodapé: Histórico (com o seletor *Tipo*: Tudo, Disparo automático, Espelhamento, Catálogo ou Remetente), Ajustes, Docs
@@ -161,6 +161,47 @@ Em *Disparos → Disparar mensagem* você envia texto livre ou uma enquete para 
 - Agendados e repetições **sobrevivem a reinício**: ficam no banco e retomam sozinhos.
 - Todo envio, inclusive o **"agora"**, sai pela **mesma fila** das regras automáticas, com a pausa entre mensagens de *Ajustes*. Por isso pode haver atraso de alguns minutos enquanto uma regra está enviando; os envios entram entre as regras.
 - Repetições e enquetes aumentam o volume de envio e o risco de restrição do número: use com moderação.
+
+## Horários marcados e Grupo vivo
+
+Duas formas de ritmo que não mudam nada do que já existe: um disparo sem horários marcados e os envios de *Disparar mensagem* continuam como antes.
+
+### Horários marcados (a grade)
+
+Em *Disparo automático → Novo disparo automático → Ritmo de envio*, o **Como enviar** tem duas opções: **A cada X minutos** (o padrão, com "Funciona das/até") e **Em horários marcados**. A grade é opcional, disparo por disparo.
+
+- **O que é**: uma lista de horários do dia, cada um com as suas **Ofertas** e o seu **Template** ("Padrão do disparo" usa o do disparo), e os **dias da semana** em que ela vale (o padrão é todos).
+- **Limites**: até 48 horários, com pelo menos 10 min entre um e outro (inclusive da noite para a manhã: 23:55 e 00:00 não cabem juntos) e sem horário repetido; de 1 a 20 ofertas por horário. Um template que não existe é recusado.
+- **Modelos rápidos e Montar…**: "A cada 30 min, 8h às 22h", "A cada hora, 8h às 22h", "Manhã, tarde e noite" e "Horários de pico" preenchem a lista, e *Montar…* faz o mesmo com o seu "De", "Até", "A cada" e "Ofertas em cada". Os modelos rápidos e o *Montar…* incluem o horário final. *Substituir horários* troca a lista; *Acrescentar* soma. Nada é salvo até clicar em *Salvar*.
+- **O ritmo atual vira a grade**: na primeira vez que você troca para *Em horários marcados*, o painel converte o intervalo e a janela em horários. O horário final não entra: "a cada 60 min, das 8h às 22h" vira 14 horários, das 08:00 às 21:00. Se não couber (mais de 48 horários ou menos de 10 min entre eles), a lista começa vazia. Voltar para *A cada X minutos* restaura o ritmo anterior, porque os campos ficam guardados.
+- **A janela não vale**: em horários marcados, o "Funciona das/até" não vale. Os valores ficam guardados.
+- **Horário perdido**: o horário sai se atrasou até 30 min (programa desligado, WhatsApp fora, fila ocupada). Passou disso, é pulado, com um aviso no *Histórico*. Se vários venceram, sai só o mais recente. As frases:
+  - `Horário 10:00 pulado: o programa estava desligado, o WhatsApp desconectado ou outro envio demorou. Próximo: 12:00.`
+  - `3 horários pulados (10:00 a 12:00): o programa estava desligado, o WhatsApp desconectado ou outro envio demorou. Próximo: 13:00.`
+  - `Vários horários pulados desde …: …` (o programa ficou muitos dias desligado: o Histórico traz um aviso só, com o dia e a hora do primeiro horário perdido, em vez de um por horário)
+  - `Horário 10:00: saíram 5 de 8 ofertas; não havia mais ofertas novas dentro dos filtros.` (faltou oferta: sai o que houver, sem acumular para o horário seguinte)
+  - `Horário 10:00: o template escolhido para este horário não existe mais. As ofertas saíram com o template da regra.`
+- **Enviar agora e Ver ofertas**: usam a quantidade e o template do próximo horário. *Enviar agora* envia de verdade, mas não pula esse horário.
+- **Template em uso**: um template usado numa grade não pode ser apagado: `A regra "Promoções" usa este template no horário 10:00.`
+- **Cartão**: ganha o selo *Grade*, um resumo e o "Próximo envio … N ofertas com o template X".
+
+### Grupo vivo
+
+Em *Disparos → Grupo vivo*, rotinas que mandam sozinhas **mensagens** ou **enquetes** para os grupos. Não é oferta: as ofertas saem pelo Disparo automático.
+
+- **Rotina**: um nome (só você vê), liga e desliga, o tipo (*Nova mensagem* ou *Nova enquete*, que não muda depois), de 1 a 5 conteúdos (até 5 textos ou enquetes), os grupos, os dias da semana e até 6 horários por rotina. O programa guarda até 50 rotinas. Sem foto por enquanto.
+- **Ordem**: com mais de um conteúdo, *Um depois do outro* segue a lista e volta ao primeiro; *Sorteio* escolhe ao acaso, sem repetir o último.
+- **Modelos**: a galeria tem 10 modelos (seis mensagens e quatro enquetes). *Usar este modelo* só preenche o formulário: nada é salvo até *Criar rotina*.
+- **Horário perdido**: a mesma regra da grade (atrasou até 30 min, senão é pulado, e sai só o mais recente). Frase: `Horário de 05/11 10:00 pulado: o programa estava desligado, o WhatsApp desconectado ou outro envio demorou. Próximo: 05/11 18:00.`
+- **Enviar agora**: manda a rotina já, avança o rodízio e não muda o próximo horário. Para a mesma rotina, só vale um a cada 1 min.
+- **Histórico**: os envios aparecem como `Grupo vivo: nome da rotina`, em *Tudo* (não há tipo próprio). Excluir uma rotina não apaga o que ela já enviou. O Operador pode criar e mudar rotinas, como no Disparo automático.
+- **Fila e pausas**: tudo sai pela mesma fila, com as pausas de *Ajustes*.
+
+### Aviso de volume
+
+O painel soma as mensagens por dia dos disparos e das rotinas ligados e, com mais de 400 mensagens por dia, mostra um aviso no formulário. É só um aviso: o programa nunca bloqueia. O WhatsApp não publica um limite, então o 400 é uma estimativa prudente.
+
+Honestamente: a grade e o Grupo vivo foram testados com o WhatsApp simulado (`test/grade.test.js`, `test/rotinas.test.js`, `test/grade-painel.test.js`, `test/grupovivo-painel.test.js`); não foi testado contra o WhatsApp real, que exige a sua conta. Confira com uma rotina de teste num grupo seu antes de ligar as de verdade.
 
 ## Espelhamento da Amazon
 

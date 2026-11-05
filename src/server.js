@@ -16,6 +16,7 @@ import { createAmazon } from './amazon.js';
 import { createShopee } from './shopee.js';
 import { montarRotas as rotasEspelho } from './espelho.js';
 import { montarRotas as rotasRemetentes } from './remetentes.js';
+import { montarRotas as rotasRotinas, MAX_CONTEUDOS, MAX_HORARIOS_ROTINA } from './rotinas.js';
 import { montarRotas as rotasEquipe, montarRotasPublicas as rotasEquipePublicas } from './equipe.js';
 import { createCatalogo, limparFonteCatalogo } from './catalogo.js';
 import { createCatalogoItens, montarRotas as rotasCatalogoItens } from './catalogo-itens.js';
@@ -24,6 +25,7 @@ import { CATEGORIAS, ORDENS, POR_PAGINA } from './afiliados.js';
 import { overview, resumo, evasaoDoDia, periodRange, startOfDay, dayOf } from './analytics.js';
 import { MODOS, LIMITE_MAX, LOTACAO_PCT, slugify, parseLink, pickGroup, statusDosGrupos, verificarLotacao, encaixarGrupoNovo } from './rotador.js';
 import { addLog } from './db.js';
+import { validarGrade, proximoHorario, horarioDe, MAX_HORARIOS_GRADE, INTERVALO_MIN_GRADE, TOLERANCIA_MIN, MAX_QTD_GRADE } from './grade.js';
 import crypto from 'node:crypto';
 
 const LOCAL_HOST = /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i;
@@ -271,6 +273,10 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
     espelhos_na_fila: one("SELECT COUNT(*) AS n FROM espelho_itens WHERE status = 'na_fila'").n, // ofertas espelhadas esperando o dono completar
     amostras: { amazon: SAMPLE_OFFER_AMAZON }, // oferta de exemplo para a prévia do template (sem tag no link)
     catalogo: estadoCatalogo(),
+    // limites da grade de horários do Disparo automático (src/grade.js) e das rotinas do Grupo vivo (src/rotinas.js),
+    // para os editores e o contador do painel
+    grade: { max_horarios: MAX_HORARIOS_GRADE, intervalo_min: INTERVALO_MIN_GRADE, tolerancia_min: TOLERANCIA_MIN, max_qtd: MAX_QTD_GRADE,
+      max_conteudos: MAX_CONTEUDOS, max_horarios_rotina: MAX_HORARIOS_ROTINA },
   })));
 
   app.put('/api/ajustes', wrap((req) => {
@@ -457,9 +463,21 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
     checkTemplate(req.body);
     db.prepare('UPDATE templates SET name = ?, body = ? WHERE id = ?').run(req.body.name.trim(), req.body.body, req.params.id);
   }));
+  /** Primeiro horário de grade (em ordem de regra e de hora) que usa o template; grade ilegível no banco é ignorada. */
+  const usoNaGrade = (templateId) => {
+    for (const r of all('SELECT name, grade FROM rules WHERE grade IS NOT NULL ORDER BY id')) {
+      let g = null;
+      try { g = JSON.parse(r.grade); } catch { continue; }
+      const linha = Array.isArray(g?.horarios) ? g.horarios.find((l) => l && Number(l.template_id) === templateId) : null;
+      if (linha) return { regra: r.name, hora: String(linha.hora ?? '') };
+    }
+    return null;
+  };
   app.delete('/api/templates/:id', wrap((req) => {
     const used = one('SELECT name FROM rules WHERE template_id = ? LIMIT 1', req.params.id);
     if (used) throw new Error(`A regra "${used.name}" usa este template.`);
+    const naGrade = usoNaGrade(Number(req.params.id));
+    if (naGrade) throw new Error(`A regra "${naGrade.regra}" usa este template no horário ${naGrade.hora}.`);
     if (one('SELECT COUNT(*) AS n FROM templates').n <= 1) throw new Error('Mantenha ao menos um template.');
     db.prepare('DELETE FROM templates WHERE id = ?').run(req.params.id);
   }));
@@ -496,6 +514,9 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
       if (s.type === 'search' && !String(s.config.query || '').trim()) throw new Error(`Fonte ${i + 1}: a busca está sem a palavra-chave.`);
       if (s.type === 'list' && !String(s.config.items || '').split('\n').some((l) => /^https?:/i.test(l.trim()))) throw new Error(`Fonte ${i + 1}: a lista de links está vazia.`);
     }
+    // grade de horários (opcional): sem o campo ou null = "A cada X minutos", como antes. Intervalo e janela
+    // continuam gravados e validados acima, para quem voltar ao intervalo (D1). Inválida: frase de tela (400).
+    const grade = validarGrade(b.grade, { templateExiste: (id) => !!one('SELECT 1 AS ok FROM templates WHERE id = ?', id) });
     return [
       b.name.trim(), b.enabled === false ? 0 : 1, nz(b.tag_id), nz(b.template_id),
       JSON.stringify(Array.isArray(b.group_jids) ? b.group_jids : []),
@@ -503,9 +524,29 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
       nz(n(b.min_price, null)), nz(n(b.max_price, null)), nz(n(b.min_discount, null)),
       perRun, interval, hhmm(b.window_start, '08:00'), hhmm(b.window_end, '22:00'),
       n(b.dedupe_days, 7), b.send_image === false ? 0 : 1,
+      grade ? JSON.stringify(grade) : null,
     ];
   };
-  const COLS = 'name, enabled, tag_id, template_id, group_jids, source_type, source_config, sources, min_price, max_price, min_discount, per_run, interval_min, window_start, window_end, dedupe_days, send_image';
+  const COLS = 'name, enabled, tag_id, template_id, group_jids, source_type, source_config, sources, min_price, max_price, min_discount, per_run, interval_min, window_start, window_end, dedupe_days, send_image, grade';
+  const TOLERANCIA_MS = TOLERANCIA_MIN * 60000;
+  /**
+   * Próximo envio de uma regra com grade, para o cartão: { ts, hora, qtd, template_id } (template_id null = o da
+   * regra), ou null sem grade. É o next_run_at gravado pelo agendador quando ele é um horário da grade que ainda sai
+   * (no futuro ou atrasado até a tolerância); senão (regra nova ou editada, horário que vai ser pulado), o próximo
+   * horário da grade depois de agora. Grade quebrada no banco dá null, sem derrubar a lista.
+   */
+  const proximoDaGrade = (regra, now = Date.now()) => {
+    if (!regra?.grade) return null;
+    try {
+      let ts = Number.isFinite(regra.next_run_at) && now - regra.next_run_at <= TOLERANCIA_MS && horarioDe(regra.grade, regra.next_run_at)
+        ? regra.next_run_at : null;
+      if (ts == null) ts = proximoHorario(regra.grade, now);
+      const linha = ts == null ? null : horarioDe(regra.grade, ts);
+      if (!linha) return null;
+      const tpl = Number(linha.template_id);
+      return { ts, hora: linha.hora, qtd: Number(linha.qtd), template_id: Number.isInteger(tpl) && tpl > 0 ? tpl : null };
+    } catch { return null; }
+  };
   /**
    * Fonte "Novidades" do catálogo que ainda não terminou a primeira leitura (contrato com o painel, S3): a
    * pré-visualização dela vem vazia até a regra rodar. Só nas fontes catálogo com ordem Novidades; sem rede. Não é
@@ -521,7 +562,10 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
     });
     return { ...regra, sources };
   };
-  app.get('/api/rules', wrap(() => all('SELECT * FROM rules ORDER BY id').map((r) => ({ ...comPrimeiraLeitura(parseRule(r)), em_andamento: scheduler.isRunning(r.id) }))));
+  app.get('/api/rules', wrap(() => all('SELECT * FROM rules ORDER BY id').map((r) => {
+    const regra = parseRule(r);
+    return { ...comPrimeiraLeitura(regra), em_andamento: scheduler.isRunning(r.id), proximo_horario: proximoDaGrade(regra) };
+  })));
   app.post('/api/rules', wrap((req) => {
     const v = ruleFromBody(req.body);
     return { id: db.prepare(`INSERT INTO rules (${COLS}, created_at) VALUES (${v.map(() => '?').join(',')}, ?)`).run(...v, Date.now()).lastInsertRowid };
@@ -599,7 +643,8 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
 
   // ---------- features novas: cada módulo monta as próprias rotas, todas depois do Host/Origin e do login ----------
   const ctx = { db, wa, links, scheduler, auth, wrap, soDono: exigeDono, dataDir, ml, amazon, shopee, catalogo, catalogoItens, enderecoPublico, publicHost, gravarCookie, sidDe };
-  for (const montar of [rotasEnvios, rotasAvisos, rotasConexoes, rotasEspelho, rotasRemetentes, rotasEquipe, rotasCatalogoItens]) montar(app, ctx);
+  // rotasRotinas (Grupo vivo): o serviço é scheduler.rotinas, lido na hora; Operador pode tudo, sem soDono (P15)
+  for (const montar of [rotasEnvios, rotasAvisos, rotasConexoes, rotasEspelho, rotasRemetentes, rotasEquipe, rotasCatalogoItens, rotasRotinas]) montar(app, ctx);
 
   // Erros de parsing (JSON inválido, corpo grande demais) e inesperados: resposta curta, sem stack nem caminhos.
   // eslint-disable-next-line no-unused-vars

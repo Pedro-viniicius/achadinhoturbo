@@ -635,7 +635,7 @@ test('CA8: menu em grupos na ordem da spec, rodapé, rotas e aliases, verbetes d
   assert.deepEqual(grupos, [
     { grupo: '', itens: ['#visao'] },
     { grupo: 'Principal', itens: ['#links', '#grupos', '#blocos'] },
-    { grupo: 'Disparos', itens: ['#disparo-manual', '#disparo-automatico', '#disparar-mensagem', '#templates'] },
+    { grupo: 'Disparos', itens: ['#disparo-manual', '#disparo-automatico', '#disparar-mensagem', '#grupo-vivo', '#templates'] }, // Grupo vivo: etapa 8 da grade
     { grupo: 'Comunicação', itens: ['#relatorios'] },
     { grupo: 'Conta', itens: ['#conexoes', '#numeros'] }, // Equipe entra por app.js só para o Dono
   ]);
@@ -1129,7 +1129,9 @@ test('Ler mais (etapa 11): toda chave de LEIA_MAIS existe em TIPS e todo destino
     'manual.link': 'disparo-manual/mercado-livre', 'manual.amazon': 'disparo-manual/amazon', 'manual.shopee': 'disparo-manual/shopee',
     'regras.template': 'templates/linha-some', templates: 'templates/linha-some', whatsapp: 'primeiros-passos/whatsapp', equipe: 'equipe/papeis',
     'equipe.convite': 'equipe/convidar', 'ajustes.privacidade': 'privacidade/retencao', links: 'grupos/rotacionador', 'links.modo': 'grupos/rotacionador',
-    'links.proximo': 'grupos/proximo-grupo', relatorios: 'resultados/avisos', 'relatorios.virada': 'resultados/avisos', 'remetente': 'disparo-automatico/remetentes' };
+    'links.proximo': 'grupos/proximo-grupo', relatorios: 'resultados/avisos', 'relatorios.virada': 'resultados/avisos', 'remetente': 'disparo-automatico/remetentes',
+    'regras.modo_grade': 'disparo-automatico/horarios-marcados', 'regras.grade_horarios': 'disparo-automatico/horarios-marcados', 'regras.grade_modelos': 'disparo-automatico/horarios-marcados',
+    grupovivo: 'mensagens/grupo-vivo', 'grupovivo.rodizio': 'mensagens/grupo-vivo' };
   assert.deepEqual(LEIA, SPEC);
   // todo ícone q('chave') de uma tela com destino sai com data-docs; os demais seguem sem
   for (const chave of Object.keys(TIPS)) {
