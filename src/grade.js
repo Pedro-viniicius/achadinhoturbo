@@ -40,7 +40,7 @@ const minutosDe = (hora) => Number(hora.slice(0, 2)) * 60 + Number(hora.slice(3)
  * Grade validada e normalizada (dias sem repetir e em ordem, horários em ordem com hora de 2 dígitos, template vazio
  * = null), ou null se não houver grade (modo intervalo). Grade inválida lança Error com a frase para a tela.
  * Recusa campos a mais, mais de 48 horários, horário repetido, menos de 10 min entre dois horários seguidos (na ordem
- * do dia; da última linha para a primeira do dia seguinte não conta), ofertas fora de 1..20 e template que
+ * do dia e também na virada: da última linha para a primeira do dia seguinte), ofertas fora de 1..20 e template que
  * `templateExiste(id)` não confirma (sem `templateExiste`, nenhum template passa).
  */
 export function validarGrade(g, { templateExiste } = {}) {
@@ -66,9 +66,8 @@ export function validarGrade(g, { templateExiste } = {}) {
   };
   const horarios = g.horarios.map((l) => {
     if (!objetoSimples(l) || !soCampos(l, CAMPOS_LINHA)) throw new Error(FORMATO);
-    const m = HHMM.exec(typeof l.hora === 'string' ? l.hora.trim() : '');
-    if (!m) throw new Error(HORA_INVALIDA);
-    const hora = `${pad(m[1])}:${m[2]}`;
+    const hora = horaDaLinha(l.hora);
+    if (!hora) throw new Error(HORA_INVALIDA);
     const qtd = inteiro(l.qtd);
     if (!(qtd >= 1 && qtd <= MAX_QTD_GRADE)) throw new Error(`Horário ${hora}: ofertas de 1 a ${MAX_QTD_GRADE}.`);
     let template_id = null;
@@ -86,6 +85,13 @@ export function validarGrade(g, { templateExiste } = {}) {
       throw new Error(`Os horários ${antes} e ${agora} estão a menos de ${INTERVALO_MIN_GRADE} min um do outro.`);
     }
   }
+  // virada do dia: a última linha contra a primeira do dia seguinte (23:55 e 00:00 seriam 5 min)
+  if (horarios.length > 1) {
+    const ult = horarios.at(-1).hora; const pri = horarios[0].hora;
+    if (minutosDe(pri) + 1440 - minutosDe(ult) < INTERVALO_MIN_GRADE) {
+      throw new Error(`Os horários ${ult} e ${pri} estão a menos de ${INTERVALO_MIN_GRADE} min um do outro.`);
+    }
+  }
   return { dias, horarios };
 }
 
@@ -96,15 +102,54 @@ export function proximoHorario(grade, depoisDe = Date.now()) {
 }
 
 /**
+ * Hora de uma linha em 'HH:MM' ('9:00' vira '09:00', como o proximaOcorrencia a lê), ou null se não for hora.
+ * A API grava a grade já normalizada; isto vale para a grade editada à mão no banco.
+ */
+export function horaDaLinha(hora) {
+  const m = HHMM.exec(typeof hora === 'string' ? hora.trim() : '');
+  return m ? `${pad(m[1])}:${m[2]}` : null;
+}
+
+/**
  * Linha da grade cujo HH:MM, no dia de `ts` (hora local), é exatamente o de `ts` (segundos e ms zerados, como os
  * horários que proximoHorario devolve). Não confere os dias: quem chama passa um horário que veio da própria grade.
+ * Devolve a linha como está gravada; quem usa a quantidade e o template lê por qtdDaLinha e templateDaLinha.
  */
 export function horarioDe(grade, ts) {
   if (!objetoSimples(grade) || !Array.isArray(grade.horarios) || !Number.isFinite(ts)) return null;
   const d = new Date(ts);
   if (d.getSeconds() !== 0 || d.getMilliseconds() !== 0) return null;
   const hora = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
-  return grade.horarios.find((l) => l?.hora === hora) ?? null;
+  return grade.horarios.find((l) => objetoSimples(l) && horaDaLinha(l.hora) === hora) ?? null;
+}
+
+/**
+ * Ofertas de uma linha da grade: a `qtd` de 1 a 20 (número ou texto só com dígitos); sem linha ou fora disso (só num
+ * banco editado à mão), `padrao` (o per_run da regra). O agendador e o cartão (proximo_horario) usam esta mesma conta.
+ */
+export function qtdDaLinha(linha, padrao) {
+  const qtd = objetoSimples(linha) ? inteiro(linha.qtd) : NaN;
+  return qtd >= 1 && qtd <= MAX_QTD_GRADE ? qtd : padrao;
+}
+
+/** Template pedido pela linha da grade: inteiro ≥ 1 (número ou texto só com dígitos), ou null (o template da regra). */
+export function templateDaLinha(linha) {
+  const id = objetoSimples(linha) ? inteiro(linha.template_id) : NaN;
+  return id >= 1 ? id : null;
+}
+
+/**
+ * Horário do próximo envio de uma regra com grade, a mesma conta do tick (src/scheduler.js), do "Enviar agora", da
+ * prévia e do cartão (proximo_horario em src/server.js). `nextRunAt` só vale se for um horário da grade: no futuro, é
+ * ele; vencido, é o que resolverVencido vai executar (só o mais recente, até a tolerância) ou, se for pulado, o
+ * seguinte. Sem horário gravado, ou com um que não é da grade (o tick o descarta), é o primeiro depois de `now`.
+ */
+export function proximoEnvio(grade, nextRunAt, now = Date.now(), tolMs = TOLERANCIA_MS) {
+  const seguinte = (h) => proximoHorario(grade, h);
+  if (!Number.isFinite(nextRunAt) || !horarioDe(grade, nextRunAt)) return seguinte(now);
+  if (nextRunAt > now) return nextRunAt;
+  const r = resolverVencido(seguinte, nextRunAt, now, tolMs);
+  return r.executar ?? r.proximo;
 }
 
 /**

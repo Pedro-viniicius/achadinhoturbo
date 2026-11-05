@@ -500,6 +500,13 @@ function formRegra(r) {
       dedupe_days: g('dedupe_days'), send_image: g('send_image') === '1', enabled: nova ? true : r.enabled,
       grade: ritmo.corpo(), // sempre explícito: null = "A cada X minutos" (o PUT sem grade também grava NULL)
     };
+    if (ritmo.modo() === 'grade') {
+      // D1: em "Em horários marcados" estes dois campos ficam escondidos e não podem virar erro: vai o digitado, se
+      // válido; senão o salvo na regra, se válido; senão o padrão (3 ofertas, 60 min). As checagens abaixo ficam iguais.
+      const valido = (v, ok, salvo, padrao) => (ok(v) ? v : ok(salvo) ? String(salvo) : padrao);
+      corpo.per_run = valido(corpo.per_run, (v) => Number(v) >= 1 && Number(v) <= 20, r.per_run, '3');
+      corpo.interval_min = valido(corpo.interval_min, (v) => Number(v) >= 1, r.interval_min, '60');
+    }
     const erros = [];
     if (!String(corpo.name || '').trim()) erros.push({ msg: 'Dê um nome ao disparo automático.', el: $('[name=name]', dlg) });
     if (!corpo.tag_id && fcatPrecisaEtiqueta(fontes)) erros.push({ msg: 'Escolha a etiqueta ML padrão (cadastre em Conexões > Mercado Livre se ainda não tiver).', el: $('[name=tag_id]', dlg) });
@@ -771,3 +778,5 @@ carregar().then(() => {
 }).catch((e) => aviso(e.message, true));
 setInterval(() => atualizarEstado().catch(() => {}), 3000);
 setInterval(() => { if (rotaAtual() === 'disparo-automatico' && !$('#dlg').open) recarregarRegras().catch(() => {}); }, 10000);
+// Grupo vivo: o próximo horário e a contagem de 24 h chegam sem recarregar (gvAtualizar não repinta à toa nem rouba o foco)
+setInterval(() => { if (rotaAtual() === 'grupo-vivo' && !$('#dlg').open) gvAtualizar().catch(() => {}); }, 10000);

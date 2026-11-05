@@ -4,7 +4,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  validarGrade, proximoHorario, horarioDe, resolverVencido,
+  validarGrade, proximoHorario, horarioDe, resolverVencido, horaDaLinha, qtdDaLinha, templateDaLinha, proximoEnvio,
   MAX_HORARIOS_GRADE, INTERVALO_MIN_GRADE, TOLERANCIA_MIN, MAX_QTD_GRADE,
 } from '../src/grade.js';
 import { proximaOcorrencia } from '../src/envios.js';
@@ -60,6 +60,15 @@ test('validarGrade: 10 min entre horários seguidos passa; 9 min é recusado (co
   assert.equal(validarGrade({ horarios: [linha('10:00'), linha('10:10')] }, opts).horarios.length, 2);
   erro({ horarios: [linha('10:09'), linha('10:00')] }, /10:00 e 10:09.*menos de 10 min/);
   erro({ horarios: [linha('08:00'), linha('23:59'), linha('23:50')] }, /23:50 e 23:59/);
+});
+
+test('validarGrade: na virada do dia, a última linha contra a primeira do dia seguinte também precisa de 10 min', () => {
+  erro({ horarios: [linha('23:55'), linha('00:00')] }, /^Os horários 23:55 e 00:00 estão a menos de 10 min um do outro\.$/);
+  erro({ horarios: [linha('00:05'), linha('12:00'), linha('23:56')] }, /^Os horários 23:56 e 00:05 estão a menos de 10 min um do outro\.$/);
+  assert.equal(validarGrade({ horarios: [linha('23:50'), linha('00:00')] }, opts).horarios.length, 2, '10 min em ponto passa');
+  assert.equal(validarGrade({ horarios: [linha('00:00')] }, opts).horarios.length, 1, 'um horário só não tem virada');
+  // 48 horários de 30 em 30 min (o modelo do painel): 23:30 → 00:00 são 30 min
+  assert.equal(validarGrade({ horarios: Array.from({ length: 48 }, (_, i) => linha(hhmm(i * 30))) }, opts).horarios.length, 48);
 });
 
 test('validarGrade: horário repetido é recusado, mesmo escrito de outro jeito', () => {
@@ -235,4 +244,39 @@ test('resolverVencido: função de próximo que não avança não prende o laço
   assert.ok(chamadas < 2000, `laço limitado (${chamadas} chamadas)`);
   assert.equal(r2.executar, null, 'o salto também estourou: nada sai');
   assert.equal(r2.proximo, em(2, 10) + 1, 'o próximo é o primeiro depois de agora');
+});
+
+// ---------- leitura única da linha e do próximo envio (rodada 2, Q2: o cartão e o agendador usam as mesmas funções) ----------
+
+test('horaDaLinha e horarioDe: hora sem zero à esquerda (grade editada à mão) é o mesmo horário que o proximoHorario devolve', () => {
+  assert.equal(horaDaLinha('9:00'), '09:00');
+  assert.equal(horaDaLinha(' 21:05 '), '21:05');
+  for (const h of ['24:00', '9:5', '', null, 900, '09h00']) assert.equal(horaDaLinha(h), null, String(h));
+  const g = { dias: [1], horarios: [{ hora: '9:00', qtd: 2, template_id: null }, null, { hora: 'x' }] };
+  const ts = proximoHorario(g, em(2, 8));
+  assert.equal(ts, em(2, 9));
+  assert.deepEqual(horarioDe(g, ts), { hora: '9:00', qtd: 2, template_id: null }, 'a linha como está gravada');
+});
+
+test('qtdDaLinha e templateDaLinha: número ou texto só com dígitos; fora de forma, o da regra', () => {
+  assert.equal(qtdDaLinha(linha('09:00', 7), 3), 7);
+  assert.equal(qtdDaLinha(linha('09:00', '2'), 3), 2, 'texto com dígitos');
+  for (const q of [0, 21, 99, 2.5, '2a', null, undefined, { x: 1 }]) assert.equal(qtdDaLinha(linha('09:00', q), 3), 3, String(q));
+  assert.equal(qtdDaLinha(null, 3), 3, 'sem linha: per_run');
+  assert.equal(qtdDaLinha(linha('09:00', MAX_QTD_GRADE), 3), MAX_QTD_GRADE);
+  assert.equal(templateDaLinha(linha('09:00', 1, 7)), 7);
+  assert.equal(templateDaLinha(linha('09:00', 1, '7')), 7);
+  for (const t of [null, '', 0, -1, 1.5, 'sete', { x: 1 }]) assert.equal(templateDaLinha(linha('09:00', 1, t)), null, String(t));
+  assert.equal(templateDaLinha(null), null);
+});
+
+test('proximoEnvio: o gravado no futuro; vencido, o que o resolverVencido executa (ou o seguinte); fora da grade, o primeiro depois de agora', () => {
+  const g = gradeDe([1], '09:00', '10:00', '11:00', '15:00');
+  assert.equal(proximoEnvio(g, null, em(2, 8)), em(2, 9), 'sem horário gravado');
+  assert.equal(proximoEnvio(g, em(2, 11), em(2, 8)), em(2, 11), 'no futuro: o gravado');
+  assert.equal(proximoEnvio(g, em(2, 9), em(2, 9, 20)), em(2, 9), 'vencido há 20 min: ainda sai');
+  assert.equal(proximoEnvio(g, em(2, 9), em(2, 11, 20)), em(2, 11), 'vários vencidos: só o último, como o tick');
+  assert.equal(proximoEnvio(g, em(2, 9), em(2, 11, 45)), em(2, 15), 'todos passaram da tolerância: o seguinte');
+  assert.equal(proximoEnvio(g, em(2, 9, 7), em(2, 8)), em(2, 9), 'gravado que não é horário da grade não vale');
+  assert.equal(proximoEnvio({ dias: [], horarios: [linha('09:00')] }, null, em(2, 8)), null);
 });

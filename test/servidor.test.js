@@ -1119,6 +1119,25 @@ test('grade (CA9): GET /api/rules traz proximo_horario { ts, hora, qtd, template
   } finally { await s.fechar(); }
 });
 
+test('grade (Q2): proximo_horario anuncia o que o agendador usa com a grade editada à mão (hora sem zero, qtd fora de forma, template sumido)', async () => {
+  const { s, api } = await comLogin();
+  try {
+    const cupom = await criarTemplate(api, 'Cupom');
+    const h1 = horaDaqui(180); const h2 = horaDaqui(300);
+    const id = (await api('/api/rules', 'POST', corpoRegra({ grade: { horarios: [{ hora: h1, qtd: 2, template_id: cupom }, { hora: h2, qtd: 3 }] } }))).json.id;
+    const proximo = async () => (await api('/api/rules')).json.find((r) => r.id === id).proximo_horario;
+    const ts = proximoHorario(parseRule(linhaRegra(s.db, id)).grade, Date.now());
+    const semZero = h1.startsWith('0') ? h1.slice(1) : ` ${h1} `; // '9:05' ou ' 13:05 ': o que o proximaOcorrencia também lê
+    const gravar = (l1) => s.db.prepare('UPDATE rules SET grade = ? WHERE id = ?').run(JSON.stringify({ dias: [0, 1, 2, 3, 4, 5, 6], horarios: [l1, { hora: h2, qtd: 3, template_id: null }] }), id);
+    gravar({ hora: semZero, qtd: '2', template_id: String(cupom) });
+    assert.deepEqual(await proximo(), { ts, hora: h1, qtd: 2, template_id: cupom }, 'hora normalizada, qtd e template lidos como o agendador');
+    gravar({ hora: h1, qtd: 99, template_id: cupom });
+    assert.deepEqual(await proximo(), { ts, hora: h1, qtd: 4, template_id: cupom }, 'qtd fora de 1 a 20: o per_run da regra');
+    s.db.prepare('DELETE FROM templates WHERE id = ?').run(cupom); // à mão: a API bloqueia
+    assert.deepEqual(await proximo(), { ts, hora: h1, qtd: 4, template_id: null }, 'template sumido: o da regra');
+  } finally { await s.fechar(); }
+});
+
 test('grade: /api/state traz os limites da grade e os do Grupo vivo (max_conteudos, max_horarios_rotina)', async () => {
   const { s, api } = await comLogin();
   try {

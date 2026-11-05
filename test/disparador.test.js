@@ -652,3 +652,70 @@ test('grade: a prévia ("Ver ofertas") usa a quantidade e o template do próximo
   assert.ok((await scheduler.previewOffers(id)).every((o) => o.text.startsWith('*')), 'template apagado: o da regra');
   assert.deepEqual(avisosDe(db), [], 'a prévia não escreve no Histórico');
 });
+
+// Rodada 2 (Q1): a regra trocada de ritmo no meio de uma execução. Sem grade, o fim da execução é o de sempre (CA1);
+// salva em "horários marcados", o próximo do intervalo não pode ficar gravado, nem pela cópia velha da lista do tick.
+test('sem grade (CA1): regra editada no intervalo durante a execução grava o próximo como hoje (o do intervalo lido no começo)', async (t) => {
+  const { db, links, scheduler } = setup();
+  relogio(t, dia(2, 10, 0));
+  const id = regraJanela(db, ['08:00', '22:00'], { per: 1, interval: 60 });
+  const pedir = links.requestLink;
+  links.requestLink = async (o) => { db.prepare('UPDATE rules SET interval_min = 15, next_run_at = NULL WHERE id = ?').run(id); return pedir(o); }; // o PUT
+  await scheduler.runRule(id);
+  assert.deepEqual(linhaRegra(db, id), { next_run_at: alignToWindow(dia(2, 10, 0) + 60 * 60000, '08:00', '22:00'), last_run_at: dia(2, 10, 0), grade: null });
+});
+
+test('grade (Q1): salva em "horários marcados" enquanto roda pelo intervalo, o próximo do intervalo não fica gravado', async (t) => {
+  const { db, wa, links, scheduler } = setup();
+  relogio(t, dia(2, 10, 0));
+  const id = regraJanela(db, ['00:00', '23:59'], { per: 1, interval: 60 });
+  const grade = { dias: [0, 1, 2, 3, 4, 5, 6], horarios: [{ hora: '10:30', qtd: 2, template_id: null }] };
+  const pedir = links.requestLink;
+  links.requestLink = async (o) => { comGrade(db, id, grade); return pedir(o); }; // o PUT grava a grade e zera o next_run_at
+  await scheduler.runRule(id);
+  links.requestLink = pedir;
+  assert.deepEqual([linhaRegra(db, id).next_run_at, linhaRegra(db, id).last_run_at], [null, dia(2, 10, 0)], 'sem o 11:00 do intervalo');
+  await scheduler.tick();
+  assert.deepEqual([wa.simulated.length, linhaRegra(db, id).next_run_at], [1, dia(2, 10, 30)], 'o tick calcula pela grade, sem enviar');
+});
+
+test('grade (Q1): regra salva em "horários marcados" enquanto outra roda no mesmo tick não sai pelo intervalo (lista velha)', async (t) => {
+  const { db, wa, links, scheduler } = setup();
+  relogio(t, dia(2, 10, 0));
+  const a = addRule(db, { name: 'A', tag: 1, groups: ['111@g.us'], items: ITEMS, per: 1 });
+  const b = addRule(db, { name: 'B', tag: 1, groups: ['222@g.us'], items: ITEMS, per: 2 });
+  const pedir = links.requestLink;
+  let primeira = true;
+  links.requestLink = async (o) => {
+    if (primeira) { primeira = false; comGrade(db, b, { dias: [0, 1, 2, 3, 4, 5, 6], horarios: [{ hora: '12:00', qtd: 1, template_id: null }] }); }
+    return pedir(o);
+  };
+  await scheduler.tick();
+  assert.equal(wa.simulated.filter((m) => m.jid === '111@g.us').length, 1, 'a regra A roda pelo intervalo, como hoje');
+  assert.equal(wa.simulated.filter((m) => m.jid === '222@g.us').length, 0, 'a B não sai fora do horário marcado');
+  assert.equal(linhaRegra(db, b).next_run_at, dia(2, 12, 0));
+  assert.equal(linhaRegra(db, a).next_run_at, dia(2, 11, 0));
+});
+
+test('grade (Q2): next_run_at que não é horário da grade (editado à mão) é trocado pelo próximo horário, sem enviar, como o cartão anuncia', async (t) => {
+  const { db, wa, scheduler } = setup();
+  relogio(t, dia(2, 10, 10));
+  const id = regraJanela(db, ['00:00', '23:59'], { per: 4 });
+  comGrade(db, id, { dias: [0, 1, 2, 3, 4, 5, 6], horarios: [{ hora: '10:00', qtd: 1, template_id: null }, { hora: '12:00', qtd: 2, template_id: null }] }, dia(2, 10, 7));
+  await scheduler.tick();
+  assert.deepEqual([wa.simulated.length, linhaRegra(db, id).next_run_at], [0, dia(2, 12, 0)], 'nada de per_run às 10:10');
+  assert.deepEqual(avisosDe(db), []);
+  t.mock.timers.setTime(dia(2, 12, 0) + 5000);
+  await scheduler.tick();
+  assert.equal(wa.simulated.length, 2, 'a linha das 12:00');
+});
+
+test('grade (Q2): hora sem zero à esquerda e qtd como texto (banco editado à mão) saem pela linha, não pelo per_run', async (t) => {
+  const { db, wa, scheduler } = setup();
+  relogio(t, dia(2, 9, 0) + 5000);
+  const id = regraJanela(db, ['00:00', '23:59'], { per: 4 });
+  comGrade(db, id, { dias: [0, 1, 2, 3, 4, 5, 6], horarios: [{ hora: '9:00', qtd: '2', template_id: null }, { hora: '15:00', qtd: 1, template_id: null }] }, dia(2, 9, 0));
+  await scheduler.tick();
+  assert.equal(wa.simulated.length, 2);
+  assert.equal(linhaRegra(db, id).next_run_at, dia(2, 15, 0));
+});

@@ -12,7 +12,7 @@ import express from 'express';
 import { openDb } from '../src/db.js';
 import { createWhatsApp } from '../src/whatsapp.js';
 import { createEnvios, validarTextoMensagem, validarEnquete, HHMM } from '../src/envios.js';
-import { createRotinas, montarRotas, MAX_CONTEUDOS, MAX_HORARIOS_ROTINA } from '../src/rotinas.js';
+import { createRotinas, montarRotas, MAX_CONTEUDOS, MAX_HORARIOS_ROTINA, MAX_ROTINAS, ENVIAR_AGORA_INTERVALO_MIN } from '../src/rotinas.js';
 
 // o fetch de verdade só serve ao teste das rotas (HTTP local); o global fica bloqueado e o último teste confere
 const fetchLocal = globalThis.fetch;
@@ -40,6 +40,7 @@ const BOM_DIA = () => ({
 });
 
 const DESCONECTADO = 'O WhatsApp está desconectado. Conecte o número antes de disparar.';
+const FREIO = 'Esta rotina já foi enviada agora há pouco. Espere um minuto para enviar de novo.';
 
 /** Banco, WhatsApp simulado, fila de envios real e rotinas com relógio e sorteio injetados. */
 function montar({ conectado = true, sorteios = [] } = {}) {
@@ -420,7 +421,8 @@ test('Enviar agora: sem WhatsApp falha sem gravar; conectado grava já, avança 
   await s.rotinas.processarPendentes(em(5, 8));
   assert.equal(enviosDa(s)[1].payload.texto, TEXTOS[1]);
 
-  // desligada também envia na hora (é um pedido do dono); sem grupos, não
+  // desligada também envia na hora (é um pedido do dono); sem grupos, não. Um minuto depois do primeiro (o freio)
+  s.relogio.t = em(5, 7, 31);
   s.rotinas.ativar(id, false);
   assert.equal(s.rotinas.enviarAgora(id).grupos, 2);
   assert.equal(rotina(s, id).next_run_at, null);
@@ -428,6 +430,47 @@ test('Enviar agora: sem WhatsApp falha sem gravar; conectado grava já, avança 
   assert.throws(() => s.rotinas.enviarAgora(id), recusa('Os grupos desta rotina não existem mais. Edite a rotina e escolha os grupos de novo.'));
   assert.throws(() => s.rotinas.enviarAgora(999), recusa('Rotina não encontrada.', 404));
   assert.throws(() => s.rotinas.enviarAgora('abc'), recusa('Rotina não encontrada.', 404));
+});
+
+test('Enviar agora: no máximo um por minuto em cada rotina; o 2º volta 429 sem gravar nada', () => {
+  assert.equal(ENVIAR_AGORA_INTERVALO_MIN, 1);
+  const s = montar();
+  const a = s.rotinas.criar(BOM_DIA()).id;
+  const b = s.rotinas.criar({ ...BOM_DIA(), nome: 'Boa noite', group_jids: [G3] }).id;
+  const t0 = em(5, 7, 30);
+  s.relogio.t = t0;
+  assert.equal(s.rotinas.enviarAgora(a).grupos, 2);
+  const depois = () => ({ envios: enviosDa(s).length, indice: rotina(s, a).proximo_indice, ultimo: rotina(s, a).ultimo_envio_id, acordou: s.estado.acordou });
+  const antes = depois();
+  // o clique repetido, na hora e um instante antes do minuto, não grava, não avança o rodízio e não acorda o agendador
+  assert.throws(() => s.rotinas.enviarAgora(a), recusa(FREIO, 429));
+  s.relogio.t = t0 + MIN - 1;
+  assert.throws(() => s.rotinas.enviarAgora(String(a)), recusa(FREIO, 429));
+  assert.deepEqual(depois(), antes);
+  // outra rotina não é freada pela primeira
+  assert.equal(s.rotinas.enviarAgora(b).grupos, 1);
+  // passado 1 min do envio (a recusa não reinicia a conta), vale de novo; e o freio volta a contar daí
+  s.relogio.t = t0 + MIN;
+  assert.equal(s.rotinas.enviarAgora(a).grupos, 2);
+  assert.equal(rotina(s, a).proximo_indice, 2);
+  assert.throws(() => s.rotinas.enviarAgora(a), recusa(FREIO, 429));
+  assert.equal(enviosDa(s).length, 3);
+});
+
+test('Enviar agora: pedido recusado não arma o freio; relógio que volta não trava a rotina', () => {
+  const s = montar({ conectado: false });
+  const id = s.rotinas.criar(BOM_DIA()).id;
+  s.relogio.t = em(5, 7, 30);
+  assert.throws(() => s.rotinas.enviarAgora(id), recusa(DESCONECTADO));
+  s.wa.connect();
+  s.db.prepare("UPDATE rotinas SET group_jids = '[]' WHERE id = ?").run(id);
+  assert.throws(() => s.rotinas.enviarAgora(id), recusa('Os grupos desta rotina não existem mais. Edite a rotina e escolha os grupos de novo.'));
+  s.db.prepare('UPDATE rotinas SET group_jids = ? WHERE id = ?').run(JSON.stringify([G1, G2]), id);
+  assert.equal(s.rotinas.enviarAgora(id).grupos, 2, 'as recusas de antes não contam como envio');
+  // o relógio do computador voltou 1 h (ajuste de hora): o envio "do futuro" não trava a rotina por uma hora
+  s.relogio.t = em(5, 6, 30);
+  assert.equal(s.rotinas.enviarAgora(id).grupos, 2);
+  assert.throws(() => s.rotinas.enviarAgora(id), recusa(FREIO, 429), 'e o freio conta a partir desse envio');
 });
 
 // ------------------------------------------------------------------------------------------- editar, ligar, excluir
@@ -508,6 +551,21 @@ test('excluir: some a rotina; o envio já gravado e o Histórico ficam', async (
   const outra = s.rotinas.criar({ ...BOM_DIA(), nome: 'Nova' });
   assert.ok(outra.id > id);
   assert.equal(s.rotinas.listar().find((r) => r.id === outra.id).enviadas_24h, 0);
+});
+
+test('teto de rotinas: com 50 guardadas (ligadas ou não), a próxima volta 400 com a frase; excluir uma libera', () => {
+  const s = montar();
+  assert.equal(MAX_ROTINAS, 50, 'o número que o README e os Docs citam');
+  const ids = [];
+  for (let i = 0; i < MAX_ROTINAS; i++) ids.push(s.rotinas.criar({ ...BOM_DIA(), nome: `Rotina ${i + 1}`, enabled: i % 2 === 0 }).id);
+  const MSG = 'O programa guarda no máximo 50 rotinas. Exclua uma para criar outra.';
+  assert.throws(() => s.rotinas.criar({ ...BOM_DIA(), nome: 'Uma a mais' }), recusa(MSG));
+  assert.equal(s.db.prepare('SELECT COUNT(*) AS n FROM rotinas').get().n, MAX_ROTINAS, 'nada foi gravado');
+  // editar continua valendo no teto
+  assert.equal(s.rotinas.atualizar(ids[0], { nome: 'Editada' }).id, ids[0]);
+  s.rotinas.apagar(ids[1]);
+  assert.ok(s.rotinas.criar({ ...BOM_DIA(), nome: 'Depois de excluir' }).id > ids.at(-1));
+  assert.throws(() => s.rotinas.criar({ ...BOM_DIA(), nome: 'De novo no teto' }), recusa(MSG));
 });
 
 // ------------------------------------------------------------------------------------------- lista e painel
@@ -615,6 +673,7 @@ test('rotas: listar, criar, editar, ligar, enviar agora e excluir; erros com a f
     s.wa.connect();
     r = await pedir('POST', `/api/rotinas/${id}/enviar`);
     assert.deepEqual(JSON.parse(r.texto), { envio_id: 1, grupos: 2 });
+    assert.deepEqual(await pedir('POST', `/api/rotinas/${id}/enviar`), { status: 429, texto: JSON.stringify({ erro: FREIO }) });
     assert.deepEqual(await pedir('PUT', '/api/rotinas/999', BOM_DIA()), { status: 404, texto: JSON.stringify({ erro: 'Rotina não encontrada.' }) });
     assert.equal((await pedir('DELETE', '/api/rotinas/x')).status, 404);
     assert.deepEqual(await pedir('DELETE', `/api/rotinas/${id}`), { status: 200, texto: '{"ok":true}' });

@@ -46,11 +46,11 @@ Dentro do fieldset "Ritmo de envio", primeiro item: `.seg` **"Como enviar"** com
 
 1. **Dias** (`.dias`, reaproveita `DISP_DIAS` e o padrão do Repetir): "Em quais dias". Padrão: todos marcados. Dica: "Os mesmos horários valem nos dias marcados." (**[ARQ]** se dias não entrarem, o bloco some.)
 2. **Modelos rápidos** (linha de `button.chip` como os placeholders de Templates): "A cada 30 min, 8h às 22h", "A cada hora, 8h às 22h", "Manhã, tarde e noite" (09:00, 15:00, 20:00), "Horários de pico" (12:00, 18:00, 21:00). Mais um botão **"Montar…"** que abre o gerador:
-   - mini-formulário em linha (`.grade`): **De** (time), **Até** (time), **A cada** (select 15, 30, 45, 60, 90, 120 min), **Ofertas em cada** (número 1 a 20), **Template** (select: "Padrão da regra" ou um template).
+   - mini-formulário em linha (`.grade`): **De** (time), **Até** (time), **A cada** (select 15, 30, 45, 60, 90, 120 min), **Ofertas em cada** (número 1 a 20), **Template** (select: "Padrão do disparo" ou um template).
    - Botões "Substituir horários" e "Acrescentar". Se a grade já tem linhas, "Substituir" pede `confirm("Isso troca os horários atuais por 29 novos. Continuar?")`.
    - Os quatro modelos rápidos são atalhos que preenchem o gerador e já aplicam (sempre "Substituir", com a mesma confirmação).
 3. **Lista de horários** (`<ol class="gh-lista">`, uma `<li role="group" aria-label="Horário 3">` por linha, em ordem de hora):
-   - **Horário** (`input type="time"`), **Ofertas** (número 1 a 20), **Template** (select: "Padrão da regra ({nome})" + templates), ações **Copiar** e **Remover** (botões de texto; no celular com 44 px).
+   - **Horário** (`input type="time"`), **Ofertas** (número 1 a 20), **Template** (select: "Padrão do disparo ({nome})" + templates), ações **Copiar** e **Remover** (botões de texto; no celular com 44 px).
    - **Copiar** cria uma linha com os mesmos valores, 30 minutos depois do horário copiado (ou o próximo livre), com o foco no horário novo para o dono ajustar.
    - **Ordenação:** ao sair do campo de horário (`change`), a linha vai para o lugar certo e o foco volta ao mesmo campo; um `role="status"` diz "Horário movido para a posição 4." Nunca reordena enquanto digita.
    - Cabeçalho de colunas (Horário, Ofertas, Template) só em ≥ 601 px; em ≤ 600 px cada campo mostra o rótulo em cima (a `label` existe nos dois casos; no desktop o texto do rótulo da linha fica visualmente oculto, com o cabeçalho único à vista).
@@ -128,7 +128,7 @@ Lista de cartões compactos: título, chip do tipo, 2 linhas do texto, botão **
 - **Horário que se encontra com outra regra ou rotina** (não bloqueia, sem aviso): vão para a fila única, uma atrás da outra, com as pausas de Ajustes. Só na linha, `.dica` discreta quando o servidor souber: "10:00 também tem {nome}. Saem um depois do outro." **[ARQ]**
 - **Não dá tempo antes do próximo horário** (`nivel-aviso`, "!" textual, não bloqueia): "O envio das 10:00 leva uns 18 min (3 ofertas, 4 grupos, pausas de Ajustes) e o próximo é às 10:15. O próximo sai assim que o anterior acabar." Cálculo com as pausas de `S.st.ajustes`; aparece só quando estoura.
 - **Passou do limite anti-ban** **[ARQ/DONO]** (definir os números): dois níveis.
-  - *Acima do recomendado* (`nivel-aviso`, abaixo do resumo; salva): "Com as regras ligadas, este número enviaria cerca de 380 mensagens por dia. Acima de {N} aumenta o risco de bloqueio do WhatsApp. Para baixar: menos ofertas por horário, menos horários ou menos grupos." O cálculo soma as outras regras e as rotinas de Grupo vivo ligadas, se o servidor mandar; senão, só a regra aberta (e o texto diz "esta regra").
+  - *Acima do recomendado* (`nivel-aviso`, abaixo do resumo; salva): "Somando os outros disparos e rotinas ligados, este número enviaria cerca de 380 mensagens por dia. (Sem outros ligados: "Este número enviaria…".) Acima de {N} aumenta o risco de bloqueio do WhatsApp. Para baixar: menos ofertas por horário, menos horários ou menos grupos." O cálculo soma as outras regras e as rotinas de Grupo vivo ligadas, se o servidor mandar; senão, só a regra aberta (e o texto diz "esta regra").
   - *Acima do máximo* (só se o dono quiser um teto duro; `nivel-erro` ao salvar, em `.erros`): "Passa do máximo de {M} mensagens por dia para este número. Reduza a grade para salvar."
   - Abaixo do recomendado: nada além do resumo neutro.
 - **Dias:** nenhum marcado, erro "Marque ao menos um dia."
@@ -153,7 +153,7 @@ Lista de cartões compactos: título, chip do tipo, 2 linhas do texto, botão **
 
 Em `TEXTOS_GRADE` e `TEXTOS_GRUPO_VIVO` (no topo dos arquivos novos), nunca soltos no componente; ajuda em `ajuda.js`.
 - **Botões:** Em horários marcados, A cada X minutos, Montar…, Substituir horários, Acrescentar, + Adicionar horário, Copiar, Remover, Limpar tudo, Nova mensagem, Nova enquete, Modelos, Usar este modelo, Criar do zero, Criar rotina, Enviar agora, Copiar, Excluir.
-- **Rótulos:** Como enviar; Em quais dias; Horário; Ofertas; Template; Padrão da regra ({nome}); Variação do horário; Ordem (Um depois do outro, Sorteio); Rotina ativa.
+- **Rótulos:** Como enviar; Em quais dias; Horário; Ofertas; Template; Padrão do disparo ({nome}); Variação do horário; Ordem (Um depois do outro, Sorteio); Rotina ativa.
 - **Toasts:** "Grade salva" (a regra segue "Salvar" normal), "Rotina criada", "Rotina salva", "Rotina ligada", "Rotina pausada", "Rotina excluída", "Enviado para {N} grupos".
 - **Avisos e erros:** como nas seções acima, em linguagem de resultado. Frase de "Enviar agora": "Enviando para {N} grupos." Nenhum texto técnico (sem "cron", "slot", "fila única").
 - **Verbetes para `TIPS`:** `regras.modo_grade`, `regras.grade_horarios`, `regras.grade_modelos`, `regras.grade_variacao`, `grupovivo`, `grupovivo.rodizio`, `grupovivo.variacao`. **Template excluído em uso** (texto de `confirm` em Templates): "Este template é usado em {N} horários de grades. Eles passam a usar o template padrão da regra." **[ARQ]** confirmar o comportamento.

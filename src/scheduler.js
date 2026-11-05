@@ -8,7 +8,7 @@ import { createAvisos } from './avisos.js';
 import { createEspelho } from './espelho.js';
 import { createRemetentes } from './remetentes.js';
 import { createRotinas } from './rotinas.js';
-import { proximoHorario, horarioDe, resolverVencido, MAX_QTD_GRADE, TOLERANCIA_MIN } from './grade.js';
+import { proximoHorario, horarioDe, resolverVencido, proximoEnvio, qtdDaLinha, templateDaLinha } from './grade.js';
 import { sleep, jitter } from './util.js';
 
 // Pausas entre mensagens: moram em ./util.js (src/envios.js usa o mesmo ritmo anti-bloqueio); reexportadas aqui.
@@ -245,35 +245,32 @@ export function createScheduler({ db, wa, links, ml = mlDefault, fast = false, d
   }
 
   /**
-   * Próximo horário da regra com grade, na mesma conta do cartão (proximoDaGrade em src/server.js): o next_run_at
-   * gravado, se for um horário da grade e não tiver passado da tolerância (o vencido que ainda vai sair); senão, o
-   * primeiro horário depois de agora.
-   */
-  function proximoDaRegra(rule, agora) {
-    const gravado = rule.next_run_at;
-    if (Number.isFinite(gravado) && agora - gravado <= TOLERANCIA_MIN * 60000 && horarioDe(rule.grade, gravado)) return gravado;
-    return proximoHorario(rule.grade, agora);
-  }
-
-  /**
    * Linha da grade que vale para esta execução (D4): a do horário executado pelo tick ou, sem ele ("Enviar agora" e
-   * prévia), a do próximo horário. null = regra sem grade ou horário sem linha (vale per_run e o template da regra).
+   * prévia), a do próximo envio, na mesma conta do cartão (proximoEnvio, src/grade.js). null = regra sem grade ou
+   * horário sem linha (vale per_run e o template da regra).
    */
   function linhaDaGrade(rule, horario, agora) {
     if (!rule.grade) return null;
-    return horarioDe(rule.grade, horario ?? proximoDaRegra(rule, agora));
+    return horarioDe(rule.grade, horario ?? proximoEnvio(rule.grade, rule.next_run_at, agora));
   }
 
-  /** Ofertas da execução: a qtd da linha (1 a 20; fora disso, só num banco editado à mão, vale per_run) ou per_run. */
-  const qtdDa = (rule, linha) => (Number.isInteger(linha?.qtd) && linha.qtd >= 1 && linha.qtd <= MAX_QTD_GRADE ? linha.qtd : rule.per_run);
+  /** Ofertas da execução: a qtd da linha (qtdDaLinha, a mesma conta do cartão) ou per_run. */
+  const qtdDa = (rule, linha) => qtdDaLinha(linha, rule.per_run);
 
   /** Template da execução: o da linha da grade, se existir; senão o da regra. `sumiu`: a linha pedia um que não existe mais. */
   function templateDa(rule, linha) {
     const daRegra = rule.template_id && db.prepare('SELECT * FROM templates WHERE id = ?').get(rule.template_id);
-    if (!Number.isInteger(linha?.template_id)) return { tpl: daRegra, sumiu: false };
-    const daLinha = db.prepare('SELECT * FROM templates WHERE id = ?').get(linha.template_id);
+    const idDaLinha = templateDaLinha(linha);
+    if (idDaLinha == null) return { tpl: daRegra, sumiu: false };
+    const daLinha = db.prepare('SELECT * FROM templates WHERE id = ?').get(idDaLinha);
     return daLinha ? { tpl: daLinha, sumiu: false } : { tpl: daRegra, sumiu: true };
   }
+
+  /**
+   * A regra está, no banco, em "horários marcados" (a mesma leitura de parseRule: grade ilegível = intervalo). Serve a
+   * quem tem uma cópia velha dela (o fim de uma execução pelo intervalo, a lista do tick). Nunca lança.
+   */
+  const comGradeAgora = (id) => { try { return !!getRule(id)?.grade; } catch { return false; } };
 
   /**
    * `horario` (regra com grade, vindo do tick): o horário da grade que esta execução cumpre. `manual` ("Enviar agora"):
@@ -377,7 +374,11 @@ export function createScheduler({ db, wa, links, ml = mlDefault, fast = false, d
       fecharCatalogo(rule, exec); // avisos de espera e cursor do catálogo, no fim (nunca na pré-visualização)
       const now = Date.now();
       if (rule.grade) fecharGrade(rule, { manual, horario, retrySoon }, now);
-      else {
+      else if (comGradeAgora(id)) {
+        // salva em "horários marcados" durante esta execução pelo intervalo (o PUT zerou o next_run_at): o próximo do
+        // intervalo não fica gravado, e o tick calcula o próximo horário pela grade nova
+        db.prepare('UPDATE rules SET last_run_at = ? WHERE id = ?').run(now, id);
+      } else {
         const next = retrySoon ? now + 60000 : alignToWindow(now + rule.interval_min * 60000, rule.window_start, rule.window_end);
         db.prepare('UPDATE rules SET last_run_at = ?, next_run_at = ? WHERE id = ?').run(now, next, id);
       }
@@ -408,7 +409,13 @@ export function createScheduler({ db, wa, links, ml = mlDefault, fast = false, d
     const regra = getRule(r.id); // a lista do tick pode estar velha (a regra salva enquanto outra rodava)
     if (!regra?.enabled || !regra.grade) return null;
     const grava = (next) => db.prepare('UPDATE rules SET next_run_at = ? WHERE id = ? AND next_run_at IS ?').run(next, regra.id, regra.next_run_at);
-    if (regra.next_run_at == null) { grava(proximoHorario(regra.grade, now)); return null; }
+    // sem horário, ou com um que não é da grade (grade editada à mão, sobra de outro ritmo): grava o próximo sem enviar,
+    // como o cartão anuncia (proximoEnvio)
+    if (regra.next_run_at == null || !horarioDe(regra.grade, regra.next_run_at)) {
+      const next = proximoHorario(regra.grade, now);
+      if (next !== regra.next_run_at) grava(next);
+      return null;
+    }
     if (regra.next_run_at > now) return null;
     const res = resolverVencido((h) => proximoHorario(regra.grade, h), regra.next_run_at, now);
     // o que vai sair fica gravado: com o WhatsApp fora, ele espera (e vence) como qualquer horário
@@ -500,7 +507,8 @@ export function createScheduler({ db, wa, links, ml = mlDefault, fast = false, d
       const rules = db.prepare('SELECT * FROM rules WHERE enabled = 1').all().map(parseRule);
       for (const r of rules) {
         const now = Date.now();
-        if (r.grade) {
+        // a lista pode estar velha: a regra salva em "horários marcados" enquanto outra rodava já vai pela grade
+        if (r.grade || comGradeAgora(r.id)) {
           // regra com grade (D3): pelos horários marcados, sem a janela
           if (running.has(r.id)) continue;
           const pronto = wa.isReady();

@@ -115,7 +115,8 @@ const MODELOS_GRUPO_VIVO = [
 
 // Estado da tela: a lista que veio do servidor, o erro da última carga, o contador que descarta resposta velha e o
 // botão que abriu o diálogo (o foco volta para ele quando o diálogo fecha).
-const GV = { lista: [], erro: '', seq: 0, origem: null };
+// `carregando`: há uma busca de /rotinas no ar; `html`: o que está pintado em #gv-lista (para não repintar à toa)
+const GV = { lista: [], erro: '', seq: 0, origem: null, carregando: 0, html: '' };
 
 /** Limites do formulário: os de /api/state.grade, com os de src/rotinas.js como reserva. */
 function gvLimites() {
@@ -218,19 +219,43 @@ function paginaGrupoVivo() {
 }
 /** Busca as rotinas e repinta a lista; resposta de uma carga mais antiga é descartada. */
 async function gvCarregar() {
-  const n = ++GV.seq;
+  const n = ++GV.seq; GV.carregando++;
   try {
     const x = await api('/rotinas'); if (n !== GV.seq) return;
     GV.lista = Array.isArray(x) ? x : []; GV.erro = '';
-  } catch (e) { if (n !== GV.seq) return; GV.erro = e.message; }
+  } catch (e) { if (n !== GV.seq) return; GV.erro = e.message; } finally { GV.carregando--; }
   gvPintarLista();
 }
+/**
+ * Atualização automática (D2; app.js chama a cada 10 s na tela do Grupo vivo, sem diálogo aberto). Não atropela uma
+ * carga no ar, não mostra erro (fica o que está na tela), não repinta com o foco dentro da lista (o foco se perderia)
+ * nem quando o HTML sairia igual (o "Enviando em instantes" muda com o relógio, por isso compara o HTML, não os dados).
+ */
+async function gvAtualizar() {
+  if (GV.carregando || !$('#gv-lista')) return;
+  const n = ++GV.seq; GV.carregando++;
+  let x;
+  try { x = await api('/rotinas'); } catch { return; } finally { GV.carregando--; }
+  const el = $('#gv-lista');
+  if (n !== GV.seq || !el || el.contains(document.activeElement)) return;
+  const lista = Array.isArray(x) ? x : [];
+  const html = gvListaHtml(lista, '');
+  if (html === GV.html) return;
+  GV.lista = lista; GV.erro = '';
+  gvPintarLista();
+}
+/** HTML de #gv-lista: a frase de erro com "Tentar de novo", os cartões ou, vazio, a galeria no lugar. */
+function gvListaHtml(lista, erro) {
+  const T = TEXTOS_GRUPO_VIVO;
+  return erro
+    ? `<p class="dica" role="status">${esc(T.naoCarregou(erro))}</p><button type="button" data-gv-recarregar>${T.tentarDeNovo}</button>`
+    : lista.length ? lista.map(cartaoRotinaViva).join('') : gvGaleriaHtml({ vazia: true });
+}
 function gvPintarLista() {
-  const T = TEXTOS_GRUPO_VIVO; const el = $('#gv-lista'); if (!el) return;
+  const el = $('#gv-lista'); if (!el) return;
   el.removeAttribute('aria-busy');
-  el.innerHTML = GV.erro
-    ? `<p class="dica" role="status">${esc(T.naoCarregou(GV.erro))}</p><button type="button" data-gv-recarregar>${T.tentarDeNovo}</button>`
-    : GV.lista.length ? GV.lista.map(cartaoRotinaViva).join('') : gvGaleriaHtml({ vazia: true }); // vazio: a galeria no lugar
+  GV.html = gvListaHtml(GV.lista, GV.erro);
+  el.innerHTML = GV.html;
 }
 /** Cliques da lista (cartões, galeria do estado vazio e "Tentar de novo"). Erro de rota vira toast (tentar). */
 async function gvAcao(ev) {

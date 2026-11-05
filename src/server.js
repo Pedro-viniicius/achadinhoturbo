@@ -25,7 +25,7 @@ import { CATEGORIAS, ORDENS, POR_PAGINA } from './afiliados.js';
 import { overview, resumo, evasaoDoDia, periodRange, startOfDay, dayOf } from './analytics.js';
 import { MODOS, LIMITE_MAX, LOTACAO_PCT, slugify, parseLink, pickGroup, statusDosGrupos, verificarLotacao, encaixarGrupoNovo } from './rotador.js';
 import { addLog } from './db.js';
-import { validarGrade, proximoHorario, horarioDe, MAX_HORARIOS_GRADE, INTERVALO_MIN_GRADE, TOLERANCIA_MIN, MAX_QTD_GRADE } from './grade.js';
+import { validarGrade, horarioDe, horaDaLinha, proximoEnvio, qtdDaLinha, templateDaLinha, MAX_HORARIOS_GRADE, INTERVALO_MIN_GRADE, TOLERANCIA_MIN, MAX_QTD_GRADE } from './grade.js';
 import crypto from 'node:crypto';
 
 const LOCAL_HOST = /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i;
@@ -528,23 +528,22 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
     ];
   };
   const COLS = 'name, enabled, tag_id, template_id, group_jids, source_type, source_config, sources, min_price, max_price, min_discount, per_run, interval_min, window_start, window_end, dedupe_days, send_image, grade';
-  const TOLERANCIA_MS = TOLERANCIA_MIN * 60000;
   /**
    * Próximo envio de uma regra com grade, para o cartão: { ts, hora, qtd, template_id } (template_id null = o da
-   * regra), ou null sem grade. É o next_run_at gravado pelo agendador quando ele é um horário da grade que ainda sai
-   * (no futuro ou atrasado até a tolerância); senão (regra nova ou editada, horário que vai ser pulado), o próximo
-   * horário da grade depois de agora. Grade quebrada no banco dá null, sem derrubar a lista.
+   * regra), ou null sem grade. O horário, a quantidade e o template saem das mesmas funções que o agendador usa
+   * (src/grade.js: proximoEnvio, qtdDaLinha, templateDaLinha), para o cartão anunciar o que de fato sai, inclusive
+   * com a grade editada à mão no banco. Template da linha que não existe mais: sai o da regra (null). Grade quebrada
+   * no banco dá null, sem derrubar a lista.
    */
   const proximoDaGrade = (regra, now = Date.now()) => {
     if (!regra?.grade) return null;
     try {
-      let ts = Number.isFinite(regra.next_run_at) && now - regra.next_run_at <= TOLERANCIA_MS && horarioDe(regra.grade, regra.next_run_at)
-        ? regra.next_run_at : null;
-      if (ts == null) ts = proximoHorario(regra.grade, now);
+      const ts = proximoEnvio(regra.grade, regra.next_run_at, now);
       const linha = ts == null ? null : horarioDe(regra.grade, ts);
       if (!linha) return null;
-      const tpl = Number(linha.template_id);
-      return { ts, hora: linha.hora, qtd: Number(linha.qtd), template_id: Number.isInteger(tpl) && tpl > 0 ? tpl : null };
+      const tpl = templateDaLinha(linha);
+      const existe = tpl != null && !!one('SELECT 1 AS ok FROM templates WHERE id = ?', tpl);
+      return { ts, hora: horaDaLinha(linha.hora), qtd: qtdDaLinha(linha, regra.per_run), template_id: existe ? tpl : null };
     } catch { return null; }
   };
   /**

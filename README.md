@@ -178,7 +178,7 @@ Em *Disparo automático → Novo disparo automático → Ritmo de envio*, o **Co
 - **Horário perdido**: o horário sai se atrasou até 30 min (programa desligado, WhatsApp fora, fila ocupada). Passou disso, é pulado, com um aviso no *Histórico*. Se vários venceram, sai só o mais recente. As frases:
   - `Horário 10:00 pulado: o programa estava desligado, o WhatsApp desconectado ou outro envio demorou. Próximo: 12:00.`
   - `3 horários pulados (10:00 a 12:00): o programa estava desligado, o WhatsApp desconectado ou outro envio demorou. Próximo: 13:00.`
-  - `Vários horários pulados desde …: …` (o programa ficou muitos dias desligado: o Histórico traz um aviso só, com o dia e a hora do primeiro horário perdido, em vez de um por horário)
+  - `8 horários pulados (09:00 de 03/11 a 13:00): o programa estava desligado, o WhatsApp desconectado ou outro envio demorou. Próximo: 21:00.` (o programa ficou dias desligado: o Histórico traz um aviso só, com o primeiro e o último horário pulados, em vez de um por horário; o de outro dia vem com a data. Depois de muitos dias, o número pode ficar abaixo do total, porque o programa não confere um por um os horários do meio)
   - `Horário 10:00: saíram 5 de 8 ofertas; não havia mais ofertas novas dentro dos filtros.` (faltou oferta: sai o que houver, sem acumular para o horário seguinte)
   - `Horário 10:00: o template escolhido para este horário não existe mais. As ofertas saíram com o template da regra.`
 - **Enviar agora e Ver ofertas**: usam a quantidade e o template do próximo horário. *Enviar agora* envia de verdade, mas não pula esse horário.
@@ -191,15 +191,16 @@ Em *Disparos → Grupo vivo*, rotinas que mandam sozinhas **mensagens** ou **enq
 
 - **Rotina**: um nome (só você vê), liga e desliga, o tipo (*Nova mensagem* ou *Nova enquete*, que não muda depois), de 1 a 5 conteúdos (até 5 textos ou enquetes), os grupos, os dias da semana e até 6 horários por rotina. O programa guarda até 50 rotinas. Sem foto por enquanto.
 - **Ordem**: com mais de um conteúdo, *Um depois do outro* segue a lista e volta ao primeiro; *Sorteio* escolhe ao acaso, sem repetir o último.
+- **Cartão**: cada rotina vira um cartão com o "Próximo envio" e quantas saíram nas últimas 24 horas. A lista se atualiza sozinha a cada 10 s, enquanto nenhum formulário está aberto.
 - **Modelos**: a galeria tem 10 modelos (seis mensagens e quatro enquetes). *Usar este modelo* só preenche o formulário: nada é salvo até *Criar rotina*.
-- **Horário perdido**: a mesma regra da grade (atrasou até 30 min, senão é pulado, e sai só o mais recente). Frase: `Horário de 05/11 10:00 pulado: o programa estava desligado, o WhatsApp desconectado ou outro envio demorou. Próximo: 05/11 18:00.`
+- **Horário perdido**: a mesma regra da grade (atrasou até 30 min, senão é pulado, e sai só o mais recente). As frases: `Horário de 05/11 10:00 pulado: o programa estava desligado, o WhatsApp desconectado ou outro envio demorou. Próximo: 05/11 18:00.` e, quando vários passaram (o programa ficou dias desligado), um aviso só, com o último: `7 horários pulados, o último de 05/11 08:00: o programa estava desligado, o WhatsApp desconectado ou outro envio demorou. Próximo: 05/11 18:00.`
 - **Enviar agora**: manda a rotina já, avança o rodízio e não muda o próximo horário. Para a mesma rotina, só vale um a cada 1 min.
 - **Histórico**: os envios aparecem como `Grupo vivo: nome da rotina`, em *Tudo* (não há tipo próprio). Excluir uma rotina não apaga o que ela já enviou. O Operador pode criar e mudar rotinas, como no Disparo automático.
 - **Fila e pausas**: tudo sai pela mesma fila, com as pausas de *Ajustes*.
 
 ### Aviso de volume
 
-O painel soma as mensagens por dia dos disparos e das rotinas ligados e, com mais de 400 mensagens por dia, mostra um aviso no formulário. É só um aviso: o programa nunca bloqueia. O WhatsApp não publica um limite, então o 400 é uma estimativa prudente.
+O painel soma as mensagens por dia dos disparos e das rotinas ligados e, com mais de 400 mensagens por dia, mostra um aviso no formulário. No *Disparo automático*, quando há outros disparos ou rotinas ligados, o aviso diz "Somando os outros disparos e rotinas ligados, este número…"; quando só o disparo aberto entra na conta, diz "Este número…". É só um aviso: o programa nunca bloqueia. O WhatsApp não publica um limite, então o 400 é uma estimativa prudente.
 
 Honestamente: a grade e o Grupo vivo foram testados com o WhatsApp simulado (`test/grade.test.js`, `test/rotinas.test.js`, `test/grade-painel.test.js`, `test/grupovivo-painel.test.js`); não foi testado contra o WhatsApp real, que exige a sua conta. Confira com uma rotina de teste num grupo seu antes de ligar as de verdade.
 

@@ -695,6 +695,8 @@ mark { background:color-mix(in oklab, var(--warn) 30%, var(--surface)); color:va
 .gh-resumo, .gh-aviso { margin:0; }
 .gh-gerador .gh-tpl { grid-column:1 / -1; }
 .gh-aviso { padding:10px 12px; border:1px solid var(--warn); border-radius:10px; background:color-mix(in oklab, var(--warn) 16%, var(--surface)); font-weight:400; font-size:14px; }
+/* o "!" de texto já marca o aviso: sem a bolinha do .nivel-aviso (vem depois dele e vence) */
+.gh-aviso::before { content:none; }
 @media (max-width:600px) {
   .gh-cab { display:none !important; }
   .gh-linha { grid-template-columns:minmax(0,1fr) minmax(0,1fr); padding:10px; border:1px solid var(--line); border-radius:10px; }

@@ -13,7 +13,7 @@ const TEXTOS_GRADE = {
   de: 'De', ate: 'Até', cada: 'A cada', cadaMin: (n) => `${n} min`, ofertasEm: 'Ofertas em cada',
   substituir: 'Substituir horários', acrescentar: 'Acrescentar',
   horarios: 'Horários', horario: 'Horário', ofertas: 'Ofertas', template: 'Template',
-  padrao: (nome) => `Padrão da regra (${nome})`, apagado: '(template apagado)',
+  padrao: (nome) => `Padrão do disparo (${nome})`, apagado: '(template apagado)',
   linha: (n) => `Horário ${n}`, copiar: 'Copiar', remover: 'Remover',
   copiarRot: (h) => `Copiar horário ${h}`, removerRot: (h) => `Remover horário ${h}`, semHora: 'sem hora',
   adicionar: '+ Adicionar horário', limpar: 'Limpar tudo', limparConfirma: 'Apagar todos os horários desta grade?',
@@ -35,7 +35,8 @@ const TEXTOS_GRADE = {
   resumo: (n, de, ate, ofertas, grupos) => `${n} ${n === 1 ? 'horário' : 'horários'} por dia, ${n === 1 ? `às ${de}` : `das ${de} às ${ate}`}. `
     + `${ofertas} ${ofertas === 1 ? 'oferta' : 'ofertas'} por dia`
     + (grupos ? ` em ${grupos} ${grupos === 1 ? 'grupo' : 'grupos'} (${ofertas * grupos} ${ofertas * grupos === 1 ? 'mensagem' : 'mensagens'}).` : ', ainda sem grupo marcado.'),
-  aviso: (total, limite, comRotinas) => `Com os disparos${comRotinas ? ' e as rotinas' : ''} ligados, este número enviaria cerca de ${total.toLocaleString('pt-BR')} mensagens por dia. `
+  // `somando`: há outro disparo ou rotina ligado entrando na conta (sem eles, a conta é só deste disparo)
+  aviso: (total, limite, somando) => `${somando ? 'Somando os outros disparos e rotinas ligados, este número' : 'Este número'} enviaria cerca de ${total.toLocaleString('pt-BR')} mensagens por dia. `
     + `Acima de ${limite} aumenta o risco de bloqueio do WhatsApp. Para baixar: menos ofertas por horário, menos horários ou menos grupos.`,
   // cartão
   chip: 'Grade',
@@ -109,6 +110,11 @@ function gradeValidar(g, { templateExiste } = {}) {
     const a = boas[k - 1]; const b = boas[k];
     if (a.min === b.min) erros.push({ msg: T.erroRepetido(b.hora), i: b.i, campo: 'hora' });
     else if (b.min - a.min < L.intervalo_min) erros.push({ msg: T.erroPerto(a.hora, b.hora, L.intervalo_min), i: b.i, campo: 'hora' });
+  }
+  // virada do dia (R4/S2): a última linha e a primeira do dia seguinte também precisam da folga; marca a primeira
+  if (boas.length > 1) {
+    const ult = boas.at(-1); const pri = boas[0];
+    if (ult.min !== pri.min && pri.min + 1440 - ult.min < L.intervalo_min) erros.push({ msg: T.erroPerto(ult.hora, pri.hora, L.intervalo_min), i: pri.i, campo: 'hora' });
   }
   const vistos = new Set();
   return erros.filter((e) => !vistos.has(e.msg) && vistos.add(e.msg));
@@ -227,7 +233,7 @@ function gradeModoHtml(modo) {
   return `<div class="gh-bloco"><span id="r-modo-h" class="gh-tit">${T.comoEnviar} ${q('regras.modo_grade')}</span>
     ${dispSegHtml('r-modo', [['intervalo', T.intervalo], ['grade', T.grade]], modo, 'r-modo-h')}</div>`;
 }
-/** Opções de template de uma linha: "Padrão da regra ({nome})" + os templates; id que sumiu fica marcado como apagado. */
+/** Opções de template de uma linha: "Padrão do disparo ({nome})" + os templates; id que sumiu fica marcado como apagado. */
 function gradeOpcoesTemplate(sel, padraoNome) {
   const T = TEXTOS_GRADE; const id = gradeInteiro(sel); const tpls = S.templates || [];
   const sumiu = id >= 1 && !tpls.some((t) => t.id === id);
@@ -303,10 +309,11 @@ function gradeLigar(raiz, { regra = {}, nGrupos = () => 0, lerIntervalo = () => 
   /** Linhas para uma nova pintura: a chave estável de cada uma e os valores como estão na tela. */
   const atuais = () => lerLinhas().map((l) => ({ hora: l.hora, qtd: l.qtd, template_id: l.template_id, k: Number(l.li.dataset.k) }));
   const minutosUsados = () => lerLinhas().map((l) => gradeMin(l.hora)).filter(Number.isFinite);
-  /** Primeiro minuto a partir de `ini` (de 10 em 10, dando a volta no dia) com 10 min de folga para todos os outros. */
+  /** Primeiro minuto a partir de `ini` (de 10 em 10, dando a volta no dia) com 10 min de folga para todos os outros, contando a virada do dia. */
   const livre = (ini) => {
     const usados = minutosUsados(); const folga = gradeLimites().intervalo_min;
-    for (let d = 0; d < 1440; d += 10) { const c = (ini + d) % 1440; if (usados.every((u) => Math.abs(u - c) >= folga)) return c; }
+    const distancia = (a, b) => { const d = Math.abs(a - b) % 1440; return Math.min(d, 1440 - d); };
+    for (let d = 0; d < 1440; d += 10) { const c = (ini + d) % 1440; if (usados.every((u) => distancia(u, c) >= folga)) return c; }
     return ini % 1440;
   };
 
@@ -333,7 +340,9 @@ function gradeLigar(raiz, { regra = {}, nGrupos = () => 0, lerIntervalo = () => 
     const ligadas = (rotinas || []).filter((x) => x?.enabled);
     const total = gradeMensagensDia({ regras: S.rules || [], rotinas: ligadas, atual: { id: regra.id, msgs } });
     const passou = modo === 'grade' && total > AVISO_MENSAGENS_DIA;
-    const html = passou ? `<b>!</b> ${esc(T.aviso(total, AVISO_MENSAGENS_DIA, ligadas.length > 0))}` : '';
+    // D7: "Somando os outros…" só quando há outro disparo (não o aberto) ou rotina ligado na conta
+    const somando = ligadas.length > 0 || (S.rules || []).some((r) => r?.enabled && r.id !== regra.id);
+    const html = passou ? `<b>!</b> ${esc(T.aviso(total, AVISO_MENSAGENS_DIA, somando))}` : '';
     av.hidden = !passou; if (av.innerHTML !== html) av.innerHTML = html;
   }
   /** Rotinas do Grupo vivo, para a estimativa: pedidas uma vez, quando a grade aparece; sem a rota, contam zero. */
@@ -427,7 +436,12 @@ function gradeLigar(raiz, { regra = {}, nGrupos = () => 0, lerIntervalo = () => 
     }
     atualizar();
   });
-  bloco.addEventListener('change', () => atualizar());
+  // D8: o campo mexido perde a marca de inválido na hora; os outros ficam marcados até o próximo Salvar
+  bloco.addEventListener('change', (e) => {
+    const el = e.target;
+    if (el?.matches?.('.gh-h, .gh-q, .gh-t')) { el.removeAttribute('aria-invalid'); el.classList.remove('invalido'); }
+    atualizar();
+  });
   tplRegra?.addEventListener('change', () => {
     const nome = T.padrao(padraoNome());
     $$('.gh-t option[value=""], #gh-ger-tpl option[value=""]', raiz).forEach((o) => (o.textContent = nome));

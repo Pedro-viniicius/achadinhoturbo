@@ -22,10 +22,13 @@ import { resolverVencido, TOLERANCIA_MIN } from './grade.js';
 
 export const MAX_CONTEUDOS = 5;          // textos ou enquetes em rodízio (P12)
 export const MAX_HORARIOS_ROTINA = 6;    // horários por rotina: os mesmos 6 do Repetir (P6)
+export const MAX_ROTINAS = 50;           // rotinas guardadas (ligadas ou não): o teto que os Docs e o README citam
+export const ENVIAR_AGORA_INTERVALO_MIN = 1; // "Enviar agora": no máximo um por minuto em cada rotina (clique repetido)
 const MAX_NOME = 60;
 const MAX_GRUPOS = 500;
 const MAX_NOME_LOG = 80;
 const TOLERANCIA_MS = TOLERANCIA_MIN * 60000;
+const FREIO_MS = ENVIAR_AGORA_INTERVALO_MIN * 60000;
 const DIA = 86400000;
 const TIPOS = ['mensagem', 'enquete'];
 const ORDENS = ['rodizio', 'sorteio'];
@@ -53,10 +56,12 @@ const MSG = Object.freeze({
   horaInvalida: 'Horário inválido: use HH:MM.',
   horaRepetida: (h) => `Já existe um horário às ${h}.`,
   muitosHorarios: `Uma rotina aceita no máximo ${MAX_HORARIOS_ROTINA} horários.`,
+  muitasRotinas: `O programa guarda no máximo ${MAX_ROTINAS} rotinas. Exclua uma para criar outra.`,
   ativo: 'Ativo: ligue ou desligue.',
   desconectado: 'O WhatsApp está desconectado. Conecte o número antes de disparar.', // a mesma do "agora" de envios.criar
   semGruposAgora: 'Os grupos desta rotina não existem mais. Edite a rotina e escolha os grupos de novo.',
   semTextoAgora: 'Esta rotina está sem texto. Edite a rotina.',
+  freio: `Esta rotina já foi enviada agora há pouco. Espere ${ENVIAR_AGORA_INTERVALO_MIN === 1 ? 'um minuto' : `${ENVIAR_AGORA_INTERVALO_MIN} minutos`} para enviar de novo.`,
   indisponivel: 'O Grupo vivo não está disponível neste servidor.',
   inesperado: 'Não consegui concluir. Tente de novo.',
 });
@@ -118,6 +123,10 @@ export function createRotinas({ db, wa = null, acordar = null, envios = null, ag
   const nomeDoLog = (nome) => `Grupo vivo: ${String(nome ?? '').replace(/\s+/g, ' ').trim().slice(0, MAX_NOME_LOG) || 'sem nome'}`;
   const log = (nome, o) => addLog(db, { rule: { id: null, name: nomeDoLog(nome) }, ...o });
   const rotinaPorId = (id) => lerRotina(db.prepare('SELECT * FROM rotinas WHERE id = ?').get(id));
+  // "Enviar agora" aceito por rotina (id → ts), só em memória: reiniciar o programa zera o freio, o que basta para o
+  // clique repetido. Ts no futuro (o relógio do computador voltou) não freia.
+  const enviadoAgora = new Map();
+  const freado = (id, now) => { const t = enviadoAgora.get(id); return t != null && now >= t && now - t < FREIO_MS; };
 
   function transacao(fn) {
     db.exec('BEGIN IMMEDIATE');
@@ -316,12 +325,14 @@ export function createRotinas({ db, wa = null, acordar = null, envios = null, ag
   /**
    * POST /api/rotinas. Ligada: o próximo horário a partir de agora; desligada: sem horário. → { id, next_run_at }
    * O id nunca repete o de uma rotina excluída: os envios dela (payload.origem.rotina_id) não passam a contar para outra.
+   * Com MAX_ROTINAS guardadas, recusa (400); a contagem é dentro da transação, então dois POST juntos não passam do teto.
    */
   function criar(corpo) {
     const v = validarCorpo(corpo, null);
     const now = agora();
     const next = proximoDe(v, now);
     const id = transacao(() => {
+      if (db.prepare('SELECT COUNT(*) AS n FROM rotinas').get().n >= MAX_ROTINAS) throw new ErroRotina(400, MSG.muitasRotinas);
       const novoId = Number(db.prepare(`SELECT MAX(COALESCE((SELECT MAX(id) FROM rotinas), 0),
         COALESCE((SELECT MAX(CAST(${ORIGEM_ROTINA} AS INTEGER)) FROM envios e WHERE ${ORIGEM_TIPO} = 'rotina'), 0)) + 1 AS id`).get().id);
       db.prepare(`INSERT INTO rotinas (id, nome, enabled, tipo, conteudos, ordem, proximo_indice, group_jids, repetir, next_run_at, created_at, updated_at)
@@ -367,7 +378,8 @@ export function createRotinas({ db, wa = null, acordar = null, envios = null, ag
 
   /**
    * POST /api/rotinas/:id/enviar: grava a ocorrência já (ligada ou não) e avança o rodízio, sem mexer no próximo horário.
-   * Exige o WhatsApp conectado, como o "agora" de Disparar mensagem. → { envio_id, grupos }
+   * Exige o WhatsApp conectado, como o "agora" de Disparar mensagem. Freio: um envio aceito por minuto em cada rotina
+   * (429); o pedido recusado por outro motivo não conta. → { envio_id, grupos }
    */
   function enviarAgora(id) {
     const n = idValido(id);
@@ -380,11 +392,14 @@ export function createRotinas({ db, wa = null, acordar = null, envios = null, ag
       const destinos = [...new Set(r.group_jids)].filter(grupoExiste);
       if (!destinos.length) throw new ErroRotina(400, MSG.semGruposAgora);
       if (!conteudoOk(r)) throw new ErroRotina(400, MSG.semTextoAgora);
+      if (freado(r.id, now)) throw new ErroRotina(429, MSG.freio);
       const { indice, proximo } = escolher(r);
       const envioId = gravarEnvio(r, indice, destinos, now);
       db.prepare('UPDATE rotinas SET proximo_indice = ?, last_run_at = ?, ultimo_envio_id = ? WHERE id = ?').run(proximo, now, envioId, r.id);
       return { envio_id: envioId, grupos: destinos.length };
     });
+    for (const [rid, t] of enviadoAgora) if (!freado(rid, now)) enviadoAgora.delete(rid); // só os que ainda freiam
+    enviadoAgora.set(n, now);
     pedirEnvio();
     return feito;
   }
