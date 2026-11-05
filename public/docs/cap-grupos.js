@@ -278,11 +278,11 @@ docsCapitulo({
       blocos: [
         { p: 'O Histórico registra tudo o que saiu e tudo o que deu errado, com o motivo. A lista se atualiza sozinha.' },
         { passos: [
-          'Abra [[Histórico]]. Em “Tipo”, escolha o que quer ver: Tudo, Disparo automático, Espelhamento ou Catálogo.',
+          'Abra [[Histórico]]. Em “Tipo”, escolha o que quer ver: Tudo, Disparo automático, Espelhamento, Catálogo ou Remetente.',
           'Para achar um problema, troque o filtro de “Tudo” para “Só erros”. Também há “Só enviados” e “Só avisos”.',
           'Leia a coluna “Resultado”: ela diz o que aconteceu com cada oferta.',
         ] },
-        { p: 'O tipo Espelhamento lista cada oferta espelhada, com o motivo de ter sido descartada ou de estar na fila. O tipo Catálogo mostra o que passou pelo catálogo e o que espera revisão. Veja [Espelhar ofertas da Amazon](#docs/espelhamento/fila) e [Revisão de ofertas](#docs/revisao/motivos).' },
+        { p: 'O tipo Espelhamento lista cada oferta espelhada, com o motivo de ter sido descartada ou de estar na fila. O tipo Catálogo mostra o que passou pelo catálogo e o que espera revisão. O tipo Remetente mostra cada link que um remetente mandou e o que aconteceu com ele. Veja [Espelhar ofertas da Amazon](#docs/espelhamento/fila), [Revisão de ofertas](#docs/revisao/motivos) e [Receber links de um remetente](#docs/disparo-automatico/remetentes).' },
         { tabela: {
           colunas: ['Mensagem no Histórico', 'O que fazer'],
           linhas: [

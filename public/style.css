@@ -768,3 +768,8 @@ nav a[href="#ganhos"] { --ic:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3
 #imp-dia, #imp-arq { scroll-margin-bottom:96px; }
 @media (min-width:601px) { #g-sec-grupo .tab-din th:first-child, #g-sec-grupo .tab-din td:first-child { min-width:16rem; } }
 @media (max-width:600px) { .tab-din button.g-grupo { min-height:44px; } p.dica > a.alvo24:only-child { min-height:44px; line-height:44px; } }
+/* Remetente/Espelhamento/Visão Geral em telas muito estreitas: os KPIs em uma coluna, sem quebrar palavra no meio */
+@media (max-width:400px) {
+  .esp-kpis { grid-template-columns:minmax(0,1fr); }
+  .esp-kpis .kpi .rotulo { overflow-wrap:normal; letter-spacing:.04em; }
+}

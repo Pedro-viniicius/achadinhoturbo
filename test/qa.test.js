@@ -1132,7 +1132,7 @@ test('Ler mais (etapa 11): toda chave de LEIA_MAIS existe em TIPS e todo destino
     'links.proximo': 'grupos/proximo-grupo', relatorios: 'resultados/avisos', 'relatorios.virada': 'resultados/avisos',
     ganhos: 'grupos/ganhos', 'ganhos.cobertura': 'grupos/ganhos', 'ganhos.comissao': 'grupos/ganhos', 'ganhos.receita': 'grupos/ganhos', 'ganhos.vendas': 'grupos/ganhos', 'ganhos.cliques': 'grupos/ganhos', 'ganhos.gpc': 'grupos/ganhos', 'ganhos.conversao': 'grupos/ganhos', 'ganhos.envios': 'grupos/ganhos', 'ganhos.atribuida': 'grupos/ganhos', 'ganhos.entradas': 'grupos/ganhos', 'ganhos.custo': 'grupos/ganhos', 'ganhos.retorno': 'grupos/ganhos', 'ganhos.oferta': 'grupos/ganhos', 'ganhos.importar': 'grupos/importar', 'ganhos.gasto': 'grupos/importar',
     rastreio: 'grupos/rastreio', 'rastreio.etiqueta': 'grupos/rastreio', 'rastreio.amazon': 'grupos/rastreio',
-    'rastreio.shopee': 'grupos/rastreio', 'rastreio.grupo': 'grupos/rastreio', 'blocos.etiqueta': 'grupos/rastreio' };
+    'rastreio.shopee': 'grupos/rastreio', 'rastreio.grupo': 'grupos/rastreio', 'blocos.etiqueta': 'grupos/rastreio', 'remetente': 'disparo-automatico/remetentes' };
   assert.deepEqual(LEIA, SPEC);
   // todo ícone q('chave') de uma tela com destino sai com data-docs; os demais seguem sem
   for (const chave of Object.keys(TIPS)) {

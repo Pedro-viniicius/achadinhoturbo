@@ -421,6 +421,240 @@ test('onMensagem(handler): troca ou desliga quem recebe; sem handler nada é pro
   db.close();
 });
 
+// ---------- envio pelo sócio, etapa 3 (D1): ouvinte da conversa privada (CA2, CA3, CA9) ----------
+const SOCIO = '5535999990000@s.whatsapp.net';
+const SOCIO_LID = '187654321098765@lid';
+const LINK_ML = 'https://mercadolivre.com/sec/abc123';
+/** Mensagem privada como chega no messages.upsert, com pushName (que nunca pode sair do ouvinte). */
+const privada = (message, { id = 'PV1', jid = SOCIO, alt, fromMe = false, ts = 1793620000 } = {}) => ({
+  key: { remoteJid: jid, ...(alt ? { remoteJidAlt: alt } : {}), fromMe, id, addressingMode: jid.endsWith('@lid') ? 'lid' : 'pn' },
+  pushName: 'João Sócio', messageTimestamp: ts, message,
+});
+/** Modo real com socket falso; `lidMapping` é o `signalRepository.lidMapping` do Baileys (ou null para não ter). */
+function ouvintePrivado({ lidMapping = null, user, privado, grupo } = {}) {
+  const dir = tmp(); const db = openDb(dir);
+  const privadas = []; const grupos = [];
+  const wa = createWhatsApp({ db, dir, onMensagem: grupo || ((m) => { grupos.push(m); }) });
+  wa.onPrivada(privado || ((m) => { privadas.push(m); }));
+  const enviados = [];
+  wa._usarSocket({
+    ...(user ? { user } : {}),
+    ...(lidMapping ? { signalRepository: { lidMapping } } : {}),
+    sendMessage: async (jid, conteudo) => { enviados.push(conteudo); return { key: { remoteJid: jid, fromMe: true, id: `NOSSA${enviados.length}` } }; },
+  });
+  return { wa, privadas, grupos, fechar: () => db.close() };
+}
+
+test('onPrivada: número comum (PN) chega como { ids, texto, msgId, ts }, sem pushName (CA3, CA9)', async () => {
+  const { wa, privadas, grupos, fechar } = ouvintePrivado();
+  const texto = `Olha esse ${LINK_ML}`;
+  await wa._onMensagens({ type: 'notify', messages: [
+    privada({ conversation: texto }, { id: 'PN1' }),
+    privada({ extendedTextMessage: { text: texto } }, { id: 'PN2', jid: '5535999990000:7@s.whatsapp.net' }),
+  ] });
+  assert.deepEqual(privadas, [
+    { ids: [SOCIO], texto, msgId: 'PN1', ts: 1793620000 * 1000 },
+    { ids: [SOCIO], texto, msgId: 'PN2', ts: 1793620000 * 1000 },
+  ], 'o :device sai (bareJid)');
+  assert.deepEqual(Object.keys(privadas[0]).sort(), ['ids', 'msgId', 'texto', 'ts']);
+  assert.ok(!JSON.stringify(privadas).includes('João'), 'pushName nunca sai do ouvinte');
+  assert.deepEqual(grupos, [], 'privado não vai ao ouvinte de grupos');
+  fechar();
+});
+
+// R3 (rodada 2, desvio da D1): com o número no remoteJid, o LID do remoteJidAlt (atributo do servidor) também vai em
+// `ids`, para o remetente aprender o LID (src/remetentes.js só aprende quando casou pelo número).
+test('onPrivada: o remoteJidAlt completa o par: LID + número, ou número + LID; alt de outro tipo fica de fora (CA3)', async () => {
+  let consultas = 0;
+  const { wa, privadas, fechar } = ouvintePrivado({ lidMapping: { getPNForLID: async () => { consultas++; return null; } } });
+  await wa._onMensagens({ type: 'notify', messages: [
+    privada({ conversation: LINK_ML }, { id: 'L1', jid: '187654321098765:3@lid', alt: '5535999990000:3@s.whatsapp.net' }),
+    privada({ conversation: LINK_ML }, { id: 'L2', jid: SOCIO, alt: '187654321098765:5@lid' }),
+    privada({ conversation: LINK_ML }, { id: 'L3', jid: SOCIO, alt: '5535999998888@s.whatsapp.net' }), // número com número: fica só o remoteJid
+    privada({ conversation: LINK_ML }, { id: 'L4', jid: SOCIO, alt: '120363000000000000@g.us' }),
+    privada({ conversation: LINK_ML }, { id: 'L5', jid: SOCIO_LID, alt: '207000000000001@lid' }), // LID com LID: vai ao mapa
+    privada({ conversation: LINK_ML }, { id: 'L6', jid: SOCIO, alt: SOCIO }),
+  ] });
+  // L5 espera o mapa (assíncrono) e chega depois: a ordem é a do msgId
+  assert.deepEqual(privadas.map((p) => [p.msgId, p.ids]).sort(([a], [b]) => a.localeCompare(b)), [
+    ['L1', [SOCIO_LID, SOCIO]], ['L2', [SOCIO, SOCIO_LID]], ['L3', [SOCIO]], ['L4', [SOCIO]], ['L5', [SOCIO_LID]], ['L6', [SOCIO]],
+  ]);
+  assert.equal(consultas, 1, 'com o número no remoteJidAlt, o mapa nem é consultado; o número no remoteJid também não pede o mapa');
+  fechar();
+});
+
+test('onPrivada: LID sem remoteJidAlt é resolvido pelo getPNForLID do Baileys (CA3)', async () => {
+  const pedidos = [];
+  const { wa, privadas, fechar } = ouvintePrivado({ lidMapping: { getPNForLID: async (lid) => { pedidos.push(lid); return '5535999990000:0@s.whatsapp.net'; } } });
+  await wa._onMensagens({ type: 'notify', messages: [privada({ conversation: LINK_ML }, { id: 'L3', jid: SOCIO_LID })] });
+  assert.deepEqual(pedidos, [SOCIO_LID]);
+  assert.deepEqual(privadas, [{ ids: [SOCIO_LID, SOCIO], texto: LINK_ML, msgId: 'L3', ts: 1793620000 * 1000 }]);
+  fechar();
+});
+
+test('onPrivada: LID sem mapa chega só com o LID, sem lançar nem escrever no console (CA3, CA9)', async (t) => {
+  const saida = []; for (const n of ['log', 'info', 'warn', 'error']) t.mock.method(console, n, (...a) => saida.push(a.join(' ')));
+  const mapas = [
+    { getPNForLID: async () => null },
+    { getPNForLID: async () => { throw new Error(`falhou ${SOCIO_LID}`); } },
+    { getPNForLID: () => { throw new Error('síncrono'); } },
+    { getPNForLID: async () => '5535999990000@hosted' }, // não é número de WhatsApp comum
+    { getPNForLID: async () => ({ jid: SOCIO }) }, // formato inesperado
+    null, // socket sem signalRepository
+  ];
+  for (const lidMapping of mapas) {
+    const { wa, privadas, fechar } = ouvintePrivado({ lidMapping });
+    await wa._onMensagens({ type: 'notify', messages: [privada({ conversation: LINK_ML }, { id: 'L4', jid: SOCIO_LID })] });
+    assert.deepEqual(privadas.map((p) => p.ids), [[SOCIO_LID]], JSON.stringify(lidMapping && Object.keys(lidMapping)));
+    fechar();
+  }
+  // modo simulado: não há socket nem mapa
+  const dir = tmp(); const db = openDb(dir);
+  const recebidas = [];
+  const wa = createWhatsApp({ db, dir, dryRun: true }); wa.connect();
+  wa.onPrivada((m) => recebidas.push(m));
+  await wa._onMensagens({ type: 'notify', messages: [privada({ conversation: LINK_ML }, { id: 'L5', jid: SOCIO_LID })] });
+  assert.deepEqual(recebidas.map((p) => p.ids), [[SOCIO_LID]]);
+  db.close();
+  assert.deepEqual(saida, [], 'nada no console');
+});
+
+test('onPrivada: fromMe, status, canal, grupo, append, sem texto e o que o programa enviou nunca chegam (CA2)', async () => {
+  const { wa, privadas, fechar } = ouvintePrivado();
+  await wa.sendText(SOCIO, 'Enviado para 3 grupos.'); // volta pelo upsert como NOSSA1
+  const msg = { conversation: `Oferta ${LINK_ML}` };
+  await wa._onMensagens({ type: 'append', messages: [privada(msg, { id: 'HIST' })] });
+  await wa._onMensagens({ type: 'notify', messages: [
+    privada(msg, { id: 'MEU', fromMe: true }),
+    privada(msg, { id: 'MEU-LID', jid: SOCIO_LID, alt: SOCIO, fromMe: true }),
+    privada(msg, { id: 'NOSSA1' }),
+    privada(msg, { id: 'ST', jid: 'status@broadcast', alt: SOCIO }),
+    privada(msg, { id: 'LISTA', jid: '1793620000@broadcast' }),
+    privada(msg, { id: 'CANAL', jid: '120363000000000099@newsletter' }),
+    privada(msg, { id: 'GRUPO', jid: GRUPO }),
+    privada(msg, { id: 'BOT', jid: '13135550002@bot' }),
+    privada(msg, { id: 'HOSTED', jid: '187654321098765@hosted.lid' }),
+    privada(msg, { id: 'ESTRANHO', jid: 'abc@s.whatsapp.net' }),
+    privada(msg, { id: '' }),
+    privada({ reactionMessage: { text: '👍' } }, { id: 'REACAO' }),
+    privada(null, { id: 'STUB' }),
+    { key: { remoteJid: SOCIO, id: 'SEM-MSG' } },
+    { key: { remoteJid: 42, id: 'JID-NUMERO' }, message: msg },
+    null,
+  ] });
+  await wa._onMensagens(undefined); await wa._onMensagens({ type: 'notify' }); await wa._onMensagens({ type: 'notify', messages: 'x' });
+  assert.deepEqual(privadas, []);
+  fechar();
+});
+
+test('onPrivada: grupo continua indo só ao onMensagem, e o privado só ao onPrivada (D1)', async () => {
+  const { wa, privadas, grupos, fechar } = ouvintePrivado();
+  await wa._onMensagens({ type: 'notify', messages: [
+    recebida({ conversation: `Grupo ${LINK}` }, { id: 'G1' }),
+    privada({ conversation: `Privado ${LINK_ML}` }, { id: 'P1' }),
+    recebida({ conversation: 'minha no grupo' }, { id: 'G2', fromMe: true }),
+  ] });
+  assert.deepEqual(grupos.map((g) => g.msgId), ['G1', 'G2'], 'o ouvinte de grupos segue igual (fromMe chega como está)');
+  assert.deepEqual(Object.keys(grupos[0]).sort(), ['fromMe', 'jid', 'msgId', 'texto', 'ts']);
+  assert.deepEqual(privadas.map((p) => p.msgId), ['P1']);
+
+  // só o privado ligado: grupo não é entregue a ninguém
+  wa.onMensagem(null); grupos.length = 0; privadas.length = 0;
+  await wa._onMensagens({ type: 'notify', messages: [recebida({ conversation: 'g' }, { id: 'G3' }), privada({ conversation: 'p' }, { id: 'P2' })] });
+  assert.deepEqual([grupos.length, privadas.map((p) => p.msgId)], [0, ['P2']]);
+  fechar();
+});
+
+test('onPrivada: handler que lança (síncrono, assíncrono ou com o texto no nome) não derruba o ouvinte; console só com e.name (CA9)', async (t) => {
+  const saida = []; for (const n of ['log', 'info', 'warn', 'error']) t.mock.method(console, n, (...a) => saida.push(a.join(' ')));
+  const vistas = [];
+  const { wa, fechar } = ouvintePrivado({
+    lidMapping: { getPNForLID: async () => SOCIO },
+    privado: (m) => {
+      vistas.push(m.msgId);
+      if (m.msgId === 'SINC') throw new Error(`falhou ${m.ids.join(',')} ${m.texto}`);
+      if (m.msgId === 'ASSINC') return Promise.reject(new Error(`depois ${m.ids[0]}`));
+      if (m.msgId === 'JSON') JSON.parse(m.texto);
+      if (m.msgId === 'NOME') { const e = new Error('x'); e.name = `Nome ${m.ids[0]}`; throw e; }
+      if (m.msgId === 'NADA') throw null;
+    },
+  });
+  const segredo = `{texto-do-socio ${LINK_ML}`;
+  let retorno;
+  assert.doesNotThrow(() => { retorno = wa._onMensagens({ type: 'notify', messages: ['SINC', 'ASSINC', 'JSON', 'NOME', 'NADA', 'DEPOIS']
+    .map((id) => privada({ conversation: segredo }, { id, jid: SOCIO_LID })) }); });
+  await retorno;
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(vistas, ['SINC', 'ASSINC', 'JSON', 'NOME', 'NADA', 'DEPOIS'], 'as mensagens seguintes continuam chegando');
+  assert.deepEqual(saida.sort(), [
+    '[remetente] erro no handler: Error', '[remetente] erro no handler: Error', '[remetente] erro no handler: Error',
+    '[remetente] erro no handler: Error', '[remetente] erro no handler: SyntaxError',
+  ]);
+  for (const proibido of ['5535999990000', '187654321098765', 'texto-do-socio', 'mercadolivre', 'João']) {
+    assert.ok(!saida.join('\n').includes(proibido), `vazou ${proibido}`);
+  }
+  fechar();
+});
+
+test('onPrivada(handler): troca ou desliga quem recebe; sem handler nada é entregue nem consultado', async () => {
+  let consultas = 0;
+  const { wa, privadas, fechar } = ouvintePrivado({ lidMapping: { getPNForLID: async () => { consultas++; return SOCIO; } } });
+  const lote = (id) => ({ type: 'notify', messages: [privada({ conversation: 'oi' }, { id, jid: SOCIO_LID })] });
+  wa.onPrivada(null);
+  await wa._onMensagens(lote('X'));
+  assert.equal(consultas, 0, 'desligado: nem consulta o mapa');
+  const outras = [];
+  wa.onPrivada((m) => outras.push(m.msgId));
+  await wa._onMensagens(lote('Y'));
+  wa.onPrivada('não é função');
+  await wa._onMensagens(lote('Z'));
+  assert.deepEqual([privadas.length, outras], [0, ['Y']]);
+  fechar();
+});
+
+test('lidDe: LID do número pelo getLIDForPN do Baileys; null no modo simulado, sem mapa ou em falha (D2)', async (t) => {
+  const saida = []; for (const n of ['log', 'info', 'warn', 'error']) t.mock.method(console, n, (...a) => saida.push(a.join(' ')));
+  const pedidos = [];
+  const { wa, fechar } = ouvintePrivado({ lidMapping: { getLIDForPN: async (pn) => { pedidos.push(pn); return '187654321098765:4@lid'; } } });
+  assert.equal(await wa.lidDe(SOCIO), SOCIO_LID, 'sem o :device');
+  assert.equal(await wa.lidDe('5535999990000:2@s.whatsapp.net'), SOCIO_LID);
+  assert.deepEqual(pedidos, [SOCIO, SOCIO]);
+  for (const invalido of [null, undefined, '', 42, GRUPO, SOCIO_LID, 'status@broadcast']) assert.equal(await wa.lidDe(invalido), null, String(invalido));
+  assert.equal(pedidos.length, 2, 'entrada que não é número nem chega ao Baileys');
+  fechar();
+
+  for (const lidMapping of [
+    { getLIDForPN: async () => null },
+    { getLIDForPN: async () => { throw new Error(`USYNC falhou ${SOCIO}`); } },
+    { getLIDForPN: () => { throw new Error('síncrono'); } },
+    { getLIDForPN: async () => SOCIO }, // não é LID
+    null,
+  ]) {
+    const x = ouvintePrivado({ lidMapping });
+    assert.equal(await x.wa.lidDe(SOCIO), null);
+    x.fechar();
+  }
+  const { wa: sim, fechar: fecharSim } = simulado();
+  assert.equal(await sim.lidDe(SOCIO), null, 'modo simulado');
+  fecharSim();
+  assert.deepEqual(saida, []);
+});
+
+test('meuJid: o número conectado sem o :device; null desconectado e no modo simulado', () => {
+  const { wa, fechar } = ouvintePrivado({ user: { id: '5535911112222:12@s.whatsapp.net', lid: '99887766554433:12@lid' } });
+  assert.equal(wa.meuJid(), '5535911112222@s.whatsapp.net');
+  fechar();
+  const { wa: semUser, fechar: f2 } = ouvintePrivado();
+  assert.equal(semUser.meuJid(), null);
+  f2();
+  const dir = tmp(); const db = openDb(dir);
+  const desligado = createWhatsApp({ db, dir });
+  assert.equal(desligado.meuJid(), null);
+  const { wa: sim, fechar: f3 } = simulado();
+  assert.equal(sim.meuJid(), null, 'modo simulado não tem número');
+  f3(); db.close();
+});
+
 test('R9 (decisão documentada): link sem esquema no texto não impede o link da prévia; os dois saem (a etapa 11 deduplica por ASIN)', () => {
   const canonico = 'https://www.amazon.com.br/dp/B0ABCDEFGH';
   assert.equal(textoDaMensagem({ extendedTextMessage: { text: 'Fone amzn.to/x', canonicalUrl: canonico } }), `Fone amzn.to/x\n${canonico}`);

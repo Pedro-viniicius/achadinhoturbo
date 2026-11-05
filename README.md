@@ -2,7 +2,7 @@
 
 Programa **pessoal** que roda no seu computador e envia ofertas da sua **Central de Afiliados** do Mercado Livre para os seus grupos de WhatsApp, com link `meli.la` e **várias etiquetas** (cada regra usa a sua).
 
-Além das regras automáticas, o painel faz **disparo manual** de uma oferta (do Mercado Livre ou da Amazon), **mensagens e enquetes** (agora, agendadas ou repetidas), **espelha ofertas da Amazon** postadas em outros grupos (veja [Espelhamento da Amazon](#espelhamento-da-amazon)), usa as ofertas do seu app Etiqueta como fonte (veja [Catálogo do Etiqueta](#catálogo-do-etiqueta)) e manda **resumo diário e avisos** para o seu WhatsApp.
+Além das regras automáticas, o painel faz **disparo manual** de uma oferta (do Mercado Livre ou da Amazon), **mensagens e enquetes** (agora, agendadas ou repetidas), **espelha ofertas da Amazon** postadas em outros grupos (veja [Espelhamento da Amazon](#espelhamento-da-amazon)), usa as ofertas do seu app Etiqueta como fonte (veja [Catálogo do Etiqueta](#catálogo-do-etiqueta)), publica os links que um **remetente** de confiança manda no privado (veja [Remetente](#remetente-links-enviados-por-outro-número)) e manda **resumo diário e avisos** para o seu WhatsApp.
 
 Você configura: grupos, template, quantas ofertas por envio, intervalo, horário de funcionamento e quanto tempo sem repetir a mesma oferta.
 
@@ -17,6 +17,8 @@ Painel (localhost:3737) ── disparos, espelhamento, conexões, templates, gru
         │
         ├─ Espelhamento (Amazon) ◄── mensagens dos grupos de origem (só links da Amazon)
         │       └──► resolve o ASIN ──► Creators API da Amazon (ou o texto da mensagem) ──► link .../dp/<ASIN>?tag=<sua tag>
+        │
+        ├─ Remetente ◄── links que um número cadastrado manda no privado (Mercado Livre, Amazon ou Shopee) ──► link do dono, sem aprovação
         │
         ├─ Catálogo ──► lê as ofertas do app Etiqueta (127.0.0.1:8765, token lido de um arquivo) ──► link por loja; suspeitas esperam a revisão do Dono
         │
@@ -50,7 +52,7 @@ Em casa, só no `localhost`, o painel abre sem login (aparece um aviso no termin
 
 ### Backup
 
-`npm run backup [pasta]` copia o banco com `VACUUM INTO` (seguro com o programa rodando) e a sessão do WhatsApp num `.tar.gz`, mantendo os 7 mais recentes. O destino padrão é `data/backups/`, que o `.gitignore` já exclui; se você apontar para dentro de um repositório git não ignorado, o script avisa. **Nunca faça commit de um backup.** Para conferir um backup: `npm run backup -- restaurar arquivo.tar.gz ../achadinho-restaurado` (extrai numa pasta nova, fora da pasta do programa, e roda `PRAGMA integrity_check`; o passo a passo para trocar a `data/` está nos Docs, capítulo *Manutenção*). **O pacote contém a sessão do seu WhatsApp**: trate como senha. Ele também leva o ID e o segredo da credencial da Amazon e, com o espelhamento, **textos de mensagens de grupos de terceiros** (já mascarados; veja [Privacidade (LGPD)](#privacidade-lgpd)).
+`npm run backup [pasta]` copia o banco com `VACUUM INTO` (seguro com o programa rodando) e a sessão do WhatsApp num `.tar.gz`, mantendo os 7 mais recentes. O destino padrão é `data/backups/`, que o `.gitignore` já exclui; se você apontar para dentro de um repositório git não ignorado, o script avisa. **Nunca faça commit de um backup.** Para conferir um backup: `npm run backup -- restaurar arquivo.tar.gz ../achadinho-restaurado` (extrai numa pasta nova, fora da pasta do programa, e roda `PRAGMA integrity_check`; o passo a passo para trocar a `data/` está nos Docs, capítulo *Manutenção*). **O pacote contém a sessão do seu WhatsApp**: trate como senha. Ele também leva o ID e o segredo da credencial da Amazon, o **número de WhatsApp de cada remetente** (veja [Remetente](#remetente-links-enviados-por-outro-número)) e, com o espelhamento, **textos de mensagens de grupos de terceiros** (já mascarados; veja [Privacidade (LGPD)](#privacidade-lgpd)).
 
 ## Menu do painel
 
@@ -59,10 +61,10 @@ O menu lateral é dividido em grupos:
 - **Visão Geral**
 - **Ganhos** (só o Dono; no grupo **Principal** do menu, logo abaixo de Visão Geral): comissões, cliques, ganho por grupo, bloco, loja e oferta, cobertura do rastreio e custo por membro novo, veja [Rastreio por grupo e página Ganhos](#rastreio-por-grupo-e-página-ganhos)
 - **Principal**: Rotacionador de Links, Grupos, Blocos de análise
-- **Disparos**: Disparo manual, Disparo automático (antes chamado *Regras*; é onde fica o botão *Novo espelhamento*), Disparar mensagem, Templates
+- **Disparos**: Disparo manual, Disparo automático (antes chamado *Regras*; é onde ficam os botões *Novo espelhamento* e *Novo remetente*), Disparar mensagem, Templates
 - **Comunicação**: Relatórios e avisos
 - **Conta**: Conexões, Números de WhatsApp, Equipe (só o Dono vê)
-- No rodapé: Histórico (com o seletor *Tipo*: Tudo, Disparo automático, Espelhamento ou Catálogo), Ajustes, Docs
+- No rodapé: Histórico (com o seletor *Tipo*: Tudo, Disparo automático, Espelhamento, Catálogo ou Remetente), Ajustes, Docs
 
 Os endereços antigos continuam funcionando: `#regras` abre *Disparo automático*, `#whatsapp` abre *Números de WhatsApp*, `#etiquetas` abre *Conexões* (na seção do Mercado Livre) e `#ajuda` abre os *Docs*.
 
@@ -458,6 +460,75 @@ Elas contam nas "ofertas por envio" da regra. Cada regra guarda **no máximo 50*
 - Os textos que vêm do Etiqueta (título, categoria, cupom) são tratados como texto cru e escapados em toda a tela.
 - O que fica em `data/disparador.db`: as categorias da última verificação (`settings`), o ponto de partida de cada fonte (`catalogo_cursores`) e, para cada oferta tratada, título, preço, foto, categoria e link (`catalogo_itens`). **Não há dado pessoal**, mas os backups carregam tudo isso. Apagar uma regra apaga na hora os itens e o ponto de partida dela; "Limpar já enviadas" apaga também as enviadas do catálogo (as em revisão e as descartadas ficam).
 
+## Remetente: links enviados por outro número
+
+Um **remetente** é um número de WhatsApp de confiança, como o do seu sócio, que manda links de produto no **privado** do número conectado. O programa monta a oferta e a envia aos grupos que você escolheu, **sem pedir a sua aprovação**. O link sai sempre com a **sua** afiliação, nunca com a de quem mandou. Qualquer número que você não cadastrou é ignorado, sem resposta.
+
+Isto foi testado só com o WhatsApp, as lojas e a extensão **simulados**; a prova com o celular do sócio é o último passo (veja [O que foi testado e o que não foi](#o-que-foi-testado-e-o-que-não-foi)).
+
+### Cadastrar
+
+Em *Disparo automático → Novo remetente* (só o Dono cadastra, edita, liga e exclui; o Operador só vê):
+
+1. **Nome** (só você vê) e **Número do remetente**, com DDD, por exemplo `(35) 99999-1234`. O programa confere se o número existe no WhatsApp. O número conectado ao painel não pode ser o remetente, e o mesmo número não entra duas vezes.
+2. **Grupos de destino**: para onde vão todos os links deste número (de 1 a 500 grupos). *Marcar um bloco…* só ajuda a marcar: se o bloco mudar depois, a lista não muda.
+3. **Template** (precisa do campo `{LINK}`), **Etiqueta do Mercado Livre** (vale só para o Mercado Livre) e **Foto do produto**.
+4. **Ritmo e proteção**: *No máximo (links por hora)* e *Não repetir o mesmo produto por (horas)* (veja [Limites do remetente](#limites-do-remetente)).
+5. **Responder ao remetente no WhatsApp** (ligado por padrão) e *Ligar agora*.
+
+Cada remetente vira um cartão com interruptor, o resumo das últimas 24 horas (recebidos, enviados, repetidos, descartados, com erro) e os botões *Ver registro*, *Editar* e *Excluir*. Desligado, ele continua cadastrado, mas os links dele são ignorados em silêncio. Se algo impede o envio, o cartão mostra o problema. Grupo de que o número saiu, template ou etiqueta apagados aparecem logo. O aviso de tag da Amazon ou ID da Shopee faltando só aparece depois que um link do remetente foi barrado por isso.
+
+### As três lojas
+
+O programa **nunca reenvia o link que o remetente mandou**: ele lê o produto e gera o seu.
+
+| Loja | Como o link sai | O que precisa estar pronto |
+|---|---|---|
+| Mercado Livre | Um `meli.la` novo, gerado pela extensão do Chrome, com a etiqueta escolhida no remetente | A etiqueta em *Conexões → Mercado Livre* e a extensão conectada. No modo de link direto o Mercado Livre não sai |
+| Amazon | O endereço do produto (`/dp/<ASIN>`) com a sua tag de associado | A tag em *Conexões → Amazon* |
+| Shopee | Um link curto gerado pela sua conta, pela API ou pela extensão | O ID de afiliado em *Conexões → Shopee* e a API da Shopee ou a extensão do Chrome conectada |
+
+Título, preço e foto vêm da loja. Quando a loja não informa algum campo, o programa completa com o que o remetente escreveu na mensagem (título na primeira linha, "De R$", "Por R$", "NN% OFF", frete e cupom), mas **só quando a mensagem tem um link só**; veja [Formato de mensagem de origem que funciona](#formato-de-mensagem-de-origem-que-funciona). **Sem título ou sem preço a oferta não sai**: o remetente é orientado a mandar o link junto com o nome e o preço. Um link do Mercado Livre que o programa não consegue ligar a um produto também é recusado.
+
+### O que o remetente recebe
+
+Com *Responder ao remetente no WhatsApp* ligado, ele recebe **uma frase por mensagem**, depois que os envios dela terminam. A resposta **nunca leva link, número, nome de grupo nem o texto que ele mandou**.
+
+| Situação | Frase |
+|---|---|
+| Saiu para todos os grupos | "Enviado para 3 grupos." (ou "Enviado para 1 grupo.") |
+| Saiu só para alguns | "Enviado para 2 de 3 grupos." |
+| Não saiu para nenhum | "Não consegui enviar esse link para os grupos. O dono vai ver o motivo no painel." |
+| Produto repetido | "Esse produto já foi enviado há 3 h. Não repeti." |
+| Falta afiliação, grupo ou template | "Não consegui montar esse link agora. O dono vai ver o motivo no painel." |
+| Sem título ou sem preço | "Não consegui ler os dados desse produto. Mande o link junto com o nome e o preço." |
+| Link que não é de produto | "Não reconheci esse link. Mande o link da página do produto." |
+| Mensagem com link, mas de outra loja | "Não encontrei um link do Mercado Livre, Amazon ou Shopee nessa mensagem." |
+| Passou do limite por hora | "Muitos links em pouco tempo. Tente de novo daqui a pouco." (no máximo 1 vez por hora) |
+| Vários links na mesma mensagem | "Recebi 3 links: 2 enviados, 1 repetido." |
+
+Mensagem **sem nenhum link**, número desconhecido, remetente desligado e mensagem da própria conta não recebem nada: silêncio. Assim ninguém descobre, testando, se um número está cadastrado.
+
+### Limites do remetente
+
+Servem para proteger os seus grupos, caso o número do remetente caia em outras mãos.
+
+- **Links por hora**: **10 links por hora por remetente** por padrão; o campo aceita **de 1 a 60 links por hora**. Os que passam disso são descartados (uma linha por hora no Histórico) e o remetente recebe a frase de limite.
+- **Mesmo produto**: **24 h sem repetir** por padrão (de 0 a 8760; **0 = pode repetir**). Vale por remetente, mesmo com link diferente, e não cruza com as regras, o espelhamento nem o Disparo manual. O mesmo produto também não sai duas vezes na mesma mensagem.
+- **Links por mensagem**: até **5 links por mensagem**; o resto é ignorado.
+- **Mensagem enviada com o programa fora do ar**: o que o remetente mandou enquanto o programa estava desligado ou sem conexão com o WhatsApp **não é processado**, sem resposta; ele precisa mandar de novo. Um link que já foi aceito e ficou parado na fila por **mais de 2 h** expira e não sai.
+- **Respostas**: até **20 respostas por hora** por remetente.
+
+Os envios saem pela **mesma fila** dos outros disparos, com as pausas de *Ajustes*. Em *Histórico → Tipo → Remetente* cada link aparece com o resultado e o motivo ("Enviada", "Descartada: repetida (enviada há 3 h)", "Não saiu: falta a tag da Amazon", "Descartada: sem dados para montar a oferta"…), mesmo quando não saiu. O Histórico mostra só o **nome** do remetente, nunca o número.
+
+Quem controla o número do remetente consegue mandar links para os seus grupos, até o limite por hora, sempre das três lojas e sempre com a sua afiliação. Se desconfiar de um número, desligue o remetente ou exclua-o.
+
+### Privacidade e segurança do remetente
+
+- **O número do remetente fica só no seu computador, entra no backup e é apagado ao excluir o remetente** (o Histórico fica com o nome). Os backups que você já fez continuam com o número até saírem do rodízio (o programa guarda os 7 mais recentes). Está na tabela `remetentes` de `data/disparador.db`; a API do painel mostra só o número mascarado e nunca o identificador interno do WhatsApp. Nunca vai para log, console nem mensagem de erro.
+- **O texto da mensagem não é guardado.** Ficam só os campos lidos dele (título, preço, cupom…), com e-mails, telefones e sequências de 8 ou mais dígitos já escondidos, só quando a mensagem tem um link só e só até o link ser decidido. Links do Mercado Livre e links curtos são guardados sem os parâmetros. Os itens já decididos são apagados no prazo de *Ajustes → Privacidade dos grupos*, e o que ainda conta para "não repetir" é mantido pelas horas definidas.
+- Só mensagens **privadas** de números cadastrados e ligados são tratadas. Grupos, status, canais, mensagens da própria conta e qualquer outro número não geram item, resposta nem linha de log.
+
 ## Relatórios e avisos
 
 Em *Comunicação → Relatórios e avisos* você cadastra os **números que recebem** o resumo diário e os avisos, direto no WhatsApp:
@@ -517,6 +588,7 @@ Conferido uma vez contra a Central de Afiliados real (02/11/2026): a lista de pr
 - **Números de telefone e e-mails em `data/`:** além do pseudônimo dos membros, o banco guarda os **números de WhatsApp que você cadastra para receber avisos** (tabela `aviso_destinos`) e os **nomes e e-mails da equipe e dos convidados** (tabelas `users` e `invites`). A API mostra o número mascarado; o programa não escreve número nem e-mail no log nem em mensagem de erro. **Os backups carregam tudo isso**: trate-os como dado pessoal.
 - **Convites:** o banco guarda só uma impressão (hash) do link, nunca o link. Convites usados, cancelados ou vencidos são apagados 30 dias depois, na próxima vez que a tela *Equipe* abre. Para apagar os dados de alguém da equipe, remova a pessoa em *Equipe* (o e-mail ainda fica no convite que ela usou até essa limpeza).
 - **Espelhamento da Amazon**: o programa ouve os grupos de origem, mas entrega ao espelhamento só `{ grupo, se foi do seu número, texto, id da mensagem, hora }`: **nunca o número, o identificador nem o nome de exibição de quem postou**. Só os links da Amazon são tratados; o resto da conversa é descartado. Na tabela `espelho_itens` ficam o JID e o **nome do grupo** de origem, o id da mensagem (só para não processar duas vezes) e o **texto da mensagem**, guardado **mascarado** (e-mails, telefones e qualquer sequência de 8 ou mais dígitos viram `…`) e cortado em **1000 caracteres**. Esse texto **não vai para o navegador** (nem na fila de completar) e **não entra no log**, que usa só nomes de grupo. Para a Amazon vão o link postado (para abrir o encurtador), o código do produto e a sua tag, nunca o texto da mensagem, o grupo ou quem postou. **Os backups carregam esses textos de grupos de terceiros**: mesmo mascarados, trate o pacote como dado pessoal. **Retenção:** os itens já decididos (enviados, descartados, expirados, com erro) são apagados depois do prazo de *Ajustes → Privacidade dos grupos* (padrão 90 dias; **0 = guardar para sempre**, e então os textos também ficam), na limpeza que roda ao iniciar e a cada 6 h. Ficam de fora dessa limpeza o que ainda está na fila de decisão ou na fila para completar (esta expira sozinha, veja [Fila para completar](#fila-para-completar)) e o item enviado que ainda conta para o "não repetir" do espelhamento. **Apagar um espelhamento apaga na hora todos os itens e textos dele.** O botão *Apagar o que já passou do prazo* de *Ajustes* aplica a mesma regra na hora, inclusive aos itens do espelhamento.
+- **Remetente**: o número de cada remetente (e o identificador interno que o WhatsApp usa para ele) fica só na tabela `remetentes` do banco, **entra no backup** e é **apagado ao excluir o remetente** (os backups já feitos continuam com ele até saírem do rodízio dos 7 mais recentes); a API mostra só o número mascarado, e nem log, console nem mensagem de erro o levam. O **texto da mensagem não é guardado**: só os campos lidos dele, já mascarados. Veja [Privacidade e segurança do remetente](#privacidade-e-segurança-do-remetente).
 - **Catálogo do Etiqueta**: o token fica num arquivo seu; o programa guarda só o caminho, lê o arquivo a cada pedido e nunca o põe em banco, log, URL, mensagem de erro ou tela. Ficam no banco as ofertas já tratadas (título, preço, foto, categoria e link), sem dado pessoal; veja [Privacidade e segurança](#privacidade-e-segurança) do Catálogo.
 - **Fotos enviadas:** as fotos de *Disparar mensagem* ficam em `data/uploads/` e são apagadas **7 dias depois** de não terem mais nenhum envio ativo (agendado ou repetido) que as use.
 - **Retenção:** eventos, leituras e cliques são apagados depois do prazo de *Ajustes → Privacidade dos grupos* (padrão 90 dias; a limpeza roda ao iniciar e a cada 6 h). Sessões vencidas também.

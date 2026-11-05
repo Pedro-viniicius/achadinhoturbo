@@ -663,6 +663,172 @@ test('catálogo etapa 0: defaults, status permitido, obrigatórios e unicidade p
   db.close();
 });
 
+// Envio pelo sócio (plano envio-pelo-socio, etapa 1): cadastro de remetentes e um item por link recebido no privado.
+const TABELAS_REMETENTES = {
+  remetentes: ['id', 'nome', 'jid', 'lid', 'enabled', 'destino_jids', 'template_id', 'tag_id', 'enviar_foto', 'max_por_hora',
+    'dedupe_horas', 'responder', 'created_at', 'updated_at'],
+  remetente_itens: ['id', 'remetente_id', 'remetente_nome', 'msg_id', 'ts', 'url', 'loja', 'complemento', 'status', 'codigo',
+    'motivo', 'chave', 'oferta', 'fonte_dados', 'envio_id', 'decidido_em', 'respondido_em', 'chegou_em', 'qtd_links'],
+};
+const INDICES_REMETENTES = {
+  idx_rem_msg: [['remetente_id', 'msg_id', 'url'], 1],
+  idx_rem_status: [['status', 'ts'], 0],
+  idx_rem_dedupe: [['remetente_id', 'chave', 'status', 'decidido_em'], 0],
+  idx_rem_hora: [['remetente_id', 'ts'], 0],
+};
+const OBJETOS_REMETENTES = ['idx_rem_dedupe', 'idx_rem_hora', 'idx_rem_msg', 'idx_rem_status', 'remetente_itens', 'remetentes',
+  'sqlite_autoindex_remetentes_1', 'sqlite_autoindex_remetentes_2'];
+
+function conferirTabelasRemetentes(db, quando) {
+  for (const [tabela, cols] of Object.entries(TABELAS_REMETENTES)) {
+    assert.ok(existe(db, 'table', tabela), `tabela ${tabela} (${quando})`);
+    assert.deepEqual(colunas(db, tabela), cols, `colunas de ${tabela} (${quando})`);
+  }
+  for (const [indice, [cols, unico]] of Object.entries(INDICES_REMETENTES)) {
+    assert.equal(db.prepare("SELECT tbl_name FROM sqlite_master WHERE type = 'index' AND name = ?").get(indice)?.tbl_name, 'remetente_itens', `índice ${indice} (${quando})`);
+    assert.deepEqual(db.prepare(`PRAGMA index_info(${indice})`).all().map((c) => c.name), cols, `colunas de ${indice} (${quando})`);
+    assert.equal(db.prepare('PRAGMA index_list(remetente_itens)').all().find((i) => i.name === indice)?.unique, unico, `${indice} ${unico ? 'é' : 'não é'} único (${quando})`);
+  }
+  // jid e lid UNIQUE: um índice único de uma coluna só para cada um
+  const unicos = db.prepare('PRAGMA index_list(remetentes)').all().filter((i) => i.unique === 1)
+    .map((i) => db.prepare(`PRAGMA index_info(${i.name})`).all().map((c) => c.name).join(',')).sort();
+  assert.deepEqual(unicos, ['jid', 'lid'], `jid e lid únicos em remetentes (${quando})`);
+}
+
+test('remetentes etapa 1: banco novo tem remetentes, remetente_itens e índices; reabrir não cria nem altera nada', () => {
+  const dir = tmp();
+  const db1 = openDb(dir);
+  conferirTabelasRemetentes(db1, 'primeira abertura');
+  for (const tabela of Object.keys(TABELAS_REMETENTES)) assert.equal(db1.prepare(`SELECT COUNT(*) AS n FROM ${tabela}`).get().n, 0, `${tabela} nasce vazia`);
+  db1.prepare("INSERT INTO remetentes (nome, jid, lid, created_at) VALUES ('Sócio', '5531999990000@s.whatsapp.net', '123@lid', 1)").run();
+  db1.prepare("INSERT INTO remetente_itens (remetente_id, remetente_nome, msg_id, ts, url) VALUES (1, 'Sócio', 'M1', 1, 'https://meli.la/abc')").run();
+  const esquema = linhas(db1, 'SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name');
+  const dados = { remetentes: linhas(db1, 'SELECT * FROM remetentes'), itens: linhas(db1, 'SELECT * FROM remetente_itens') };
+  db1.close();
+
+  const db2 = openDb(dir);
+  conferirTabelasRemetentes(db2, 'segunda abertura');
+  assert.deepEqual(linhas(db2, 'SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name'), esquema, 'reabrir não cria nem altera nada');
+  assert.deepEqual(linhas(db2, 'SELECT * FROM remetentes'), dados.remetentes, 'remetentes intactos ao reabrir');
+  assert.deepEqual(linhas(db2, 'SELECT * FROM remetente_itens'), dados.itens, 'itens intactos ao reabrir');
+  db2.close();
+});
+
+test('remetentes etapa 1: banco da versão anterior (sem as tabelas de remetentes) migra com os dados intactos', () => {
+  const dir = tmp();
+  // Banco como o do serviço antes desta etapa: esquema atual sem as tabelas e índices de remetentes, com dados em várias tabelas.
+  const velho = openDb(dir);
+  velho.exec(`
+    DROP TABLE remetente_itens; DROP TABLE remetentes;
+    INSERT INTO groups (jid, name, size, updated_at) VALUES ('g1@g.us', 'Grupo 1', 250, 1);
+    INSERT INTO rules (id, name, template_id, group_jids, sources, created_at) VALUES (3, 'Regra', 1, '["g1@g.us"]', '[{"type":"list","config":{}}]', 1);
+    INSERT INTO sent_offers (rule_id, offer_key, sent_at) VALUES (3, 'MLB123', 1730000000000);
+    INSERT INTO envios (id, tipo, payload, group_jids, status, created_at) VALUES (5, 'mensagem', '{"texto":"oi"}', '["g1@g.us"]', 'concluido', 1);
+    INSERT INTO envio_resultados (envio_id, ocorrencia, ts, jid, group_name, ok) VALUES (5, 1, 2, 'g1@g.us', 'Grupo 1', 1);
+    INSERT INTO aviso_destinos (nome, jid, created_at) VALUES ('Dono', '5531988887777@s.whatsapp.net', 1);
+    INSERT INTO espelhos (id, nome, created_at) VALUES (2, 'Espelho', 1);
+    INSERT INTO espelho_itens (espelho_id, origem_jid, msg_id, ts, url) VALUES (2, 'o1@g.us', 'M1', 1, 'https://amzn.to/abc');
+    INSERT INTO catalogo_itens (rule_id, chave, loja, status, oferta, criado_em) VALUES (3, 'MLB1', 'ml', 'enviado', '{}', 1);
+    INSERT INTO conexoes (plataforma, config, segredos, updated_at) VALUES ('amazon', '{}', '{"tag":"minhatag-20"}', 1);
+  `);
+  for (const tabela of Object.keys(TABELAS_REMETENTES)) assert.ok(!existe(velho, 'table', tabela), `o banco simulado não tem ${tabela}`);
+  for (const indice of Object.keys(INDICES_REMETENTES)) assert.ok(!existe(velho, 'index', indice), `o banco simulado não tem ${indice}`);
+  const objetosAntigos = linhas(velho, 'SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name');
+  const tabelasAntigas = objetosAntigos.filter((o) => o.type === 'table').map((o) => o.name);
+  const antes = {};
+  for (const t of tabelasAntigas) antes[t] = linhas(velho, `SELECT * FROM ${t} ORDER BY rowid`);
+  velho.close();
+
+  for (let abertura = 1; abertura <= 2; abertura++) {
+    const db = openDb(dir);
+    conferirTabelasRemetentes(db, `abertura ${abertura}`);
+    for (const t of tabelasAntigas) {
+      assert.deepEqual(linhas(db, `SELECT * FROM ${t} ORDER BY rowid`), antes[t], `${t} intacta (abertura ${abertura})`);
+    }
+    const objetos = linhas(db, 'SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name');
+    assert.deepEqual(objetos.filter((o) => !Object.keys(TABELAS_REMETENTES).includes(o.tbl_name)), objetosAntigos, `nenhuma tabela ou índice antigo muda (abertura ${abertura})`);
+    assert.deepEqual(objetos.filter((o) => Object.keys(TABELAS_REMETENTES).includes(o.tbl_name)).map((o) => o.name).sort(), OBJETOS_REMETENTES,
+      `só as tabelas e índices de remetentes a mais, sem duplicar (abertura ${abertura})`);
+    for (const tabela of Object.keys(TABELAS_REMETENTES)) assert.equal(db.prepare(`SELECT COUNT(*) AS n FROM ${tabela}`).get().n, 0, `${tabela} nasce vazia (abertura ${abertura})`);
+    db.close();
+  }
+});
+
+test('remetentes etapa 1 (CA1): valores padrão, obrigatórios e jid/lid únicos', () => {
+  const db = openDb(tmp());
+  const rem = db.prepare('INSERT INTO remetentes (nome, jid, lid) VALUES (?, ?, ?)');
+  const { lastInsertRowid: id } = rem.run('Sócio', '5531999990000@s.whatsapp.net', null);
+  assert.deepEqual({ ...db.prepare('SELECT * FROM remetentes WHERE id = ?').get(id) }, {
+    id: Number(id), nome: 'Sócio', jid: '5531999990000@s.whatsapp.net', lid: null, enabled: 1, destino_jids: '[]',
+    template_id: null, tag_id: null, enviar_foto: 1, max_por_hora: 10, dedupe_horas: 24, responder: 1, created_at: null, updated_at: null,
+  });
+  assert.throws(() => rem.run('Outro', '5531999990000@s.whatsapp.net', null), /UNIQUE/, 'o mesmo jid não entra duas vezes');
+  rem.run('Sem LID', '5531999991111@s.whatsapp.net', null); // vários remetentes sem LID convivem
+  rem.run('Com LID', '5531999992222@s.whatsapp.net', '111@lid');
+  assert.throws(() => rem.run('Outro LID', '5531999993333@s.whatsapp.net', '111@lid'), /UNIQUE/, 'o mesmo lid não entra duas vezes');
+  assert.throws(() => rem.run(null, '5531999994444@s.whatsapp.net', null), /NOT NULL/, 'nome é obrigatório');
+  assert.throws(() => rem.run('Sem jid', null, null), /NOT NULL/, 'jid é obrigatório');
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM remetentes').get().n, 3);
+  db.close();
+});
+
+test('remetentes etapa 1 (CA9): remetente_itens tem padrões, obrigatórios, um item por mensagem e link, e nenhum texto ou número', () => {
+  const db = openDb(tmp());
+  const item = db.prepare('INSERT INTO remetente_itens (remetente_id, msg_id, ts) VALUES (?, ?, ?)');
+  const { lastInsertRowid: id } = item.run(1, 'M1', 10);
+  assert.deepEqual({ ...db.prepare('SELECT * FROM remetente_itens WHERE id = ?').get(id) }, {
+    id: Number(id), remetente_id: 1, remetente_nome: null, msg_id: 'M1', ts: 10, url: '', loja: null, complemento: null,
+    status: 'recebido', codigo: null, motivo: null, chave: null, oferta: null, fonte_dados: null, envio_id: null,
+    decidido_em: null, respondido_em: null, chegou_em: null, qtd_links: null,
+  });
+  const comUrl = db.prepare('INSERT INTO remetente_itens (remetente_id, msg_id, ts, url) VALUES (?, ?, ?, ?)');
+  comUrl.run(1, 'M2', 10, 'https://amzn.to/a');
+  assert.throws(() => comUrl.run(1, 'M2', 11, 'https://amzn.to/a'), /UNIQUE/, 'a mesma mensagem e link não entram duas vezes');
+  assert.throws(() => item.run(1, 'M1', 11), /UNIQUE/, 'a mesma mensagem sem link (url vazia) não entra duas vezes');
+  comUrl.run(1, 'M2', 10, 'https://amzn.to/b'); // outro link da mesma mensagem
+  comUrl.run(2, 'M2', 10, 'https://amzn.to/a'); // outro remetente
+  const vals = { remetente_id: 3, msg_id: 'M9', ts: 1 };
+  for (const col of Object.keys(vals)) {
+    const v = { ...vals, [col]: null };
+    assert.throws(() => item.run(v.remetente_id, v.msg_id, v.ts), /NOT NULL/, `${col} é obrigatório`);
+  }
+  assert.throws(() => comUrl.run(3, 'M9', 1, null), /NOT NULL/, 'url nunca é nula');
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM remetente_itens').get().n, 4);
+  // LGPD: o item não guarda o texto da mensagem nem o número (jid/lid ficam só no cadastro e somem ao excluir).
+  for (const proibida of ['texto', 'texto_origem', 'mensagem', 'jid', 'lid', 'numero', 'telefone', 'participante', 'remetente_jid']) {
+    assert.ok(!colunas(db, 'remetente_itens').includes(proibida), `remetente_itens não tem ${proibida}`);
+  }
+  db.close();
+});
+
+// Remetente, rodada 2 (Q2/S2 e Q3): remetente_itens ganha chegou_em (hora de chegada, para o limite por hora) e qtd_links
+// (quantos links a linha 'limite' representa) por ALTER TABLE, sem perder os itens da versão anterior.
+test('remetentes rodada 2: banco da versão anterior com itens ganha chegou_em e qtd_links sem perder dado', () => {
+  const dir = tmp();
+  const velho = openDb(dir);
+  velho.exec('ALTER TABLE remetente_itens DROP COLUMN qtd_links; ALTER TABLE remetente_itens DROP COLUMN chegou_em;');
+  assert.deepEqual(colunas(velho, 'remetente_itens'), TABELAS_REMETENTES.remetente_itens.slice(0, -2), 'o banco simulado é o da versão anterior');
+  velho.prepare("INSERT INTO remetentes (id, nome, jid, lid, created_at) VALUES (4, 'Sócio', '5531999990000@s.whatsapp.net', '123@lid', 1)").run();
+  const ins = velho.prepare(`INSERT INTO remetente_itens (remetente_id, remetente_nome, msg_id, ts, url, loja, status, codigo, motivo, chave,
+    oferta, fonte_dados, envio_id, decidido_em, respondido_em) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+  ins.run(4, 'Sócio', 'M1', 1000, 'https://produto.mercadolivre.com.br/MLB-1234567890-x', 'mercadolivre', 'enviado', null, null, 'MLB1234567890',
+    '{"title":"Fone"}', 'api', 9, 1100, 1200);
+  ins.run(4, 'Sócio', 'M2', 2000, '', null, 'descartado', 'limite', 'passou do limite de links por hora', null, null, null, null, 2000, null);
+  ins.run(4, 'Sócio', 'M3', 3000, 'https://amzn.to/abc', 'amazon', 'recebido', null, null, null, null, null, null, null, null);
+  const antes = linhas(velho, 'SELECT * FROM remetente_itens ORDER BY id');
+  const remetentes = linhas(velho, 'SELECT * FROM remetentes');
+  velho.close();
+
+  for (let abertura = 1; abertura <= 2; abertura++) {
+    const db = openDb(dir);
+    conferirTabelasRemetentes(db, `abertura ${abertura}`);
+    assert.deepEqual(linhas(db, 'SELECT * FROM remetente_itens ORDER BY id'), antes.map((i) => ({ ...i, chegou_em: null, qtd_links: null })),
+      `itens intactos, com as colunas novas vazias (abertura ${abertura})`);
+    assert.deepEqual(linhas(db, 'SELECT * FROM remetentes'), remetentes, `remetentes intactos (abertura ${abertura})`);
+    db.close();
+  }
+});
+
 // R1 (docs-do-sistema, rodada 1): a simulação roda o agendador de verdade (encerra agendados vencidos, marca o resumo
 // do dia e ofertas como enviadas com links falsos). Por isso, sem DATA_DIR, ela usa data-simulacao/, nunca data/.
 test('config: sem DATA_DIR, o serviço normal usa data/ e a simulação (--simular ou DRY_RUN=1) usa data-simulacao/', () => {

@@ -11,6 +11,7 @@ import { createWhatsApp } from '../src/whatsapp.js';
 import { createLinkService } from '../src/links.js';
 import { IMAGEM_SHOPEE, URL_API as URL_API_SHOPEE } from '../src/shopee.js';
 import { ERROS_FONTE } from '../src/catalogo.js';
+import { RESPOSTAS } from '../src/remetentes.js';
 
 const HOST = 'disparador.exemplo.com.br';
 const SENHA = 'senha-de-teste-123';
@@ -24,14 +25,15 @@ const redeProibida = async () => { throw new Error('rede proibida no teste'); };
 
 /**
  * Sobe pelo mesmo caminho do main de src/server.js: criarServicos (Amazon, Shopee e agendador) e buildApp.
- * `modoLink`: o modo do serviço de links ('fake' por padrão; 'extension' para a volta da extensão).
+ * `modoLink`: o modo do serviço de links ('fake' por padrão; 'extension' para a volta da extensão). `ml`: leitor do
+ * Mercado Livre falso (padrão: o de src/ml.js).
  */
-function subir({ publicHost = HOST, panelPassword = SENHA, dir = tmp(), fetch = redeProibida, modoLink = 'fake' } = {}) {
+function subir({ publicHost = HOST, panelPassword = SENHA, dir = tmp(), fetch = redeProibida, modoLink = 'fake', ml } = {}) {
   const db = openDb(dir);
   const wa = createWhatsApp({ db, dir, dryRun: true }); wa.connect();
   const links = createLinkService({ getMode: () => modoLink });
-  const { amazon, shopee, catalogo, catalogoItens, scheduler } = criarServicos({ db, wa, links, fast: true, dir, fetch });
-  const app = buildApp({ db, wa, links, scheduler, amazon, shopee, catalogo, catalogoItens, publicHost, panelPassword });
+  const { amazon, shopee, catalogo, catalogoItens, scheduler } = criarServicos({ db, wa, links, fast: true, dir, fetch, ...(ml ? { ml } : {}) });
+  const app = buildApp({ db, wa, links, scheduler, amazon, shopee, catalogo, catalogoItens, publicHost, panelPassword, ...(ml ? { ml } : {}) });
   return new Promise((ok) => {
     const server = app.listen(0, '127.0.0.1', () => {
       const port = server.address().port;
@@ -749,4 +751,210 @@ test('catálogo (CA1): o "Enviar" da revisão pelo servidor sai pela fila de env
     const segundo = await req(s.port, `/api/catalogo/itens/${item}/enviar`, { method: 'POST', headers: h, body: {} });
     assert.deepEqual([segundo.status, segundo.json], [409, { erro: 'Esta oferta já foi tratada.' }]);
   } finally { await s.fechar(); }
+});
+
+// ---------- Remetente ligado no servidor (plano envio-pelo-socio, etapa 9; CA2, CA6, CA9, CA10) ----------
+const NUMERO_REM = '5535987651234';
+const PN_REM = `${NUMERO_REM}@s.whatsapp.net`;
+const LID_REM = '207654321098765@lid';
+const GRUPO_REM = '400@g.us';
+const URL_ML_REM = 'https://produto.mercadolivre.com.br/MLB-1234567890-fone-bom-_JM';
+
+/** Leitor do Mercado Livre sem rede: a página de qualquer link traz o mesmo produto. Guarda as URLs lidas. */
+function mlSemRede() {
+  const lidos = [];
+  return {
+    lidos,
+    async resolveOffer(c) {
+      lidos.push(c.url);
+      return { key: 'MLB1234567890', url: c.url, title: 'Fone Bom', price: 89.9, oldPrice: 129.9, discountPct: null, sold: 1200,
+        freeShipping: false, image: 'https://http2.mlstatic.com/D_NQ_NP_123-O.jpg' };
+    },
+  };
+}
+
+/** Grupo de destino, etiqueta e um remetente gravados direto (o cadastro tem os próprios testes). → id do remetente */
+function cadastrarRemetente(db, extra = {}) {
+  const agora = Date.now();
+  if (!db.prepare('SELECT 1 FROM groups WHERE jid = ?').get(GRUPO_REM)) {
+    db.prepare('INSERT INTO groups (jid, name, size, updated_at) VALUES (?,?,?,?)').run(GRUPO_REM, 'Achadinhos do Sócio', 10, agora);
+  }
+  const tag = db.prepare("SELECT id FROM tags WHERE name = 'etiquetaA'").get()?.id
+    ?? Number(db.prepare("INSERT INTO tags (name, created_at) VALUES ('etiquetaA', 1)").run().lastInsertRowid);
+  const r = { nome: 'Sócio Pedro', jid: PN_REM, lid: LID_REM, enabled: 1, responder: 1, dedupe_horas: 24, ...extra };
+  return Number(db.prepare(`INSERT INTO remetentes (nome, jid, lid, enabled, destino_jids, template_id, tag_id, enviar_foto, max_por_hora,
+    dedupe_horas, responder, created_at, updated_at) VALUES (?,?,?,?,?,1,?,0,10,?,?,?,?)`)
+    .run(r.nome, r.jid, r.lid, r.enabled, JSON.stringify([GRUPO_REM]), tag, r.dedupe_horas, r.responder, agora, agora).lastInsertRowid);
+}
+
+/** Mensagem privada como o Baileys entrega em messages.upsert (com pushName, que nunca deve passar adiante). */
+const upsertPrivado = (texto, { id = 'PV1', jid = PN_REM } = {}) => ({ type: 'notify', messages: [{
+  key: { remoteJid: jid, fromMe: false, id, addressingMode: jid.endsWith('@lid') ? 'lid' : 'pn' },
+  pushName: 'Pedro', messageTimestamp: Math.floor(Date.now() / 1000), message: { conversation: texto },
+}] });
+
+/** Espera a condição (até 3 s). */
+async function ate(cond, msg) {
+  const t0 = Date.now();
+  while (!cond()) {
+    assert.ok(Date.now() - t0 < 3000, msg);
+    await new Promise((ok) => setTimeout(ok, 5));
+  }
+}
+
+const itensRem = (db) => db.prepare('SELECT status, codigo, envio_id, msg_id FROM remetente_itens ORDER BY id').all().map((i) => ({ ...i }));
+
+test('remetente (CA6): mensagem privada simulada (wa._onMensagens) de remetente cadastrado vira item, sai pela fila de envios do agendador e recebe a resposta', async () => {
+  const ml = mlSemRede();
+  const s = await subir({ publicHost: '', panelPassword: '', ml });
+  try {
+    assert.ok(s.scheduler.remetentes, 'o agendador cria e expõe o serviço dos remetentes');
+    cadastrarRemetente(s.db);
+    await s.wa._onMensagens(upsertPrivado(`Olha que oferta: ${URL_ML_REM}`, { id: 'MSG-CA6' }));
+    const envio = () => s.db.prepare('SELECT * FROM envios ORDER BY id DESC LIMIT 1').get();
+    await ate(() => envio()?.status === 'concluido', 'o envio do remetente não saiu pela fila (onPrivada → receber → acordar → tick)');
+    assert.deepEqual(itensRem(s.db), [{ status: 'enviado', codigo: null, envio_id: envio().id, msg_id: 'MSG-CA6' }]);
+    const payload = JSON.parse(envio().payload);
+    assert.equal(payload.origem.tipo, 'remetente');
+    assert.deepEqual(JSON.parse(envio().group_jids), [GRUPO_REM]);
+    assert.deepEqual(ml.lidos, [URL_ML_REM]);
+    const nosGrupos = s.wa.simulated.filter((m) => m.jid.endsWith('@g.us'));
+    assert.equal(nosGrupos.length, 1);
+    assert.equal(nosGrupos[0].jid, GRUPO_REM);
+    assert.match(nosGrupos[0].text, /https:\/\/meli\.la\/fake-/, 'sai com o link do dono, não com o recebido');
+    assert.ok(!nosGrupos[0].text.includes(URL_ML_REM));
+    // a resposta (responderPendentes, no passo dos remetentes do tick seguinte) vai ao número cadastrado, com a frase fixa
+    const respondeu = () => s.wa.simulated.some((m) => m.jid === PN_REM);
+    for (const t0 = Date.now(); !respondeu() && Date.now() - t0 < 3000;) { await s.scheduler.tick(); await new Promise((ok) => setTimeout(ok, 5)); }
+    assert.ok(respondeu(), 'a resposta ao remetente não saiu');
+    assert.deepEqual(s.wa.simulated.filter((m) => m.jid === PN_REM).map((m) => m.text), [RESPOSTAS.enviadoTodos(1)]);
+    const log = s.db.prepare('SELECT rule_name, level FROM log ORDER BY id').all().map((l) => ({ ...l }));
+    assert.ok(log.some((l) => l.rule_name === 'Remetente: Sócio Pedro' && l.level === 'ok'), JSON.stringify(log));
+    assert.ok(!JSON.stringify(log).includes(NUMERO_REM.slice(-8)), 'o número não vai ao log');
+  } finally { await s.fechar(); }
+});
+
+test('remetente (CA6): mensagem que chega no meio do tick (depois do passo dos remetentes) sai no laço "acordado" do mesmo tick', async () => {
+  const s = await subir({ publicHost: '', panelPassword: '', ml: mlSemRede() });
+  try {
+    cadastrarRemetente(s.db);
+    const avisosTick = s.scheduler.avisos.tick;
+    let chegou = false;
+    s.scheduler.avisos.tick = async () => {
+      if (!chegou) { chegou = true; await s.wa._onMensagens(upsertPrivado(URL_ML_REM, { id: 'MSG-MEIO' })); }
+      return avisosTick();
+    };
+    await s.scheduler.tick();
+    assert.ok(chegou, 'o passo dos avisos rodou');
+    assert.deepEqual(itensRem(s.db).map((i) => i.status), ['enviado'], 'o item foi decidido no mesmo tick');
+    assert.equal(s.db.prepare('SELECT status FROM envios').get()?.status, 'concluido', 'o envio saiu no mesmo tick');
+    assert.equal(s.wa.simulated.filter((m) => m.jid === GRUPO_REM).length, 1);
+    assert.deepEqual(s.wa.simulated.filter((m) => m.jid === PN_REM).map((m) => m.text), [RESPOSTAS.enviadoTodos(1)], 'e a resposta também');
+  } finally { await s.fechar(); }
+});
+
+test('remetente (CA2): mensagem privada de número não cadastrado, de remetente desligado ou minha não gera item, envio, log nem resposta', async (t) => {
+  const ml = mlSemRede();
+  const s = await subir({ publicHost: '', panelPassword: '', ml });
+  try {
+    const saida = []; for (const n of ['log', 'info', 'warn', 'error']) t.mock.method(console, n, (...a) => saida.push(a.join(' ')));
+    cadastrarRemetente(s.db, { nome: 'Desligado', jid: '5535911112222@s.whatsapp.net', lid: null, enabled: 0 });
+    const logAntes = s.db.prepare('SELECT COUNT(*) AS n FROM log').get().n;
+    await s.wa._onMensagens(upsertPrivado(URL_ML_REM, { id: 'X1', jid: '5511988887777@s.whatsapp.net' })); // não cadastrado
+    await s.wa._onMensagens(upsertPrivado(URL_ML_REM, { id: 'X2', jid: '208888888888888@lid' }));          // LID desconhecido
+    await s.wa._onMensagens(upsertPrivado(URL_ML_REM, { id: 'X3', jid: '5535911112222@s.whatsapp.net' })); // remetente desligado
+    const minha = upsertPrivado(URL_ML_REM, { id: 'X4', jid: PN_REM }); minha.messages[0].key.fromMe = true;
+    cadastrarRemetente(s.db);
+    await s.wa._onMensagens(minha);                                                                         // fromMe
+    await s.scheduler.tick();
+    assert.equal(s.db.prepare('SELECT COUNT(*) AS n FROM remetente_itens').get().n, 0);
+    assert.equal(s.db.prepare('SELECT COUNT(*) AS n FROM envios').get().n, 0);
+    assert.equal(s.db.prepare('SELECT COUNT(*) AS n FROM log').get().n, logAntes);
+    assert.deepEqual(s.wa.simulated, []);
+    assert.deepEqual(ml.lidos, [], 'nem a loja é consultada');
+    assert.deepEqual(saida, [], 'silêncio total, inclusive no console');
+  } finally { await s.fechar(); }
+});
+
+test('remetente (CA9): GET /api/remetentes com login responde 200 sem o número nem o LID; sem login 401; o Histórico também não traz o número', async () => {
+  const s = await subir();
+  try {
+    cadastrarRemetente(s.db);
+    assert.equal((await req(s.port, '/api/remetentes')).status, 401);
+    const cookie = sidDe(await login(s.port));
+    const r = await req(s.port, '/api/remetentes', { headers: { cookie } });
+    assert.equal(r.status, 200, r.txt);
+    assert.deepEqual(r.json.remetentes.map((x) => x.nome), ['Sócio Pedro']);
+    assert.equal(r.json.remetentes[0].numero, '+55 35 •••••-1234', 'só o número mascarado');
+    for (const proibido of [NUMERO_REM, NUMERO_REM.slice(-8), PN_REM, LID_REM, LID_REM.split('@')[0], 'whatsapp.net', '@lid']) {
+      assert.ok(!r.txt.includes(proibido), `a resposta traz ${proibido}`);
+    }
+    s.db.prepare("INSERT INTO remetente_itens (remetente_id, remetente_nome, msg_id, ts, url, loja, status, codigo, motivo, decidido_em) VALUES (?, 'Sócio Pedro', 'M1', ?, ?, 'mercadolivre', 'descartado', 'sem_dados', 'sem dados', ?)")
+      .run(r.json.remetentes[0].id, Date.now(), URL_ML_REM, Date.now());
+    const h = await req(s.port, '/api/remetentes/itens', { headers: { cookie } });
+    assert.equal(h.status, 200, h.txt);
+    assert.equal(h.json.length, 1);
+    for (const proibido of [NUMERO_REM, NUMERO_REM.slice(-8), LID_REM.split('@')[0], 'whatsapp.net']) assert.ok(!h.txt.includes(proibido), `o Histórico traz ${proibido}`);
+  } finally { await s.fechar(); }
+});
+
+test('remetente (CA9): "Apagar o que já passou do prazo" (POST /api/privacidade/limpar) também apaga os itens antigos dos remetentes, com a regra da retenção', async () => {
+  const s = await subir({ publicHost: '', panelPassword: '' });
+  try {
+    const origin = `http://127.0.0.1:${s.port}`;
+    const DIA = 86400000; const agora = Date.now(); const velho = agora - 60 * DIA;
+    s.db.prepare("INSERT INTO settings (key, value) VALUES ('retencao_dias', '30') ON CONFLICT(key) DO UPDATE SET value = excluded.value").run();
+    const curta = cadastrarRemetente(s.db);
+    const longa = cadastrarRemetente(s.db, { nome: 'Longo', jid: '5535911113333@s.whatsapp.net', lid: null, dedupe_horas: 8760 });
+    const ins = s.db.prepare("INSERT INTO remetente_itens (remetente_id, remetente_nome, msg_id, ts, url, loja, status, decidido_em) VALUES (?, 'x', ?, ?, '', 'mercadolivre', ?, ?)");
+    ins.run(curta, 'velho-descartado', velho, 'descartado', velho);    // apaga
+    ins.run(curta, 'velho-enviado', velho, 'enviado', velho);          // fora das 24 h de "Horas sem repetir": apaga
+    ins.run(longa, 'velho-dedupe', velho, 'enviado', velho);           // ainda conta para "Horas sem repetir" (1 ano): fica
+    ins.run(curta, 'velho-recebido', velho, 'recebido', null);         // ativo: fica
+    ins.run(curta, 'recente', agora - DIA, 'descartado', agora - DIA); // dentro dos 30 dias: fica
+    const r = await req(s.port, '/api/privacidade/limpar', { method: 'POST', headers: { origin } });
+    assert.equal(r.status, 200, r.txt);
+    assert.equal(r.json.remetentes, 2);
+    assert.equal(r.json.espelhamento, 0, 'o resto da resposta continua igual');
+    assert.deepEqual(s.db.prepare('SELECT msg_id FROM remetente_itens ORDER BY id').all().map((i) => i.msg_id), ['velho-dedupe', 'velho-recebido', 'recente']);
+    s.db.prepare("UPDATE settings SET value = '0' WHERE key = 'retencao_dias'").run();
+    const r0 = await req(s.port, '/api/privacidade/limpar', { method: 'POST', headers: { origin } });
+    assert.deepEqual([r0.status, r0.json.remetentes], [200, 0], 'retenção 0 (para sempre): nada sai');
+    assert.equal(s.db.prepare('SELECT COUNT(*) AS n FROM remetente_itens').get().n, 3);
+  } finally { await s.fechar(); }
+});
+
+test('remetente (CA10): start() devolve os itens "processando" (o serviço caiu no meio) a "recebido" antes do primeiro tick, e o tick os envia', async () => {
+  const s = await subir({ publicHost: '', panelPassword: '', ml: mlSemRede() });
+  try {
+    const id = cadastrarRemetente(s.db);
+    s.db.prepare("INSERT INTO remetente_itens (remetente_id, remetente_nome, msg_id, ts, url, loja, chave, status) VALUES (?, 'Sócio Pedro', 'M-CAIU', ?, ?, 'mercadolivre', 'MLB1234567890', 'processando')")
+      .run(id, Date.now(), URL_ML_REM);
+    s.scheduler.start();
+    s.scheduler.stop(); // sem o timer: o tick vem daqui
+    assert.deepEqual(itensRem(s.db).map((i) => i.status), ['recebido']);
+    await s.scheduler.tick();
+    assert.deepEqual(itensRem(s.db).map((i) => i.status), ['enviado']);
+    assert.equal(s.wa.simulated.filter((m) => m.jid === GRUPO_REM).length, 1, 'saiu uma vez só');
+  } finally { s.scheduler.stop(); await s.fechar(); }
+});
+
+test('remetente (CA10): falha no passo dos remetentes não trava o tick e vai ao console só com o nome do erro', async (t) => {
+  const s = await subir({ publicHost: '', panelPassword: '' });
+  try {
+    const saida = []; t.mock.method(console, 'error', (...a) => saida.push(a.join(' ')));
+    const chamadas = [];
+    const erro = () => { const e = new Error(`falhou com ${PN_REM}`); e.code = 'ERR_SQLITE_ERROR'; return e; };
+    s.scheduler.remetentes.responderPendentes = async () => { chamadas.push('responder'); throw erro(); };
+    s.scheduler.remetentes.processarPendentes = async () => { chamadas.push('processar'); throw erro(); };
+    const avisosTick = s.scheduler.avisos.tick;
+    s.scheduler.avisos.tick = async () => { chamadas.push('avisos'); return avisosTick(); };
+    s.scheduler.remetentes.recuperar = () => { chamadas.push('recuperar'); throw erro(); };
+    s.scheduler.start(); s.scheduler.stop();
+    await s.scheduler.tick();
+    assert.deepEqual(chamadas, ['recuperar', 'responder', 'processar', 'avisos'], 'a resposta que falha não impede a decisão, e o tick segue');
+    assert.ok(saida.length >= 3 && saida.every((l) => l.startsWith('[agendador] remetentes')), saida.join('\n'));
+    assert.ok(saida.every((l) => !l.includes(NUMERO_REM.slice(-8))), 'o número (mensagem do erro) não vai ao console');
+    assert.ok(saida.some((l) => l.includes('ERR_SQLITE_ERROR')));
+  } finally { s.scheduler.stop(); await s.fechar(); }
 });

@@ -762,6 +762,13 @@ const FATOS = [
   { nome: 'linhas máximas do arquivo de comissões (milhares)', valor: 100, texto: (v) => new RegExp(`até ${v}\\.000 linhas`), codigo: [['src/csv.js', /export const MAX_LINHAS_ARQUIVO = (\d+)_000;/]] },
   { nome: 'dias máximos de um gasto com anúncios', valor: 366, texto: (v) => new RegExp(`gasto[^.]{0,60}até ${v} dias`), codigo: [['src/ganhos.js', /export const MAX_DIAS_GASTO = (\d+);/], ['public/ganhos.js', /const GANHOS_MAX_DIAS_GASTO = (\d+);/]] },
   { nome: 'caracteres da observação do gasto', valor: 200, texto: (v) => new RegExp(`observação[^.]{0,40}até ${v} caracteres`), codigo: [['src/ganhos.js', /export const MAX_NOTA = (\d+);/], ['public/ganhos.js', /const GANHOS_MAX_NOTA = (\d+);/]] },
+  // Remetente (envio pelo sócio, plano envio-pelo-socio, etapa 8): o que o dono vê no cadastro e o que o sócio recebe.
+  { nome: 'links por hora do remetente (padrão)', valor: 10, texto: (v) => new RegExp(`${v} links por hora por remetente`), codigo: [['src/db.js', /CREATE TABLE IF NOT EXISTS remetentes \([^;]*?max_por_hora INTEGER NOT NULL DEFAULT (\d+)/]] },
+  { nome: 'links por hora do remetente (máximo)', valor: 60, texto: (v) => new RegExp(`de 1 a ${v} links por hora`), codigo: [['src/remetentes.js', /const MAX_POR_HORA = (\d+);/]] },
+  { nome: 'horas sem repetir do remetente (padrão)', valor: 24, texto: (v) => new RegExp(`${v} h(?:oras)? sem repetir`), codigo: [['src/db.js', /CREATE TABLE IF NOT EXISTS remetentes \([^;]*?dedupe_horas INTEGER NOT NULL DEFAULT (\d+)/]] },
+  { nome: 'links por mensagem do remetente', valor: 5, texto: (v) => new RegExp(`[Aa]té (?:${numero(v)}) links por mensagem`), codigo: [['src/oferta-texto.js', /export const MAX_URLS = (\d+);/]] },
+  { nome: 'link parado do remetente na fila (horas)', valor: 2, texto: (v) => new RegExp(`parado na fila por mais de ${v} h expira`), codigo: [['src/remetentes.js', /const PARADO_MAX = (\d+) \* HORA;/]] },
+  { nome: 'respostas por hora ao remetente', valor: 20, texto: (v) => new RegExp(`até ${v} respostas por hora`), codigo: [['src/remetentes.js', /const MAX_RESPOSTAS_HORA = (\d+);/]] },
 ];
 
 test('FATOS: cada número aparece nos Docs e no README e bate com a constante do código', () => {
@@ -800,6 +807,112 @@ test('P4: a versão da extensão citada para o Sub_id da Shopee aparece no READM
   const ok = versao[0] > pedida[0] || (versao[0] === pedida[0] && (versao[1] > pedida[1] || (versao[1] === pedida[1] && versao[2] >= pedida[2])));
   assert.ok(ok, `o manifest (${versao.join('.')}) é mais velho que a versão citada (${citada})`);
   assert.match(lerRaiz('extension/background.js'), /const SHOPEE_SUBID_CAMPO = 'subId1';/, 'o campo do Sub_id está ligado na extensão');
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// Remetente (plano envio-pelo-socio, etapa 8, CA13): verbetes, glossário, seção do capítulo e README. As frases que o
+// sócio recebe vêm de RESPOSTAS (src/remetentes.js): a documentação precisa citá-las como o programa as manda.
+// ---------------------------------------------------------------------------------------------------------------
+const TIPS_REMETENTE = ['remetente', 'remetente.numero', 'remetente.destino', 'remetente.responder', 'remetente.limite'];
+const escRe = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+/** Regex da frase, com os números trocados por \d+ (a documentação mostra um exemplo, o programa conta de verdade). */
+const frase = (t) => new RegExp(escRe(limpo(t)).replace(/\d+/g, '\\d+'));
+
+function tipsDoPainel() {
+  const noop = () => {};
+  const ctx = vm.createContext({ document: { addEventListener: noop, getElementById: () => null }, addEventListener: noop, innerWidth: 1280, innerHeight: 800 });
+  vm.runInContext(fonte('ajuda.js'), ctx, { filename: 'public/ajuda.js' });
+  return JSON.parse(vm.runInContext('JSON.stringify(TIPS)', ctx));
+}
+
+test('Remetente: os cinco verbetes de TIPS existem, em linguagem simples, com os números certos', () => {
+  const T = tipsDoPainel();
+  for (const k of TIPS_REMETENTE) {
+    assert.ok(typeof T[k] === 'string' && T[k].length >= 40 && T[k].length <= 520, `TIPS.${k}: ${T[k]?.length}`);
+    assert.doesNotMatch(T[k], /\b(jid|lid|hmac|payload|endpoint|json|sqlite|baileys)\b/i, `TIPS.${k}: jargão`);
+  }
+  assert.match(T['remetente'], /número/i);
+  assert.match(T['remetente'], /sua (?:etiqueta|tag|afiliação)|sua conta/i, 'o link sai com a afiliação do dono');
+  assert.match(T['remetente.numero'], /DDD/);
+  assert.match(T['remetente.numero'], /só (?:no|neste) seu computador|fica só no seu computador/i);
+  assert.match(T['remetente.destino'], /grupos?/i);
+  assert.match(T['remetente.responder'], /frase/i);
+  assert.doesNotMatch(T['remetente.responder'], /link de afiliado/i);
+  const lim = T['remetente.limite'];
+  assert.match(lim, /\b10\b/, 'padrão de 10 links por hora'); assert.match(lim, /\b60\b/, 'máximo de 60');
+  assert.match(lim, /\b24\b/, 'padrão de 24 h sem repetir');
+});
+
+test('Remetente: o glossário tem o verbete "Remetente" e a tabela de limites traz a linha do remetente', () => {
+  const g = CAPS.referencia.secoes.find((s) => s.id === 'glossario').blocos.filter((b) => b.termos).flatMap((b) => b.termos);
+  const v = g.find(([x]) => x === 'Remetente');
+  assert.ok(v, 'glossário: Remetente'); assert.ok(g.filter(([x]) => x === 'Remetente').length === 1);
+  assert.match(v[1], /número/); assert.match(v[1], /Disparo automático/);
+  assert.ok(primeiraColuna('referencia', 'limites').some((x) => /^Remetente/.test(x)), 'limites: linha do Remetente');
+});
+
+test('Remetente: a seção "remetentes" do Disparo automático cobre cadastro, as 3 lojas, as respostas, os limites e a LGPD', async () => {
+  const { RESPOSTAS } = await import('../src/remetentes.js');
+  const sec = CAPS['disparo-automatico'].secoes.find((s) => s.id === 'remetentes');
+  assert.ok(sec, 'seção remetentes em disparo-automatico');
+  assert.ok(sec.onde && /Novo remetente/.test(sec.onde));
+  const txt = limpo(strings(sec.blocos).join('\n'));
+  // cadastrar
+  for (const r of [/Novo remetente/, /Nome/, /Número do remetente/, /Grupos de destino/, /Template/, /Etiqueta do Mercado Livre/, /Responder ao remetente/, /Criar remetente/]) assert.match(txt, r);
+  // as 3 lojas e a afiliação do dono
+  for (const r of [/Mercado Livre/, /Amazon/, /Shopee/, /extensão/, /tag de associado/, /ID de afiliado/, /nunca reenvia o link que o remetente mandou/]) assert.match(txt, r);
+  assert.match(txt, /sempre com a sua afiliação|sempre sai com a sua/i);
+  // as frases que o sócio recebe
+  const frases = [RESPOSTAS.enviadoTodos(1), RESPOSTAS.enviadoTodos(3), RESPOSTAS.enviadoParte(2, 3), RESPOSTAS.falhaEnvio, RESPOSTAS.repetida(3), RESPOSTAS.montar, RESPOSTAS.sem_dados,
+    RESPOSTAS.link_invalido, RESPOSTAS.sem_link_de_loja, RESPOSTAS.limite, RESPOSTAS.varios(3, { enviados: 2, repetidos: 1, nao: 0 })];
+  for (const f of frases) assert.match(txt, frase(f), `a seção não traz a frase: ${f}`);
+  assert.match(txt, /nunca (?:leva|levam)[^.]*link/i); assert.match(txt, /silêncio/);
+  // limites
+  for (const r of [/10 links por hora por remetente/, /de 1 a 60 links por hora/, /24 h sem repetir/, /até 5 links por mensagem/, /parado na fila por mais de 2 h expira/, /até 20 respostas por hora/]) assert.match(txt, r);
+  // o programa não processa o que chegou com ele fora do ar (nem promete a regra antiga de "mensagem com mais de 2 h")
+  assert.match(txt, /desligado ou sem conexão não é processada/); assert.match(txt, /precisa mandar de novo/);
+  assert.doesNotMatch(txt, /mais de 2 h é ignorada/);
+  // a Shopee exige também a API ou a extensão, não só o ID (R1)
+  assert.match(txt, /ID de afiliado em [\[*]*Conexões → Shopee[\]*]* e a API da Shopee ou a extensão do Chrome conectada/);
+  // backups já feitos continuam com o número até saírem do rodízio (S4)
+  assert.match(txt, /backups que você já fez continuam com o número até saírem do rodízio[^.]*7 mais recentes/);
+  // o aviso de tag ou ID só aparece depois que um link foi barrado
+  assert.match(txt, /depois que um link foi barrado/);
+  // LGPD
+  for (const r of [/só no seu computador/, /entra no backup/, /apagado ao excluir o remetente|apaga o número/, /texto da mensagem não é guardado/]) assert.match(txt, r);
+  // nada de promessa que o programa não cumpre
+  assert.doesNotMatch(txt, /Avisei o dono|Recebi\. Sai assim/);
+});
+
+test('Remetente: o README tem a seção, as frases do sócio, os limites e a LGPD (e o Histórico lista o tipo)', async () => {
+  const { RESPOSTAS } = await import('../src/remetentes.js');
+  assert.match(README_BRUTO, /^## Remetente/m);
+  const i = README_BRUTO.search(/^## Remetente/m); const resto = README_BRUTO.slice(i + 5); const fim = resto.search(/^## /m);
+  const txt = limpo(resto.slice(0, fim < 0 ? undefined : fim));
+  for (const f of [RESPOSTAS.enviadoTodos(3), RESPOSTAS.enviadoParte(2, 3), RESPOSTAS.repetida(3), RESPOSTAS.sem_dados, RESPOSTAS.sem_link_de_loja, RESPOSTAS.limite]) assert.match(txt, frase(f), `README sem a frase: ${f}`);
+  for (const r of [/Mercado Livre/, /Amazon/, /Shopee/, /entra no backup/, /apagado ao excluir o remetente/, /texto da mensagem não é guardado/, /silêncio/, /Novo remetente/]) assert.match(txt, r);
+  assert.match(limpo(README_BRUTO), /Tudo, Disparo automático, Espelhamento, Catálogo ou Remetente/);
+  assert.match(txt, /ID de afiliado em [\[*]*Conexões → Shopee[\]*]* e a API da Shopee ou a extensão do Chrome conectada/);
+  assert.match(txt, /não é processado/); assert.match(txt, /precisa mandar de novo/); assert.doesNotMatch(txt, /mais de 2 h é ignorada/);
+  assert.match(txt, /backups que você já fez continuam com o número até saírem do rodízio[^.]*7 mais recentes/);
+  assert.match(txt, /depois que um link do remetente foi barrado/);
+  const privacidade = limpo(README_BRUTO.slice(README_BRUTO.search(/^## Privacidade \(LGPD\)/m)));
+  assert.match(privacidade, /Remetente/, 'a seção de privacidade cita o Remetente');
+});
+
+test('Remetente: o prazo de guarda, o botão "Apagar o que já passou do prazo" e o link direto citam os itens dos remetentes', () => {
+  const sec = (cap, id) => limpo(strings(CAPS[cap].secoes.find((x) => x.id === id).blocos).join('\n'));
+  const retencao = sec('privacidade', 'retencao');
+  assert.match(retencao, /itens já decididos dos remetentes/);
+  assert.match(retencao, /fila do espelhamento e dos remetentes/);
+  assert.match(limpo(strings(CAPS.manutencao.secoes.flatMap((x) => x.blocos)).join('\n')), /Catálogo ou de um remetente não saem/);
+  // o aviso do botão mostra o que foi apagado dos remetentes (o servidor devolve `remetentes`)
+  const app = fs.readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  assert.match(app, /\$\{r\.remetentes \?\? 0\} itens dos remetentes/);
+});
+
+test('Remetente: o capítulo do Histórico lista o tipo Remetente', () => {
+  assert.match(limpo(strings(CAPS.resultados).join('\n')), /Tudo, Disparo automático, Espelhamento, Catálogo ou Remetente/);
 });
 
 /** Primeira coluna de todas as tabelas de uma seção. */

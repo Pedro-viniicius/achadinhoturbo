@@ -12,6 +12,8 @@
 //
 // Puro: sem rede, sem banco. Preços no formato brasileiro (R$ 1.310,05).
 
+import { discountPct } from './template.js';
+
 export const MAX_URL = 2048;
 export const MAX_URLS = 5;
 export const TITULO_MIN = 3;
@@ -208,6 +210,43 @@ export function lerOfertaDoTexto(texto) {
     coupon: lerCupom(limpo),
     urls,
   };
+}
+
+/**
+ * Junta os dados da loja (prioridade) com os do texto, campo a campo: o texto só completa o que a loja não trouxe.
+ * `daLoja` = oferta lida pela API/página da loja (ou null); `doTexto` = lerOfertaDoTexto(...) (ou {}).
+ * A imagem vem só da loja, nunca do texto. → { oferta, fonte: 'api'|'api+texto'|'texto'|null }:
+ * `fonte` diz de onde veio o que ficou na oferta (o que foi jogado fora não conta).
+ */
+export function mesclarOferta(daLoja, doTexto) {
+  const api = daLoja ?? null;
+  const t = doTexto ?? {};
+  const de = { api: false, texto: false };
+  const pegar = (vApi, vTexto) => {
+    if (vApi != null && vApi !== '') { de.api = true; return vApi; }
+    if (vTexto != null && vTexto !== '') { de.texto = true; return vTexto; }
+    return null;
+  };
+  const title = pegar(api?.title, t.title);
+  const precoDaApi = api?.price != null;
+  const price = pegar(api?.price, t.price);
+  // preço antigo só quando é maior que o atual: nenhuma linha "De" inventada (e o que foi jogado fora não conta como fonte)
+  let oldPrice = api?.oldPrice ?? t.oldPrice ?? null;
+  if (oldPrice != null && (price == null || oldPrice <= price)) oldPrice = null;
+  if (oldPrice != null) de[api?.oldPrice != null ? 'api' : 'texto'] = true;
+  // desconto: o da loja (0 = não veio); senão o dos dois preços; o "NN% OFF" do texto só vale para o preço do texto
+  let pct = api?.discountPct || (oldPrice != null ? discountPct(price, oldPrice) : null);
+  if (!pct && !precoDaApi && t.discountPct) { pct = t.discountPct; de.texto = true; }
+  const oferta = {
+    title, price, oldPrice, discountPct: pct || null,
+    sold: pegar(api?.sold, t.sold),
+    freeShipping: !!(api?.freeShipping || t.freeShipping), // a loja não informa frete: false = "não veio"
+    coupon: pegar(api?.coupon, t.coupon),
+    image: api?.image ?? null,
+  };
+  if (!api?.freeShipping && t.freeShipping) de.texto = true;
+  const fonte = de.api && de.texto ? 'api+texto' : de.api ? 'api' : de.texto ? 'texto' : null;
+  return { oferta, fonte };
 }
 
 function escaparRegex(s) {

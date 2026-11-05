@@ -7,6 +7,7 @@ import { createEnvios } from './envios.js';
 import { createAvisos } from './avisos.js';
 import { createEspelho } from './espelho.js';
 import { agrupar, registrar as registrarRastreio } from './rastreio.js';
+import { createRemetentes } from './remetentes.js';
 import { sleep, jitter } from './util.js';
 
 // Pausas entre mensagens: moram em ./util.js (src/envios.js usa o mesmo ritmo anti-bloqueio); reexportadas aqui.
@@ -60,6 +61,9 @@ export function alignToWindow(ts, start, end) {
  * `catalogo` e `catalogoItens`: o cliente do Etiqueta (src/catalogo.js, createCatalogo) e o registro do que cada
  * regra já tratou com a fila de revisão (src/catalogo-itens.js, createCatalogoItens), criados em src/server.js; sem
  * os dois, a fonte "catalogo" das regras falha como indisponível (as outras fontes seguem).
+ * Remetentes (src/remetentes.js, plano envio-pelo-socio D9): o ouvinte privado do WhatsApp (ligado em src/server.js)
+ * entrega a remetentes.receber(); o tick responde às mensagens já decididas e decide os itens recebidos logo depois
+ * do espelho, e o que sai vai pela mesma fila de envios.
  */
 export function createScheduler({ db, wa, links, ml = mlDefault, fast = false, dir = null, amazon = null, shopee = null, catalogo = null, catalogoItens = null }) {
   const running = new Set();
@@ -70,6 +74,8 @@ export function createScheduler({ db, wa, links, ml = mlDefault, fast = false, d
   const avisos = createAvisos({ db, wa });
   // receber() (ouvinte do WhatsApp) e cada envio que o espelho cria chamam acordar(): a oferta sai neste tick
   const espelho = createEspelho({ db, wa, amazon, envios, acordar });
+  // idem para a mensagem privada de um remetente cadastrado (receber) e para cada envio que ela cria
+  const remetentes = createRemetentes({ db, wa, envios, acordar });
 
   const getRule = (id) => parseRule(db.prepare('SELECT * FROM rules WHERE id = ?').get(id));
   const delays = () => fast ? { group: 0, offer: 0 } : {
@@ -460,9 +466,18 @@ export function createScheduler({ db, wa, links, ml = mlDefault, fast = false, d
   const semDetalhe = (fn) => async () => { try { return await fn(); } catch (e) { throw new Error(e?.code || e?.name || 'erro'); } };
   /** Espelho: decide os itens recebidos (cada decisão "enviar" grava um envio pendente e acorda o tick). */
   const passoEspelho = () => passo('espelho', semDetalhe(() => espelho.processarPendentes()));
+  /**
+   * Remetentes (D9): primeiro as respostas às mensagens cujos envios terminaram, depois a decisão dos itens recebidos
+   * (cada "enviar" grava um envio pendente e acorda o tick). Passos separados: a falha de um não impede o outro. Sem a
+   * mensagem do erro no console (semDetalhe): a de uma biblioteca pode trazer o número do remetente.
+   */
+  async function passoRemetentes() {
+    await passo('remetentes (respostas)', semDetalhe(() => remetentes.responderPendentes()));
+    await passo('remetentes', semDetalhe(() => remetentes.processarPendentes()));
+  }
 
-  // Ordem: envios vencidos → espelho → avisos → regras, com espelho e envios de novo depois de cada regra
-  // (um agendado ou uma oferta espelhada espera no máximo a regra em andamento, não todas).
+  // Ordem: envios vencidos → espelho → remetentes → avisos → regras, com espelho, remetentes e envios de novo depois
+  // de cada regra (um agendado, uma oferta espelhada ou um link de remetente espera no máximo a regra em andamento).
   async function tick() {
     if (ticking) return; ticking = true; acordado = false;
     try {
@@ -470,6 +485,7 @@ export function createScheduler({ db, wa, links, ml = mlDefault, fast = false, d
       await passoEnvios();
       await passo('espelho (fila)', semDetalhe(() => espelho.expirarFila())); // 'na_fila' esquecido → 'expirado'
       await passoEspelho();
+      await passoRemetentes();
       await passo('avisos', () => avisos.tick());
       const rules = db.prepare('SELECT * FROM rules WHERE enabled = 1').all().map(parseRule);
       for (const r of rules) {
@@ -482,21 +498,29 @@ export function createScheduler({ db, wa, links, ml = mlDefault, fast = false, d
         if (!wa.isReady()) continue;
         await runRule(r.id);
         await passoEspelho();
+        await passoRemetentes();
         await passoEnvios();
       }
-      // "agora" criado (ou mensagem espelhada recebida) depois da última passada: sai neste tick, não no próximo
-      // (até 15 s depois). O espelho vem antes dos envios: o envio que ele criar sai na mesma volta.
-      while (acordado) { acordado = false; await passoEspelho(); await passoEnvios(); }
+      // "agora" criado (ou mensagem espelhada ou de remetente recebida) depois da última passada: sai neste tick, não
+      // no próximo (até 15 s depois). Espelho e remetentes vêm antes dos envios: o envio que eles criarem sai na mesma
+      // volta. A resposta ao remetente sai no passo dos remetentes seguinte: a próxima volta deste laço (o envio criado
+      // acorda o tick de novo) ou o próximo tick.
+      while (acordado) { acordado = false; await passoEspelho(); await passoRemetentes(); await passoEnvios(); }
     } catch (e) { console.error('[agendador]', e); } finally { ticking = false; }
   }
 
   return {
     // acordar: o "Enviar" aprovado na revisão do catálogo (src/catalogo-itens.js) pede o tick já
-    runRule, previewOffers, tick, acordar, envios, avisos, amazon, shopee, espelho, catalogo, catalogoItens,
+    runRule, previewOffers, tick, acordar, envios, avisos, amazon, shopee, espelho, remetentes, catalogo, catalogoItens,
     start() {
       if (timer) return;
-      // o que ficou 'enviando' (envios) ou 'processando' (espelho) quando o serviço caiu volta antes do primeiro tick
-      recuperacao = Promise.all([passo('recuperar', () => envios.recuperar()), passo('espelho (recuperar)', semDetalhe(() => espelho.recuperar()))]);
+      // o que ficou 'enviando' (envios) ou 'processando' (espelho e remetentes) quando o serviço caiu volta antes do
+      // primeiro tick
+      recuperacao = Promise.all([
+        passo('recuperar', () => envios.recuperar()),
+        passo('espelho (recuperar)', semDetalhe(() => espelho.recuperar())),
+        passo('remetentes (recuperar)', semDetalhe(() => remetentes.recuperar())),
+      ]);
       timer = setInterval(tick, 15000); primeiro = setTimeout(tick, 2000);
     },
     stop() { clearInterval(timer); clearTimeout(primeiro); timer = null; primeiro = null; },

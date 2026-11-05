@@ -31,7 +31,7 @@
 import { addLog, getSetting } from './db.js';
 import { identificar } from './lojas.js';
 import { extrairAsin, ErroAmazon, LinkNaoResolvido } from './amazon.js';
-import { extrairUrls, lerOfertaDoTexto, palavraBloqueada, normalizar } from './oferta-texto.js';
+import { extrairUrls, lerOfertaDoTexto, mesclarOferta, palavraBloqueada, normalizar } from './oferta-texto.js';
 import { mascararPessoais } from './privacidade.js';
 import { MAX_TEXTO_RECEBIDO } from './whatsapp.js';
 import { renderTemplate, discountPct } from './template.js';
@@ -347,32 +347,7 @@ export function createEspelho({ db, wa = null, amazon = null, envios = null, aco
         if (!(e instanceof ErroAmazon)) console.error('[espelho] dados da Amazon:', e?.name || 'erro'); // sem mensagem
       }
     }
-    const t = usarTexto ? lerOfertaDoTexto(textoOrigem) : {};
-    const de = { api: false, texto: false };
-    const pegar = (vApi, vTexto) => {
-      if (vApi != null && vApi !== '') { de.api = true; return vApi; }
-      if (vTexto != null && vTexto !== '') { de.texto = true; return vTexto; }
-      return null;
-    };
-    const title = pegar(api?.title, t.title);
-    const precoDaApi = api?.price != null;
-    const price = pegar(api?.price, t.price);
-    // preço antigo só quando é maior que o atual: nenhuma linha "De" inventada (e o que foi jogado fora não conta como fonte)
-    let oldPrice = api?.oldPrice ?? t.oldPrice ?? null;
-    if (oldPrice != null && (price == null || oldPrice <= price)) oldPrice = null;
-    if (oldPrice != null) de[api?.oldPrice != null ? 'api' : 'texto'] = true;
-    // desconto: o da API (0 = não veio); senão o dos dois preços; o "NN% OFF" do texto só vale para o preço do texto
-    let pct = api?.discountPct || (oldPrice != null ? discountPct(price, oldPrice) : null);
-    if (!pct && !precoDaApi && t.discountPct) { pct = t.discountPct; de.texto = true; }
-    const oferta = {
-      title, price, oldPrice, discountPct: pct || null,
-      sold: pegar(api?.sold, t.sold),
-      freeShipping: !!(api?.freeShipping || t.freeShipping), // a API não informa frete: false = "não veio"
-      coupon: pegar(api?.coupon, t.coupon),
-      image: api?.image ?? null,
-    };
-    if (!api?.freeShipping && t.freeShipping) de.texto = true;
-    const fonte = de.api && de.texto ? 'api+texto' : de.api ? 'api' : de.texto ? 'texto' : null;
+    const { oferta, fonte } = mesclarOferta(api, usarTexto ? lerOfertaDoTexto(textoOrigem) : {});
     return { oferta, fonte, api, erroApi };
   }
 

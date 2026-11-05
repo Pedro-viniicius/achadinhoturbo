@@ -15,6 +15,7 @@ import { montarRotas as rotasConexoes, segredosDe } from './conexoes.js';
 import { createAmazon } from './amazon.js';
 import { createShopee } from './shopee.js';
 import { montarRotas as rotasEspelho } from './espelho.js';
+import { montarRotas as rotasRemetentes } from './remetentes.js';
 import { montarRotas as rotasEquipe, montarRotasPublicas as rotasEquipePublicas } from './equipe.js';
 import { createCatalogo, limparFonteCatalogo } from './catalogo.js';
 import { createCatalogoItens, montarRotas as rotasCatalogoItens } from './catalogo-itens.js';
@@ -45,7 +46,8 @@ const CSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inl
  * Disparo manual), e UM cliente da Shopee (situação da Open API e cache de itens e de links curtos) usado pela fila
  * de envios e por Conexões. Os dois leem a credencial a cada chamada (segredosDe), nunca guardada. Aqui também o
  * ouvinte de mensagens do WhatsApp é ligado ao espelho: cada mensagem nova de grupo vai a espelho.receber()
- * (síncrono, sem rede, nunca lança), que grava os itens e acorda o agendador.
+ * (síncrono, sem rede, nunca lança), que grava os itens e acorda o agendador. Do mesmo jeito, cada mensagem privada
+ * vai a remetentes.receber() (plano envio-pelo-socio): só a de um remetente cadastrado e ligado gera algo.
  * Catálogo do Etiqueta (plano fonte-catalogo-etiqueta): UM cliente (`catalogo`: fila única de pedidos ao Etiqueta,
  * situação e cursores) para o agendador e para Conexões, e UMA fila de revisão (`catalogoItens`). O cliente lê o
  * endereço e o caminho do token a cada chamada (segredosDe; o cartão não tem segredo) e o token do arquivo, nunca
@@ -72,6 +74,8 @@ export function criarServicos({ db, wa, links, fast = FAST, dir = DATA_DIR, ml =
   const catalogoItens = createCatalogoItens({ db, wa, links, amazon, envios, acordar });
   scheduler = createScheduler({ db, wa, links, fast, dir, ml, amazon, shopee, catalogo, catalogoItens });
   wa.onMensagem((m) => scheduler.espelho.receber(m));
+  // Para desligar o envio pelo sócio na hora: desligue os remetentes no painel (ou apague esta linha e reinicie)
+  wa.onPrivada((m) => scheduler.remetentes.receber(m));
   return { amazon, shopee, catalogo, catalogoItens, scheduler };
 }
 
@@ -297,12 +301,14 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
   // ---------- privacidade: rotação do token da extensão, limpeza e exclusão por titular ----------
   app.post('/api/ajustes/token', exigeDono, wrap(() => { setSetting(db, 'ext_token', crypto.randomBytes(24).toString('hex')); })); // fora de /api/ext/: passa pelo Host/Origin e pelo login
   // "Apagar o que já passou do prazo": a mesma retenção do início do serviço, inclusive os itens do espelhamento
-  // (que guardam o texto mascarado das mensagens dos grupos de origem) e o histórico do rastreio (prazo próprio de
-  // 400 dias, mesmo com a retenção em 0 = para sempre: não tem dado de pessoa e precisa durar mais que os relatórios)
+  // (que guardam o texto mascarado das mensagens dos grupos de origem), os dos remetentes (campos lidos do texto) e o
+  // histórico do rastreio (prazo próprio de 400 dias, mesmo com a retenção em 0 = para sempre: não tem dado de pessoa e
+  // precisa durar mais que os relatórios)
   app.post('/api/privacidade/limpar', exigeDono, wrap(() => {
     const dias = Number(getSetting(db, 'retencao_dias', RETENCAO_PADRAO_DIAS));
     const r = limparAntigos(db, dias);
     if (scheduler?.espelho) r.espelhamento = scheduler.espelho.limpar(dias).itens;
+    if (scheduler?.remetentes) r.remetentes = scheduler.remetentes.limpar(dias).itens;
     r.rastreio = limparRastreio(db);
     return r;
   }));
@@ -653,7 +659,7 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
   const ctx = { db, wa, links, scheduler, auth, wrap, soDono: exigeDono, dataDir, ml, amazon, shopee, catalogo, catalogoItens, enderecoPublico, publicHost, gravarCookie, sidDe,
     viradaMin: () => viradaMin(db) };
   // importador e ganhos: tudo só do Dono, inclusive GET (ctx.soDono); ganhos usa ctx.viradaMin
-  for (const montar of [rotasEnvios, rotasAvisos, rotasConexoes, rotasEspelho, rotasEquipe, rotasCatalogoItens, rotasRastreio, rotasImportador, rotasGanhos]) montar(app, ctx);
+  for (const montar of [rotasEnvios, rotasAvisos, rotasConexoes, rotasEspelho, rotasRemetentes, rotasEquipe, rotasCatalogoItens, rotasRastreio, rotasImportador, rotasGanhos]) montar(app, ctx);
 
   // Erros de parsing (JSON inválido, corpo grande demais) e inesperados: resposta curta, sem stack nem caminhos.
   // eslint-disable-next-line no-unused-vars
@@ -685,6 +691,8 @@ if (import.meta.url === `file://${process.argv[1].replace(/\\/g, '/')}` || proce
       .catch((e) => console.error('[retenção]', e.message));
     // itens do espelhamento já decididos (guarda os 'enviado' que ainda contam para "Horas sem repetir")
     try { const r = scheduler.espelho.limpar(Number(getSetting(db, 'retencao_dias', RETENCAO_PADRAO_DIAS))); if (r.itens) console.log(`Retenção (espelhamento): apagados ${r.itens} itens antigos.`); } catch (e) { console.error('[retenção] espelhamento:', e?.code || e?.name || 'erro'); }
+    // itens dos remetentes já decididos (mesma regra: guarda os 'enviado' que ainda contam para "Horas sem repetir")
+    try { const r = scheduler.remetentes.limpar(Number(getSetting(db, 'retencao_dias', RETENCAO_PADRAO_DIAS))); if (r.itens) console.log(`Retenção (remetentes): apagados ${r.itens} itens antigos.`); } catch (e) { console.error('[retenção] remetentes:', e?.code || e?.name || 'erro'); }
     // histórico do rastreio por grupo: prazo próprio (RETENCAO_RASTREIO_DIAS), independente de retencao_dias
     try { const n = limparRastreio(db); if (n) console.log(`Retenção (rastreio): apagadas ${n} linhas antigas.`); } catch (e) { console.error('[retenção] rastreio:', e?.code || e?.name || 'erro'); }
   };
