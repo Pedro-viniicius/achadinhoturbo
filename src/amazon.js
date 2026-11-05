@@ -22,7 +22,7 @@
 //   o status e o Location, nunca o corpo. Antes de chamar a rede, a etapa 11 deve tentar o ASIN em
 //   canonicalUrl/matchedText da prévia do WhatsApp (extrairAsin), e só resolver se não houver.
 // - createAmazon({ db, fetch, agora, esperar, lerConexao, cacheLinks = new Map() }) →
-//   { lerItem(asin), lerItens(asins), montarLink(asin), resolver(url), testar(), situacao(), configurado(),
+//   { lerItem(asin), lerItens(asins), montarLink(asin, { tag }?), resolver(url), testar(), situacao(), configurado(),
 //     invalidarToken() }
 //   - Credenciais lidas a cada chamada: por padrão da linha 'amazon' de `conexoes` (config.tag,
 //     config.credencial_versao, segredos.credencial_id, segredos.credencial_secret). A etapa 7 pode injetar
@@ -34,8 +34,10 @@
 //     faltar), não "sem desconto"/"sem frete grátis". Na fusão campo a campo da etapa 11 (API × texto da
 //     mensagem), use `||` para esses dois (`api.discountPct || doTexto.discountPct`), não `??`.
 //     Pedidos simultâneos do mesmo ASIN dividem um só GetItems (promessa em voo por ASIN).
-//   - montarLink(asin) → 'https://www.amazon.com.br/dp/<ASIN>?tag=<tag>'; sem tag → ErroAmazon('sem_tag');
-//     ASIN inválido → LinkNaoResolvido('invalido').
+//   - montarLink(asin, { tag }?) → 'https://www.amazon.com.br/dp/<ASIN>?tag=<tag>'; sem tag → ErroAmazon('sem_tag');
+//     ASIN inválido → LinkNaoResolvido('invalido'). `tag` opcional = ID de rastreamento do grupo/bloco: se vier
+//     (≠ undefined/null) vale no lugar da tag de Conexões e precisa casar com RE_TAG, senão ErroAmazon('sem_tag')
+//     (nunca link sem tag, nunca cai na tag de Conexões). Sem a opção, o comportamento é o de sempre.
 //   - resolver(url) = resolverLink com o fetch, o relógio e o cache de links desta instância (`cacheLinks`;
 //     cada instância tem o seu, nunca o do módulo).
 //   - 404 ResourceNotFound do GetItems = todos os itens null (a chamada foi autorizada); outro 404 → 'nao_encontrado'.
@@ -90,7 +92,7 @@ const CACHE_ITEM_MS = 15 * 60 * 1000;
 const CACHE_ITEM_MAX = 1000;
 const MAX_CORPO = 2 * 1024 * 1024;
 const RE_ASIN = /^[A-Z0-9]{10}$/;
-const RE_TAG = /^[A-Za-z0-9_-]{2,64}$/;
+export const RE_TAG = /^[A-Za-z0-9_-]{2,64}$/; // formato da tag/ID de rastreamento; src/rastreio.js usa este
 const RE_VERSAO = /^3\.[1-3]$/;
 
 // ---------------------------------------------------------------------------------------------- erros
@@ -459,10 +461,15 @@ export function createAmazon({ db, fetch: f, agora = Date.now, esperar, lerConex
     return (await lerItens([a]))[a] ?? null;
   }
 
-  function montarLink(asin) {
+  function montarLink(asin, opcoes) {
     const a = typeof asin === 'string' ? asin.trim().toUpperCase() : '';
     if (!RE_ASIN.test(a)) throw new LinkNaoResolvido('invalido');
-    const { tag } = ler();
+    // Tag de rastreamento do grupo/bloco: se vier (≠ undefined/null), vale só ela e precisa ser válida; uma tag
+    // inválida NUNCA cai na de Conexões (seria atribuir a venda ao lugar errado) nem gera link sem tag.
+    const pedida = opcoes?.tag;
+    const tag = pedida === undefined || pedida === null
+      ? ler().tag
+      : (typeof pedida === 'string' && RE_TAG.test(pedida) ? pedida : '');
     if (!tag) throw new ErroAmazon('sem_tag');
     return `https://www.amazon.com.br/dp/${a}?tag=${tag}`;
   }

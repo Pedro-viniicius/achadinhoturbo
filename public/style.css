@@ -664,3 +664,99 @@ mark { background:color-mix(in oklab, var(--warn) 30%, var(--surface)); color:va
 @media (max-width:600px) { .q[data-docs]::after { width:44px; height:44px; } }
 .docs-nota--erro .docs-nota-t span { color:#fff; }
 @media (prefers-color-scheme: dark) { .docs-nota--erro .docs-nota-t span { color:var(--grafite); } }
+
+/* ganhos: início */
+.sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
+nav a[href="#ganhos"] { --ic:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='22 7 13.5 15.5 8.5 10.5 2 17'/%3E%3Cpolyline points='16 7 22 7 22 13'/%3E%3C/svg%3E"); }
+.ganhos-aviso { margin-bottom:12px; }
+.cob-card { display:grid; gap:10px; }
+.cob-card h2 { margin:0; }
+.cob-texto { margin:0; font-size:16px; }
+.cob-barra { height:10px; background:var(--border); border-radius:5px; overflow:hidden; }
+.cob-barra i { display:block; height:100%; border-radius:5px; background:var(--primary); }
+.cob-barra.boa i { background:var(--ok); } .cob-barra.parcial i { background:var(--warn); } .cob-barra.baixa i { background:var(--err); }
+.cob-lojas { list-style:none; margin:0; padding:0; display:grid; gap:6px; }
+.cob-lojas li { display:flex; flex-wrap:wrap; gap:4px 10px; align-items:baseline; }
+.ganhos-datas { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+.ganhos-datas label { display:flex; gap:6px; align-items:center; font-weight:600; font-size:14px; }
+.ganhos-datas input { width:auto; }
+.rastreio { border:1px solid var(--line); border-radius:10px; padding:10px 14px; }
+.rastreio > summary { cursor:pointer; font-weight:600; min-height:24px; line-height:24px; }
+.rastreio[open] > summary { margin-bottom:10px; }
+.rastreio-campos { border:0; padding:0; }
+.rastreio-selo b { font-weight:700; overflow-wrap:anywhere; }
+.rastreio-celula { display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
+.rastreio-previa { overflow-wrap:anywhere; }
+@media (max-width:900px) { .rastreio > summary { min-height:44px; line-height:44px; } .rastreio-celula button, .rastreio [data-usar-etiqueta], #g-mais { min-height:44px; min-width:44px; } }
+/* Dashboard, Importar e Gasto (entrega B) */
+.topo-acoes { display:flex; flex-wrap:wrap; gap:8px; }
+.ganhos-kpis { grid-template-columns:repeat(auto-fit, minmax(150px,1fr)); }
+.ganhos-kpis .kpi { min-width:0; }
+.ganhos-kpis .kpi .valor { font-size:26px; overflow-wrap:anywhere; }
+.ganhos-kpis .kpi .nota { overflow-wrap:anywhere; }
+.g-sec { margin-top:20px; }
+.g-sec > h2 { margin:0 0 10px; }
+.g-sec > details > summary { cursor:pointer; font-weight:600; font-size:18px; min-height:24px; margin-bottom:10px; }
+.tab-din .c-num { font-variant-numeric:tabular-nums; white-space:nowrap; }
+.tab-din tfoot td { font-weight:700; border-top:2px solid var(--line); }
+.tab-din tr.sem-grupo td { color:var(--muted); }
+.tab-din .c-acao { text-align:right; white-space:nowrap; }
+.tab-din button.ord { padding:0; border:0; background:none; font-weight:500; color:inherit; text-align:left; cursor:pointer; text-decoration:underline dotted; text-underline-offset:3px; white-space:nowrap; }
+.tab-din th[aria-sort] button.ord { font-weight:700; color:var(--text); }
+.tab-din th[aria-sort="ascending"] button.ord::after { content:" \25B2"; font-size:11px; }
+.tab-din th[aria-sort="descending"] button.ord::after { content:" \25BC"; font-size:11px; }
+.oferta-nome { display:inline-block; max-width:42ch; overflow-wrap:anywhere; }
+.g-vazio { display:grid; gap:14px; }
+.g-vazio h2 { margin:0; }
+.g-vazio .passo { display:flex; flex-wrap:wrap; gap:8px 16px; align-items:center; justify-content:space-between; padding-bottom:12px; border-bottom:1px solid var(--line); }
+.g-vazio .passo p { margin:0; flex:1 1 320px; }
+.g-vazio .btn { text-decoration:none; }
+.g-como { margin-top:20px; }
+.g-como > summary { cursor:pointer; font-weight:600; min-height:24px; }
+.g-como ul { margin:8px 0 0; padding-left:20px; color:var(--text-2); max-width:70ch; }
+.g-resumo { margin:0; padding-left:20px; display:grid; gap:2px; }
+.g-extras { margin:0; }
+.g-colunas { margin:0; overflow-wrap:anywhere; }
+#imp-info { overflow-wrap:anywhere; }
+@media (max-width:900px) {
+  #g-informar, .g-sec > details > summary, .g-como > summary { min-height:44px; display:flex; align-items:center; }
+  #g-informar { border-color:var(--line); }
+  .tab-din button, #g-mais-grupo, #g-mais-oferta, .g-vazio .btn, .g-vazio button, #imp-loja button, #imp-tipo button { min-height:44px; min-width:44px; }
+}
+@media (max-width:600px) {
+  .topo-acoes { width:100%; } .topo-acoes button { flex:1 1 100%; min-height:44px; }
+  .ganhos-kpis .kpi .valor { font-size:22px; }
+  .tab-din { overflow-x:visible; }
+  .tab-din td.c-num { white-space:normal; }
+  .tab-din table, .tab-din tbody, .tab-din tfoot { display:block; min-width:0; }
+  .tab-din thead { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); white-space:nowrap; }
+  .tab-din tr { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:4px 12px; padding:10px 0; border-bottom:1px solid var(--line); align-items:start; }
+  .tab-din td { display:block; padding:0; border:0; min-width:0; overflow-wrap:anywhere; white-space:normal; }
+  .tab-din td:empty { display:none; }
+  .tab-din td:first-child { grid-column:1 / -1; font-weight:600; }
+  .tab-din td[data-rot]:not(:first-child)::before { content:attr(data-rot) ": "; color:var(--muted); font-size:13px; font-weight:400; }
+  .tab-din td.c-acao { grid-column:1 / -1; text-align:left; }
+}
+/* ganhos: fim */
+
+/* Grupos (coluna Rastreio) e Ganhos (Por grupo): em tela estreita, cada linha vira um cartão sem rolagem lateral */
+.filtro-rot { font-size:13px; font-weight:600; color:var(--muted); }
+.tab-grupos .conv { flex-wrap:wrap; } .tab-grupos .conv input { flex:1 1 100%; min-width:24ch; }
+.tab-cob .c-num { font-variant-numeric:tabular-nums; }
+@media (max-width:600px) {
+  .tab-grupos, .tab-cob { overflow-x:visible; }
+  .tab-grupos table, .tab-grupos tbody, .tab-cob table, .tab-cob tbody { display:block; min-width:0; }
+  .tab-grupos thead, .tab-cob thead { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); white-space:nowrap; }
+  .tab-grupos tr { display:grid; grid-template-columns:minmax(0,1fr) auto; grid-template-areas:"nome memb" "rast rast" "conv conv"; gap:6px 12px; align-items:start; padding:10px 0; border-bottom:1px solid var(--line); }
+  .tab-grupos td, .tab-cob td { display:block; padding:0; border:0; min-width:0; }
+  .tab-grupos td:nth-child(1) { grid-area:nome; } .tab-grupos .c-memb { grid-area:memb; color:var(--muted); }
+  .tab-grupos .c-memb:not(:empty)::after { content:" membros"; }
+  .tab-grupos .c-rast { grid-area:rast; } .tab-grupos .c-conv { grid-area:conv; }
+  .tab-grupos .c-rast::before { content:attr(data-rot) ": "; color:var(--muted); font-size:13px; }
+  .tab-grupos .c-rast .rastreio-celula { display:inline-flex; }
+  .tab-cob tr { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:4px 12px; padding:10px 0; border-bottom:1px solid var(--line); align-items:start; }
+  .tab-cob td:first-child { grid-column:1 / 3; overflow-wrap:anywhere; } .tab-cob .c-cob { grid-column:3; text-align:right; }
+  .tab-cob .c-cob::before { content:"Cobertura "; color:var(--muted); font-size:13px; }
+  .tab-cob .c-num { color:var(--muted); font-size:13px; }
+  .tab-cob .c-num::before { content:attr(data-rot) ": "; }
+}

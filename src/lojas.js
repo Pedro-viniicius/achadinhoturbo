@@ -25,7 +25,7 @@
 import path from 'node:path';
 import { IMAGEM_PERMITIDA, offerKey } from './ml.js';
 import { IMAGEM_AMAZON, ErroAmazon, LinkNaoResolvido, extrairAsin } from './amazon.js';
-import { IMAGEM_SHOPEE, ErroShopee, LinkShopeeNaoResolvido, LINK_SHOPEE, RE_ID_AFILIADO, extrairIds, afiliadoDoLongLink } from './shopee.js';
+import { IMAGEM_SHOPEE, ErroShopee, LinkShopeeNaoResolvido, LINK_SHOPEE, RE_ID_AFILIADO, RE_SUB_ID, extrairIds, afiliadoDoLongLink } from './shopee.js';
 import { brl } from './template.js';
 
 const MAX_URL = 4096;
@@ -275,46 +275,99 @@ async function lerProdutoShopee(url, shopee) {
   };
 }
 
-/** Link já guardado no cliente da Shopee para o produto e o ID (shopee.linkGuardado), ou null. */
-function linkGuardadoShopee(shopee, urlProduto, id) {
+/**
+ * Pedir link com Sub_id à extensão do Chrome? Desligado enquanto a extensão não sabe aplicar o Sub_id
+ * (SHOPEE_SUBID_CAMPO vazio em extension/background.js; formato pendente do dono, P4 do plano dashboard-ganhos):
+ * cada pedido gastaria uma vaga do teto de links por hora para voltar sem o Sub_id. Desligado, o Sub_id só sai pela
+ * Open API; sem ela, linkAfiliadoShopeeRastreado recusa com SubIdIndisponivel e quem envia usa o link padrão.
+ * Ligar quando a extensão aplicar o Sub_id (e o teste de src/lojas.js que fixa o valor). Ligar aqui não basta: a
+ * extensão só manda o Sub_id ao portal com SHOPEE_SUBID_CAMPO (extension/background.js) preenchido. Mude os dois juntos.
+ */
+export const SUBID_PELA_EXTENSAO = false;
+
+/**
+ * O link com Sub_id não saiu sem pedir à extensão (ver SUBID_PELA_EXTENSAO). `motivo` vai para a cobertura do
+ * rastreio: 'subid_extensao_indisponivel' (sem a API) ou 'falha_link' (a API falhou). Nunca carrega Sub_id nem ID.
+ */
+export class SubIdIndisponivel extends Error {
+  constructor(motivo = 'subid_extensao_indisponivel') {
+    super('O Sub_id da Shopee só sai pela API, que não gerou o link agora.');
+    this.name = 'SubIdIndisponivel';
+    this.motivo = motivo === 'falha_link' ? 'falha_link' : 'subid_extensao_indisponivel';
+  }
+}
+
+/** Link já guardado no cliente da Shopee para o produto, o ID e o Sub_id ('' = o link padrão), ou null. */
+function linkGuardadoShopee(shopee, urlProduto, id, subId) {
   if (typeof shopee?.linkGuardado !== 'function') return null;
-  const l = shopee.linkGuardado(urlProduto, id);
+  const l = subId ? shopee.linkGuardado(urlProduto, id, subId) : shopee.linkGuardado(urlProduto, id);
   return typeof l === 'string' && LINK_SHOPEE.test(l) ? l : null;
 }
 
 /**
- * Link de afiliado da Shopee (ver o topo do arquivo). Ordem: ID de afiliado salvo (senão ErroShopee 'sem_id', sem
- * rede) → endereço do produto sem parâmetros → link guardado para o produto e o ID (até 7 dias) → API
- * (shopee.gerarLink) se shopee.apiUtil() → senão, ou se a API falhar, a extensão (links.requestLinkShopee). O link
- * final precisa casar LINK_SHOPEE ('link_falhou'), e o an_<ID> do longLink, quando vem, precisa ser o ID salvo
- * ('outra_conta'). Só o link confiável é guardado (shopee.guardarLink): o da API, ou o da extensão com o an_<ID>
- * do longLink conferido. Link da extensão sem longLink (ou sem an_) sai neste disparo, mas não é guardado.
+ * Link de afiliado da Shopee (ver o topo do arquivo) → { link, sub_id }. Ordem: ID de afiliado salvo (senão
+ * ErroShopee 'sem_id', sem rede) → endereço do produto sem parâmetros → link guardado para o produto, o ID e o
+ * Sub_id (até 7 dias) → API (shopee.gerarLink, com { subId } quando há Sub_id) se shopee.apiUtil() → senão, ou se
+ * a API falhar, a extensão (links.requestLinkShopee, com o mesmo subId). O link final precisa casar LINK_SHOPEE
+ * ('link_falhou'), e o an_<ID> do longLink, quando vem, precisa ser o ID salvo ('outra_conta').
+ * Sub_id (plano dashboard-ganhos, etapa 5): vazio ou fora de RE_SUB_ID (src/shopee.js) = sem Sub_id (o link padrão, D4).
+ * `sub_id` é o Sub_id só quando ele foi aplicado: pela API (subIds é documentado) ou pela extensão que respondeu
+ * sub_id_aplicado; senão null, e o link é o de afiliado sem Sub_id (CA9).
+ * Só o link confiável é guardado (shopee.guardarLink): o da API, ou o da extensão com o an_<ID> do longLink
+ * conferido. Guardado com o Sub_id só se ele foi aplicado; o que saiu sem Sub_id vale como o link padrão.
+ * Link da extensão sem longLink (ou sem an_) sai neste disparo, mas não é guardado.
+ * Com Sub_id, a extensão só é chamada se `subIdPelaExtensao === true` (padrão SUBID_PELA_EXTENSAO); senão, sem link
+ * da API → SubIdIndisponivel, sem pedido nenhum (o link padrão, sem Sub_id, segue indo pela extensão como hoje).
  */
-async function linkAfiliadoShopee(base, { shopee, links, idAfiliado }) {
+async function linkAfiliadoShopee(base, { shopee, links, idAfiliado, subId, subIdPelaExtensao = SUBID_PELA_EXTENSAO }) {
   const id = typeof idAfiliado === 'string' ? idAfiliado.trim() : '';
   if (!RE_ID_AFILIADO.test(id)) throw new ErroShopee('sem_id');
+  const sub = typeof subId === 'string' && RE_SUB_ID.test(subId) ? subId : '';
   const { urlProduto } = await idsShopee(base, shopee);
-  const guardado = linkGuardadoShopee(shopee, urlProduto, id);
-  if (guardado) return guardado;
+  const guardado = linkGuardadoShopee(shopee, urlProduto, id, sub);
+  if (guardado) return { link: guardado, sub_id: sub || null };
   let link = null;
   let longo = null;
   let daApi = false;
+  let extAplicou = false;
+  let apiTentada = false;
   if (typeof shopee?.apiUtil === 'function' && typeof shopee.gerarLink === 'function' && shopee.apiUtil()) {
-    try { link = await shopee.gerarLink(urlProduto); } catch { link = null; } // os dois caminhos são da conta do dono
+    // os dois caminhos são da conta do dono; sem Sub_id, a chamada é a de antes (só o endereço)
+    apiTentada = true;
+    try { link = await shopee.gerarLink(urlProduto, ...(sub ? [{ subId: sub }] : [])); } catch { link = null; }
     daApi = link != null;
   }
+  // teto da extensão: sem o formato do Sub_id, o pedido voltaria sem ele (ver SUBID_PELA_EXTENSAO)
+  if (link == null && sub && subIdPelaExtensao !== true) throw new SubIdIndisponivel(apiTentada ? 'falha_link' : 'subid_extensao_indisponivel');
   if (link == null) {
     if (typeof links?.requestLinkShopee !== 'function') throw new Error('Serviço de links indisponível.');
-    const r = await links.requestLinkShopee({ url: urlProduto });
+    const r = await links.requestLinkShopee(sub ? { url: urlProduto, subId: sub } : { url: urlProduto });
     link = r?.link;
     longo = r?.longo ?? null;
+    extAplicou = r?.subIdAplicado === true;
   }
   if (typeof link !== 'string' || !LINK_SHOPEE.test(link)) throw new ErroShopee('link_falhou');
   const dono = afiliadoDoLongLink(longo);
   if (dono && dono !== id) throw new ErroShopee('outra_conta', { final: id.slice(-4) });
+  const aplicado = sub !== '' && (daApi || extAplicou);
   const confiavel = daApi || dono === id;
-  if (confiavel && typeof shopee?.guardarLink === 'function') shopee.guardarLink(urlProduto, id, link);
-  return link;
+  if (confiavel && typeof shopee?.guardarLink === 'function') {
+    if (aplicado) shopee.guardarLink(urlProduto, id, link, sub);
+    else shopee.guardarLink(urlProduto, id, link);
+  }
+  return { link, sub_id: aplicado ? sub : null };
+}
+
+/**
+ * Link de afiliado da Shopee com o Sub_id de rastreio (plano dashboard-ganhos, etapa 5) → { link, sub_id }.
+ * `base`: o link ou o endereço do produto (tem de ser da Shopee). deps: { shopee, links, idAfiliado, subId? }.
+ * `sub_id` é null quando o Sub_id não foi pedido, era inválido ou não foi aplicado (ex.: extensão sem o formato do
+ * Sub_id, ou antiga): o link continua de afiliado, o mesmo de sem Sub_id. Erros: os do link padrão e, com Sub_id
+ * válido e sem link da API, SubIdIndisponivel (a extensão só recebe Sub_id com `subIdPelaExtensao: true`; padrão
+ * SUBID_PELA_EXTENSAO).
+ */
+export async function linkAfiliadoShopeeRastreado(base, { shopee, links, idAfiliado, subId, subIdPelaExtensao = SUBID_PELA_EXTENSAO } = {}) {
+  return linkAfiliadoShopee(exigirLoja('shopee', base), { shopee, links, idAfiliado, subId, subIdPelaExtensao });
 }
 
 /**
@@ -344,7 +397,7 @@ export async function lerProduto(id, url, { ml, amazon, shopee } = {}) {
  *   resolvido pelo servidor, ex.: o do payload) ou de `url`; `idAfiliado` é o ID salvo em Conexões. `tag` é ignorada.
  */
 export async function linkAfiliado(id, { url, tag, asin, urlProduto } = {}, { links, amazon, shopee, idAfiliado } = {}) {
-  if (id === 'shopee') return linkAfiliadoShopee(exigirLoja(id, urlProduto ?? url), { shopee, links, idAfiliado });
+  if (id === 'shopee') return (await linkAfiliadoShopeeRastreado(urlProduto ?? url, { shopee, links, idAfiliado })).link;
   const limpo = exigirLoja(id, url);
   if (id === 'amazon') {
     exigirAmazon(amazon, 'montarLink');

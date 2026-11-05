@@ -349,3 +349,249 @@ test('etiqueta por fonte: cada oferta sai com a etiqueta da fonte de origem; sem
   assert.deepEqual(porTitulo, { '*Fone A*': 'etiquetaB', '*Mouse B*': 'etiquetaB', '*Teclado C*': 'etiquetaA', '*Cabo D*': 'etiquetaA' });
   assert.match(db.prepare("SELECT message FROM log WHERE level = 'ok' ORDER BY id LIMIT 1").get().message, /etiqueta etiquetaB \(fonte 1\)/);
 });
+
+// ---------- rastreio por grupo nas regras (plano dashboard-ganhos, etapa 8; CA1, CA3, CA4, CA9) ----------
+import { salvar as salvarRastreio } from '../src/rastreio.js';
+import { createCatalogoItens } from '../src/catalogo-itens.js';
+import { createAmazon } from '../src/amazon.js';
+import { paraCandidato } from '../src/catalogo.js';
+import * as mlPadrao from '../src/ml.js';
+
+/** Linhas de rastreio_envios, sem id nem hora (objetos comuns: o node:sqlite devolve sem protótipo). */
+const linhasRastreio = (db) => db.prepare(`SELECT jid, loja, origem, rule_id, envio_id, oferta_chave, link, codigo, nivel, bloco_id, esperado, motivo
+  FROM rastreio_envios ORDER BY id`).all().map((l) => ({ ...l }));
+const logsDaRegra = (db, id) => db.prepare('SELECT level, group_name, offer_title, message FROM log WHERE rule_id = ? ORDER BY id').all(id).map((l) => ({ ...l }));
+const enviadasDaRegra = (db, id) => db.prepare('SELECT offer_key FROM sent_offers WHERE rule_id = ? ORDER BY id').all(id).map((l) => l.offer_key);
+const linkDoTexto = (texto) => texto.match(/https:\/\/\S+/g).at(-1);
+/** Conta os pedidos de link (a etiqueta de cada um) e faz falhar as etiquetas de `falhar`. */
+function espiarLinks(links, falhar = new Set()) {
+  const pedidos = []; const original = links.requestLink;
+  links.requestLink = async (p) => {
+    pedidos.push(p.tag);
+    if (falhar.has(p.tag)) throw new Error(`a etiqueta ${p.tag} foi recusada`);
+    return original(p);
+  };
+  return pedidos;
+}
+const bloco = (db, nome, jids) => {
+  const id = Number(db.prepare('INSERT INTO blocks (name, created_at) VALUES (?, ?)').run(nome, Date.now()).lastInsertRowid);
+  for (const jid of jids) db.prepare('INSERT INTO block_groups (block_id, jid) VALUES (?, ?)').run(id, jid);
+  return id;
+};
+const ITEM1 = 'https://produto.mercadolivre.com.br/MLB-1000001-a | Fone A | 50 | 100';
+const ITEM2 = 'https://produto.mercadolivre.com.br/MLB-1000002-b | Mouse B | 30 | 40';
+const TODOS = ['111@g.us', '222@g.us', '333@g.us'];
+
+test('rastreio, CA9: regra sem associação pede 1 link por oferta, mantém ordem, log e sent_offers, e grava 1 linha por grupo (padrão)', async () => {
+  const { db, wa, links, scheduler } = setup();
+  const pedidos = espiarLinks(links);
+  const id = addRule(db, { name: 'Sem rastreio', tag: 2, groups: TODOS, items: `${ITEM1}\n${ITEM2}`, per: 2 });
+  const r = await scheduler.runRule(id);
+  assert.deepEqual([r.offers, r.messages, r.errors], [2, 6, 0]);
+  assert.deepEqual(pedidos, ['etiquetaB', 'etiquetaB'], 'um pedido por oferta, como hoje');
+  assert.deepEqual(wa.simulated.map((m) => m.jid), [...TODOS, ...TODOS], 'mesma ordem de grupos');
+  // as 3 mensagens de uma oferta têm o mesmo texto (um link só)
+  assert.equal(new Set(wa.simulated.slice(0, 3).map((m) => m.text)).size, 1);
+  assert.equal(new Set(wa.simulated.slice(3).map((m) => m.text)).size, 1);
+  assert.deepEqual(logsDaRegra(db, id), [
+    ...['Achadinhos', 'Tech', 'Casa'].map((g) => ({ level: 'ok', group_name: g, offer_title: 'Fone A', message: 'Enviado com a etiqueta etiquetaB' })),
+    ...['Achadinhos', 'Tech', 'Casa'].map((g) => ({ level: 'ok', group_name: g, offer_title: 'Mouse B', message: 'Enviado com a etiqueta etiquetaB' })),
+  ]);
+  assert.equal(enviadasDaRegra(db, id).length, 2);
+  const linhas = linhasRastreio(db);
+  assert.deepEqual(linhas.map((l) => l.jid), [...TODOS, ...TODOS]);
+  assert.deepEqual(linhas[0], {
+    jid: '111@g.us', loja: 'mercadolivre', origem: 'regra', rule_id: Number(id), envio_id: null, oferta_chave: enviadasDaRegra(db, id)[0],
+    link: linkDoTexto(wa.simulated[0].text), codigo: 'etiquetaB', nivel: 'padrao', bloco_id: null, esperado: 0, motivo: null,
+  });
+  assert.ok(linhas.every((l, i) => l.link === linkDoTexto(wa.simulated[i].text) && l.nivel === 'padrao' && l.esperado === 0 && l.codigo === 'etiquetaB'));
+});
+
+test('rastreio, CA4/P1: etiqueta do grupo vence a da regra e da fonte; mesmo código reaproveita o link; ordem dos grupos não muda', async () => {
+  const { db, wa, links, scheduler } = setup();
+  db.prepare('INSERT INTO tags (name, created_at) VALUES (?,?)').run('etiquetaC', Date.now());
+  salvarRastreio(db, { loja: 'mercadolivre', alvo_tipo: 'grupo', alvo: '222@g.us', codigo: 'etiquetaB' });
+  const b = bloco(db, 'Casa e tech', ['333@g.us']);
+  salvarRastreio(db, { loja: 'mercadolivre', alvo_tipo: 'bloco', alvo: String(b), codigo: 'etiquetaC' });
+  const pedidos = espiarLinks(links);
+  // a fonte tem etiqueta própria (etiquetaA); a regra, etiquetaB
+  const sources = [{ type: 'list', tag_id: 1, config: { items: ITEM1 } }];
+  const id = Number(db.prepare(`INSERT INTO rules (name, enabled, tag_id, template_id, group_jids, source_type, source_config, sources, per_run, interval_min, window_start, window_end, dedupe_days, send_image, created_at)
+    VALUES ('Rastreada', 1, 2, 1, ?, 'list', '{}', ?, 1, 60, '00:00', '23:59', 7, 1, ?)`).run(JSON.stringify(TODOS), JSON.stringify(sources), Date.now()).lastInsertRowid);
+  const r = await scheduler.runRule(id);
+  assert.deepEqual([r.offers, r.messages, r.errors], [1, 3, 0]);
+  assert.deepEqual(pedidos, ['etiquetaA', 'etiquetaB', 'etiquetaC'], 'um pedido por código distinto, na ordem do 1º grupo');
+  assert.deepEqual(wa.simulated.map((m) => m.jid), TODOS);
+  assert.deepEqual(wa.simulated.map((m) => m.text.match(/fake-(\w+)-/)[1]), ['etiquetaA', 'etiquetaB', 'etiquetaC']);
+  assert.deepEqual(logsDaRegra(db, id).map((l) => [l.group_name, l.message]), [
+    ['Achadinhos', 'Enviado com a etiqueta etiquetaA'], ['Tech', 'Enviado com a etiqueta etiquetaB'], ['Casa', 'Enviado com a etiqueta etiquetaC'],
+  ]);
+  assert.deepEqual(linhasRastreio(db).map((l) => [l.jid, l.codigo, l.nivel, l.bloco_id, l.esperado, l.motivo]), [
+    ['111@g.us', 'etiquetaA', 'padrao', null, 0, null],
+    ['222@g.us', 'etiquetaB', 'grupo', null, 1, null],
+    ['333@g.us', 'etiquetaC', 'bloco', b, 1, null],
+  ]);
+  assert.ok(linhasRastreio(db).every((l, i) => l.link === linkDoTexto(wa.simulated[i].text)));
+
+  // associação com a mesma etiqueta do padrão: um pedido só, o mesmo link para todos
+  const s2 = setup();
+  salvarRastreio(s2.db, { loja: 'mercadolivre', alvo_tipo: 'grupo', alvo: '222@g.us', codigo: 'etiquetaA' });
+  const pedidos2 = espiarLinks(s2.links);
+  const id2 = addRule(s2.db, { name: 'Igual', tag: 1, groups: TODOS, items: ITEM1, per: 1 });
+  await s2.scheduler.runRule(id2);
+  assert.deepEqual(pedidos2, ['etiquetaA']);
+  assert.equal(new Set(s2.wa.simulated.map((m) => m.text)).size, 1);
+  assert.deepEqual(linhasRastreio(s2.db).map((l) => [l.jid, l.nivel, l.esperado]), [['111@g.us', 'padrao', 0], ['222@g.us', 'grupo', 1], ['333@g.us', 'padrao', 0]]);
+});
+
+test('rastreio, CA9: etiqueta associada que falha cai no link padrão da regra (nunca link comum), com motivo falha_link', async () => {
+  const { db, wa, links, scheduler } = setup();
+  salvarRastreio(db, { loja: 'mercadolivre', alvo_tipo: 'grupo', alvo: '222@g.us', codigo: 'etiquetaB' });
+  const pedidos = espiarLinks(links, new Set(['etiquetaB']));
+  const id = addRule(db, { name: 'Falha associada', tag: 1, groups: TODOS, items: ITEM1, per: 1 });
+  const r = await scheduler.runRule(id);
+  assert.deepEqual([r.offers, r.messages, r.errors], [1, 3, 0]);
+  assert.deepEqual(pedidos, ['etiquetaA', 'etiquetaB']);
+  assert.deepEqual(wa.simulated.map((m) => m.jid), TODOS);
+  assert.ok(wa.simulated.every((m) => /https:\/\/meli\.la\/fake-etiquetaA-/.test(m.text)), 'todos com o link de afiliado da regra');
+  assert.deepEqual(linhasRastreio(db).map((l) => [l.jid, l.codigo, l.nivel, l.esperado, l.motivo]), [
+    ['111@g.us', 'etiquetaA', 'padrao', 0, null],
+    ['222@g.us', 'etiquetaA', 'padrao', 1, 'falha_link'],
+    ['333@g.us', 'etiquetaA', 'padrao', 0, null],
+  ]);
+  const logs = logsDaRegra(db, id);
+  assert.ok(logs.some((l) => l.level === 'aviso' && l.offer_title === 'Fone A' && /etiquetaB/.test(l.message) && /a etiqueta etiquetaB foi recusada/.test(l.message)), 'aviso da etiqueta que falhou');
+  assert.deepEqual(logs.filter((l) => l.level === 'ok').map((l) => l.message), Array(3).fill('Enviado com a etiqueta etiquetaA'));
+  assert.equal(enviadasDaRegra(db, id).length, 1);
+});
+
+test('rastreio: falha do link padrão com associação ok — só os grupos do padrão falham; sem associação, nada sai (como hoje)', async () => {
+  const { db, wa, links, scheduler } = setup();
+  salvarRastreio(db, { loja: 'mercadolivre', alvo_tipo: 'grupo', alvo: '222@g.us', codigo: 'etiquetaB' });
+  const pedidos = espiarLinks(links, new Set(['etiquetaA']));
+  const id = addRule(db, { name: 'Padrão falha', tag: 1, groups: TODOS, items: ITEM1, per: 1 });
+  const r = await scheduler.runRule(id);
+  assert.deepEqual([r.offers, r.messages, r.errors], [1, 1, 2]);
+  assert.deepEqual(pedidos, ['etiquetaA', 'etiquetaB'], 'o padrão não é pedido duas vezes');
+  assert.deepEqual(wa.simulated.map((m) => m.jid), ['222@g.us']);
+  assert.match(wa.simulated[0].text, /https:\/\/meli\.la\/fake-etiquetaB-/);
+  assert.deepEqual(logsDaRegra(db, id).map((l) => [l.level, l.group_name, l.message]), [
+    ['erro', 'Achadinhos', 'Link de afiliado não gerado: a etiqueta etiquetaA foi recusada'],
+    ['ok', 'Tech', 'Enviado com a etiqueta etiquetaB'],
+    ['erro', 'Casa', 'Link de afiliado não gerado: a etiqueta etiquetaA foi recusada'],
+  ]);
+  assert.deepEqual(linhasRastreio(db).map((l) => [l.jid, l.codigo, l.nivel, l.esperado]), [['222@g.us', 'etiquetaB', 'grupo', 1]]);
+  assert.equal(enviadasDaRegra(db, id).length, 1, 'saiu para um grupo: conta como enviada (como uma falha de envio hoje)');
+
+  // sem associação e o link falha: a mensagem de hoje, nada enviado nem gravado
+  const s2 = setup();
+  espiarLinks(s2.links, new Set(['etiquetaA']));
+  const id2 = addRule(s2.db, { name: 'Sem link', tag: 1, groups: TODOS, items: ITEM1, per: 1 });
+  const r2 = await s2.scheduler.runRule(id2);
+  assert.deepEqual([r2.offers, r2.messages, r2.errors], [0, 0, 1]);
+  assert.deepEqual(logsDaRegra(s2.db, id2), [{ level: 'erro', group_name: null, offer_title: 'Fone A', message: 'Link de afiliado não gerado: a etiqueta etiquetaA foi recusada' }]);
+  assert.deepEqual([s2.wa.simulated.length, linhasRastreio(s2.db).length, enviadasDaRegra(s2.db, id2).length], [0, 0, 0]);
+});
+
+test('rastreio: etiqueta associada que foi apagada usa a da regra, com esperado=1 e motivo etiqueta_apagada', async () => {
+  const { db, wa, links, scheduler } = setup();
+  db.prepare('INSERT INTO tags (name, created_at) VALUES (?,?)').run('etiquetaC', Date.now());
+  salvarRastreio(db, { loja: 'mercadolivre', alvo_tipo: 'grupo', alvo: '222@g.us', codigo: 'etiquetaC' });
+  db.prepare("DELETE FROM tags WHERE name = 'etiquetaC'").run();
+  const pedidos = espiarLinks(links);
+  const id = addRule(db, { name: 'Apagada', tag: 1, groups: TODOS, items: ITEM1, per: 1 });
+  await scheduler.runRule(id);
+  assert.deepEqual(pedidos, ['etiquetaA'], 'a etiqueta apagada nem é pedida');
+  assert.equal(new Set(wa.simulated.map((m) => m.text)).size, 1);
+  assert.deepEqual(linhasRastreio(db).map((l) => [l.jid, l.codigo, l.nivel, l.esperado, l.motivo]), [
+    ['111@g.us', 'etiquetaA', 'padrao', 0, null], ['222@g.us', 'etiquetaA', 'padrao', 1, 'etiqueta_apagada'], ['333@g.us', 'etiquetaA', 'padrao', 0, null],
+  ]);
+});
+
+test('rastreio, CA1: grupo que falhou no envio não ganha linha; os outros ganham', async () => {
+  const { db, wa, scheduler } = setup();
+  const sendText = wa.sendText;
+  wa.sendText = async (jid, texto) => { if (jid === '222@g.us') throw new Error('grupo fora do ar'); return sendText(jid, texto); };
+  const id = addRule(db, { name: 'Um falha', tag: 1, groups: TODOS, items: ITEM1, per: 1 });
+  const r = await scheduler.runRule(id);
+  assert.deepEqual([r.messages, r.errors], [2, 1]);
+  assert.deepEqual(linhasRastreio(db).map((l) => l.jid), ['111@g.us', '333@g.us']);
+});
+
+/** Regra com a fonte catálogo e um Etiqueta falso em memória (o ml.candidates real chama catalogo.candidatos). */
+function setupCatalogo(ofertas, { tagAmazon = 'achadinho-20' } = {}) {
+  const s = setup();
+  const conexaoAmazon = { tag: tagAmazon };
+  const amazon = createAmazon({ db: s.db, fetch: async () => { throw new Error('rede proibida (Amazon)'); }, esperar: async () => {}, lerConexao: () => conexaoAmazon });
+  const catalogo = { candidatos: async () => ofertas.map(paraCandidato) };
+  const catalogoItens = createCatalogoItens({ db: s.db, wa: s.wa, links: s.links, amazon });
+  const scheduler = createScheduler({ db: s.db, wa: s.wa, links: s.links, ml: mlPadrao, fast: true, amazon, catalogo, catalogoItens });
+  const regraCat = (lojas, tag = 1) => Number(s.db.prepare(`INSERT INTO rules (name, enabled, tag_id, template_id, group_jids, source_type, source_config, sources, per_run, interval_min, window_start, window_end, dedupe_days, send_image, created_at)
+    VALUES ('Catálogo', 1, ?, 1, ?, 'list', '{}', ?, 3, 60, '00:00', '23:59', 7, 0, ?)`)
+    .run(tag, JSON.stringify(TODOS), JSON.stringify([{ type: 'catalogo', tag_id: null, config: { ordem: 'relevancia', lojas } }]), Date.now()).lastInsertRowid);
+  return { ...s, scheduler, amazon, conexaoAmazon, regraCat };
+}
+const ofertaCat = (i, loja) => ({
+  id: i, loja, titulo: `Produto ${i}`, preco: 100, preco_antigo: 150, desconto_pct: 33, categoria: 'Casa',
+  ...(loja === 'amazon' ? { item_id: `B0${String(i).padStart(8, '0')}`, link: 'https://www.amazon.com.br/dp/X?tag=terceiro-20' } : { item_id: `MLB${4000000000 + i}`, link: 'https://meli.la/TerCeiro1' }),
+});
+
+test('rastreio, CA3: Amazon do catálogo usa o ID de rastreamento do bloco; sem associação, a tag de Conexões; nunca sem tag', async () => {
+  const s = setupCatalogo([ofertaCat(1, 'amazon')]);
+  const b = bloco(s.db, 'Bloco 1', ['222@g.us', '333@g.us']);
+  salvarRastreio(s.db, { loja: 'amazon', alvo_tipo: 'bloco', alvo: String(b), codigo: 'turbob1-20' });
+  salvarRastreio(s.db, { loja: 'amazon', alvo_tipo: 'grupo', alvo: '333@g.us', codigo: 'casa333-20' });
+  const id = s.regraCat(['amazon'], null);
+  const r = await s.scheduler.runRule(id);
+  assert.deepEqual([r.offers, r.messages, r.errors], [1, 3, 0]);
+  assert.deepEqual(s.wa.simulated.map((m) => m.jid), TODOS);
+  assert.deepEqual(s.wa.simulated.map((m) => linkDoTexto(m.text)), [
+    'https://www.amazon.com.br/dp/B000000001?tag=achadinho-20',
+    'https://www.amazon.com.br/dp/B000000001?tag=turbob1-20',
+    'https://www.amazon.com.br/dp/B000000001?tag=casa333-20',
+  ]);
+  assert.deepEqual(linhasRastreio(s.db).map((l) => [l.jid, l.loja, l.origem, l.oferta_chave, l.codigo, l.nivel, l.bloco_id, l.esperado, l.motivo]), [
+    ['111@g.us', 'amazon', 'regra', 'ASIN:B000000001', 'achadinho-20', 'padrao', null, 0, null],
+    ['222@g.us', 'amazon', 'regra', 'ASIN:B000000001', 'turbob1-20', 'bloco', b, 1, null],
+    ['333@g.us', 'amazon', 'regra', 'ASIN:B000000001', 'casa333-20', 'grupo', null, 1, null],
+  ]);
+  assert.ok(linhasRastreio(s.db).every((l, i) => l.link === linkDoTexto(s.wa.simulated[i].text)));
+  // a tag não aparece no histórico
+  assert.ok(logsDaRegra(s.db, id).filter((l) => l.level === 'ok').every((l) => !/achadinho-20|turbob1-20|casa333-20/.test(l.message)));
+  assert.deepEqual(logsDaRegra(s.db, id).filter((l) => l.level === 'ok').map((l) => l.message), [
+    'Enviado pela Amazon, com a sua tag', 'Enviado pela Amazon, com o ID de rastreamento do bloco', 'Enviado pela Amazon, com o ID de rastreamento do grupo',
+  ]);
+});
+
+test('rastreio, CA3/CA9: ID da Amazon inválido no banco cai na tag de Conexões (falha_link); sem associação, a mensagem de hoje', async () => {
+  const s = setupCatalogo([ofertaCat(2, 'amazon')]);
+  // gravado por fora do salvar (que recusaria): o envio nunca sai sem tag
+  s.db.prepare("INSERT INTO rastreio_codigos (loja, alvo_tipo, alvo, codigo) VALUES ('amazon', 'grupo', '222@g.us', 'tag com espaço')").run();
+  const id = s.regraCat(['amazon'], null);
+  const r = await s.scheduler.runRule(id);
+  assert.deepEqual([r.offers, r.messages, r.errors], [1, 3, 0]);
+  assert.ok(s.wa.simulated.every((m) => linkDoTexto(m.text) === 'https://www.amazon.com.br/dp/B000000002?tag=achadinho-20'));
+  assert.deepEqual(linhasRastreio(s.db).map((l) => [l.jid, l.codigo, l.nivel, l.esperado, l.motivo]), [
+    ['111@g.us', 'achadinho-20', 'padrao', 0, null],
+    ['222@g.us', 'achadinho-20', 'padrao', 1, 'falha_link'],
+    ['333@g.us', 'achadinho-20', 'padrao', 0, null],
+  ]);
+  assert.ok(logsDaRegra(s.db, id).every((l) => !/tag com espaço/.test(l.message || '')), 'o código recusado não vai ao histórico');
+});
+
+test('rastreio, CA4: ML do catálogo gera um link por etiqueta distinta e registra cada grupo', async () => {
+  const s = setupCatalogo([ofertaCat(3, 'ml')]);
+  salvarRastreio(s.db, { loja: 'mercadolivre', alvo_tipo: 'grupo', alvo: '333@g.us', codigo: 'etiquetaB' });
+  const pedidos = espiarLinks(s.links);
+  const id = s.regraCat(['ml'], 1);
+  const r = await s.scheduler.runRule(id);
+  assert.deepEqual([r.offers, r.messages, r.errors, r.revisao], [1, 3, 0, 0]);
+  assert.deepEqual(pedidos, ['etiquetaA', 'etiquetaB']);
+  assert.deepEqual(s.wa.simulated.map((m) => m.text.match(/fake-(\w+)-/)[1]), ['etiquetaA', 'etiquetaA', 'etiquetaB']);
+  assert.ok(s.wa.simulated.every((m) => !m.text.includes('TerCeiro1')), 'nunca o link do Etiqueta');
+  assert.deepEqual(linhasRastreio(s.db).map((l) => [l.jid, l.loja, l.oferta_chave, l.codigo, l.nivel, l.esperado]), [
+    ['111@g.us', 'mercadolivre', 'MLB4000000003', 'etiquetaA', 'padrao', 0],
+    ['222@g.us', 'mercadolivre', 'MLB4000000003', 'etiquetaA', 'padrao', 0],
+    ['333@g.us', 'mercadolivre', 'MLB4000000003', 'etiquetaB', 'grupo', 1],
+  ]);
+});

@@ -2,7 +2,7 @@ import express from 'express';
 import path from 'node:path';
 import { DATA_DIR, PORT, DRY_RUN, FAST, ROOT, PUBLIC_HOST, PANEL_PASSWORD } from './config.js';
 import { openDb, getSetting, setSetting, parseRule, nz, MAX_SOURCES } from './db.js';
-import { createAuth, createLimiter, parseCookies, safeEqual, soDono, SESSION_MS } from './auth.js';
+import { createAuth, createLimiter, parseCookies, safeEqual, soDono, ehDono, SESSION_MS } from './auth.js';
 import * as privacidade from './privacidade.js';
 import { pseudonimo, migrarPseudonimos, limparAntigos, chaveIp, RETENCAO_PADRAO_DIAS } from './privacidade.js';
 import { createWhatsApp } from './whatsapp.js';
@@ -18,6 +18,9 @@ import { montarRotas as rotasEspelho } from './espelho.js';
 import { montarRotas as rotasEquipe, montarRotasPublicas as rotasEquipePublicas } from './equipe.js';
 import { createCatalogo, limparFonteCatalogo } from './catalogo.js';
 import { createCatalogoItens, montarRotas as rotasCatalogoItens } from './catalogo-itens.js';
+import { montarRotas as rotasRastreio, apagarDoBloco as apagarRastreioDoBloco, blocoTemCodigo, etiquetaEmUso, MENSAGENS_RASTREIO, limpar as limparRastreio } from './rastreio.js';
+import { montarRotas as rotasImportador } from './importador.js';
+import { montarRotas as rotasGanhos, blocoTemGasto, MENSAGENS_GANHOS } from './ganhos.js';
 import { renderTemplate, SAMPLE_OFFER, SAMPLE_OFFER_AMAZON, PLACEHOLDERS } from './template.js';
 import { CATEGORIAS, ORDENS, POR_PAGINA } from './afiliados.js';
 import { overview, resumo, evasaoDoDia, periodRange, startOfDay, dayOf } from './analytics.js';
@@ -58,6 +61,8 @@ export function criarServicos({ db, wa, links, fast = FAST, dir = DATA_DIR, ml =
   const envios = {
     lerFoto: (id) => scheduler.envios.lerFoto(id),
     processarPendentes: () => scheduler.envios.processarPendentes(),
+    // "Enviar" da revisão da Shopee: links com Sub_id por bloco (rastreio); sem associação devolve só o link base
+    linksRastreioShopee: (a) => scheduler.envios.linksRastreioShopee(a),
   };
   // o envio aprovado sai no tick do agendador (como o "agora" e o espelho); sem acordar() exposto, pede um tick
   const acordar = () => {
@@ -81,7 +86,10 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
   app.set('trust proxy', 1); // Nginx na frente: req.ip e req.secure vêm do X-Forwarded-*
   const jsonPequeno = express.json({ limit: '100kb' });
   const jsonGrande = express.json({ limit: '5mb' }); // só a lista da Central, que vem pela extensão, e só depois do token conferido
-  app.use((req, res, next) => (req.path === '/api/ext/result' ? next() : jsonPequeno(req, res, next)));
+  // fora do JSON global: a lista da Central (jsonGrande, depois do token) e o CSV do importador (corpo cru, só
+  // depois do soDono; outro tipo de conteúdo recebe o 415 dele, não o 400/413 do parser JSON)
+  const SEM_JSON_GLOBAL = new Set(['/api/ext/result', '/api/ganhos/importar']);
+  app.use((req, res, next) => (SEM_JSON_GLOBAL.has(req.path) ? next() : jsonPequeno(req, res, next)));
 
   const auth = createAuth({ db, password: panelPassword });
   const exigeDono = soDono(auth); // Operador recebe 403; sem login no painel, passa
@@ -139,9 +147,11 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
     res.status(200).type('application/json').flushHeaders();
     res.end(JSON.stringify({ job: await links.poll(20000) }));
   });
-  // `longo` (só no pedido link_shopee): o longLink, que serve só para conferir o ID de afiliado; links.submit o valida
+  // `longo` (só no pedido link_shopee): o longLink, que serve só para conferir o ID de afiliado; links.submit o valida.
+  // `sub_id_aplicado` (só no link_shopee com Sub_id): a extensão diz se o Sub_id entrou no link; só o true literal vale.
   app.post('/api/ext/result', extAuth, jsonGrande, (req, res) => {
-    const ok = links.submit(Number(req.body.id), { ok: !!req.body.ok, link: req.body.link, longo: req.body.longo, data: req.body.data, error: req.body.error });
+    const ok = links.submit(Number(req.body.id), { ok: !!req.body.ok, link: req.body.link, longo: req.body.longo, data: req.body.data, error: req.body.error,
+      sub_id_aplicado: req.body.sub_id_aplicado });
     res.json({ ok });
   });
 
@@ -287,11 +297,13 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
   // ---------- privacidade: rotação do token da extensão, limpeza e exclusão por titular ----------
   app.post('/api/ajustes/token', exigeDono, wrap(() => { setSetting(db, 'ext_token', crypto.randomBytes(24).toString('hex')); })); // fora de /api/ext/: passa pelo Host/Origin e pelo login
   // "Apagar o que já passou do prazo": a mesma retenção do início do serviço, inclusive os itens do espelhamento
-  // (que guardam o texto mascarado das mensagens dos grupos de origem)
+  // (que guardam o texto mascarado das mensagens dos grupos de origem) e o histórico do rastreio (prazo próprio de
+  // 400 dias, mesmo com a retenção em 0 = para sempre: não tem dado de pessoa e precisa durar mais que os relatórios)
   app.post('/api/privacidade/limpar', exigeDono, wrap(() => {
     const dias = Number(getSetting(db, 'retencao_dias', RETENCAO_PADRAO_DIAS));
     const r = limparAntigos(db, dias);
     if (scheduler?.espelho) r.espelhamento = scheduler.espelho.limpar(dias).itens;
+    r.rastreio = limparRastreio(db);
     return r;
   }));
   app.post('/api/privacidade/apagar-participante', wrap((req) => {
@@ -328,19 +340,62 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
       return { ...b, group_jids: jids, grupos, membros: grupos.reduce((s, g) => s + (g.size || 0), 0), hoje: resumo(db, { ...hoje, jids }) };
     });
   }));
+  // Id de bloco nunca reaproveitado (S1/Q3): sem AUTOINCREMENT o SQLite daria ao bloco novo o id do último apagado, e
+  // ele herdaria a comissão (rastreio_envios.bloco_id) e o gasto (gastos_anuncio.alvo) daquele. O próximo id passa de
+  // tudo o que já apontou para um bloco; 'ultimo_bloco_id' lembra o maior já dado, mesmo sem rastro nas tabelas.
+  const proximoIdBloco = () => {
+    const maior = (sql) => Number(db.prepare(sql).get()?.m) || 0;
+    return 1 + Math.max(
+      maior('SELECT MAX(id) AS m FROM blocks'),
+      maior('SELECT MAX(bloco_id) AS m FROM rastreio_envios'),
+      maior("SELECT MAX(CAST(alvo AS INTEGER)) AS m FROM gastos_anuncio WHERE alvo_tipo = 'bloco'"),
+      Number(getSetting(db, 'ultimo_bloco_id', 0)) || 0,
+    );
+  };
   app.post('/api/blocks', wrap((req) => {
     const b = blockFromBody(req.body);
-    const id = db.prepare('INSERT INTO blocks (name, tag_id, note, created_at) VALUES (?,?,?,?)').run(b.name, b.tag_id, b.note, Date.now()).lastInsertRowid;
-    saveBlockGroups(id, b.jids); return { id };
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      const id = proximoIdBloco();
+      db.prepare('INSERT INTO blocks (id, name, tag_id, note, created_at) VALUES (?,?,?,?,?)').run(id, b.name, b.tag_id, b.note, Date.now());
+      setSetting(db, 'ultimo_bloco_id', id);
+      saveBlockGroups(id, b.jids);
+      db.exec('COMMIT');
+      return { id };
+    } catch (e) { db.exec('ROLLBACK'); throw e; }
   }));
-  app.put('/api/blocks/:id', wrap((req) => {
+  // Id do bloco na URL: só dígitos ('01' é o 1); '1e0', '+1', ' 1', '1.0' não são bloco. Sem isto o SQLite acharia o
+  // bloco 1 por afinidade numérica e a checagem do rastreio e os DELETEs olhariam ids diferentes.
+  const idDoBloco = (v) => (/^\d{1,15}$/.test(v) && Number(v) > 0 ? Number(v) : null);
+  const mudaGrupos = (id, jids) => {
+    const atuais = new Set(all('SELECT jid FROM block_groups WHERE block_id = ?', id).map((r) => r.jid));
+    return jids.length !== atuais.size || jids.some((j) => !atuais.has(j));
+  };
+  // CA11 (P2: rastreio e ganhos são só do Dono): no bloco com código de rastreio ou com gasto com anúncio, o Operador
+  // não troca os grupos nem apaga; nome, etiqueta e nota continuam livres. Bloco sem nenhum dos dois: como antes.
+  // `acao` é 'bloco_apagar' ou 'bloco_grupos'; devolve a frase da recusa (o código vem primeiro) ou null.
+  const travaDoBloco = (id, acao) => (blocoTemCodigo(db, id) ? MENSAGENS_RASTREIO[acao]
+    : blocoTemGasto(db, id) ? MENSAGENS_GANHOS[acao] : null);
+  app.put('/api/blocks/:id', wrap((req, res) => {
+    const id = idDoBloco(req.params.id); if (id === null) throw new Error('Bloco não encontrado.');
     const b = blockFromBody(req.body);
-    db.prepare('UPDATE blocks SET name = ?, tag_id = ?, note = ? WHERE id = ?').run(b.name, b.tag_id, b.note, req.params.id);
-    saveBlockGroups(Number(req.params.id), b.jids);
+    const trava = ehDono(auth, req) || !mudaGrupos(id, b.jids) ? null : travaDoBloco(id, 'bloco_grupos');
+    if (trava) { res.status(403); return { erro: trava }; }
+    db.prepare('UPDATE blocks SET name = ?, tag_id = ?, note = ? WHERE id = ?').run(b.name, b.tag_id, b.note, id);
+    saveBlockGroups(id, b.jids);
   }));
-  app.delete('/api/blocks/:id', wrap((req) => {
-    db.prepare('DELETE FROM blocks WHERE id = ?').run(req.params.id);
-    db.prepare('DELETE FROM block_groups WHERE block_id = ?').run(req.params.id);
+  app.delete('/api/blocks/:id', wrap((req, res) => {
+    const id = idDoBloco(req.params.id); if (id === null) return; // não é id de bloco: nada a apagar
+    // bloco, grupos e códigos de rastreio saem juntos ou nada sai (o histórico de envios fica)
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      const trava = ehDono(auth, req) ? null : travaDoBloco(id, 'bloco_apagar');
+      if (trava) { db.exec('ROLLBACK'); res.status(403); return { erro: trava }; }
+      db.prepare('DELETE FROM blocks WHERE id = ?').run(id);
+      db.prepare('DELETE FROM block_groups WHERE block_id = ?').run(id);
+      apagarRastreioDoBloco(db, id);
+      db.exec('COMMIT');
+    } catch (e) { db.exec('ROLLBACK'); throw e; }
   }));
 
   // ---------- visão geral ----------
@@ -435,6 +490,8 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
     if (naFonte) throw new Error(`Uma fonte da regra "${naFonte.name}" usa esta etiqueta. Troque lá antes.`);
     const bloco = one('SELECT name FROM blocks WHERE tag_id = ? LIMIT 1', req.params.id);
     if (bloco) throw new Error(`O bloco "${bloco.name}" usa esta etiqueta. Troque a etiqueta dele antes.`);
+    const etq = one('SELECT name FROM tags WHERE id = ?', req.params.id);
+    if (etq && etiquetaEmUso(db, etq.name)) throw new Error(MENSAGENS_RASTREIO.etiqueta_em_uso); // a associação ficaria sem código (etiqueta_apagada)
     db.prepare('DELETE FROM tags WHERE id = ?').run(req.params.id);
   }));
 
@@ -593,8 +650,10 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
   app.get('/api/simulados', wrap(() => wa.simulated.slice(-50).map((m) => (String(m.jid).endsWith('@g.us') ? m : { ...m, jid: mascararNumero(m.jid) }))));
 
   // ---------- features novas: cada módulo monta as próprias rotas, todas depois do Host/Origin e do login ----------
-  const ctx = { db, wa, links, scheduler, auth, wrap, soDono: exigeDono, dataDir, ml, amazon, shopee, catalogo, catalogoItens, enderecoPublico, publicHost, gravarCookie, sidDe };
-  for (const montar of [rotasEnvios, rotasAvisos, rotasConexoes, rotasEspelho, rotasEquipe, rotasCatalogoItens]) montar(app, ctx);
+  const ctx = { db, wa, links, scheduler, auth, wrap, soDono: exigeDono, dataDir, ml, amazon, shopee, catalogo, catalogoItens, enderecoPublico, publicHost, gravarCookie, sidDe,
+    viradaMin: () => viradaMin(db) };
+  // importador e ganhos: tudo só do Dono, inclusive GET (ctx.soDono); ganhos usa ctx.viradaMin
+  for (const montar of [rotasEnvios, rotasAvisos, rotasConexoes, rotasEspelho, rotasEquipe, rotasCatalogoItens, rotasRastreio, rotasImportador, rotasGanhos]) montar(app, ctx);
 
   // Erros de parsing (JSON inválido, corpo grande demais) e inesperados: resposta curta, sem stack nem caminhos.
   // eslint-disable-next-line no-unused-vars
@@ -626,6 +685,8 @@ if (import.meta.url === `file://${process.argv[1].replace(/\\/g, '/')}` || proce
       .catch((e) => console.error('[retenção]', e.message));
     // itens do espelhamento já decididos (guarda os 'enviado' que ainda contam para "Horas sem repetir")
     try { const r = scheduler.espelho.limpar(Number(getSetting(db, 'retencao_dias', RETENCAO_PADRAO_DIAS))); if (r.itens) console.log(`Retenção (espelhamento): apagados ${r.itens} itens antigos.`); } catch (e) { console.error('[retenção] espelhamento:', e?.code || e?.name || 'erro'); }
+    // histórico do rastreio por grupo: prazo próprio (RETENCAO_RASTREIO_DIAS), independente de retencao_dias
+    try { const n = limparRastreio(db); if (n) console.log(`Retenção (rastreio): apagadas ${n} linhas antigas.`); } catch (e) { console.error('[retenção] rastreio:', e?.code || e?.name || 'erro'); }
   };
   retencao(); setInterval(retencao, 6 * 60 * 60 * 1000);
 

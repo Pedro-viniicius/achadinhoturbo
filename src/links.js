@@ -5,7 +5,7 @@
 // só o link pronto ou a lista voltam.
 
 import { amostraHub, validarPaginas } from './afiliados.js';
-import { LINK_SHOPEE } from './shopee.js';
+import { LINK_SHOPEE, RE_SUB_ID } from './shopee.js';
 
 // No modo extensão só aceitamos o link curto do Mercado Livre: quem tiver o token não consegue
 // fazer o programa publicar uma URL qualquer nos grupos.
@@ -17,6 +17,8 @@ export const LINK_MELI = /^https:\/\/meli\.la\/[A-Za-z0-9_-]{3,40}$/;
 // shopee.com.br, caminho em ASCII visível, sem `?` nem `#` (sem parâmetros).
 const URL_PRODUTO_SHOPEE = /^https:\/\/shopee\.com\.br\/[!"$->@-~]*$/;
 const MAX_URL = 2048;
+// Sub_id1 da Shopee (plano dashboard-ganhos, D3): RE_SUB_ID de src/shopee.js; extension/background.js confere de novo.
+const semSubId = (v) => v === undefined || v === null || v === '';
 
 /**
  * O `longo` (longLink) só serve para conferir o ID de afiliado. Vale só se for https, num host
@@ -81,7 +83,7 @@ export function createLinkService({ getMode, limiteShopeeHora = LIMITE_SHOPEE_HO
         const i = queue.findIndex((j) => j.id === id); if (i >= 0) queue.splice(i, 1);
         reject(new Error('a extensão não respondeu a tempo'));
       }, timeoutMs);
-      jobs.set(id, { resolve, reject, timer, type: job.type });
+      jobs.set(id, { resolve, reject, timer, type: job.type, subId: job.subId });
       queue.push({ id, ...job });
       flush();
     });
@@ -98,19 +100,24 @@ export function createLinkService({ getMode, limiteShopeeHora = LIMITE_SHOPEE_HO
 
   /**
    * Link de afiliado da Shopee para o endereço do produto (`https://shopee.com.br/…`, sem parâmetros).
-   * Devolve `{ link, longo }`: `link` sempre passa em LINK_SHOPEE; `longo` é o longLink (ou null).
+   * Devolve `{ link, longo, subIdAplicado }`: `link` sempre passa em LINK_SHOPEE; `longo` é o longLink (ou null).
+   * `subId` (opcional, RE_SUB_ID; vazio = sem Sub_id) vai no pedido; `subIdAplicado` só é true quando a extensão
+   * responde `sub_id_aplicado: true` (a extensão antiga não responde o campo: o link sai sem Sub_id).
    * O modo 'direct' do ML não vale aqui: fora da simulação, o link sai sempre pela extensão.
    * Teto: `limiteShopeeHora` pedidos entregues à extensão por hora (o que a extensão off-line recusou não conta);
-   * passou → LIMITE_SHOPEE_ATINGIDO, sem pedido. A simulação (fake) não conta.
+   * passou → LIMITE_SHOPEE_ATINGIDO, sem pedido. A simulação (fake) não conta e simula a extensão que aplica o Sub_id.
    */
-  async function requestLinkShopee({ url, timeoutMs = 90000 }) {
+  async function requestLinkShopee({ url, subId, timeoutMs = 90000 }) {
     if (typeof url !== 'string' || url.length > MAX_URL || !URL_PRODUTO_SHOPEE.test(url)) {
       throw new Error('endereço de produto da Shopee inválido');
     }
-    if (getMode() === 'fake') return { link: `https://s.shopee.com.br/fake${++seq}`, longo: null };
+    const comSubId = !semSubId(subId);
+    if (comSubId && !(typeof subId === 'string' && RE_SUB_ID.test(subId))) throw new Error('Sub_id da Shopee inválido');
+    if (getMode() === 'fake') return { link: `https://s.shopee.com.br/fake${++seq}`, longo: null, subIdAplicado: comSubId };
     if (!vagaShopee()) throw new Error(LIMITE_SHOPEE_ATINGIDO);
     if (online()) pedidosShopee.push(agora()); // off-line, ask recusa sem pôr na fila
-    return ask({ type: 'link_shopee', url }, timeoutMs);
+    // sem Sub_id, o pedido é o de antes (sem o campo)
+    return ask(comSubId ? { type: 'link_shopee', url, subId } : { type: 'link_shopee', url }, timeoutMs);
   }
 
   /** Busca páginas da lista da Central de Afiliados. `paginas` = corpos prontos (ver afiliados.js). */
@@ -134,11 +141,12 @@ export function createLinkService({ getMode, limiteShopeeHora = LIMITE_SHOPEE_HO
   }
 
   /** Resposta a um pedido link_shopee: resultado em shopeeLastOkAt/shopeeLastError (o estado do ML não muda). */
-  function respostaShopee(e, { ok, link, longo, error }) {
+  function respostaShopee(e, { ok, link, longo, error, sub_id_aplicado: aplicado }) {
     const l = String(link || '').trim();
     if (ok && LINK_SHOPEE.test(l)) {
       shopeeLastOkAt = Date.now(); shopeeLastError = '';
-      e.resolve({ link: l, longo: longoDaShopee(longo) });
+      // só vale o true literal, e só se o pedido levou Sub_id
+      e.resolve({ link: l, longo: longoDaShopee(longo), subIdAplicado: e.subId !== undefined && aplicado === true });
       return true;
     }
     shopeeLastError = erroCurto(!ok ? error || 'a extensão não conseguiu'
@@ -147,10 +155,10 @@ export function createLinkService({ getMode, limiteShopeeHora = LIMITE_SHOPEE_HO
     return true;
   }
 
-  function submit(id, { ok, link, longo, data, error }) {
+  function submit(id, { ok, link, longo, data, error, sub_id_aplicado }) {
     const e = jobs.get(id); if (!e) return false;
     clearTimeout(e.timer); jobs.delete(id);
-    if (e.type === 'link_shopee') return respostaShopee(e, { ok, link, longo, error });
+    if (e.type === 'link_shopee') return respostaShopee(e, { ok, link, longo, error, sub_id_aplicado });
     if (!ok) { lastError = erroCurto(error || 'a extensão não conseguiu'); e.reject(new Error(lastError)); return true; }
     if (e.type === 'ofertas') {
       const v = validarPaginas(data);

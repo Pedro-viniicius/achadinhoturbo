@@ -22,6 +22,9 @@
 // mesmas regras de preço).
 // Nenhum link comum (CA4): ML só com links em modo extensão/simulação e etiqueta; Amazon só com a tag de Conexões
 // (o link é montado na hora do envio); Shopee só com o link do catálogo conferido por LINK_SHOPEE.
+// Rastreio por grupo (plano dashboard-ganhos, etapa 7): ML e Amazon seguem o código de cada grupo no envio
+// (src/envios.js). Na Shopee, o link do catálogo é o base e, se algum grupo da regra tem Sub_id (por bloco), o
+// "Enviar" pede os links com Sub_id à fila de envios (envios.linksRastreioShopee) e guarda em `links_rastreio`.
 // Preço suspeito (CA7, decisão P4 do dono): sem "Enviar mesmo com 100%". Depois dos ajustes, desconto de 100% ou
 // preço antigo ≥ 10× o preço recusa com frase fixa.
 //
@@ -426,6 +429,13 @@ export function createCatalogoItens({ db, wa = null, links = null, amazon = null
       .filter((j) => typeof j === 'string' && grupoExiste(j));
     if (!destinos.length) throw new ErroCatalogoItem(400, 'A regra desta oferta não tem grupos. Escolha ao menos um grupo na regra.');
     if (wa && !wa.isReady()) throw new ErroCatalogoItem(400, 'O WhatsApp está desconectado. Conecte o número antes de enviar.');
+
+    // Shopee com Sub_id por bloco: os links saem agora (como no Disparo manual), com o do catálogo como base. Sem a
+    // função na fila (servidor que ainda não a expõe), sai só o base e o envio conta como não rastreado.
+    if (info.loja === 'shopee' && typeof envios?.linksRastreioShopee === 'function') {
+      const porGrupo = await envios.linksRastreioShopee({ urlProduto: info.url, jids: destinos, base: loja.link_afiliado });
+      if (Object.values(porGrupo).some((l) => l.esperado)) loja.links_rastreio = porGrupo;
+    }
 
     const lojaId = LOJA_ID[info.loja];
     const imagem = imagemPermitida(lojaId, oferta.image) ? oferta.image : null;

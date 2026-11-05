@@ -18,6 +18,7 @@ import { createAmazon } from '../src/amazon.js';
 import { soDono } from '../src/auth.js';
 import { createCatalogoItens, montarRotas, ErroCatalogoItem, TETO_REVISAO, MOTIVOS, lerChave, precoSuspeito } from '../src/catalogo-itens.js';
 import { validarAjustesOferta, lerPrecoDigitado, lerTextoCurto, ErroEspelho } from '../src/espelho.js';
+import * as rastreio from '../src/rastreio.js';
 
 let acessosRede = 0;
 globalThis.fetch = async () => { acessosRede++; throw new Error('rede proibida no teste'); };
@@ -41,8 +42,11 @@ const ML = (n = 1234567890, extra = {}) => ({ key: `MLB${n}`, title: 'Fone Bom',
 const AMZ = (asin = ASIN, extra = {}) => ({ key: `ASIN:${asin}`, title: 'Roteador Mesh', price: 1310.05, oldPrice: 1999, discountPct: 34, sold: null, freeShipping: false, coupon: 'MESH10', image: IMG_AMAZON, categoria: 'Informática', tag_id: null, source_index: 0, ...extra });
 const SHP = (item = '22334455', extra = {}) => ({ key: `SHOPEE:111.${item}`, title: 'Perfume Floral', price: 59.9, oldPrice: null, discountPct: 30, sold: 50, freeShipping: true, coupon: null, image: IMG_SHOPEE, link: LINK_SHOPEE_OK, categoria: 'Perfumes', tag_id: null, source_index: 0, ...extra });
 
-/** Banco com 2 grupos e 2 etiquetas, WhatsApp simulado, links no modo `estado.modo`, Amazon com a tag `conexao.tag`. */
-function montar({ modo = 'fake', tag = TAG, comAmazon = true } = {}) {
+/**
+ * Banco com 2 grupos e 2 etiquetas, WhatsApp simulado, links no modo `estado.modo`, Amazon com a tag `conexao.tag`.
+ * `shopee`: cliente da Shopee da fila de envios (os links com Sub_id do rastreio).
+ */
+function montar({ modo = 'fake', tag = TAG, comAmazon = true, shopee = null } = {}) {
   const dir = tmp();
   const db = openDb(dir);
   for (const [jid, nome] of [['111@g.us', 'Achadinhos'], ['222@g.us', 'Tech']]) db.prepare('INSERT INTO groups (jid, name, size, updated_at) VALUES (?,?,?,?)').run(jid, nome, 10, Date.now());
@@ -52,7 +56,7 @@ function montar({ modo = 'fake', tag = TAG, comAmazon = true } = {}) {
   const links = createLinkService({ getMode: () => estado.modo });
   const conexao = { tag };
   const amazon = comAmazon ? createAmazon({ db, fetch: globalThis.fetch, esperar: async () => {}, lerConexao: () => conexao }) : null;
-  const envios = createEnvios({ db, wa, links, ml: null, fast: true, dir, amazon });
+  const envios = createEnvios({ db, wa, links, ml: null, fast: true, dir, amazon, shopee });
   const relogio = { t: Date.now() };
   const acordou = { n: 0 };
   const itens = createCatalogoItens({ db, wa, links, amazon, envios, acordar: () => { acordou.n++; }, agora: () => relogio.t });
@@ -740,6 +744,82 @@ test('R9: os validadores de ajustes do espelho, exportados, seguem iguais no esp
   assert.throws(() => lerTextoCurto(5, 'título', 10), (e) => e instanceof ErroEspelho && e.message === 'O título precisa ser texto.');
   const erro = (m) => new ErroCatalogoItem(400, m);
   assert.deepEqual(await espelho({ coupon: 'C'.repeat(101) }, { maxCupom: 100, erro }), ['ErroCatalogoItem', 400, 'O cupom passa de 100 caracteres.']);
+});
+
+// ------------------------------------------------------------------------------------------------ rastreio (dashboard-ganhos, etapa 7)
+
+/** Shopee falsa com a API útil: um link por Sub_id, guardando cada gerarLink. */
+function shopeeApi() {
+  const chamadas = [];
+  return {
+    chamadas, apiUtil: () => true, linkGuardado: () => null, guardarLink: () => true,
+    async gerarLink(u, op) { chamadas.push([u, op?.subId ?? null]); return op?.subId ? `https://s.shopee.com.br/Sub${op.subId}` : 'https://s.shopee.com.br/BaseDaApi'; },
+  };
+}
+const rastreados = (db, envioId) => db.prepare(`SELECT jid, loja, origem, rule_id, envio_id, oferta_chave, link, codigo, nivel, bloco_id, esperado, motivo
+  FROM rastreio_envios WHERE envio_id = ? ORDER BY id`).all(envioId).map((l) => ({ ...l }));
+
+test('CA2/CA1: catálogo Shopee — base = link do Etiqueta; Sub_id do bloco gera links_rastreio no "Enviar"; uma linha de rastreio por grupo', async () => {
+  const shopee = shopeeApi();
+  const s = montar({ shopee });
+  s.db.prepare("INSERT INTO conexoes (plataforma, config, segredos) VALUES ('shopee', ?, '{}')").run(JSON.stringify({ id_afiliado: '98765432101' }));
+  s.db.prepare('INSERT INTO blocks (id, name, created_at) VALUES (1, ?, 1)').run('B1');
+  s.db.prepare("INSERT INTO block_groups (block_id, jid) VALUES (1, '111@g.us')").run();
+  rastreio.salvar(s.db, { loja: 'shopee', alvo_tipo: 'bloco', alvo: '1', codigo: 'b1' });
+  const regra = s.regra();
+  const id = s.revisao(regra, SHP('1'), ['shopee']);
+  const r = await s.itens.enviar(id, {});
+  const p = s.envio(r.envio_id).payload;
+  assert.equal(p.link_afiliado, LINK_SHOPEE_OK, 'o link do catálogo continua sendo o base');
+  assert.deepEqual(p.links_rastreio, {
+    '111@g.us': { link: 'https://s.shopee.com.br/Subb1', codigo: 'b1', nivel: 'bloco', bloco_id: 1, esperado: 1, motivo: null },
+    '222@g.us': { link: LINK_SHOPEE_OK, codigo: null, nivel: 'padrao', bloco_id: null, esperado: 0, motivo: null },
+  });
+  assert.deepEqual(shopee.chamadas, [['https://shopee.com.br/product/111/1', 'b1']], 'só o Sub_id foi pedido; o base é o do Etiqueta');
+  await s.envios.runEnvio(r.envio_id);
+  assert.deepEqual(s.enviados().map((m) => [m.jid, /Compre aqui: (\S+)$/.exec(m.text)?.[1]]), [['111@g.us', 'https://s.shopee.com.br/Subb1'], ['222@g.us', LINK_SHOPEE_OK]]);
+  const comum = { loja: 'shopee', origem: 'catalogo', rule_id: regra.id, envio_id: r.envio_id, oferta_chave: 'SHOPEE:111.1' };
+  assert.deepEqual(rastreados(s.db, r.envio_id), [
+    { jid: '111@g.us', ...comum, link: 'https://s.shopee.com.br/Subb1', codigo: 'b1', nivel: 'bloco', bloco_id: 1, esperado: 1, motivo: null },
+    { jid: '222@g.us', ...comum, link: LINK_SHOPEE_OK, codigo: null, nivel: 'padrao', bloco_id: null, esperado: 0, motivo: null },
+  ]);
+
+  // CA9: sem associação, o payload é o de antes (sem links_rastreio) e nenhum link é pedido
+  s.db.prepare('DELETE FROM rastreio_codigos').run();
+  const id2 = s.revisao(regra, SHP('2'), ['shopee']);
+  const r2 = await s.itens.enviar(id2, {});
+  assert.equal(Object.hasOwn(s.envio(r2.envio_id).payload, 'links_rastreio'), false);
+  assert.equal(shopee.chamadas.length, 1);
+});
+
+test('CA1/CA4: catálogo ML registra origem "catalogo" com a regra; a etiqueta associada ao grupo vence a da fonte (P1)', async () => {
+  const s = montar();
+  rastreio.salvar(s.db, { loja: 'mercadolivre', alvo_tipo: 'grupo', alvo: '222@g.us', codigo: 'etiquetaA' });
+  const regra = s.regra();
+  const id = s.revisao(regra, ML(1234567890, { tag_id: 2 }), ['falha_link']);
+  const r = await s.itens.enviar(id, {});
+  await s.envios.runEnvio(r.envio_id);
+  assert.deepEqual(s.enviados().map((m) => [m.jid, /fake-(\w+)-/.exec(m.text)?.[1]]), [['111@g.us', 'etiquetaB'], ['222@g.us', 'etiquetaA']]);
+  assert.deepEqual(rastreados(s.db, r.envio_id).map((l) => [l.jid, l.origem, l.rule_id, l.oferta_chave, l.codigo, l.nivel, l.esperado]), [
+    ['111@g.us', 'catalogo', regra.id, 'MLB1234567890', 'etiquetaB', 'padrao', 0],
+    ['222@g.us', 'catalogo', regra.id, 'MLB1234567890', 'etiquetaA', 'grupo', 1],
+  ]);
+});
+
+test('catálogo Shopee com a fila de envios sem linksRastreioShopee (embrulho do servidor): sai com o base; a associação conta como não rastreada', async () => {
+  const s = montar();
+  s.db.prepare('INSERT INTO blocks (id, name, created_at) VALUES (1, ?, 1)').run('B1');
+  s.db.prepare("INSERT INTO block_groups (block_id, jid) VALUES (1, '111@g.us')").run();
+  rastreio.salvar(s.db, { loja: 'shopee', alvo_tipo: 'bloco', alvo: '1', codigo: 'b1' });
+  const itens = createCatalogoItens({ db: s.db, wa: s.wa, links: s.links, amazon: s.amazon, envios: { lerFoto: (u) => s.envios.lerFoto(u), processarPendentes: async () => 0 }, acordar: () => {}, agora: () => s.relogio.t });
+  const regra = s.regra();
+  assert.equal(itens.registrar(regra, SHP('1'), 'revisao', ['shopee']), true);
+  const id = s.db.prepare('SELECT id FROM catalogo_itens WHERE rule_id = ?').get(regra.id).id;
+  const r = await itens.enviar(id, {});
+  assert.equal(Object.hasOwn(s.envio(r.envio_id).payload, 'links_rastreio'), false);
+  await s.envios.runEnvio(r.envio_id);
+  assert.ok(s.enviados().every((m) => m.text.endsWith(LINK_SHOPEE_OK)));
+  assert.deepEqual(rastreados(s.db, r.envio_id).map((l) => [l.jid, l.nivel, l.esperado, l.motivo]), [['111@g.us', 'nenhum', 1, 'sem_link_rastreio'], ['222@g.us', 'padrao', 0, null]]);
 });
 
 test('nenhum acesso à rede nos testes deste arquivo', () => {

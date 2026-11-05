@@ -8,7 +8,7 @@ import { createHash } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import {
   extrairIds, afiliadoDoLongLink, ofertaDoNo, createShopee, ErroShopee, LinkShopeeNaoResolvido,
-  HOSTS_SHOPEE, IMAGEM_SHOPEE, LINK_SHOPEE, URL_API, MENSAGENS_SHOPEE, FRASES_TESTE_SHOPEE, RE_ID_AFILIADO,
+  HOSTS_SHOPEE, IMAGEM_SHOPEE, LINK_SHOPEE, URL_API, MENSAGENS_SHOPEE, FRASES_TESTE_SHOPEE, RE_ID_AFILIADO, RE_SUB_ID,
 } from '../src/shopee.js';
 
 // ------------------------------------------------------------------------------------------- rede bloqueada
@@ -687,6 +687,83 @@ test('S2: linkGuardado/guardarLink: por produto e ID de afiliado, 7 dias, só s.
   // outra instância (outro cliente) não vê os links desta
   shopee.guardarLink(URL_PRODUTO, ID_AFILIADO, CURTO);
   assert.equal(createShopee({ agora: rel.agora }).linkGuardado(URL_PRODUTO, ID_AFILIADO), null);
+});
+
+// ------------------------------------------------------------------------------- Sub_id (rastreio de ganhos)
+test('Sub_id: gerarLink manda subIds:["…"] só quando há Sub_id; sem ele o corpo é o de sempre (CA2)', async () => {
+  const corpoSemSubId = `mutation{generateShortLink(input:{originUrl:"${URL_PRODUTO}"}){shortLink}}`;
+  const f = fetchFalso(apiOk());
+  const shopee = createShopee({ fetch: f, agora: relogio().agora, lerConexao: () => conexao() });
+  assert.equal(await shopee.gerarLink(URL_PRODUTO, { subId: 'g1' }), CURTO);
+  assert.equal(JSON.parse(f.chamadas[0].init.body).query,
+    `mutation{generateShortLink(input:{originUrl:"${URL_PRODUTO}",subIds:["g1"]}){shortLink}}`);
+  // sem Sub_id, de qualquer forma de pedir: byte a byte o corpo de hoje
+  for (const arg of [undefined, {}, { subId: undefined }, { subId: null }, { subId: '' }]) {
+    const g = fetchFalso(apiOk());
+    await createShopee({ fetch: g, agora: relogio().agora, lerConexao: () => conexao() }).gerarLink(URL_PRODUTO, arg);
+    assert.equal(g.chamadas[0].init.body, JSON.stringify({ query: corpoSemSubId }), JSON.stringify(arg));
+  }
+  assert.equal(shopee.situacao().acesso, 'ok');
+});
+
+test('Sub_id: só alfanumérico de 1 a 30; o resto é recusado sem rede, sem mexer na situação e sem vazar o valor (CA2)', async () => {
+  const ok = ['g1', 'A', 'Bloco7', 'a'.repeat(30), '0123456789'];
+  for (const subId of ok) {
+    const f = fetchFalso(apiOk());
+    await createShopee({ fetch: f, lerConexao: () => conexao() }).gerarLink(URL_PRODUTO, { subId });
+    assert.equal(JSON.parse(f.chamadas[0].init.body).query,
+      `mutation{generateShortLink(input:{originUrl:"${URL_PRODUTO}",subIds:["${subId}"]}){shortLink}}`, subId);
+  }
+  const ruins = ['a-b', 'a_b', 'a b', ' g1', 'g1 ', 'a'.repeat(31), 'ç', 'g1"]}){x', 'g1\n', '{}', 'a.b', 42, 1.5, true, [], ['g1'], {}];
+  for (const subId of ruins) {
+    const f = fetchFalso(() => assert.fail('sem rede'));
+    const shopee = createShopee({ fetch: f, lerConexao: () => conexao() });
+    const e = await capturarErro(() => shopee.gerarLink(URL_PRODUTO, { subId }));
+    assert.ok(e instanceof ErroShopee, JSON.stringify(subId));
+    assert.equal(e.tipo, 'link_falhou');
+    assert.equal(f.chamadas.length, 0);
+    assert.equal(shopee.situacao().acesso, 'desconhecido', 'recusa do próprio programa não vira situação da conta');
+    assert.equal(e.message, MENSAGENS_SHOPEE.link_falhou, 'a mensagem é fixa: nunca o valor recusado');
+  }
+  assert.ok(RE_SUB_ID.test('g1') && !RE_SUB_ID.test('g-1') && !RE_SUB_ID.test('') && !RE_SUB_ID.test('a'.repeat(31)));
+});
+
+test('Sub_id: o link guardado é por produto, ID de afiliado e Sub_id; sem Sub_id nada muda (CA2)', () => {
+  const rel = relogio();
+  const shopee = createShopee({ fetch: fetchFalso(() => assert.fail('sem rede')), agora: rel.agora, lerConexao: () => conexao() });
+  const A = 'https://s.shopee.com.br/AAAaaa1';
+  const B = 'https://s.shopee.com.br/BBBbbb2';
+  const BASE = 'https://s.shopee.com.br/BASE123';
+  assert.equal(shopee.guardarLink(URL_PRODUTO, ID_AFILIADO, BASE), true);
+  assert.equal(shopee.guardarLink(URL_PRODUTO, ID_AFILIADO, A, 'g1'), true);
+  assert.equal(shopee.guardarLink(URL_PRODUTO, ID_AFILIADO, B, 'g2'), true);
+  // cada Sub_id acha só o seu; o mesmo produto com outro Sub_id não reaproveita; o base não é de nenhum Sub_id
+  assert.equal(shopee.linkGuardado(URL_PRODUTO, ID_AFILIADO, 'g1'), A);
+  assert.equal(shopee.linkGuardado(URL_PRODUTO, ID_AFILIADO, 'g2'), B);
+  assert.equal(shopee.linkGuardado(URL_PRODUTO, ID_AFILIADO, 'g3'), null);
+  assert.equal(shopee.linkGuardado(URL_PRODUTO, ID_AFILIADO, 'G1'), null, 'maiúscula é outro código');
+  assert.equal(shopee.linkGuardado(URL_PRODUTO, ID_AFILIADO), BASE);
+  for (const vazio of ['', null, undefined]) assert.equal(shopee.linkGuardado(URL_PRODUTO, ID_AFILIADO, vazio), BASE);
+  // outro ID de afiliado e outro produto não acham o link do Sub_id
+  assert.equal(shopee.linkGuardado(URL_PRODUTO, '18328801340', 'g1'), null);
+  assert.equal(shopee.linkGuardado(`https://shopee.com.br/x-i.${SHOP}.1`, ID_AFILIADO, 'g1'), null);
+  // o mesmo produto em outro formato de endereço acha o link do Sub_id
+  assert.equal(shopee.linkGuardado(`https://shopee.com.br/product/${SHOP}/${ITEM}`, ID_AFILIADO, 'g1'), A);
+  // Sub_id inválido não guarda nem acha (nada de chave ambígua com o separador)
+  for (const ruim of ['g-1', 'g|1', 'a'.repeat(31), 'g 1', 7, {}]) {
+    assert.equal(shopee.guardarLink(URL_PRODUTO, ID_AFILIADO, 'https://s.shopee.com.br/Ruim999', ruim), false, String(ruim));
+    assert.equal(shopee.linkGuardado(URL_PRODUTO, ID_AFILIADO, ruim), null, String(ruim));
+  }
+  assert.equal(shopee.linkGuardado(URL_PRODUTO, ID_AFILIADO), BASE, 'o base seguiu intacto');
+  // link que não é s.shopee.com.br não guarda, nem com Sub_id
+  assert.equal(shopee.guardarLink(URL_PRODUTO, ID_AFILIADO, 'https://meli.la/abc', 'g9'), false);
+  assert.equal(shopee.linkGuardado(URL_PRODUTO, ID_AFILIADO, 'g9'), null);
+  // 7 dias vale por Sub_id; invalidar esquece todos
+  rel.t += 7 * 24 * 3600 * 1000;
+  assert.equal(shopee.linkGuardado(URL_PRODUTO, ID_AFILIADO, 'g1'), null);
+  shopee.guardarLink(URL_PRODUTO, ID_AFILIADO, A, 'g1');
+  shopee.invalidar();
+  assert.equal(shopee.linkGuardado(URL_PRODUTO, ID_AFILIADO, 'g1'), null);
 });
 
 test('R5: RE_ID_AFILIADO é a fonte única do formato do ID de afiliado (5 a 20 dígitos)', () => {

@@ -93,6 +93,17 @@ const SHOPEE_ABA = `${SHOPEE_PORTAL}/offer/custom_link`;
 // foi extraído (docs/produto/referencias/shopee-api-afiliados.md). Vazio = o cabeçalho não vai. Se o teste com a
 // sessão do dono mostrar que ele é obrigatório, copie aqui o valor da requisição "Obter link" vista no DevTools.
 const SHOPEE_TIPO_PROGRAMA = '';
+// Nome do campo do Sub_id1 dentro de `advancedLinkParams` do "Link personalizado". Ponto único: o formato ainda não
+// foi capturado (pendência P4 do plano dashboard-ganhos). Vazio = o Sub_id nunca vai ao portal: o corpo é o de sempre
+// e a resposta diz sub_id_aplicado: false (o link sai de afiliado, sem Sub_id). Ao capturar no DevTools o corpo de
+// "Obter link" com o Sub_id1 preenchido, copie aqui só o nome do campo (nunca cookie nem cabeçalho).
+// Preencher só esta constante não basta: o servidor só pede link com Sub_id à extensão com SUBID_PELA_EXTENSAO
+// (src/lojas.js) em true. Para ligar o Sub_id pela extensão, mude os dois juntos.
+const SHOPEE_SUBID_CAMPO = '';
+// Cópia do RE_SUB_ID de src/shopee.js (fonte única do formato; a extensão não importa do servidor). Mudar lá pede
+// mudar aqui (o portal só aceita alfanumérico).
+const RE_SUB_ID = /^[A-Za-z0-9]{1,30}$/;
+const SHOPEE_SUBID_RECUSADO = 'Sub_id da Shopee recusado pela extensão';
 const LINK_SHOPEE = /^https:\/\/s\.shopee\.com\.br\/[A-Za-z0-9_-]{3,40}$/; // o mesmo de src/shopee.js e src/links.js
 const MAX_URL_SHOPEE = 2048;
 const SHOPEE_SEM_SESSAO = 'não há sessão de afiliado da Shopee neste Chrome. Entre no portal de afiliados da Shopee (affiliate.shopee.com.br)';
@@ -108,12 +119,24 @@ function urlProdutoShopee(v) {
   return u.href === v ? v : null; // só a forma canônica: nada de barras invertidas, espaços ou maiúsculas no host
 }
 
-/** Corpo do POST do "Link personalizado" (o mesmo que a página manda, sem Sub_ids). */
-function corpoLinkShopee(originalLink) {
+/** Sem Sub_id (undefined, null ou '')? */
+function semSubId(v) {
+  return v === undefined || v === null || v === '';
+}
+
+/**
+ * Corpo do POST do "Link personalizado" (o mesmo que a página manda). O Sub_id só entra, em
+ * advancedLinkParams[SHOPEE_SUBID_CAMPO], quando a constante está preenchida; vazio, o corpo é o de sempre.
+ * Sub_id fora de RE_SUB_ID → null (recusado), com a constante vazia ou não.
+ */
+function corpoLinkShopee(originalLink, subId) {
+  if (!semSubId(subId) && !(typeof subId === 'string' && RE_SUB_ID.test(subId))) return null;
+  const param = { originalLink };
+  if (!semSubId(subId) && SHOPEE_SUBID_CAMPO) param.advancedLinkParams = { [SHOPEE_SUBID_CAMPO]: subId };
   return JSON.stringify({
     operationName: 'batchGetCustomLink',
     query: SHOPEE_QUERY,
-    variables: { linkParams: [{ originalLink }], sourceCaller: 'CUSTOM_LINK_CALLER' },
+    variables: { linkParams: [param], sourceCaller: 'CUSTOM_LINK_CALLER' },
   });
 }
 
@@ -223,11 +246,16 @@ async function recarregarShopee(tabId) {
   return tabId;
 }
 
-/** Gera o link na aba do portal; sem sessão (ou fora do portal, ex.: página de login), recarrega uma vez. */
+/**
+ * Gera o link na aba do portal; sem sessão (ou fora do portal, ex.: página de login), recarrega uma vez.
+ * sub_id_aplicado: o Sub_id do pedido foi no corpo (só com SHOPEE_SUBID_CAMPO preenchido).
+ */
 async function gerarLinkShopee(job) {
   const url = urlProdutoShopee(job.url);
   if (!url) throw new Error('endereço de produto da Shopee recusado pela extensão');
-  const corpo = corpoLinkShopee(url);
+  const corpo = corpoLinkShopee(url, job.subId);
+  if (!corpo) throw new Error(SHOPEE_SUBID_RECUSADO);
+  const subIdAplicado = !semSubId(job.subId) && !!SHOPEE_SUBID_CAMPO;
   let tabId = await abaDaShopee();
   for (let tentativa = 0; tentativa < 2; tentativa++) {
     let res = null;
@@ -238,7 +266,7 @@ async function gerarLinkShopee(job) {
     }
     const v = interpretarShopee(res);
     if (v.erro) throw new Error(v.erro);
-    if (!v.semSessao) return { link: v.link, longo: v.longo };
+    if (!v.semSessao) return { link: v.link, longo: v.longo, sub_id_aplicado: subIdAplicado };
     if (tentativa === 0) tabId = await recarregarShopee(tabId);
   }
   throw new Error(SHOPEE_SEM_SESSAO);

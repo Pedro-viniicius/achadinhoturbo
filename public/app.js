@@ -605,6 +605,10 @@ function paginaGrupos() {
     ${aberto ? '' : '<div class="card"><h2>WhatsApp desconectado</h2><p class="sub">Conecte o número em <a href="#numeros">Números de WhatsApp</a> para atualizar a lista e buscar convites.</p></div>'}
     ${aberto || S.groups.length ? tabelaGrupos(S.groups) : ''}`;
   if ($('#sync')) $('#sync').onclick = tentar(async () => { await api('/wa/sync-groups', 'POST'); S.groups = await api('/groups'); aviso('Grupos atualizados'); paginaGrupos(); });
+  if (podeEquipe()) { // coluna Rastreio (ganhos.js): só o Dono; os códigos chegam depois e a tabela se redesenha se mudaram
+    $('#pagina').onclick = tentar(async (ev) => { const b = ev.target.closest('[data-rastreio]'); if (b) rastreioFormGrupo(b.dataset.rastreio); });
+    rastreioCarregar().then((mudou) => { if (mudou && rotaAtual() === 'grupos' && !$('#dlg').open) paginaGrupos(); }).catch(() => {});
+  }
 }
 
 // ---------- histórico ----------
@@ -664,7 +668,7 @@ function paginaAjustes() {
 // Uma rota por hash. As páginas novas ficam nos próprios arquivos (disparos.js, relatorios.js, conexoes.js,
 // equipe.js, carregados antes deste); aqui a função só é procurada na hora de abrir a página.
 const ROTAS = {
-  visao: () => paginaVisao(), links: () => paginaLinks(), grupos: () => paginaGrupos(), blocos: () => paginaBlocos(),
+  visao: () => paginaVisao(), ganhos: () => paginaGanhos(), links: () => paginaLinks(), grupos: () => paginaGrupos(), blocos: () => paginaBlocos(),
   'disparo-manual': () => paginaDisparoManual(), 'disparo-automatico': () => paginaRegras(),
   'disparar-mensagem': () => paginaDispararMensagem(), templates: () => paginaTemplates(),
   relatorios: () => paginaRelatorios(),
@@ -677,16 +681,22 @@ const ROTAS = {
 const ALIASES = { regras: 'disparo-automatico', whatsapp: 'numeros', etiquetas: 'conexoes', ajuda: 'docs' };
 // Telas de duas colunas (formulário à esquerda, acompanhamento à direita) usam main.larga.
 const ROTAS_LARGAS = new Set(['disparo-manual', 'disparar-mensagem']);
-// Equipe é só do Dono. Sem login (auth desligada) usuario é null e o painel se comporta como Dono.
+// Equipe e Ganhos são só do Dono. Sem login (auth desligada) usuario é null e o painel se comporta como Dono.
 // O mesmo critério esconde do Operador: Desconectar (Números), Apagar agora (Ajustes) e Gerar novo token (Conexões).
-const podeEquipe = () => !S.st?.usuario || S.st.usuario.papel === 'dono';
+// Sem o estado carregado (S.st ainda vazio) não se sabe o papel: devolve false, para o painel nunca chamar rota do Dono
+// (o Operador levaria 403). `#equipe` e `#ganhos` abertos de cara são retomados por `ir()` quando o estado chega.
+const ROTAS_DO_DONO = new Set(['equipe', 'ganhos']);
+const podeEquipe = () => !!S.st && (!S.st.usuario || S.st.usuario.papel === 'dono');
 /** Rota que está aberta: resolve os nomes antigos e manda rota desconhecida (ou Equipe para o Operador) para a Visão Geral. */
 function rotaAtual() {
   const pedido = (location.hash || '#visao').slice(1).split('?')[0].split('/')[0]; const r = Object.hasOwn(ALIASES, pedido) ? ALIASES[pedido] : pedido; // #docs/<cap>/<secao> é a rota docs
-  return Object.hasOwn(ROTAS, r) && (r !== 'equipe' || podeEquipe()) ? r : 'visao';
+  return Object.hasOwn(ROTAS, r) && (!ROTAS_DO_DONO.has(r) || podeEquipe()) ? r : 'visao';
 }
 function ir() {
-  const [pedido, consulta = ''] = (location.hash || '#visao').slice(1).split('?'); const r = rotaAtual();
+  const [pedido, consulta = ''] = (location.hash || '#visao').slice(1).split('?');
+  // Página só do Dono pedida antes de o estado chegar: não se sabe o papel, então não abre nem reescreve o endereço; o carregar() inicial chama ir().
+  if (!S.st && ROTAS_DO_DONO.has(pedido.split('/')[0])) return;
+  const r = rotaAtual();
   // só o Histórico leva filtros no endereço; só os Docs levam capítulo e seção (#docs/<cap>[/<secao>]), mesmo que o capítulo não exista
   const sufixo = r === 'docs' && /^docs(\/[a-z0-9-]+){1,2}$/.test(pedido) ? pedido.slice(4) : '';
   const endereco = '#' + r + (r === 'historico' && consulta ? '?' + consulta : '') + sufixo;
@@ -726,6 +736,11 @@ function pintarConta() {
   if (podeEquipe() && !item) $('#ng-conta').parentElement.insertAdjacentHTML('beforeend', '<a href="#equipe">Equipe</a>');
   if (!podeEquipe() && item) item.remove();
   if (!podeEquipe() && location.hash === '#equipe') ir();
+  // "Ganhos" logo depois de Visão Geral (começo do grupo Principal), só para o Dono: para o Operador o item não existe no DOM
+  const ganhos = $('#rail nav a[href="#ganhos"]');
+  if (podeEquipe() && !ganhos) $('#ng-principal').insertAdjacentHTML('afterend', '<a href="#ganhos">Ganhos</a>');
+  if (!podeEquipe() && ganhos) ganhos.remove();
+  if (!podeEquipe() && location.hash === '#ganhos') ir();
   // ofertas do catálogo que esperam revisão, no item Histórico (só o Dono revisa)
   const hist = $('#rail nav a[href="#historico"]');
   if (hist) {

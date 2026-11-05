@@ -109,6 +109,48 @@ CREATE INDEX IF NOT EXISTS idx_cat_lista ON catalogo_itens (rule_id, status, COA
 CREATE TABLE IF NOT EXISTS catalogo_cursores (
   rule_id INTEGER NOT NULL, filtro TEXT NOT NULL, cursor TEXT, pronto INTEGER NOT NULL DEFAULT 0,
   atualizado_em INTEGER, PRIMARY KEY (rule_id, filtro));
+-- Rastreio por grupo (src/rastreio.js). Associação loja × grupo (jid) ou bloco (id em texto) -> código:
+-- etiqueta do ML (nome em tags), ID de rastreamento da Amazon ou Sub_id da Shopee (só bloco). Um código, um alvo.
+CREATE TABLE IF NOT EXISTS rastreio_codigos (id INTEGER PRIMARY KEY,
+  loja TEXT NOT NULL CHECK (loja IN ('mercadolivre','amazon','shopee')),
+  alvo_tipo TEXT NOT NULL CHECK (alvo_tipo IN ('grupo','bloco')), alvo TEXT NOT NULL,
+  codigo TEXT NOT NULL, criado_em INTEGER, atualizado_em INTEGER);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_rcod_alvo ON rastreio_codigos (loja, alvo_tipo, alvo);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_rcod_cod ON rastreio_codigos (loja, codigo);
+-- Uma linha por grupo em todo envio de oferta que deu certo. esperado=1: havia associação para o grupo;
+-- nivel grupo|bloco = saiu com o código dela; padrao|nenhum = não saiu (motivo diz por quê). Sem dado de pessoa.
+CREATE TABLE IF NOT EXISTS rastreio_envios (id INTEGER PRIMARY KEY, ts INTEGER NOT NULL, jid TEXT NOT NULL,
+  loja TEXT NOT NULL, origem TEXT NOT NULL CHECK (origem IN ('regra','manual','catalogo','espelho')),
+  rule_id INTEGER, envio_id INTEGER, oferta_chave TEXT, link TEXT NOT NULL, codigo TEXT,
+  nivel TEXT NOT NULL CHECK (nivel IN ('grupo','bloco','padrao','nenhum')), bloco_id INTEGER,
+  esperado INTEGER NOT NULL DEFAULT 0, motivo TEXT);
+CREATE INDEX IF NOT EXISTS idx_renv_ts ON rastreio_envios (ts);
+CREATE INDEX IF NOT EXISTS idx_renv_cod ON rastreio_envios (loja, codigo, ts);
+-- Atribuição dos ganhos (src/ganhos.js): só as linhas grupo/bloco, para não percorrer os envios com o código padrão.
+-- A consulta repete o WHERE do índice parcial; o _ci é o da Amazon, que não distingue maiúsculas no código.
+CREATE INDEX IF NOT EXISTS idx_renv_atrib ON rastreio_envios (loja, codigo, ts) WHERE nivel IN ('grupo','bloco');
+CREATE INDEX IF NOT EXISTS idx_renv_atrib_ci ON rastreio_envios (loja, lower(codigo), ts) WHERE nivel IN ('grupo','bloco');
+-- Ganhos (src/ganhos.js, src/importador.js). Uma linha por arquivo importado: só o sha256 do arquivo, nunca o conteúdo.
+CREATE TABLE IF NOT EXISTS importacoes (id INTEGER PRIMARY KEY, loja TEXT NOT NULL, tipo TEXT NOT NULL CHECK (tipo IN ('comissoes','cliques')),
+  arquivo_sha256 TEXT NOT NULL, codigo_arquivo TEXT, lidas INTEGER, novas INTEGER, atualizadas INTEGER, ignoradas INTEGER,
+  criado_em INTEGER NOT NULL, user_id INTEGER);
+-- Comissão por venda, em centavos. chave = HMAC-SHA256 com a pseudo_key local (32 hex): com pedido, de
+-- loja|pedido|produto|código da coluna; sem pedido, de loja|data|produto|código (o da coluna ou o do arquivo);
+-- mais "#n" para a n-ésima linha igual no mesmo arquivo (src/importador.js). O pedido não é guardado;
+-- só as colunas da lista branca do importador, nada do comprador.
+CREATE TABLE IF NOT EXISTS comissoes (id INTEGER PRIMARY KEY, loja TEXT NOT NULL, chave TEXT NOT NULL, data TEXT NOT NULL,
+  codigo TEXT, produto TEXT, titulo TEXT, quantidade INTEGER NOT NULL DEFAULT 1, venda_centavos INTEGER NOT NULL DEFAULT 0,
+  comissao_centavos INTEGER NOT NULL, status TEXT NOT NULL CHECK (status IN ('confirmada','pendente','cancelada')),
+  importacao_id INTEGER NOT NULL, atualizado_em INTEGER NOT NULL);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_com_chave ON comissoes (loja, chave);
+CREATE INDEX IF NOT EXISTS idx_com_cod ON comissoes (loja, codigo, data);
+-- Cliques do relatório da loja, um total por dia e código ('' = sem código); a última importação vale.
+CREATE TABLE IF NOT EXISTS cliques_loja (loja TEXT NOT NULL, dia TEXT NOT NULL, codigo TEXT NOT NULL DEFAULT '',
+  cliques INTEGER NOT NULL, importacao_id INTEGER NOT NULL, atualizado_em INTEGER, PRIMARY KEY (loja, dia, codigo));
+-- Gasto com anúncio informado à mão por grupo (jid) ou bloco (id em texto), de inicio a fim (AAAA-MM-DD), rateado por dia.
+CREATE TABLE IF NOT EXISTS gastos_anuncio (id INTEGER PRIMARY KEY, alvo_tipo TEXT NOT NULL CHECK (alvo_tipo IN ('grupo','bloco')),
+  alvo TEXT NOT NULL, inicio TEXT NOT NULL, fim TEXT NOT NULL, valor_centavos INTEGER NOT NULL CHECK (valor_centavos > 0),
+  nota TEXT, criado_em INTEGER, user_id INTEGER);
 `;
 
 // Colunas acrescentadas depois da primeira versão (ALTER TABLE só se faltar).

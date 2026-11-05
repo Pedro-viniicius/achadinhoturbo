@@ -6,6 +6,7 @@ import { motivosDeRevisao, precisaEtiqueta } from './catalogo.js';
 import { createEnvios } from './envios.js';
 import { createAvisos } from './avisos.js';
 import { createEspelho } from './espelho.js';
+import { agrupar, registrar as registrarRastreio } from './rastreio.js';
 import { sleep, jitter } from './util.js';
 
 // Pausas entre mensagens: moram em ./util.js (src/envios.js usa o mesmo ritmo anti-bloqueio); reexportadas aqui.
@@ -124,6 +125,102 @@ export function createScheduler({ db, wa, links, ml = mlDefault, fast = false, d
     }
   }
 
+  // ---------- rastreio por grupo (plano dashboard-ganhos, etapa 8: D1, D4, D6; CA1, CA3, CA4, CA9)
+  /** Loja da oferta no rastreio (src/rastreio.js): as fontes antigas são do Mercado Livre; null = sem link automático. */
+  const lojaDaOferta = (o) => (!o.catalogo || o.loja === 'ml' ? 'mercadolivre' : o.loja === 'amazon' ? 'amazon' : null);
+  const tagDoLink = (link) => { try { return new URL(link).searchParams.get('tag'); } catch { return null; } };
+  const ATRIBUIDO = new Set(['grupo', 'bloco']);
+
+  /**
+   * Link de afiliado de um código: ML pela extensão com a etiqueta `codigo` (catálogo: as mesmas esperas de
+   * linkDoCatalogo); Amazon do catálogo montada do ASIN com a tag de Conexões (`padrao`) ou com o ID de
+   * rastreamento `codigo`, que precisa casar com o formato da tag (nunca sai sem tag, CA3).
+   * → { link } | { espera } | { falha } (a falha da Amazon não repete o código recusado).
+   */
+  async function linkDoCodigo(offer, etq, codigo, padrao) {
+    if (offer.catalogo && offer.loja === 'amazon') {
+      if (padrao) return linkDoCatalogo(offer, etq);
+      try { return { link: amazon.montarLink(offer.asin, { tag: codigo }) }; } catch { return { falha: 'ID de rastreamento da Amazon recusado' }; }
+    }
+    if (offer.catalogo) return linkDoCatalogo(offer, codigo ? { name: codigo } : null);
+    if (!codigo) return { falha: 'escolha uma etiqueta' }; // nunca pede link sem etiqueta
+    try { return { link: await links.requestLink({ url: offer.url, tag: codigo }) }; } catch (e) { return { falha: e.message }; }
+  }
+
+  /**
+   * Links de uma oferta, um por código de rastreio distinto entre os grupos (D1), na ordem do primeiro grupo de
+   * cada código. A associação do grupo/bloco vence a etiqueta da regra e a da fonte (P1). Sem associação: um
+   * pedido só, como antes (CA9). Código associado que falha → o link padrão de hoje, com esperado=1 e motivo
+   * 'falha_link' (D4: nunca link comum); o padrão que falha deixa sem link só os grupos que dependem dele.
+   * → { espera } | { porJid: Map(jid → destino), algum, falha, avisos }, destino = { link, codigo, nivel,
+   * bloco_id, esperado, motivo } ou { falha } (sem link). `falha`: a do padrão (ou a primeira), para quando
+   * nenhum grupo tem link.
+   */
+  async function linksPorCodigo(offer, etq, jids) {
+    const loja = lojaDaOferta(offer);
+    const codigoPadrao = loja === 'mercadolivre' ? etq?.name ?? null : null; // Amazon: a tag sai do link montado
+    const soPadrao = [{ codigo: codigoPadrao, nivel: 'padrao', bloco_id: null, esperado: 0, motivo: null, jids }];
+    let entradas = soPadrao;
+    if (loja) {
+      // falha do banco no rastreio não segura o envio: sai como sem associação (só o código no console)
+      try { entradas = agrupar(db, { loja, jids, padrao: codigoPadrao }); } catch (e) { console.error('[agendador] rastreio (códigos):', e?.code || e?.name || 'erro'); }
+    }
+    // reaproveita o link pelo código (duas entradas podem ter o mesmo); a tag de Conexões da Amazon tem chave própria
+    const gerados = new Map();
+    const gerar = async (codigo, padrao) => {
+      const chave = loja === 'amazon' ? (padrao ? null : `id:${codigo}`) : codigo;
+      if (!gerados.has(chave)) gerados.set(chave, await linkDoCodigo(offer, etq, codigo, padrao));
+      return gerados.get(chave);
+    };
+    const porJid = new Map(); const avisos = []; let primeira = null; let algum = false;
+    for (const e of entradas) {
+      let destino = { codigo: e.codigo, nivel: e.nivel, bloco_id: e.bloco_id, esperado: e.esperado, motivo: e.motivo };
+      let r = await gerar(e.codigo, !ATRIBUIDO.has(e.nivel));
+      if (r.espera) return { espera: r.espera };
+      if (!r.link && ATRIBUIDO.has(e.nivel)) {
+        const falhou = r.falha;
+        r = await gerar(codigoPadrao, true);
+        if (r.espera) return { espera: r.espera };
+        destino = { codigo: codigoPadrao, nivel: 'padrao', bloco_id: null, esperado: 1, motivo: 'falha_link' };
+        if (r.link) {
+          avisos.push(loja === 'amazon'
+            ? `Rastreio: o ID de rastreamento do ${e.nivel} foi recusado; ${e.jids.length === 1 ? 'o grupo recebeu' : 'os grupos receberam'} o link com a sua tag.`
+            : `Rastreio: a etiqueta ${e.codigo} não gerou o link (${falhou}); ${e.jids.length === 1 ? 'o grupo recebeu' : 'os grupos receberam'} o da etiqueta ${codigoPadrao}.`);
+        }
+      }
+      if (r.link) {
+        algum = true;
+        if (loja === 'amazon' && destino.nivel === 'padrao') destino.codigo = tagDoLink(r.link);
+        for (const jid of e.jids) porJid.set(jid, { ...destino, link: r.link });
+      } else {
+        primeira ??= r.falha;
+        for (const jid of e.jids) porJid.set(jid, { falha: r.falha });
+      }
+    }
+    const chavePadrao = loja === 'amazon' ? null : codigoPadrao;
+    return { porJid, algum, avisos, falha: gerados.get(chavePadrao)?.falha ?? primeira };
+  }
+
+  /** Linha de rastreio_envios do grupo que recebeu (D6, CA1). Nunca lança: o envio já saiu (no console só o código). */
+  function registrarEnvio(rule, offer, jid, destino) {
+    const loja = lojaDaOferta(offer);
+    if (!loja) return;
+    try {
+      registrarRastreio(db, {
+        jid, loja, origem: 'regra', rule_id: rule.id, oferta_chave: offer.key, link: destino.link, codigo: destino.codigo,
+        nivel: destino.nivel, bloco_id: destino.bloco_id, esperado: destino.esperado, motivo: destino.motivo,
+      });
+    } catch (e) { console.error('[agendador] rastreio (registro):', e?.code || e?.name || 'erro'); }
+  }
+
+  /** Como o link saiu, no Histórico. Da Amazon nunca vai a tag nem o ID de rastreamento. */
+  function comoSaiu(offer, destino) {
+    if (offer.catalogo && offer.loja === 'amazon') {
+      return ATRIBUIDO.has(destino.nivel) ? `Enviado pela Amazon, com o ID de rastreamento do ${destino.nivel}` : 'Enviado pela Amazon, com a sua tag';
+    }
+    return `Enviado com a etiqueta ${destino.codigo}`;
+  }
+
   /**
    * Estado de uma execução: o que o catálogo leu (para o cursor), o que os filtros da regra recusaram, o que esperou
    * e as chaves que cada fonte trouxe (vistas: o catálogo conta a de outra fonte como tratada, R11).
@@ -240,16 +337,17 @@ export function createScheduler({ db, wa, links, ml = mlDefault, fast = false, d
 
       const d = delays();
       const tagDaFonte = (o) => (o.tag_id && db.prepare('SELECT * FROM tags WHERE id = ?').get(o.tag_id)) || tag;
+      const jids = groups.map((g) => g.jid);
       for (let i = 0; i < picked.length; i++) {
         const offer = picked[i]; const etq = tagDaFonte(offer);
-        let link;
+        let gerados; // um link por código de rastreio distinto (linksPorCodigo)
         if (offer.catalogo) {
-          // revisão em vez de envio (D5): Shopee, preço suspeito ou falha do link deste item
+          // revisão em vez de envio (D5): Shopee, preço suspeito ou falha do link deste item (nenhum grupo com link)
           let motivos = offer.motivos; let detalhe = '';
           if (!motivos.length) {
-            const r = await linkDoCatalogo(offer, etq);
+            const r = await linksPorCodigo(offer, etq, jids);
             if (r.espera) { esperar(exec, r.espera); continue; }
-            if (r.link) link = r.link;
+            if (r.algum) gerados = r;
             else { motivos = ['falha_link']; detalhe = ` (${r.falha})`; }
           }
           if (motivos.length) {
@@ -261,23 +359,38 @@ export function createScheduler({ db, wa, links, ml = mlDefault, fast = false, d
             continue;
           }
         } else {
-          try { link = await links.requestLink({ url: offer.url, tag: etq.name }); } catch (e) {
-            log(rule, { level: 'erro', offer_title: offer.title, message: 'Link de afiliado não gerado: ' + e.message });
+          gerados = await linksPorCodigo(offer, etq, jids);
+          if (!gerados.algum) {
+            log(rule, { level: 'erro', offer_title: offer.title, message: 'Link de afiliado não gerado: ' + gerados.falha });
             summary.errors++; continue;
           }
         }
-        const text = renderTemplate(tpl.body, { ...offer, link }, tplOpts());
+        const textos = new Map(); // um texto por link
+        const textoDe = (link) => {
+          if (!textos.has(link)) textos.set(link, renderTemplate(tpl.body, { ...offer, link }, tplOpts()));
+          return textos.get(link);
+        };
         summary.offers++; let okCount = 0;
+        for (const aviso of gerados.avisos) log(rule, { level: 'aviso', offer_title: offer.title, message: aviso });
         // foto só do CDN da loja da oferta (D9, CA5); as fontes antigas são do Mercado Livre
         const fotoOk = rule.send_image && imagemPermitida(offer.plataforma || 'mercadolivre', offer.image);
-        const comoSaiu = offer.catalogo && offer.loja === 'amazon' ? 'Enviado pela Amazon, com a sua tag' : `Enviado com a etiqueta ${etq.name}`;
+        const daFonte = picked.some((p) => p.source_index !== offer.source_index) ? ` (fonte ${(offer.source_index ?? 0) + 1})` : '';
         for (let g = 0; g < groups.length; g++) {
+          const destino = gerados.porJid.get(groups[g].jid);
+          if (!destino?.link) {
+            // o link padrão falhou e este grupo depende dele: os grupos com link próprio seguem
+            summary.errors++;
+            log(rule, { level: 'erro', group_name: groups[g].name, offer_title: offer.title, message: 'Link de afiliado não gerado: ' + destino?.falha });
+            continue;
+          }
+          const text = textoDe(destino.link);
           try {
             if (fotoOk) {
               try { await wa.sendImage(groups[g].jid, offer.image, text); } catch { await wa.sendText(groups[g].jid, text); }
             } else await wa.sendText(groups[g].jid, text);
             okCount++; summary.messages++;
-            log(rule, { level: 'ok', group_name: groups[g].name, offer_title: offer.title, message: `${comoSaiu}${picked.some((p) => p.source_index !== offer.source_index) ? ` (fonte ${(offer.source_index ?? 0) + 1})` : ''}` });
+            log(rule, { level: 'ok', group_name: groups[g].name, offer_title: offer.title, message: `${comoSaiu(offer, destino)}${daFonte}` });
+            registrarEnvio(rule, offer, groups[g].jid, destino);
           } catch (e) {
             summary.errors++;
             log(rule, { level: 'erro', group_name: groups[g].name, offer_title: offer.title, message: 'Falha no envio: ' + e.message });

@@ -57,6 +57,7 @@ Em casa, só no `localhost`, o painel abre sem login (aparece um aviso no termin
 O menu lateral é dividido em grupos:
 
 - **Visão Geral**
+- **Ganhos** (só o Dono; no grupo **Principal** do menu, logo abaixo de Visão Geral): comissões, cliques, ganho por grupo, bloco, loja e oferta, cobertura do rastreio e custo por membro novo, veja [Rastreio por grupo e página Ganhos](#rastreio-por-grupo-e-página-ganhos)
 - **Principal**: Rotacionador de Links, Grupos, Blocos de análise
 - **Disparos**: Disparo manual, Disparo automático (antes chamado *Regras*; é onde fica o botão *Novo espelhamento*), Disparar mensagem, Templates
 - **Comunicação**: Relatórios e avisos
@@ -78,9 +79,54 @@ Os botões **?** das telas continuam com a explicação curta e muitos levam ao 
 ## Visão Geral, blocos e rotacionador
 
 - **Visão Geral**: funil do período (cliques nos links → entradas pelo link ou adicionados → saídas), saldo, tempo médio no grupo, quem abriu o grupo (leu alguma mensagem sua), gráfico de entradas e saídas por hora ou por dia, evasão (quem entrou e saiu no mesmo dia, em 7 dias, ontem e total), tabela por grupo e eventos. Tudo vem do que o WhatsApp informa enquanto o programa está conectado: antes disso não há histórico.
-- **Blocos de análise**: agrupe grupos por nicho (com uma etiqueta do Mercado Livre opcional). A Visão Geral filtra por bloco, e ao criar uma regra de disparo automático você pode marcar um bloco inteiro.
+- **Blocos de análise**: agrupe grupos por nicho. A Visão Geral filtra por bloco, e ao criar uma regra de disparo automático você pode marcar um bloco inteiro. O campo *Etiqueta do Mercado Livre para o disparo (opcional)* só deixa a etiqueta já marcada ao criar um disparo a partir do bloco; **ele não separa o ganho**. Para separar o ganho do nicho, o bloco tem os *Códigos de rastreio (opcional)* (veja [Rastreio por grupo e página Ganhos](#rastreio-por-grupo-e-página-ganhos)).
 - **Rotacionador de Links**: `/g/<nome>` leva para o primeiro grupo da lista com vaga (modos: encher um por vez, alternar entre até 3, encher e reabrir ao esvaziar), com limite por grupo, URL reserva e contagem de cliques. Só grupos com convite entram: em *Grupos*, use *Buscar convite* (precisa ser admin) ou cole o link. **No seu computador o endereço só abre para você**; para o público, o programa precisa estar publicado na internet.
 - **Próximo grupo (com confirmação)**: ligando a opção no link, quando um grupo chega a 95% do limite o painel propõe um grupo novo igual (nome com o número seguinte, descrição, foto, permissões e admins). Nada é criado até você clicar em *Criar agora*. O grupo novo entra no link logo depois do que lotou, nos mesmos blocos e nas mesmas regras. Criar grupos é a ação que mais chama a atenção do WhatsApp: evite criar vários no mesmo dia.
+
+## Rastreio por grupo e página Ganhos
+
+Para saber de qual grupo veio uma venda, cada link enviado pode sair com um **código de rastreio** do grupo ou do bloco. **Sem configurar nada, os links saem como hoje.** O rastreio é opcional e por loja:
+
+| Loja | O código | Onde se cria |
+|---|---|---|
+| Mercado Livre | uma **etiqueta** já cadastrada em *Conexões → Mercado Livre* | no painel |
+| Amazon | um **ID de rastreamento** (ex.: `casa-20`) | no portal da Amazon, em *Gerenciar IDs de rastreamento*, antes de usar aqui |
+| Shopee | um **Sub_id**: letras e números, até 30 caracteres | no próprio campo (só por bloco) |
+
+- **Onde configurar:** em *Blocos de análise*, no quadro *Códigos de rastreio (opcional)* do bloco, ou, para uma exceção, na coluna *Rastreio* de *Grupos* (o grupo vence o bloco; a Shopee não tem código por grupo, só por bloco). Só o **Dono** vê e muda os códigos.
+- **Precedência:** grupo > bloco > padrão de hoje. Se o grupo está em vários blocos, vale o bloco mais antigo (o de menor id). **Um código pertence a um só grupo ou bloco**: o painel recusa o mesmo código em dois lugares.
+- **A associação vence a etiqueta escolhida** no *Disparo manual* e na regra de *Disparo automático*: o grupo que tem etiqueta de rastreio recebe o link com ela, mesmo que o disparo tenha outra etiqueta. Já o campo *Etiqueta do Mercado Livre para o disparo* do bloco não separa o ganho.
+- **Amazon:** o painel confere só o formato (letras, números e hífen, ex.: `casa-20`), **não** se o ID existe na sua conta: confira a grafia, porque um ID errado gera link sem comissão. Não pode ser a tag padrão de *Conexões → Amazon*.
+- **Mercado Livre:** a etiqueta precisa existir em *Conexões → Mercado Livre*. O painel não deixa apagar uma etiqueta que é código de rastreio (tire a associação antes); se ela sumir mesmo assim, o link sai com a padrão e a cobertura cai.
+- **Shopee:** cada Sub_id pede um link a mais à Shopee e conta no teto de 60 links por hora pela extensão; por isso ele é por bloco e há **até 10 Sub_ids por envio** (o que passar disso sai com o link base, sem Sub_id). **Hoje o Sub_id só entra pela API de afiliados da Shopee**: pela extensão ele está desligado até conferirmos o formato do pedido no portal. Quando não entra, o link sai sem Sub_id e a falta aparece na cobertura.
+- **Equipe:** o Operador não vê nem muda códigos, não apaga um bloco que tem código ou gasto com anúncio e não troca os grupos dele (o painel responde que só o Dono pode). Ninguém apaga uma etiqueta que é código de rastreio: tire a associação antes.
+
+### Página Ganhos
+
+A página **Ganhos** (só o Dono) mostra quanto cada grupo, bloco, loja e oferta rendeu, a partir das comissões que **você importa** dos portais das lojas, e se os links saíram com o código de rastreio. Filtros: período (7 dias, 30 dias, mês atual, mês passado ou datas), bloco e loja. O que ela traz:
+
+- **Cartões:** comissão (e a parte confirmada), valor vendido, vendas (itens), cliques, ganho por clique, conversão, envios, comissão com grupo, gasto, entradas, custo por membro novo e retorno (comissão menos gasto). Onde o número não existe (divisão por zero, sem importação, sem gasto), a tela mostra **“—”**, nunca um zero inventado.
+- **Tabelas:** por grupo (clique no título da coluna para ordenar; a linha *Sem grupo identificado* soma as vendas sem código ou com código de ninguém e fica fora do ranking), por bloco, por loja, por oferta (as 10 maiores, com *Ver todas*), por dia e a cobertura por grupo.
+- **Cobertura:** dos links que tinham código configurado, quantos saíram com ele. Boa: 90% ou mais; Parcial: de 60% a 89%; Baixa: abaixo de 60%. A loja leva o aviso *Atenção* quando a cobertura dela fica abaixo de 80%. Abaixo de 100% significa que o Sub_id foi recusado ou bateu no limite, ou que a etiqueta falhou; sem o código, a venda entra no total, mas não se sabe de qual grupo veio. **Alcance:** em quantos envios havia código configurado (os outros saíram com o código padrão de cada loja).
+- **Cliques vêm do relatório da loja**, não do Rotacionador: o link de afiliado vai direto para a loja e o Turbo não vê o clique. Ganho por clique e conversão só existem para as lojas que têm cliques importados no período.
+
+#### Importar comissões e cliques
+
+Em *Ganhos → Importar comissões* (só o Dono): escolha a **loja** (Shopee, Amazon ou Mercado Livre), o que o arquivo traz (**comissões** ou **cliques**) e o arquivo **CSV** baixado do portal da loja (relatório de conversões/vendas na Shopee, de ganhos na Central de Associados da Amazon, de comissões na Central de Afiliados do Mercado Livre). O arquivo vai até 5 MB e até 100.000 linhas; arquivo do Excel (.xlsx) não vale: salve como CSV. Se o relatório já veio filtrado por um código, digite-o em *Código do arquivo*: ele vale para as linhas sem coluna de código.
+
+1. **Conferir arquivo** mostra uma **prévia que não grava nada**: linhas lidas, novas, já importadas, atualizadas e puladas (só o número da linha), período, comissão, linhas sem grupo e as **colunas usadas e as ignoradas**.
+2. **Importar agora** grava. Reimportar o mesmo período não duplica: linhas iguais são ignoradas e uma venda que era pendente e virou confirmada é atualizada. Cliques substituem o total do dia (não somam).
+3. *Importações recentes* (no fim da página) lista data, loja, tipo e contagens; **Apagar** tira só as linhas que aquela importação trouxe.
+
+Os nomes de coluna reconhecidos são os mais comuns de cada relatório (data, código, produto, comissão, status, cliques…) e ainda não foram conferidos com um arquivo real de todas as lojas: se a prévia disser que não achou uma coluna, nada é gravado.
+
+**Privacidade:** nome, endereço, telefone, e-mail ou documento de comprador **nunca são lidos nem guardados**, mesmo que o arquivo traga essas colunas; só entram data, código, produto, título, quantidade, valor, comissão e status. O número do pedido vira um código embaralhado com uma chave que só existe no seu computador (não dá para voltar ao número) e serve só para não contar a mesma linha duas vezes. O arquivo em si não vai para o disco. Comissões e cliques ficam até você apagar a importação e vão no backup junto com o banco.
+
+#### Gasto com anúncios
+
+Em *Ganhos → Gasto com anúncios*: período (o gasto de um período vai até 366 dias), **bloco ou grupo** para o qual vale, valor em reais (por exemplo `1.234,50`) e uma observação de até 200 caracteres. O valor é repartido igualmente pelos dias do período; o **custo por membro novo** é o gasto dividido pelas entradas do mesmo período (limitado ao prazo de guarda dos eventos dos grupos) e só existe para quem tem gasto próprio, grupo ou bloco. Não há edição: use **Excluir** e lance de novo. Se já existe gasto para o mesmo destino e período, o painel avisa e grava mesmo assim. Cada gasto conta só no próprio alvo: o gasto lançado para um grupo **não** entra no bloco dele, e o de um bloco não se divide entre os grupos.
+
+**Histórico do rastreio e privacidade:** cada envio de oferta que deu certo grava uma linha por grupo em `rastreio_envios` (grupo, link, loja e código; **sem dado de pessoa**). O histórico do rastreio fica guardado por 400 dias, um prazo próprio: ele **não segue** o prazo de *Ajustes → Privacidade dos grupos*, nem quando esse prazo é 0 (para sempre) ou menor. A limpeza roda ao iniciar e a cada 6 h. A tabela vai no backup junto com o banco.
 
 ## Primeiros passos
 
@@ -88,7 +134,7 @@ Os botões **?** das telas continuam com a explicação curta e muitos levam ao 
 2. **Números de WhatsApp** e **Grupos**: clique em *Conectar WhatsApp* e leia o QR no WhatsApp Business (Aparelhos conectados).
 3. **Templates**: ajuste a mensagem. Linha com campo vazio some sozinha. `{TITULO_PRODUTO}` sai **abreviado** (só o que identifica o produto: tira "Compatível com…", "Premium", "Alta Qualidade" e corta em até 60 caracteres sem partir palavra; o tamanho muda em *Ajustes*, 0 desliga). `{TITULO_COMPLETO}` é o nome inteiro. Um pedaço entre colchetes, como `[ ({DESCONTO_PRODUTO} OFF)]`, some sozinho quando falta o dado (veja [Template com trecho opcional](#template-com-trecho-opcional)).
 4. **Extensão** (abaixo). Sem ela, nem a lista de ofertas nem o link de afiliado são gerados.
-5. **Disparo automático**: crie uma regra escolhendo etiqueta, template, grupos e ritmo. A fonte padrão é a **Central de Afiliados**: a lista "Produtos selecionados para você", com busca, **uma ou várias categorias** (com várias, as ofertas saem intercaladas, bom para grupos de achadinhos gerais), ordem, "só mais vendidos" e "só com ganhos extras". Cada página da Central traz 18 produtos e "Páginas lidas por envio" vai de 1 a 10. Uma regra aceita **até 5 fontes** (Central com filtros diferentes, listas de links, buscas, misturadas): as ofertas saem intercaladas, uma de cada fonte por vez, e uma fonte que falhar vira aviso sem travar as outras. A etiqueta é uma por regra: para etiquetas diferentes no mesmo grupo, crie outra regra apontando para o mesmo grupo. Use *Ver ofertas* para conferir antes e *Enviar agora* para testar. Outra fonte é o **Catálogo** (as ofertas do seu app Etiqueta): veja [Catálogo do Etiqueta](#catálogo-do-etiqueta).
+5. **Disparo automático**: crie uma regra escolhendo etiqueta, template, grupos e ritmo. A fonte padrão é a **Central de Afiliados**: a lista "Produtos selecionados para você", com busca, **uma ou várias categorias** (com várias, as ofertas saem intercaladas, bom para grupos de achadinhos gerais), ordem, "só mais vendidos" e "só com ganhos extras". Cada página da Central traz 18 produtos e "Páginas lidas por envio" vai de 1 a 10. Uma regra aceita **até 5 fontes** (Central com filtros diferentes, listas de links, buscas, misturadas): as ofertas saem intercaladas, uma de cada fonte por vez, e uma fonte que falhar vira aviso sem travar as outras. A etiqueta é uma por regra: para etiquetas diferentes no mesmo grupo, crie outra regra apontando para o mesmo grupo. Se o grupo tem código de rastreio (veja [Rastreio por grupo e página Ganhos](#rastreio-por-grupo-e-página-ganhos)), a etiqueta dele vence a da regra. Use *Ver ofertas* para conferir antes e *Enviar agora* para testar. Outra fonte é o **Catálogo** (as ofertas do seu app Etiqueta): veja [Catálogo do Etiqueta](#catálogo-do-etiqueta).
 
 ## Disparo manual
 
@@ -457,6 +503,8 @@ Conferido uma vez contra a Central de Afiliados real (02/11/2026): a lista de pr
 - **Catálogo do Etiqueta**: o token fica num arquivo seu; o programa guarda só o caminho, lê o arquivo a cada pedido e nunca o põe em banco, log, URL, mensagem de erro ou tela. Ficam no banco as ofertas já tratadas (título, preço, foto, categoria e link), sem dado pessoal; veja [Privacidade e segurança](#privacidade-e-segurança) do Catálogo.
 - **Fotos enviadas:** as fotos de *Disparar mensagem* ficam em `data/uploads/` e são apagadas **7 dias depois** de não terem mais nenhum envio ativo (agendado ou repetido) que as use.
 - **Retenção:** eventos, leituras e cliques são apagados depois do prazo de *Ajustes → Privacidade dos grupos* (padrão 90 dias; a limpeza roda ao iniciar e a cada 6 h). Sessões vencidas também.
+- **Histórico do rastreio por grupo** (`rastreio_envios`): só grupo, link, loja e código, sem dado de pessoa. Prazo próprio de 400 dias, que vale mesmo com a retenção de *Ajustes* em 0 ou menor; vai nos backups junto com o banco. Veja [Rastreio por grupo e página Ganhos](#rastreio-por-grupo-e-página-ganhos).
+- **Comissões e cliques importados** (`comissoes`, `cliques_loja`, `importacoes`, `gastos_anuncio`): só data, código de rastreio, produto, título, quantidade, valor, comissão e status por linha; nenhum dado de comprador (nome, endereço, telefone, e-mail, documento) é lido ou guardado, e o pedido só existe como um código embaralhado com a chave do programa (não dá para voltar ao número). O arquivo CSV não vai ao disco (de `importacoes` fica só o resumo e o sha256). Ficam até o dono apagar a importação em *Ganhos* e vão nos backups junto com o banco. Veja [Rastreio por grupo e página Ganhos](#rastreio-por-grupo-e-página-ganhos).
 - **Exclusão por titular:** `POST /api/privacidade/apagar-participante` com `{ "id": "5511999999999" }` apaga tudo daquela pessoa.
 - Ao desconectar o WhatsApp, o painel oferece apagar o histórico dos grupos.
 - Avise os membros dos grupos (na descrição, por exemplo) que entradas, saídas e leituras são contadas para medir o alcance.

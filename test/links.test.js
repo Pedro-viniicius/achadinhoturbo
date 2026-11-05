@@ -25,13 +25,13 @@ async function comExtensao(links, pedir, resposta) {
   return { job, ...(await r) };
 }
 
-test('links Shopee: o pedido vai à extensão como link_shopee, só com a URL, e volta { link, longo }', async () => {
+test('links Shopee: o pedido vai à extensão como link_shopee, só com a URL, e volta { link, longo, subIdAplicado }', async () => {
   const links = createLinkService({ getMode: () => 'extension' });
   const { job, valor, erro } = await comExtensao(links, () => links.requestLinkShopee({ url: URL_SHOPEE }),
     { ok: true, link: `  ${CURTO}  `, longo: LONGO });
   assert.equal(erro, undefined);
   assert.deepEqual(job, { id: job.id, type: 'link_shopee', url: URL_SHOPEE }, 'sem tag nem outro campo');
-  assert.deepEqual(valor, { link: CURTO, longo: LONGO });
+  assert.deepEqual(valor, { link: CURTO, longo: LONGO, subIdAplicado: false });
   const st = links.status();
   assert.equal(st.shopeeLastError, ''); assert.ok(st.shopeeLastOkAt > 0); assert.equal(st.pending, 0);
   assert.deepEqual([st.lastOkAt, st.lastError], [0, ''], 'R4: o link da Shopee não conta como link do ML');
@@ -93,7 +93,7 @@ test('links Shopee: longo fora de um host da Shopee é descartado (o link curto 
   for (const longo of descartados) {
     const { valor, erro } = await comExtensao(links, () => links.requestLinkShopee({ url: URL_SHOPEE }), { ok: true, link: CURTO, longo });
     assert.equal(erro, undefined, `aceitou o link curto com longo ${String(longo).slice(0, 40)}`);
-    assert.deepEqual(valor, { link: CURTO, longo: null }, `descartou ${String(longo).slice(0, 40)}`);
+    assert.deepEqual(valor, { link: CURTO, longo: null, subIdAplicado: false }, `descartou ${String(longo).slice(0, 40)}`);
   }
   // hosts da Shopee (inclusive subdomínio e maiúsculas) passam, normalizados
   for (const [longo, esperado] of [
@@ -102,7 +102,7 @@ test('links Shopee: longo fora de um host da Shopee é descartado (o link curto 
     ['HTTPS://SHOPEE.COM.BR/x?utm_source=an_7', 'https://shopee.com.br/x?utm_source=an_7'],
   ]) {
     const { valor } = await comExtensao(links, () => links.requestLinkShopee({ url: URL_SHOPEE }), { ok: true, link: CURTO, longo });
-    assert.deepEqual(valor, { link: CURTO, longo: esperado });
+    assert.deepEqual(valor, { link: CURTO, longo: esperado, subIdAplicado: false });
   }
 });
 
@@ -120,7 +120,7 @@ test('links Shopee: modo fake gera link s.shopee.com.br sem extensão; modo dire
   await assert.rejects(direto.requestLinkShopee({ url: URL_SHOPEE }), /não está conectada/);
   const { job, valor } = await comExtensao(direto, () => direto.requestLinkShopee({ url: URL_SHOPEE }), { ok: true, link: CURTO });
   assert.equal(job.type, 'link_shopee');
-  assert.deepEqual(valor, { link: CURTO, longo: null });
+  assert.deepEqual(valor, { link: CURTO, longo: null, subIdAplicado: false });
 });
 
 test('links Shopee: só pede link de endereço de produto https://shopee.com.br/ sem parâmetros (nem no fake)', async () => {
@@ -143,6 +143,68 @@ test('links Shopee: só pede link de endereço de produto https://shopee.com.br/
   // o formato do extrairIds (/product/<shop>/<item>) passa
   const ok = await createLinkService({ getMode: () => 'fake' }).requestLinkShopee({ url: 'https://shopee.com.br/product/52377417/6309028319' });
   assert.match(ok.link, /^https:\/\/s\.shopee\.com\.br\/fake\d+$/);
+});
+
+// ---------------- Sub_id (plano dashboard-ganhos, etapa 5) ----------------
+
+test('links Sub_id (CA2): o subId vai no job link_shopee e sub_id_aplicado: true da extensão vira subIdAplicado: true', async () => {
+  const links = createLinkService({ getMode: () => 'extension' });
+  const { job, valor, erro } = await comExtensao(links, () => links.requestLinkShopee({ url: URL_SHOPEE, subId: 'bloco7' }),
+    { ok: true, link: CURTO, longo: LONGO, sub_id_aplicado: true });
+  assert.equal(erro, undefined);
+  assert.deepEqual(job, { id: job.id, type: 'link_shopee', url: URL_SHOPEE, subId: 'bloco7' });
+  assert.deepEqual(valor, { link: CURTO, longo: LONGO, subIdAplicado: true });
+});
+
+test('links Sub_id (CA9): extensão antiga (sem sub_id_aplicado) ou qualquer valor que não seja true → subIdAplicado: false', async () => {
+  for (const extra of [{}, { sub_id_aplicado: false }, { sub_id_aplicado: 'true' }, { sub_id_aplicado: 1 }, { sub_id_aplicado: null }, { subIdAplicado: true }]) {
+    const links = createLinkService({ getMode: () => 'extension' });
+    const { valor } = await comExtensao(links, () => links.requestLinkShopee({ url: URL_SHOPEE, subId: 'g1' }), { ok: true, link: CURTO, longo: LONGO, ...extra });
+    assert.deepEqual(valor, { link: CURTO, longo: LONGO, subIdAplicado: false }, JSON.stringify(extra));
+  }
+});
+
+test('links Sub_id: sem subId o job é o de hoje e a extensão não pode dizer que aplicou', async () => {
+  for (const subId of [undefined, null, '']) {
+    const links = createLinkService({ getMode: () => 'extension' });
+    const { job, valor } = await comExtensao(links, () => links.requestLinkShopee({ url: URL_SHOPEE, subId }),
+      { ok: true, link: CURTO, longo: LONGO, sub_id_aplicado: true });
+    assert.deepEqual(job, { id: job.id, type: 'link_shopee', url: URL_SHOPEE }, String(subId));
+    assert.deepEqual(valor, { link: CURTO, longo: LONGO, subIdAplicado: false });
+  }
+});
+
+test('links Sub_id: subId que não é alfanumérico (1 a 30) é recusado antes da fila, em qualquer modo, sem contar no teto', async () => {
+  for (const modo of ['extension', 'direct', 'fake']) {
+    const links = createLinkService({ getMode: () => modo, limiteShopeeHora: 1 });
+    await links.poll(0); // on-line (sem deixar waiter aberto): se a guarda falhar, o pedido entraria na fila
+    for (const subId of ['g-1', 'g_1', 'g 1', 'ção', 'a'.repeat(31), 'g1\n', 7, true, {}, ['g1']]) {
+      await assert.rejects(links.requestLinkShopee({ url: URL_SHOPEE, subId, timeoutMs: 50 }), (e) => e.message === 'Sub_id da Shopee inválido', `${modo}: ${String(subId)}`);
+    }
+    assert.equal(links.status().pending, 0, modo);
+  }
+  // nenhum dos recusados consumiu a vaga da hora (limite 1): o próximo pedido válido ainda vai
+  const links = createLinkService({ getMode: () => 'extension', limiteShopeeHora: 1 });
+  await links.poll(0);
+  await assert.rejects(links.requestLinkShopee({ url: URL_SHOPEE, subId: 'g-1', timeoutMs: 50 }), /Sub_id da Shopee inválido/);
+  const { valor } = await comExtensao(links, () => links.requestLinkShopee({ url: URL_SHOPEE, subId: 'g1' }), { ok: true, link: CURTO, sub_id_aplicado: true });
+  assert.equal(valor.subIdAplicado, true);
+});
+
+test('links Sub_id: o modo fake simula a extensão que aplica o Sub_id', async () => {
+  const fake = createLinkService({ getMode: () => 'fake' });
+  const com = await fake.requestLinkShopee({ url: URL_SHOPEE, subId: 'g1' });
+  assert.match(com.link, /^https:\/\/s\.shopee\.com\.br\/fake\d+$/);
+  assert.deepEqual({ longo: com.longo, subIdAplicado: com.subIdAplicado }, { longo: null, subIdAplicado: true });
+  const sem = await fake.requestLinkShopee({ url: URL_SHOPEE });
+  assert.equal(sem.subIdAplicado, false);
+});
+
+test('links Sub_id: link fora de s.shopee.com.br continua recusado mesmo com sub_id_aplicado: true', async () => {
+  const links = createLinkService({ getMode: () => 'extension' });
+  const { erro } = await comExtensao(links, () => links.requestLinkShopee({ url: URL_SHOPEE, subId: 'g1' }),
+    { ok: true, link: 'https://meli.la/2AbCdEf', sub_id_aplicado: true });
+  assert.match(erro.message, /não é s\.shopee\.com\.br/);
 });
 
 test('links Shopee: sem resposta da extensão, o pedido expira e sai da fila', async () => {
@@ -230,7 +292,7 @@ test('S2: no máximo 60 pedidos link_shopee por hora à extensão; o 61º é rec
   await assert.rejects(links.requestLinkShopee({ url: URL_SHOPEE, timeoutMs: 1 }), /Limite de links da Shopee por hora/);
   rel.t += 60001;
   const volta = await comExtensao(links, () => links.requestLinkShopee({ url: URL_SHOPEE }), { ok: true, link: CURTO });
-  assert.deepEqual(volta.valor, { link: CURTO, longo: null });
+  assert.deepEqual(volta.valor, { link: CURTO, longo: null, subIdAplicado: false });
 });
 
 test('S2: o teto conta só pedidos que foram à extensão (off-line e simulação não contam) e aceita outro limite', async () => {

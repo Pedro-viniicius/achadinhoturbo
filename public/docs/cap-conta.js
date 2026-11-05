@@ -31,6 +31,7 @@ docsCapitulo({
             ['Desconectar o WhatsApp', 'Não', 'Sim'],
             ['Apagar dados antigos em Ajustes', 'Não', 'Sim'],
             ['Revisar e enviar ofertas do Catálogo', 'Não (só vê a lista)', 'Sim'],
+            ['Ver a página Ganhos e mudar códigos de rastreio de grupos e blocos', 'Não', 'Sim'],
           ],
         } },
         { p: 'O servidor confere o papel a cada pedido: quando você troca o papel de alguém, vale na hora. Ninguém muda o próprio papel nem remove a si mesmo, e a equipe sempre fica com pelo menos um Dono.' },
@@ -88,6 +89,7 @@ docsCapitulo({
             ['Espelhamento', 'O nome do grupo de origem e o texto da mensagem, **mascarado** (e-mails, telefones e sequências de 8 ou mais dígitos viram `…`) e cortado em 1000 caracteres. Nunca quem postou. O texto não vai para o navegador nem para o log.'],
             ['Ofertas do Catálogo', 'Título, preço, foto, categoria e link. Sem dado pessoal.'],
             ['Fotos de Disparar mensagem', 'Sem metadados. Apagadas 7 dias depois de não terem mais envio ativo.'],
+            ['Comissões e cliques importados, e gastos com anúncio', 'Data, código de rastreio, produto, título, quantidade, valores e status; nenhum dado de comprador. O pedido só existe como um código embaralhado com a chave do programa, e o arquivo enviado não vai para o disco.'],
             ['Sessão do WhatsApp', 'Uma pasta dentro de `data`. Equivale a uma senha.'],
           ],
         } },
@@ -121,6 +123,8 @@ docsCapitulo({
       blocos: [
         { p: 'Eventos, leituras e cliques dos grupos e os itens já decididos do espelhamento são apagados depois do prazo em “Guardar por (dias)”. O padrão é **90 dias**. A limpeza roda ao iniciar o programa e a cada 6 horas.' },
         { nota: 'aviso', texto: '0 significa guardar para sempre, e então os textos do espelhamento também ficam. Não é recomendado.' },
+        { p: 'O histórico do rastreio por grupo tem prazo próprio: fica 400 dias, mesmo com “Guardar por (dias)” em 0 ou menor, e não guarda dado de pessoa (só grupo, link e código). Ele vai no backup junto com o banco. Veja [Rastreio por grupo](#docs/grupos/rastreio).' },
+        { p: 'As comissões e os cliques importados, e os gastos com anúncio, não seguem esse prazo: ficam até você apagar a importação ou o gasto em [[Ganhos]], e vão no backup junto com o banco.' },
         { p: 'Para aplicar o prazo agora, use “Apagar o que já passou do prazo” (só o Dono). Ficam de fora o que ainda está na fila do espelhamento e o item enviado que ainda conta para o “não repetir”.' },
         { passos: [
           '**Apagar um espelhamento** apaga na hora todos os itens e textos dele.',

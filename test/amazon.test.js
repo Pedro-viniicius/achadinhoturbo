@@ -657,6 +657,45 @@ test('amazon: montarLink limpo com a tag do dono (CA2)', () => {
   assert.throws(() => amazon.montarLink(null), LinkNaoResolvido);
 });
 
+test('amazon: montarLink com a tag de rastreamento do grupo/bloco (CA3, CA9)', () => {
+  const semRede = fetchFalso(() => assert.fail('sem rede'));
+  const amazon = createAmazon({ db: completo(), fetch: semRede });
+  // a tag da opção vence a de Conexões e o link continua limpo
+  assert.equal(amazon.montarLink(ASIN, { tag: 'turbob1-20' }), 'https://www.amazon.com.br/dp/B0FG2MD49G?tag=turbob1-20');
+  assert.equal(amazon.montarLink(` ${ASIN.toLowerCase()} `, { tag: 'Bloco_2-20' }), 'https://www.amazon.com.br/dp/B0FG2MD49G?tag=Bloco_2-20');
+  // sem opção, opção vazia ou sem tag: igual a hoje (tag de Conexões)
+  const hoje = 'https://www.amazon.com.br/dp/B0FG2MD49G?tag=dono-20';
+  assert.equal(amazon.montarLink(ASIN), hoje);
+  assert.equal(amazon.montarLink(ASIN, undefined), hoje);
+  assert.equal(amazon.montarLink(ASIN, {}), hoje);
+  assert.equal(amazon.montarLink(ASIN, { tag: undefined }), hoje);
+  assert.equal(amazon.montarLink(ASIN, { tag: null }), hoje);
+  // a opção não muda a tag de Conexões para a próxima chamada
+  assert.equal(amazon.montarLink(ASIN), hoje);
+});
+
+test('amazon: tag de rastreamento inválida nunca vira link sem tag nem cai na tag de Conexões (CA3)', async () => {
+  const amazon = createAmazon({ db: completo(), fetch: fetchFalso(() => assert.fail('sem rede')) });
+  const ruins = ['', '   ', 'a', 'x'.repeat(65), 'tag com espaço', 'tag&x=1', 'tag?x=1', 'tag#1', 'tag/1', 'tag\n', 'tág-20', 7, true, {}, []];
+  for (const tag of ruins) {
+    const e = await capturarErro(() => amazon.montarLink(ASIN, { tag }));
+    assert.ok(e instanceof ErroAmazon, `tag ${JSON.stringify(tag)} devia lançar ErroAmazon`);
+    assert.equal(e.codigo, 'sem_tag', `tag ${JSON.stringify(tag)}`);
+  }
+  // ASIN inválido continua LinkNaoResolvido, com ou sem opção
+  assert.throws(() => amazon.montarLink('B0FG2MD49G?tag=x', { tag: 'turbob1-20' }), LinkNaoResolvido);
+  assert.throws(() => amazon.montarLink(null, { tag: 'turbob1-20' }), LinkNaoResolvido);
+});
+
+test('amazon: sem tag em Conexões, a tag de rastreamento válida ainda monta o link (CA3)', async () => {
+  const semTag = createAmazon({ db: bancoCom({ segredos: { credencial_id: ID, credencial_secret: SECRET } }), fetch: fetchFalso(() => assert.fail('sem rede')) });
+  assert.equal(semTag.montarLink(ASIN, { tag: 'turbob1-20' }), 'https://www.amazon.com.br/dp/B0FG2MD49G?tag=turbob1-20');
+  assert.equal((await capturarErro(() => semTag.montarLink(ASIN))).codigo, 'sem_tag');
+  assert.equal((await capturarErro(() => semTag.montarLink(ASIN, {}))).codigo, 'sem_tag');
+  assert.equal((await capturarErro(() => semTag.montarLink(ASIN, { tag: 'tag ruim' }))).codigo, 'sem_tag');
+  assert.equal(semTag.configurado(), false, 'a tag do grupo não torna a API utilizável');
+});
+
 test('amazon: fluxo do link.amazon da referência até o link limpo com a nossa tag', async () => {
   const rel = relogio();
   const f = fetchFalso((url, init) => {

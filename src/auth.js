@@ -127,9 +127,12 @@ export function setPassword(db, pw) {
   });
 }
 
-/** Middleware: só o Dono passa. Sem login no painel (auth desligada), quem usa o computador é o Dono. */
+/** A sessão é do Dono? Sem login no painel (auth desligada), quem usa o computador é o Dono. */
+export const ehDono = (auth, req) => !auth.enabled() || req.user?.papel === 'dono';
+
+/** Middleware: só o Dono passa (ehDono). */
 export const soDono = (auth) => (req, res, next) => {
-  if (!auth.enabled() || req.user?.papel === 'dono') return next();
+  if (ehDono(auth, req)) return next();
   if (!req.user) return res.status(401).json({ erro: 'Faça login para continuar' });
   res.status(403).json({ erro: 'Só o Dono pode fazer isso.' });
 };

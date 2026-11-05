@@ -13,7 +13,7 @@
 // - ofertaDoNo(no, { shopId, itemId }) → oferta (parser tolerante do nó de productOfferV2; nunca lança).
 // - createShopee({ db, fetch, agora, lerConexao, cacheLinks = new Map(), limiteHora = 300 }) →
 //   { resolver(url), lerItem(shopId, itemId), gerarLink(urlProduto), testar(), situacao(), configurado(), apiUtil(),
-//     invalidar(), linkGuardado(urlProduto, idAfiliado), guardarLink(urlProduto, idAfiliado, link) }
+//     invalidar(), linkGuardado(urlProduto, idAfiliado, subId = ''), guardarLink(urlProduto, idAfiliado, link, subId = '') }
 //   - Teto de rede (S3): no máximo `limiteHora` acessos à Shopee por hora, somando cada chamada à Open API e cada
 //     salto do resolvedor de link curto (o que vem do cache não conta). Passou do teto → ErroShopee('cota'), sem
 //     rede; esse erro é do próprio programa e não muda situacao().
@@ -25,7 +25,9 @@
 //     Falha → LinkShopeeNaoResolvido { causa: 'invalido' | 'nao_produto' }.
 //   - lerItem(shopId, itemId) → oferta | null (a API não devolveu o nó desse item). Cache de 15 min por item
 //     (inclusive o null); pedidos simultâneos do mesmo item dividem uma chamada. Falha → ErroShopee { tipo }.
-//   - gerarLink(urlProduto) → shortLink (generateShortLink). Fora de LINK_SHOPEE → ErroShopee('indisponivel').
+//   - gerarLink(urlProduto, { subId }?) → shortLink (generateShortLink). Com subId (RE_SUB_ID: alfanumérico, 1 a 30) a
+//     mutation leva subIds:["<subId>"]; sem subId o corpo é idêntico ao de antes. subId que não serve →
+//     ErroShopee('link_falhou'), sem rede e sem mudar situacao(). Fora de LINK_SHOPEE → ErroShopee('indisponivel').
 //   - testar() → { ok, resultado: 'ok'|'nao_configurada'|'recusada'|'sem_acesso'|'conta_restrita'|'cota'|'indisponivel',
 //     mensagem (FRASES_TESTE_SHOPEE), campos (os campos do nó que vieram preenchidos) }.
 //   - situacao() → { acesso: 'nao_configurada'|'desconhecido'|'ok'|'sem_acesso'|'credencial_recusada'|
@@ -35,7 +37,9 @@
 //   - linkGuardado / guardarLink (S2): o shortLink já gerado para o produto (por shopId.itemId, vindo do urlProduto)
 //     e o ID de afiliado, por 7 dias, para não gerar outro a cada disparo. Vale para o link da API e o da
 //     extensão (quem guarda é src/lojas.js). Outro ID de afiliado não acha o link do anterior; só guarda
-//     LINK_SHOPEE. Fica só na memória do cliente.
+//     LINK_SHOPEE. Fica só na memória do cliente. Com subId (opcional) o link é guardado por produto + ID + Sub_id: o
+//     mesmo produto com outro Sub_id não reaproveita o link; sem subId a chave é a de antes. subId inválido: não
+//     guarda (false) e não acha (null).
 //   - invalidar(): chamar ao salvar a conexão. Esquece a última verificação, o cache de itens e os links guardados.
 //
 // Erros da API: o código sai de errors[0].extensions.code (ou errors[0].code); formato não verificado com a
@@ -72,6 +76,9 @@ const MAX_LOJA = 80;
 const RE_ID = /^\d{1,20}$/;
 export const RE_ID_AFILIADO = /^[0-9]{5,20}$/;
 const RE_APP_ID = /^[0-9]{1,20}$/;
+// Sub_id da Shopee: só alfanumérico (a Central de Afiliados não aceita outro caractere). O teto de 30 ainda não foi
+// conferido com a Shopee (provisório, plano dashboard-ganhos D3); a fonte única do formato é esta.
+export const RE_SUB_ID = /^[A-Za-z0-9]{1,30}$/;
 const RE_SLUG = /-i\.(\d{1,20})\.(\d{1,20})\/?$/;
 const RE_PRODUTO = /^\/(?:universal-link\/)?product\/(\d{1,20})\/(\d{1,20})\/?$/;
 const CAMPOS_NO = ['itemId', 'productName', 'priceMin', 'priceMax', 'priceDiscountRate', 'sales', 'ratingStar', 'imageUrl', 'shopName'];
@@ -155,6 +162,12 @@ const ACESSO_DO_TIPO = {
 const ACESSO_SEM_API = new Set(['sem_acesso', 'credencial_recusada', 'conta_restrita']);
 
 // ------------------------------------------------------------------------------------------ ids e links
+
+/** Sub_id pedido: '' (ausente: undefined, null ou vazio), o próprio texto se for válido, ou null se não servir. */
+function subIdDe(v) {
+  if (v === undefined || v === null || v === '') return '';
+  return typeof v === 'string' && RE_SUB_ID.test(v) ? v : null;
+}
 
 /** Id em texto canônico (dígitos, sem zeros à esquerda, > 0) ou null. Aceita número inteiro seguro. */
 function idCanonico(v) {
@@ -395,14 +408,21 @@ export function createShopee({ db, fetch: f, agora = Date.now, lerConexao, cache
     return copiaOferta(await p);
   }
 
-  /** Link curto de afiliado do produto pela API (generateShortLink). */
-  async function gerarLink(urlProduto) {
+  /**
+   * Link curto de afiliado do produto pela API (generateShortLink). Com `subId` (alfanumérico, RE_SUB_ID) a mutation
+   * leva subIds:["<subId>"]; sem ele o corpo é o de sempre. Sub_id que não serve → ErroShopee('link_falhou'), sem rede
+   * e sem mexer na situação da conta; a mensagem não traz o valor.
+   */
+  async function gerarLink(urlProduto, { subId } = {}) {
     const ids = extrairIds(urlProduto);
     if (!ids) throw new LinkShopeeNaoResolvido('invalido');
+    const sub = subIdDe(subId);
+    if (sub === null) throw new ErroShopee('link_falhou');
     const c = ler();
     try {
       exigirApi(c);
-      const data = await chamar(`mutation{generateShortLink(input:{originUrl:${JSON.stringify(ids.urlProduto)}}){shortLink}}`, c);
+      const extra = sub ? `,subIds:${JSON.stringify([sub])}` : '';
+      const data = await chamar(`mutation{generateShortLink(input:{originUrl:${JSON.stringify(ids.urlProduto)}${extra}}){shortLink}}`, c);
       registrar(c, 'ok');
       const link = data.generateShortLink?.shortLink;
       if (typeof link !== 'string' || !LINK_SHOPEE.test(link)) throw new ErroShopee('indisponivel');
@@ -456,25 +476,30 @@ export function createShopee({ db, fetch: f, agora = Date.now, lerConexao, cache
     linksGerados.clear();
   }
 
-  /** Chave do link guardado: ID de afiliado válido + ids do produto. null se um dos dois não serve. */
-  function chaveDoLink(urlProduto, idAfiliado) {
+  /**
+   * Chave do link guardado: ID de afiliado válido + ids do produto (+ Sub_id, se houver; sem Sub_id a chave é a de
+   * sempre). null se algum não serve.
+   */
+  function chaveDoLink(urlProduto, idAfiliado, subId) {
     const ids = extrairIds(urlProduto);
     const id = texto(idAfiliado);
-    return ids && RE_ID_AFILIADO.test(id) ? `${id}|${ids.shopId}.${ids.itemId}` : null;
+    const sub = subIdDe(subId);
+    if (!ids || !RE_ID_AFILIADO.test(id) || sub === null) return null;
+    return `${id}|${ids.shopId}.${ids.itemId}${sub ? `|${sub}` : ''}`;
   }
 
-  /** shortLink já gerado para este produto e este ID de afiliado (até 7 dias), ou null. */
-  function linkGuardado(urlProduto, idAfiliado) {
-    const chave = chaveDoLink(urlProduto, idAfiliado);
+  /** shortLink já gerado para este produto, este ID de afiliado e este Sub_id (até 7 dias), ou null. */
+  function linkGuardado(urlProduto, idAfiliado, subId = '') {
+    const chave = chaveDoLink(urlProduto, idAfiliado, subId);
     const salvo = chave ? linksGerados.get(chave) : null;
     if (!salvo) return null;
     if (salvo.ate <= agora()) { linksGerados.delete(chave); return null; }
     return salvo.link;
   }
 
-  /** Guarda o shortLink do produto para este ID de afiliado por 7 dias. → true se guardou. */
-  function guardarLink(urlProduto, idAfiliado, link) {
-    const chave = chaveDoLink(urlProduto, idAfiliado);
+  /** Guarda o shortLink do produto para este ID de afiliado (e Sub_id) por 7 dias. → true se guardou. */
+  function guardarLink(urlProduto, idAfiliado, link, subId = '') {
+    const chave = chaveDoLink(urlProduto, idAfiliado, subId);
     if (!chave || typeof link !== 'string' || !LINK_SHOPEE.test(link)) return false;
     linksGerados.delete(chave);
     linksGerados.set(chave, { link, ate: agora() + CACHE_LINK_AFILIADO_MS });

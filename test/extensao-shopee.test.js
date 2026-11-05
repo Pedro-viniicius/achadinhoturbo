@@ -25,12 +25,27 @@ const CSRF = 'csrf-segredo-0123456789';
 const SEM_SESSAO = /não há sessão de afiliado da Shopee neste Chrome/;
 const plano = (v) => JSON.parse(JSON.stringify(v)); // objetos do vm têm outro protótipo
 
-function puras(extra = {}) {
+// Sub_id (plano dashboard-ganhos, etapa 5): o nome do campo de advancedLinkParams ainda não foi capturado (P4).
+// Para provar o caminho "com campo preenchido", o teste troca a constante no texto da fonte.
+const CAMPO_VAZIO = "const SHOPEE_SUBID_CAMPO = '';";
+assert.equal(FONTE.split(CAMPO_VAZIO).length, 2, 'SHOPEE_SUBID_CAMPO vazio, declarado uma vez, em extension/background.js');
+const comCampo = (texto, campo) => texto.replace(CAMPO_VAZIO, `const SHOPEE_SUBID_CAMPO = ${JSON.stringify(campo)};`);
+const FONTE_COM_CAMPO = comCampo(FONTE, 'subId1');
+
+function puras(extra = {}, trecho = TRECHO) {
   const ctx = vm.createContext({ URL, AbortSignal, ...extra });
-  vm.runInContext(`${TRECHO};globalThis.__x = { urlProdutoShopee, corpoLinkShopee, longoShopee, interpretarShopee, chamarPortalShopee, SHOPEE_TIPO_PROGRAMA, SHOPEE_SEM_SESSAO, SHOPEE_FORMATO };`, ctx);
+  vm.runInContext(`${trecho};globalThis.__x = { urlProdutoShopee, corpoLinkShopee, longoShopee, interpretarShopee, chamarPortalShopee, SHOPEE_TIPO_PROGRAMA, SHOPEE_SUBID_CAMPO, SHOPEE_SEM_SESSAO, SHOPEE_FORMATO };`, ctx);
   return ctx.__x;
 }
 const X = puras();
+// O corpo de hoje, escrito à mão: com o campo vazio, o corpo com Sub_id tem de ser byte a byte este.
+const CORPO_DE_HOJE = (url) => JSON.stringify({
+  operationName: 'batchGetCustomLink',
+  query: 'query batchGetCustomLink($linkParams: [CustomLinkParam!], $sourceCaller: SourceCaller){ batchCustomLink(linkParams: $linkParams, sourceCaller: $sourceCaller){ shortLink longLink failCode } }',
+  variables: { linkParams: [{ originalLink: url }], sourceCaller: 'CUSTOM_LINK_CALLER' },
+});
+const SUBIDS_BONS = ['g1', 'A', 'bloco2', 'Z9', '0', 'a'.repeat(30)];
+const SUBIDS_RUINS = ['g-1', 'g_1', 'g 1', ' g1', 'g1 ', 'g1\n', 'ção', 'g1"}', '<x>', 'a'.repeat(31), 1, true, {}, ['g1'], { toString: () => 'g1' }];
 
 const respostaGql = (item) => JSON.stringify({ data: { batchCustomLink: [item] } });
 const ITEM_OK = { shortLink: 'https://s.shopee.com.br/9fMB7wrS3r', longLink: 'https://shopee.com.br/x-i.1.2?utm_source=an_98765432101&utm_medium=affiliates', failCode: 0 };
@@ -57,6 +72,38 @@ test('corpoLinkShopee: o mesmo corpo do Link personalizado, sem Sub_ids, com a U
   });
   const estranho = 'https://shopee.com.br/a"}],"x":{"y":"z';
   assert.equal(JSON.parse(X.corpoLinkShopee(estranho)).variables.linkParams[0].originalLink, estranho);
+});
+
+test('Sub_id (CA2, CA9): com SHOPEE_SUBID_CAMPO vazio, o corpo com Sub_id é byte a byte o de hoje', () => {
+  assert.equal(X.SHOPEE_SUBID_CAMPO, '', 'o formato do Sub_id ainda não foi capturado (P4)');
+  assert.equal(X.corpoLinkShopee(PRODUTO), CORPO_DE_HOJE(PRODUTO));
+  for (const subId of [...SUBIDS_BONS, undefined, null, '']) {
+    assert.equal(X.corpoLinkShopee(PRODUTO, subId), CORPO_DE_HOJE(PRODUTO), String(subId));
+  }
+});
+
+test('Sub_id: com SHOPEE_SUBID_CAMPO preenchido, vai em advancedLinkParams no campo da constante; sem Sub_id, o corpo é o de hoje', () => {
+  const C = puras({}, comCampo(TRECHO, 'subId1'));
+  assert.equal(C.SHOPEE_SUBID_CAMPO, 'subId1');
+  for (const subId of SUBIDS_BONS) {
+    assert.deepEqual(JSON.parse(C.corpoLinkShopee(PRODUTO, subId)).variables, {
+      linkParams: [{ originalLink: PRODUTO, advancedLinkParams: { subId1: subId } }], sourceCaller: 'CUSTOM_LINK_CALLER',
+    }, subId);
+    const corpo = JSON.parse(C.corpoLinkShopee(PRODUTO, subId));
+    assert.equal(corpo.operationName, 'batchGetCustomLink');
+    assert.equal(corpo.query, JSON.parse(CORPO_DE_HOJE(PRODUTO)).query);
+  }
+  for (const subId of [undefined, null, '']) assert.equal(C.corpoLinkShopee(PRODUTO, subId), CORPO_DE_HOJE(PRODUTO), String(subId));
+  // o campo segue a constante, qualquer que seja o nome capturado
+  assert.deepEqual(JSON.parse(puras({}, comCampo(TRECHO, 'sub_id1')).corpoLinkShopee(PRODUTO, 'g1')).variables.linkParams[0].advancedLinkParams, { sub_id1: 'g1' });
+});
+
+test('Sub_id: só alfanumérico (1 a 30); qualquer outro valor é recusado (null), com o campo vazio ou preenchido', () => {
+  const C = puras({}, comCampo(TRECHO, 'subId1'));
+  for (const subId of SUBIDS_RUINS) {
+    assert.equal(X.corpoLinkShopee(PRODUTO, subId), null, `vazio: ${String(subId)}`);
+    assert.equal(C.corpoLinkShopee(PRODUTO, subId), null, `preenchido: ${String(subId)}`);
+  }
 });
 
 test('interpretarShopee: link curto e longLink; failCode 0, "0" ou ausente valem', () => {
@@ -204,7 +251,7 @@ test('chamarPortalShopee: não logado, redirecionado, fora do portal, config com
  * (o fetch do poll falha) e o laço termina. `portal` = opções do portalFalso. `aposLogin`: a Shopee manda a aba
  * deslogada para shopee.com.br (fora da permissão: o executeScript falha).
  */
-async function rodarExtensao({ jobs, portal = {}, aposLogin = false, abas = [] }) {
+async function rodarExtensao({ jobs, portal = {}, aposLogin = false, abas = [], fonte = FONTE }) {
   const p = portalFalso(portal);
   const resultados = []; const consoleUsado = []; const injecoes = []; const navegacoes = []; const criadas = [];
   const armazenado = { conf: { servidor: 'http://127.0.0.1:3737', token: 'tok-painel' }, st: {} };
@@ -267,15 +314,15 @@ async function rodarExtensao({ jobs, portal = {}, aposLogin = false, abas = [] }
     chrome, fetch: fetchGeral, URL, Response, Headers, AbortSignal, structuredClone, console: espiao,
     setTimeout: (f, ms) => { const t = setTimeout(f, ms); t.unref?.(); return t; }, clearTimeout,
   });
-  vm.runInContext(FONTE, ctx, { filename: 'background.js' });
+  vm.runInContext(fonte, ctx, { filename: 'background.js' });
   await fim;
   await new Promise((ok) => setTimeout(ok, 5));
   return { resultados, consoleUsado, injecoes, navegacoes, criadas, pedidosPortal: p.pedidos, armazenado };
 }
 
-test('extensão: link_shopee logado devolve só { id, ok, link, longo } e abre a aba do Link personalizado em segundo plano', async () => {
+test('extensão: link_shopee logado devolve só { id, ok, link, longo, sub_id_aplicado } e abre a aba do Link personalizado em segundo plano', async () => {
   const r = await rodarExtensao({ jobs: [{ id: 7, type: 'link_shopee', url: PRODUTO }] });
-  assert.deepEqual(r.resultados, [{ id: 7, ok: true, link: ITEM_OK.shortLink, longo: ITEM_OK.longLink }]);
+  assert.deepEqual(r.resultados, [{ id: 7, ok: true, link: ITEM_OK.shortLink, longo: ITEM_OK.longLink, sub_id_aplicado: false }]);
   assert.deepEqual(r.criadas, [{ url: `${PORTAL}/offer/custom_link`, active: false, pinned: true }]);
   assert.equal(r.injecoes.length, 1);
   assert.equal(r.injecoes[0].world, 'MAIN');
@@ -348,8 +395,55 @@ test('extensão: job com url fora de https://shopee.com.br/ é recusado sem toca
   assert.equal(r.pedidosPortal.length, 0);
 });
 
-test('manifest: permissão nova só para affiliate.shopee.com.br e versão 1.3.0', () => {
-  assert.equal(MANIFEST.version, '1.3.0');
+test('extensão (CA9): job com Sub_id e campo vazio manda ao portal o corpo de hoje e responde sub_id_aplicado: false', async () => {
+  const r = await rodarExtensao({ jobs: [{ id: 20, type: 'link_shopee', url: PRODUTO, subId: 'g1' }] });
+  assert.deepEqual(r.resultados, [{ id: 20, ok: true, link: ITEM_OK.shortLink, longo: ITEM_OK.longLink, sub_id_aplicado: false }]);
+  assert.equal(r.injecoes.length, 1);
+  assert.equal(r.injecoes[0].args[0], CORPO_DE_HOJE(PRODUTO), 'o que vai à aba');
+  assert.equal(r.pedidosPortal.at(-1).body, CORPO_DE_HOJE(PRODUTO), 'o que sai da aba para o portal');
+});
+
+test('extensão: com o campo preenchido, o Sub_id vai em advancedLinkParams e a resposta diz sub_id_aplicado: true', async () => {
+  const r = await rodarExtensao({
+    fonte: FONTE_COM_CAMPO,
+    jobs: [{ id: 21, type: 'link_shopee', url: PRODUTO, subId: 'bloco7' }, { id: 22, type: 'link_shopee', url: PRODUTO }],
+  });
+  assert.deepEqual(r.resultados, [
+    { id: 21, ok: true, link: ITEM_OK.shortLink, longo: ITEM_OK.longLink, sub_id_aplicado: true },
+    { id: 22, ok: true, link: ITEM_OK.shortLink, longo: ITEM_OK.longLink, sub_id_aplicado: false },
+  ]);
+  const posts = r.pedidosPortal.filter((q) => q.method === 'POST').map((q) => JSON.parse(q.body).variables.linkParams);
+  assert.deepEqual(posts, [[{ originalLink: PRODUTO, advancedLinkParams: { subId1: 'bloco7' } }], [{ originalLink: PRODUTO }]]);
+});
+
+test('extensão: Sub_id que não é alfanumérico é recusado sem tocar no portal (campo vazio ou preenchido)', async () => {
+  for (const fonte of [FONTE, FONTE_COM_CAMPO]) {
+    const r = await rodarExtensao({
+      fonte,
+      jobs: [
+        { id: 30, type: 'link_shopee', url: PRODUTO, subId: 'g-1' },
+        { id: 31, type: 'link_shopee', url: PRODUTO, subId: 'a'.repeat(31) },
+        { id: 32, type: 'link_shopee', url: PRODUTO, subId: 7 },
+      ],
+    });
+    assert.deepEqual(r.resultados, [30, 31, 32].map((id) => ({ id, ok: false, error: 'Sub_id da Shopee recusado pela extensão' })));
+    assert.equal(r.injecoes.length, 0);
+    assert.deepEqual(r.criadas, []);
+    assert.equal(r.pedidosPortal.length, 0);
+  }
+});
+
+test('extensão: falha com Sub_id volta como erro, sem sub_id_aplicado', async () => {
+  const r = await rodarExtensao({
+    fonte: FONTE_COM_CAMPO,
+    jobs: [{ id: 40, type: 'link_shopee', url: PRODUTO, subId: 'g1' }],
+    portal: { gql: () => new Response(respostaGql({ shortLink: '', longLink: '', failCode: 5 }), { status: 200 }) },
+  });
+  assert.deepEqual(r.resultados, [{ id: 40, ok: false, error: 'a Shopee recusou o link (código 5)' }]);
+});
+
+test('manifest: permissão nova só para affiliate.shopee.com.br e versão 1.4.0 (Sub_id), sem permissão a mais', () => {
+  assert.equal(MANIFEST.version, '1.4.0');
   assert.deepEqual(MANIFEST.permissions, ['storage', 'alarms', 'scripting']);
   assert.deepEqual(MANIFEST.host_permissions, ['https://*.mercadolivre.com.br/*', 'https://affiliate.shopee.com.br/*', 'http://127.0.0.1/*', 'http://localhost/*']);
   assert.deepEqual(MANIFEST.optional_host_permissions, ['https://*/*']);

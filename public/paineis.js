@@ -55,7 +55,7 @@ async function paginaVisao() {
       ${kpiEvasao('Evasão total do período ' + q('visao.evasao_total'), { ...o.evasao.total_dia, fechado: true }, `${o.evasao.total_dia.n} saídas sobre ${o.evasao.total_dia.de} pessoas`, 'Nenhuma saída neste período.')}
     </div>
     <h2 style="margin:20px 0 10px">Por grupo ${q('visao.porgrupo')}</h2>
-    <div class="card tabela"><table><thead><tr><th>Grupo</th><th>Membros</th><th>Abriram</th><th>Entradas</th><th>Pelo link</th><th>Adicionados</th><th>Saídas</th><th>Mesmo dia</th></tr></thead>
+    <div class="card tabela tab-grupos"><table><thead><tr><th>Grupo</th><th>Membros</th><th>Abriram</th><th>Entradas</th><th>Pelo link</th><th>Adicionados</th><th>Saídas</th><th>Mesmo dia</th></tr></thead>
       <tbody>${o.por_grupo.sort((a, b) => b.entradas - a.entradas || b.membros - a.membros).map((g) => `<tr><td>${esc(g.name)}</td><td>${g.membros}</td><td>${g.abriram} <small class="dica">${fmtPct(g.abriram_pct)}</small></td><td><b>${g.entradas}</b></td><td>${g.pelo_link}</td><td>${g.adicionados}</td><td>${g.saidas}</td><td>${g.mesmo_dia}</td></tr>`).join('') || '<tr><td colspan="8">Nenhum grupo. Conecte o WhatsApp e sincronize os grupos.</td></tr>'}</tbody></table></div>
     <h2 style="margin:20px 0 10px">Eventos do período</h2>
     <div class="card">${o.eventos.length ? `<ul class="eventos" style="list-style:none;margin:0;padding:0">${o.eventos.map((e) => `<li><time>${dataHora(e.ts)}</time><span>${esc(e.group_name || e.jid)}: ${e.action === 'add' ? (e.by_link ? 'entrou pelo link' : 'foi adicionado') : (e.actor ? 'foi removido' : 'saiu')} <span class="dica">· pessoa ${esc(String(e.participant).slice(0, 6))}</span></span></li>`).join('')}</ul>` : sem('Nenhum evento. As entradas e saídas passam a ser registradas enquanto o programa está conectado ao WhatsApp.')}</div>`;
@@ -99,13 +99,16 @@ function ligarTooltips() {
 
 // ---------- Blocos de análise ----------
 async function paginaBlocos() {
-  S.blocks = await api('/blocks');
-  $('#pagina').innerHTML = `<div class="topo"><div><h1>Blocos de análise ${q('blocos')}</h1><p class="sub">Agrupe os grupos por nicho para ver as métricas de cada um separadas na Visão Geral. Um bloco pode ter uma etiqueta do Mercado Livre: ao criar um disparo automático, escolha o bloco e ele já marca os grupos e a etiqueta.</p></div>
+  // os códigos de rastreio só vêm para o Dono (rastreioCarregar não chama a API como Operador); se falhar, a lista segue sem eles
+  const [blocos] = await Promise.all([api('/blocks'), rastreioCarregar().catch(() => false)]);
+  S.blocks = blocos;
+  $('#pagina').innerHTML = `<div class="topo"><div><h1>Blocos de análise ${q('blocos')}</h1><p class="sub">Agrupe os grupos por nicho para ver as métricas de cada um separadas na Visão Geral. Um bloco pode ter uma etiqueta do Mercado Livre: ao criar um disparo automático, escolha o bloco e ele já marca os grupos e a etiqueta. Para separar o ganho por nicho, use os códigos de rastreio do bloco.</p></div>
     <button class="pri" id="novo">Novo bloco</button></div>
     ${S.blocks.length ? `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px">${S.blocks.map((b) => {
       const tag = S.tags.find((t) => t.id === b.tag_id);
       return `<article class="card" data-id="${b.id}" style="margin:0"><h2>${esc(b.name)}</h2>
-        <p class="dica" style="margin:0">Etiqueta do Mercado Livre: <b>${tag ? esc(tag.name) : 'padrão do disparo automático'}</b></p>
+        <p class="dica" style="margin:0">Etiqueta do disparo automático: <b>${tag ? esc(tag.name) : 'nenhuma'}</b></p>
+        ${rastreioLinhaBloco(b.id)}
         <div class="bl-stats"><div><b>${b.grupos.length}</b><small>${b.grupos.length === 1 ? 'grupo' : 'grupos'}</small></div><div><b>${b.membros}</b><small>membros</small></div><div><b>${b.hoje.entradas}</b><small>entradas hoje</small></div><div><b>${b.hoje.abriram}</b><small>abriram hoje</small></div></div>
         <div class="chips" style="margin-bottom:12px">${b.grupos.slice(0, 6).map((g) => `<span class="chip">${esc(g.name)}</span>`).join('')}${b.grupos.length > 6 ? `<span class="chip">+${b.grupos.length - 6}</span>` : ''}</div>
         <div class="acoes" style="border:0;padding:0"><button data-act="ver">Ver na Visão Geral</button><button data-act="editar">Editar</button><button data-act="excluir" class="perigo leve">Excluir</button></div></article>`;
@@ -122,22 +125,37 @@ async function paginaBlocos() {
 function formBloco(b) {
   const novo = !b; b = b || { name: '', tag_id: null, group_jids: [] }; const dlg = $('#dlg');
   const grupos = seletorGrupos({ selecionados: b.group_jids, marcarVisiveis: false });
+  // Códigos de rastreio: só o Dono (o servidor recusa o Operador) e só com as associações carregadas (editar às cegas apagaria sem ver)
+  const dono = podeEquipe(); const rast = dono && RASTREIO.carregado;
+  const antigos = rast && !novo ? rastreioDe('bloco', b.id) : { mercadolivre: '', amazon: '', shopee: '' };
+  let id = novo ? null : b.id; // depois do primeiro salvamento com sucesso o bloco novo já existe: salvar de novo atualiza, não cria outro
   dlg.innerHTML = `<form method="dialog" id="f" novalidate><h1>${novo ? 'Novo bloco' : 'Editar bloco'}</h1>
     <div class="grade"><label class="campo"><span>Nome do bloco ${REQ}</span><input name="name" value="${esc(b.name)}" placeholder="Ex.: Casa e cozinha" required></label>
-      <label class="campo"><span>Etiqueta do Mercado Livre (opcional) ${q('blocos.etiqueta')}</span><select name="tag_id"><option value="">Nenhuma</option>${S.tags.map((t) => `<option value="${t.id}" ${t.id === b.tag_id ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}</select>
-        <small>Para separar o ganho por nicho. Ao criar um disparo automático a partir deste bloco, a etiqueta já vem marcada.</small></label></div>
+      <label class="campo"><span>Etiqueta do Mercado Livre para o disparo (opcional) ${q('blocos.etiqueta')}</span><select name="tag_id"><option value="">Nenhuma</option>${S.tags.map((t) => `<option value="${t.id}" ${t.id === b.tag_id ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}</select>
+        <small>Ao criar um disparo automático a partir deste bloco, a etiqueta já vem marcada. Não muda os links já enviados; para separar o ganho, use os códigos de rastreio abaixo.</small></label></div>
     <fieldset><legend>Grupos do bloco ${REQ} <span id="cont" class="dica"></span></legend>
       ${grupos.html}</fieldset>
+    ${rast ? rastreioCamposHtml({ tipo: 'bloco', valores: antigos }) : dono ? `<p class="dica">${TEXTOS_GANHOS.bloco.naoCarregou}</p>` : ''}
     <div class="rodape"><button type="button" id="cancelar">Cancelar</button><button class="pri">${novo ? 'Salvar bloco' : 'Salvar'}</button></div></form>`;
   grupos.ligar(dlg, { contador: $('#cont', dlg) });
+  if (rast) rastreioLigar(dlg, 'bloco');
   $('#cancelar').onclick = () => dlg.close();
   $('#f').onsubmit = tentar(async (ev) => {
     ev.preventDefault(); const f = new FormData($('#f'));
     const jids = grupos.marcados(dlg); const erros = [];
+    const novos = rast ? rastreioLer(dlg, rastreioLojasDe('bloco')) : null;
     if (!String(f.get('name') || '').trim()) erros.push({ msg: 'Dê um nome ao bloco.', el: $('[name=name]', dlg) });
     if (!jids.length) erros.push({ msg: 'Marque ao menos um grupo para o bloco.', el: $('#gr', dlg) });
+    if (rast) erros.push(...rastreioErros(novos, dlg));
     if (mostrarErros(dlg, erros)) return;
-    try { await api(novo ? '/blocks' : `/blocks/${b.id}`, novo ? 'POST' : 'PUT', { name: f.get('name'), tag_id: f.get('tag_id') || null, group_jids: jids }); } catch (e) { mostrarErros(dlg, [{ msg: e.message }]); return; }
+    const corpo = { name: f.get('name'), tag_id: f.get('tag_id') || null, group_jids: jids };
+    try {
+      if (id == null) id = (await api('/blocks', 'POST', corpo)).id; else await api(`/blocks/${id}`, 'PUT', corpo);
+    } catch (e) { mostrarErros(dlg, [{ msg: e.message }]); return; }
+    // a associação só se grava com o bloco já existente; se o servidor recusar, o bloco fica salvo e o diálogo aberto para corrigir
+    if (rast) {
+      try { await rastreioGravar('bloco', id, novos, antigos); } catch (e) { paginaBlocos(); mostrarErros(dlg, [{ msg: e.message }]); return; }
+    }
     dlg.close(); aviso(novo ? 'Bloco criado' : 'Bloco salvo'); paginaBlocos();
   });
   dlg.showModal();
@@ -234,11 +252,12 @@ function formLink(l) {
 // ---------- tabela de grupos (página Grupos) ----------
 function tabelaGrupos(groups) {
   const blocoNome = (id) => S.blocks.find((b) => b.id === id)?.name;
-  return `<div class="card tabela"><table><thead><tr><th>Grupo</th><th>Membros</th><th>Convite ${q('grupos.convite')}</th></tr></thead><tbody>
-    ${groups.map((g) => `<tr data-jid="${esc(g.jid)}"><td>${esc(g.name)}${g.is_admin ? '<span class="badge-adm">admin</span>' : ''}${g.blocks?.length ? `<br><small class="dica">${g.blocks.map(blocoNome).filter(Boolean).map(esc).join(' · ')}</small>` : ''}</td><td>${g.size ?? ''}</td>
-      <td><div class="conv">${g.invite_code ? `<input readonly value="https://chat.whatsapp.com/${esc(g.invite_code)}">` : '<input data-colar placeholder="https://chat.whatsapp.com/…">'}
-        <button data-inv="${g.invite_code ? 'colar' : 'colar'}" title="Salvar o link colado" ${g.invite_code ? 'hidden' : ''}>Salvar</button><button data-inv="buscar" title="Busca o link pelo WhatsApp (precisa ser admin)">${g.invite_code ? 'Atualizar' : 'Buscar convite'}</button></div></td></tr>`).join('')
-      || '<tr><td colspan="3">Nenhum grupo. Toque em “Atualizar lista de grupos”.</td></tr>'}</tbody></table></div>`;
+  const rastreio = podeEquipe(); // coluna Rastreio: só o Dono (decisão P2)
+  return `<div class="card tabela tab-grupos"><table><thead><tr><th>Grupo</th><th>Membros</th><th>Convite ${q('grupos.convite')}</th>${rastreio ? `<th>Rastreio ${q('rastreio.grupo')}</th>` : ''}</tr></thead><tbody>
+    ${groups.map((g) => `<tr data-jid="${esc(g.jid)}"><td>${esc(g.name)}${g.is_admin ? '<span class="badge-adm">admin</span>' : ''}${rastreioBlocosDoGrupo(g).length ? `<br><small class="dica">${rastreioBlocosDoGrupo(g).map(blocoNome).filter(Boolean).map(esc).join(' · ')}</small>` : ''}</td><td class="c-memb">${g.size ?? ''}</td>
+      <td class="c-conv"><div class="conv">${g.invite_code ? `<input readonly value="https://chat.whatsapp.com/${esc(g.invite_code)}">` : '<input data-colar placeholder="https://chat.whatsapp.com/…">'}
+        <button data-inv="${g.invite_code ? 'colar' : 'colar'}" title="Salvar o link colado" ${g.invite_code ? 'hidden' : ''}>Salvar</button><button data-inv="buscar" title="Busca o link pelo WhatsApp (precisa ser admin)">${g.invite_code ? 'Atualizar' : 'Buscar convite'}</button></div></td>${rastreio ? `<td class="c-rast" data-rot="Rastreio">${rastreioCelulaGrupo(g)}</td>` : ''}</tr>`).join('')
+      || `<tr><td colspan="${rastreio ? 4 : 3}">Nenhum grupo. Toque em “Atualizar lista de grupos”.</td></tr>`}</tbody></table></div>`;
 }
 document.addEventListener('click', (ev0) => tentar(async (ev) => {
   const btn = ev.target.closest('[data-inv]'); if (!btn) return;

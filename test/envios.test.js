@@ -12,9 +12,10 @@ import vm from 'node:vm';
 import { openDb, setSetting } from '../src/db.js';
 import { buildApp } from '../src/server.js';
 import { createWhatsApp } from '../src/whatsapp.js';
-import { createLinkService } from '../src/links.js';
+import { createLinkService, LIMITE_SHOPEE_ATINGIDO } from '../src/links.js';
 import { createScheduler } from '../src/scheduler.js';
-import { createEnvios, proximaOcorrencia, limparErro, semMetadados } from '../src/envios.js';
+import { createEnvios, proximaOcorrencia, limparErro, semMetadados, MAX_SUBIDS_POR_ENVIO } from '../src/envios.js';
+import * as rastreio from '../src/rastreio.js';
 import { createAmazon } from '../src/amazon.js';
 import { createShopee, URL_API as URL_API_SHOPEE } from '../src/shopee.js';
 import { createEspelho } from '../src/espelho.js';
@@ -1463,7 +1464,8 @@ const EXTRA_SHOPEE = { loja_nome: 'Loja Oficial', nota: 4.8, preco_max: 99.9 };
 
 /**
  * fetch falso da Shopee: encurtadores (302) e a Open API. estado.api: 'ok' ou o código de erro da API ('10035'…);
- * estado.nos: os nós de productOfferV2 (padrão: o produto); estado.link: o shortLink de generateShortLink.
+ * estado.nos: os nós de productOfferV2 (padrão: o produto); estado.link: o shortLink de generateShortLink (ou a função
+ * dele sobre a consulta, para dar um link por Sub_id).
  * Guarda método, URL e a consulta GraphQL de cada chamada.
  */
 function fetchShopee(estado) {
@@ -1477,7 +1479,7 @@ function fetchShopee(estado) {
     if (u === 'https://shopee.com.br/search?keyword=fone') return new Response('<html>busca</html>', { status: 200 });
     if (u === URL_API_SHOPEE) {
       if (estado.api !== 'ok') return respJson(200, { errors: [{ message: 'erro', extensions: { code: Number(estado.api) } }], data: null });
-      if (consulta.startsWith('mutation')) return respJson(200, { data: { generateShortLink: { shortLink: estado.link } } });
+      if (consulta.startsWith('mutation')) return respJson(200, { data: { generateShortLink: { shortLink: typeof estado.link === 'function' ? estado.link(consulta) : estado.link } } });
       return respJson(200, { data: { productOfferV2: { nodes: estado.nos ?? [noShopee()] } } });
     }
     throw new Error('rede não prevista no teste');
@@ -1899,6 +1901,11 @@ test('S2: só o Disparo manual pede o link da Shopee: o espelho, as regras e o e
   assert.deepEqual(chamadas(/linkAfiliado\(\s*['"]shopee['"]/g), ['envios.js:linkShopee']);
   assert.deepEqual(chamadas(/(?<!function )\blinkShopee\(/g), ['envios.js:ofertaShopee']);
   assert.deepEqual(chamadas(/(?<!function )\bofertaShopee\(/g), ['envios.js:criar']);
+  // Sub_id (dashboard-ganhos, etapa 7): os links por código saem só ao criar (Disparo manual) e no "Enviar" do catálogo
+  assert.deepEqual(chamadas(/\blinkAfiliadoShopeeRastreado\(/g).filter((c) => !c.startsWith('lojas.js:')), ['envios.js:linkComSubId']);
+  assert.deepEqual(chamadas(/(?<!function )\blinkComSubId\(/g), ['envios.js:linksRastreioShopee']);
+  // server.js:criarServicos só repassa a chamada da revisão do catálogo (catalogo-itens.js:enviar) à fila de envios
+  assert.deepEqual(chamadas(/(?<!function )\blinksRastreioShopee\(/g).sort(), ['catalogo-itens.js:enviar', 'envios.js:criar', 'server.js:criarServicos']);
   assert.match(fontes['envios.js'].slice(fontes['envios.js'].indexOf('async function criar(')), /origem: \{ tipo: 'manual' \}/, 'criar é o Disparo manual');
   for (const arq of ['espelho.js', 'scheduler.js', 'avisos.js']) {
     assert.doesNotMatch(fontes[arq], /requestLinkShopee|gerarLink|linkAfiliado\(\s*['"]shopee/, arq);
@@ -1974,6 +1981,416 @@ test('S3: o teto de acessos barrando o link curto vira 400 com a frase de cota d
     assert.match(p.json.erro, /^Não consegui gerar o seu link de afiliado da Shopee: a extensão do Chrome não está conectada/);
     assert.equal(contar(s.db, 'SELECT COUNT(*) AS n FROM envios'), 0);
   } finally { await s.fechar(); }
+});
+
+// ---------------------------------------------------------------------------------------------
+// Rastreio por grupo (plano dashboard-ganhos, etapa 7; CA1–CA4, CA9; P1 e P6 do dono). Um link por CÓDIGO distinto
+// entre os grupos (rastreio.agrupar); sem associação, o envio é o de hoje (um pedido de link, o mesmo texto, a mesma
+// ordem). Falha do código associado cai no link de afiliado padrão (motivo na linha); nunca link comum. Cada grupo
+// que recebeu ganha uma linha em rastreio_envios.
+const G3 = '333@g.us';
+const GRUPOS3 = ['111@g.us', '222@g.us', G3];
+const URL_ML_PRODUTO = 'https://produto.mercadolivre.com.br/MLB-1234567890';
+const tplCriadoEm = (db) => db.prepare('SELECT created_at FROM templates WHERE id = 1').get().created_at;
+function terceiroGrupo(db) {
+  db.prepare('INSERT OR IGNORE INTO groups (jid, name, size, updated_at) VALUES (?,?,?,?)').run(G3, 'Ofertas', 10, Date.now());
+}
+/** Bloco `id` com os grupos `jids` (como a tela de Blocos grava). */
+function bloco(db, id, jids) {
+  db.prepare('INSERT INTO blocks (id, name, created_at) VALUES (?,?,?)').run(id, `Bloco ${id}`, Date.now());
+  for (const j of jids) db.prepare('INSERT INTO block_groups (block_id, jid) VALUES (?,?)').run(id, j);
+}
+const inserirEnvio = (db, payload, jids) => Number(db.prepare(`INSERT INTO envios (tipo, payload, group_jids, quando, status, next_run_at, created_at)
+  VALUES ('oferta', ?, ?, 'agora', 'pendente', ?, ?)`).run(JSON.stringify(payload), JSON.stringify(jids), Date.now(), Date.now()).lastInsertRowid);
+const rastreados = (db, envioId) => linhas(db, `SELECT jid, loja, origem, rule_id, envio_id, oferta_chave, link, codigo, nivel, bloco_id, esperado, motivo
+  FROM rastreio_envios ${envioId ? 'WHERE envio_id = ?' : ''} ORDER BY id`, ...(envioId ? [envioId] : []));
+const OFERTA_ML = { key: 'MLB1234567890', title: 'Fone Bom', price: 89.9, oldPrice: null, discountPct: null, sold: null, freeShipping: true, coupon: null, image: null };
+const payloadML = (db, extra = {}) => ({
+  url: URL_ML_PRODUTO, loja: 'mercadolivre', tag_id: 1, etiqueta: 'etiquetaA', template_id: 1, template_criado_em: tplCriadoEm(db),
+  fonte_dados: 'manual', origem: { tipo: 'manual' }, offer: OFERTA_ML, ...extra,
+});
+const linkDoTexto = (m) => /Compre aqui: (\S+)$/.exec(m.text)?.[1];
+
+/** Fila de envios com links simulados que registram cada pedido ao ML (etiqueta) e falham nas etiquetas de `falhar`. */
+function filaML(m) {
+  const links = createLinkService({ getMode: () => 'fake' });
+  const pedidos = []; const falhar = new Set();
+  const original = links.requestLink.bind(links);
+  links.requestLink = (a) => { pedidos.push(a.tag); return falhar.has(a.tag) ? Promise.reject(new Error('a extensão não conseguiu')) : original(a); };
+  const envios = createEnvios({ db: m.db, wa: m.wa, links, ml: m.ml, fast: true, dir: m.dir });
+  return { envios, pedidos, falhar };
+}
+
+test('CA9/CA1: ML sem associação → 1 pedido de link para 3 grupos, o mesmo texto na mesma ordem, e uma linha "padrao" por grupo', async () => {
+  const m = montar(); terceiroGrupo(m.db);
+  const { envios, pedidos } = filaML(m);
+  try {
+    const id = inserirEnvio(m.db, payloadML(m.db), GRUPOS3);
+    await envios.runEnvio(id);
+    assert.equal(statusDe(m.db, id), 'concluido');
+    assert.deepEqual(pedidos, ['etiquetaA'], 'um pedido só, como hoje');
+    assert.deepEqual(m.wa.simulated.map((x) => x.jid), GRUPOS3);
+    const [texto] = m.wa.simulated.map((x) => x.text);
+    assert.ok(m.wa.simulated.every((x) => x.text === texto), 'o mesmo texto a todos');
+    const link = linkDoTexto(m.wa.simulated[0]);
+    assert.match(link, /^https:\/\/meli\.la\/fake-etiquetaA-\d+$/);
+    assert.deepEqual(linhas(m.db, 'SELECT group_name, message FROM log ORDER BY id').map((l) => l.message), Array(3).fill('Enviado com a etiqueta etiquetaA'));
+    assert.deepEqual(rastreados(m.db), GRUPOS3.map((jid) => ({
+      jid, loja: 'mercadolivre', origem: 'manual', rule_id: null, envio_id: id, oferta_chave: 'MLB1234567890', link,
+      codigo: 'etiquetaA', nivel: 'padrao', bloco_id: null, esperado: 0, motivo: null,
+    })));
+  } finally { m.db.close(); }
+});
+
+test('CA4/P1: ML com G1→etiquetaB (grupo) e bloco de G2→etiquetaA: 2 pedidos (um por código), G1 com a etiqueta dele, a associação vence a escolhida', async () => {
+  const m = montar(); terceiroGrupo(m.db);
+  const { envios, pedidos } = filaML(m);
+  try {
+    rastreio.salvar(m.db, { loja: 'mercadolivre', alvo_tipo: 'grupo', alvo: '111@g.us', codigo: 'etiquetaB' });
+    bloco(m.db, 1, ['222@g.us']);
+    rastreio.salvar(m.db, { loja: 'mercadolivre', alvo_tipo: 'bloco', alvo: '1', codigo: 'etiquetaA' });
+    const id = inserirEnvio(m.db, payloadML(m.db), GRUPOS3);
+    await envios.runEnvio(id);
+    assert.equal(statusDe(m.db, id), 'concluido');
+    assert.deepEqual(pedidos, ['etiquetaB', 'etiquetaA'], 'o link é por código: o do bloco é o mesmo da escolhida e não é pedido de novo');
+    assert.deepEqual(m.wa.simulated.map((x) => x.jid), GRUPOS3, 'a ordem dos grupos não muda');
+    const [l1, l2, l3] = m.wa.simulated.map(linkDoTexto);
+    assert.match(l1, /^https:\/\/meli\.la\/fake-etiquetaB-\d+$/);
+    assert.match(l2, /^https:\/\/meli\.la\/fake-etiquetaA-\d+$/);
+    assert.equal(l3, l2, 'mesmo código, mesmo link');
+    assert.deepEqual(linhas(m.db, 'SELECT message FROM log ORDER BY id').map((l) => l.message),
+      ['Enviado com a etiqueta etiquetaB', 'Enviado com a etiqueta etiquetaA', 'Enviado com a etiqueta etiquetaA']);
+    assert.deepEqual(rastreados(m.db).map(({ jid, link, codigo, nivel, bloco_id, esperado, motivo }) => ({ jid, link, codigo, nivel, bloco_id, esperado, motivo })), [
+      { jid: '111@g.us', link: l1, codigo: 'etiquetaB', nivel: 'grupo', bloco_id: null, esperado: 1, motivo: null },
+      { jid: '222@g.us', link: l2, codigo: 'etiquetaA', nivel: 'bloco', bloco_id: 1, esperado: 1, motivo: null },
+      { jid: G3, link: l3, codigo: 'etiquetaA', nivel: 'padrao', bloco_id: null, esperado: 0, motivo: null },
+    ]);
+  } finally { m.db.close(); }
+});
+
+test('CA4/CA9: etiqueta associada falha → o grupo recebe o link padrão (esperado 1, falha_link); padrão falha → só os grupos do padrão falham', async () => {
+  const m = montar(); terceiroGrupo(m.db);
+  const { envios, pedidos, falhar } = filaML(m);
+  try {
+    rastreio.salvar(m.db, { loja: 'mercadolivre', alvo_tipo: 'grupo', alvo: '111@g.us', codigo: 'etiquetaB' });
+    // 1. a associada falha: G1 cai no link de afiliado padrão (nunca link comum)
+    falhar.add('etiquetaB');
+    const a = inserirEnvio(m.db, payloadML(m.db), GRUPOS3);
+    await envios.runEnvio(a);
+    assert.equal(statusDe(m.db, a), 'concluido');
+    assert.deepEqual(pedidos, ['etiquetaB', 'etiquetaA']);
+    const links = m.wa.simulated.map(linkDoTexto);
+    assert.ok(links.every((l) => /^https:\/\/meli\.la\/fake-etiquetaA-\d+$/.test(l)) && new Set(links).size === 1, links.join(' '));
+    assert.deepEqual(rastreados(m.db, a).map(({ jid, codigo, nivel, esperado, motivo }) => ({ jid, codigo, nivel, esperado, motivo })), [
+      { jid: '111@g.us', codigo: 'etiquetaA', nivel: 'padrao', esperado: 1, motivo: 'falha_link' },
+      { jid: '222@g.us', codigo: 'etiquetaA', nivel: 'padrao', esperado: 0, motivo: null },
+      { jid: G3, codigo: 'etiquetaA', nivel: 'padrao', esperado: 0, motivo: null },
+    ]);
+
+    // 2. a associada funciona e o padrão falha: só os grupos do padrão ficam com erro; nada de linha para eles
+    falhar.clear(); falhar.add('etiquetaA'); pedidos.length = 0; m.wa.simulated.length = 0;
+    const b = inserirEnvio(m.db, payloadML(m.db), GRUPOS3);
+    await envios.runEnvio(b);
+    assert.equal(statusDe(m.db, b), 'erro');
+    assert.deepEqual(m.wa.simulated.map((x) => x.jid), ['111@g.us']);
+    assert.match(linkDoTexto(m.wa.simulated[0]), /fake-etiquetaB-/);
+    assert.deepEqual(linhas(m.db, 'SELECT jid, ok, erro FROM envio_resultados WHERE envio_id = ? ORDER BY id', b), [
+      { jid: '111@g.us', ok: 1, erro: null },
+      { jid: '222@g.us', ok: 0, erro: 'link de afiliado não gerado: a extensão não conseguiu' },
+      { jid: G3, ok: 0, erro: 'link de afiliado não gerado: a extensão não conseguiu' },
+    ]);
+    assert.deepEqual(rastreados(m.db, b).map((l) => [l.jid, l.codigo, l.nivel]), [['111@g.us', 'etiquetaB', 'grupo']]);
+
+    // 3. tudo falha: o mesmo de hoje (erro em cada grupo, sem tentar enviar, motivo no resultado)
+    falhar.add('etiquetaB'); m.wa.simulated.length = 0;
+    const c = inserirEnvio(m.db, payloadML(m.db), GRUPOS3);
+    await envios.runEnvio(c);
+    assert.equal(statusDe(m.db, c), 'erro');
+    assert.equal(m.wa.simulated.length, 0);
+    assert.deepEqual(JSON.parse(m.db.prepare('SELECT resultado FROM envios WHERE id = ?').get(c).resultado),
+      { ok: 0, erro: 3, motivo: 'link de afiliado não gerado: a extensão não conseguiu' });
+    assert.equal(rastreados(m.db, c).length, 0);
+  } finally { m.db.close(); }
+});
+
+test('CA9: ML sem associação com o link falhando continua igual a hoje (um pedido, erro em todos, nenhuma linha de rastreio)', async () => {
+  const m = montar(); terceiroGrupo(m.db);
+  const { envios, pedidos, falhar } = filaML(m);
+  try {
+    falhar.add('etiquetaA');
+    const id = inserirEnvio(m.db, payloadML(m.db), GRUPOS3);
+    await envios.runEnvio(id);
+    assert.deepEqual(pedidos, ['etiquetaA']);
+    assert.deepEqual(linhas(m.db, 'SELECT message FROM log ORDER BY id').map((l) => l.message),
+      Array(3).fill('Não enviado: link de afiliado não gerado: a extensão não conseguiu'));
+    assert.equal(rastreados(m.db).length, 0);
+  } finally { m.db.close(); }
+});
+
+test('CA3: Amazon por bloco → link com o ID do bloco; sem associação, a tag de Conexões; associação inválida cai na tag padrão; espelho registra a origem', async () => {
+  const m = montar(); terceiroGrupo(m.db);
+  const amazon = createAmazon({ db: m.db, fetch: async () => { throw new Error('rede proibida'); }, esperar: async () => {}, lerConexao: () => ({ tag: TAG }) });
+  const envios = createEnvios({ db: m.db, wa: m.wa, links: m.links, ml: m.ml, fast: true, dir: m.dir, amazon });
+  const payload = {
+    url: `https://www.amazon.com.br/dp/${ASIN}`, loja: 'amazon', asin: ASIN, tag_id: null, etiqueta: null, template_id: 1, template_criado_em: tplCriadoEm(m.db),
+    fonte_dados: 'texto', origem: { tipo: 'espelho', espelho_id: 3, nome: 'Eletrônicos' }, offer: { ...OFERTA_API, image: null },
+  };
+  const comTag = (t) => `https://www.amazon.com.br/dp/${ASIN}?tag=${t}`;
+  try {
+    bloco(m.db, 1, ['111@g.us', '222@g.us']);
+    rastreio.salvar(m.db, { loja: 'amazon', alvo_tipo: 'bloco', alvo: '1', codigo: 'turbob1-20' });
+    const id = inserirEnvio(m.db, payload, GRUPOS3);
+    await envios.runEnvio(id);
+    assert.equal(statusDe(m.db, id), 'concluido');
+    assert.deepEqual(m.wa.simulated.map(linkDoTexto), [comTag('turbob1-20'), comTag('turbob1-20'), comTag(TAG)]);
+    assert.deepEqual(linhas(m.db, 'SELECT rule_name, message FROM log ORDER BY id').map((l) => [l.rule_name, l.message]),
+      Array(3).fill(['Espelho: Eletrônicos', 'Enviado com a tag de associado da Amazon']));
+    assert.deepEqual(rastreados(m.db, id), [
+      { jid: '111@g.us', loja: 'amazon', origem: 'espelho', rule_id: null, envio_id: id, oferta_chave: `ASIN:${ASIN}`, link: comTag('turbob1-20'), codigo: 'turbob1-20', nivel: 'bloco', bloco_id: 1, esperado: 1, motivo: null },
+      { jid: '222@g.us', loja: 'amazon', origem: 'espelho', rule_id: null, envio_id: id, oferta_chave: `ASIN:${ASIN}`, link: comTag('turbob1-20'), codigo: 'turbob1-20', nivel: 'bloco', bloco_id: 1, esperado: 1, motivo: null },
+      { jid: G3, loja: 'amazon', origem: 'espelho', rule_id: null, envio_id: id, oferta_chave: `ASIN:${ASIN}`, link: comTag(TAG), codigo: TAG, nivel: 'padrao', bloco_id: null, esperado: 0, motivo: null },
+    ]);
+
+    // associação gravada por fora com tag fora do formato: nunca link sem tag; cai na tag de Conexões com o motivo
+    m.db.prepare("UPDATE rastreio_codigos SET codigo = 'tag inválida!' WHERE loja = 'amazon'").run();
+    m.wa.simulated.length = 0;
+    const ruim = inserirEnvio(m.db, { ...payload, origem: { tipo: 'manual' } }, GRUPOS3);
+    await envios.runEnvio(ruim);
+    assert.deepEqual(m.wa.simulated.map(linkDoTexto), [comTag(TAG), comTag(TAG), comTag(TAG)]);
+    assert.deepEqual(rastreados(m.db, ruim).map((l) => [l.origem, l.codigo, l.nivel, l.esperado, l.motivo]), [
+      ['manual', TAG, 'padrao', 1, 'falha_link'], ['manual', TAG, 'padrao', 1, 'falha_link'], ['manual', TAG, 'padrao', 0, null],
+    ]);
+
+    // sem associação: todos com a tag de Conexões, como hoje
+    m.db.prepare('DELETE FROM rastreio_codigos').run();
+    m.wa.simulated.length = 0;
+    const semAssoc = inserirEnvio(m.db, payload, GRUPOS3);
+    await envios.runEnvio(semAssoc);
+    assert.deepEqual(m.wa.simulated.map(linkDoTexto), [comTag(TAG), comTag(TAG), comTag(TAG)]);
+    assert.ok(rastreados(m.db, semAssoc).every((l) => l.nivel === 'padrao' && l.esperado === 0 && l.codigo === TAG));
+  } finally { m.db.close(); }
+});
+
+test('rastreio (achado R5 da revisão): Amazon com ID de rastreamento recusado → aviso no Histórico como nas regras, sem o valor do ID', async () => {
+  const m = montar(); terceiroGrupo(m.db);
+  const amazon = createAmazon({ db: m.db, fetch: async () => { throw new Error('rede proibida'); }, esperar: async () => {}, lerConexao: () => ({ tag: TAG }) });
+  const envios = createEnvios({ db: m.db, wa: m.wa, links: m.links, ml: m.ml, fast: true, dir: m.dir, amazon });
+  const payload = {
+    url: `https://www.amazon.com.br/dp/${ASIN}`, loja: 'amazon', asin: ASIN, tag_id: null, etiqueta: null, template_id: 1, template_criado_em: tplCriadoEm(m.db),
+    fonte_dados: 'texto', origem: { tipo: 'manual' }, offer: { ...OFERTA_API, image: null },
+  };
+  try {
+    bloco(m.db, 1, ['111@g.us', '222@g.us']);
+    // gravadas por fora (o salvar recusaria): o montarLink não aceita a tag e o grupo cai na tag de Conexões
+    m.db.prepare(`INSERT INTO rastreio_codigos (loja, alvo_tipo, alvo, codigo, criado_em, atualizado_em)
+      VALUES ('amazon', 'bloco', '1', 'bloco inválido!', 1, 1), ('amazon', 'grupo', ?, 'grupo inválido!', 1, 1)`).run(G3);
+    const id = inserirEnvio(m.db, payload, GRUPOS3);
+    await envios.runEnvio(id);
+    assert.equal(statusDe(m.db, id), 'concluido');
+    const log = linhas(m.db, 'SELECT level, message FROM log ORDER BY id');
+    assert.deepEqual(log.filter((l) => l.level === 'aviso').map((l) => l.message), [
+      'Rastreio: o ID de rastreamento do bloco foi recusado; os grupos receberam o link com a sua tag.',
+      'Rastreio: o ID de rastreamento do grupo foi recusado; o grupo recebeu o link com a sua tag.',
+    ]);
+    assert.ok(log.every((l) => !/inválido|pedro-20/.test(l.message)), 'nem o ID recusado nem a tag vão ao Histórico');
+    assert.equal(log.filter((l) => l.level === 'ok').length, 3);
+  } finally { m.db.close(); }
+});
+
+test('CA1: retomada (grupo já ok na ocorrência) não manda de novo nem duplica a linha de rastreio', async () => {
+  const m = montar(); terceiroGrupo(m.db);
+  const { envios, pedidos } = filaML(m);
+  try {
+    const id = inserirEnvio(m.db, payloadML(m.db), GRUPOS3);
+    const { next_run_at: oc } = m.db.prepare('SELECT next_run_at FROM envios WHERE id = ?').get(id);
+    m.db.prepare('INSERT INTO envio_resultados (envio_id, ocorrencia, ts, jid, group_name, ok, erro) VALUES (?,?,?,?,?,1,NULL)').run(id, oc, Date.now(), '111@g.us', 'Achadinhos');
+    await envios.runEnvio(id);
+    assert.deepEqual(m.wa.simulated.map((x) => x.jid), ['222@g.us', G3]);
+    assert.deepEqual(rastreados(m.db, id).map((l) => l.jid), ['222@g.us', G3]);
+    // de novo na mesma ocorrência (queda depois do fim): ninguém falta, nada sai, nenhuma linha nova
+    m.db.prepare("UPDATE envios SET status = 'pendente' WHERE id = ?").run(id);
+    await envios.runEnvio(id);
+    assert.equal(m.wa.simulated.length, 2);
+    assert.equal(rastreados(m.db, id).length, 2);
+    assert.deepEqual(pedidos, ['etiquetaA']);
+  } finally { m.db.close(); }
+});
+
+test('CA2/CA9: Shopee pela API: sem associação, payload e pedidos como hoje; com Sub_id por bloco, base primeiro e um link por Sub_id, guardados em links_rastreio', async (t) => {
+  const erros = t.mock.method(console, 'error', () => {});
+  const s = await subirShopee();
+  terceiroGrupo(s.db);
+  s.estado.link = (consulta) => { const sub = /subIds:\["(\w+)"\]/.exec(consulta)?.[1]; return sub ? `https://s.shopee.com.br/Sub${sub}` : LINK_API; };
+  const mutacoes = () => s.fetchF.chamadas.filter((c) => c.consulta?.startsWith('mutation')).map((c) => /subIds:\["(\w+)"\]/.exec(c.consulta)?.[1] ?? 'base');
+  try {
+    const corpo = { tipo: 'oferta', url: URL_PRODUTO_SHOPEE, template_id: 1, group_jids: GRUPOS3 };
+    const r = await s.post('/api/envios', corpo);
+    assert.equal(r.status, 200, r.txt);
+    assert.equal(await terminar(s.db, r.json.id), 'concluido');
+    assert.deepEqual(mutacoes(), ['base']);
+    assert.equal(Object.hasOwn(payloadDe(s.db, r.json.id), 'links_rastreio'), false, 'sem associação, o payload é o de hoje');
+    assert.ok(s.wa.simulated.every((x) => linkDoTexto(x) === LINK_API));
+    assert.deepEqual(rastreados(s.db, r.json.id).map((l) => [l.jid, l.loja, l.link, l.codigo, l.nivel, l.esperado]),
+      GRUPOS3.map((j) => [j, 'shopee', LINK_API, null, 'padrao', 0]));
+
+    // B1 = {111} com b1, B2 = {222} com b2; 333 sem associação. O link base já está guardado (não é pedido de novo)
+    bloco(s.db, 1, ['111@g.us']); bloco(s.db, 2, ['222@g.us']);
+    rastreio.salvar(s.db, { loja: 'shopee', alvo_tipo: 'bloco', alvo: '1', codigo: 'b1' });
+    rastreio.salvar(s.db, { loja: 'shopee', alvo_tipo: 'bloco', alvo: '2', codigo: 'b2' });
+    s.wa.simulated.length = 0;
+    const r2 = await s.post('/api/envios', corpo);
+    assert.equal(r2.status, 200, r2.txt);
+    assert.equal(await terminar(s.db, r2.json.id), 'concluido');
+    assert.deepEqual(mutacoes(), ['base', 'b1', 'b2']);
+    const p = payloadDe(s.db, r2.json.id);
+    assert.equal(p.link_afiliado, LINK_API, 'o link base continua no payload (o código antigo usa ele)');
+    assert.deepEqual(p.links_rastreio, {
+      '111@g.us': { link: 'https://s.shopee.com.br/Subb1', codigo: 'b1', nivel: 'bloco', bloco_id: 1, esperado: 1, motivo: null },
+      '222@g.us': { link: 'https://s.shopee.com.br/Subb2', codigo: 'b2', nivel: 'bloco', bloco_id: 2, esperado: 1, motivo: null },
+      [G3]: { link: LINK_API, codigo: null, nivel: 'padrao', bloco_id: null, esperado: 0, motivo: null },
+    });
+    assert.deepEqual(s.wa.simulated.map((x) => [x.jid, linkDoTexto(x)]), [['111@g.us', 'https://s.shopee.com.br/Subb1'], ['222@g.us', 'https://s.shopee.com.br/Subb2'], [G3, LINK_API]]);
+    assert.deepEqual(rastreados(s.db, r2.json.id).map((l) => [l.jid, l.origem, l.link, l.codigo, l.nivel, l.bloco_id, l.esperado, l.motivo]), [
+      ['111@g.us', 'manual', 'https://s.shopee.com.br/Subb1', 'b1', 'bloco', 1, 1, null],
+      ['222@g.us', 'manual', 'https://s.shopee.com.br/Subb2', 'b2', 'bloco', 2, 1, null],
+      [G3, 'manual', LINK_API, null, 'padrao', null, 0, null],
+    ]);
+    assert.equal(s.linksShopee.status().pending, 0, 'a extensão não foi chamada');
+    assert.equal(erros.mock.callCount(), 0);
+  } finally { await s.fechar(); }
+});
+
+test('CA2/D5: linksRastreioShopee — limite da Shopee no 2º, teto de Sub_ids por envio, Sub_id não aplicado, link fora do formato e falha caem no link base', async () => {
+  const m = montar();
+  m.db.prepare("INSERT INTO conexoes (plataforma, config, segredos) VALUES ('shopee', ?, '{}')").run(JSON.stringify({ id_afiliado: ID_AF }));
+  const jids = [];
+  for (let i = 1; i <= MAX_SUBIDS_POR_ENVIO + 1; i++) {
+    const jid = `9${String(i).padStart(3, '0')}@g.us`; jids.push(jid);
+    m.db.prepare('INSERT INTO groups (jid, name, size, updated_at) VALUES (?,?,?,?)').run(jid, `G${i}`, 10, Date.now());
+    bloco(m.db, i, [jid]);
+    rastreio.salvar(m.db, { loja: 'shopee', alvo_tipo: 'bloco', alvo: String(i), codigo: `s${i}` });
+  }
+  const pedidos = [];
+  let resposta = (subId) => ({ link: `https://s.shopee.com.br/Sub${subId}`, sub_id: subId });
+  const lojas = { ...lojasPadrao, linkAfiliadoShopeeRastreado: async (base, deps) => { pedidos.push([base, deps.subId, deps.idAfiliado]); return resposta(deps.subId, pedidos.length); } };
+  const envios = createEnvios({ db: m.db, wa: m.wa, links: m.links, ml: m.ml, fast: true, dir: m.dir, shopee: {}, lojas });
+  const gerar = (lista) => envios.linksRastreioShopee({ urlProduto: URL_PRODUTO_SHOPEE, jids: lista, base: LINK_API });
+  const base = (motivo) => ({ link: LINK_API, codigo: null, nivel: 'nenhum', bloco_id: null, esperado: 1, motivo });
+  try {
+    assert.equal(MAX_SUBIDS_POR_ENVIO, 10);
+    // teto: 11 Sub_ids distintos → 10 pedidos + o 11º grupo com o link base
+    const r = await gerar(jids);
+    assert.equal(pedidos.length, 10);
+    assert.deepEqual(pedidos[0], [URL_PRODUTO_SHOPEE, 's1', ID_AF]);
+    assert.deepEqual(r[jids[0]], { link: 'https://s.shopee.com.br/Subs1', codigo: 's1', nivel: 'bloco', bloco_id: 1, esperado: 1, motivo: null });
+    assert.deepEqual(r[jids[10]], base('limite_subids'));
+
+    // limite da Shopee (60/h) no 2º: o 2º e os seguintes ficam com o base, sem novos pedidos
+    pedidos.length = 0;
+    resposta = (subId, n) => { if (n >= 2) throw new Error(LIMITE_SHOPEE_ATINGIDO); return { link: `https://s.shopee.com.br/Sub${subId}`, sub_id: subId }; };
+    const r2 = await gerar(jids.slice(0, 4));
+    assert.equal(pedidos.length, 2);
+    assert.deepEqual([r2[jids[0]].codigo, r2[jids[1]], r2[jids[2]], r2[jids[3]]], ['s1', base('limite_shopee'), base('limite_shopee'), base('limite_shopee')]);
+
+    // não aplicado, link fora do formato (nunca sai), erro qualquer, Sub_id que não é o pedido
+    for (const [resp, motivo] of [
+      [() => ({ link: 'https://s.shopee.com.br/SemSub', sub_id: null }), 'subid_nao_aplicado'],
+      [(sub) => ({ link: 'https://evil.example/x', sub_id: sub }), 'falha_link'],
+      [(sub) => ({ link: 'https://meli.la/abc', sub_id: sub }), 'falha_link'],
+      [() => { throw new Error('qualquer'); }, 'falha_link'],
+      [() => ({ link: 'https://s.shopee.com.br/Outro', sub_id: 'outro' }), 'falha_link'],
+      [() => { throw new lojasPadrao.SubIdIndisponivel('subid_extensao_indisponivel'); }, 'subid_extensao_indisponivel'],
+    ]) {
+      resposta = resp;
+      assert.deepEqual((await gerar([jids[0]]))[jids[0]], base(motivo), motivo);
+    }
+
+    // sem associação: o base para todos, sem pedido nenhum
+    pedidos.length = 0;
+    m.db.prepare('DELETE FROM rastreio_codigos').run();
+    const r3 = await gerar(['111@g.us', '222@g.us']);
+    assert.deepEqual(r3, Object.fromEntries(['111@g.us', '222@g.us'].map((j) => [j, { link: LINK_API, codigo: null, nivel: 'padrao', bloco_id: null, esperado: 0, motivo: null }])));
+    assert.equal(pedidos.length, 0);
+    // base fora do formato: recusa (o link base é o fallback de todos)
+    await assert.rejects(envios.linksRastreioShopee({ urlProduto: URL_PRODUTO_SHOPEE, jids: ['111@g.us'], base: 'https://evil.example/x' }));
+  } finally { m.db.close(); }
+});
+
+test('CA2 (teto de 60/h): sem a API, nenhum Sub_id é pedido à extensão (SUBID_PELA_EXTENSAO desligado); vai o link base com o motivo', async () => {
+  const m = montar();
+  m.db.prepare("INSERT INTO conexoes (plataforma, config, segredos) VALUES ('shopee', ?, '{}')").run(JSON.stringify({ id_afiliado: ID_AF }));
+  bloco(m.db, 1, ['111@g.us']);
+  rastreio.salvar(m.db, { loja: 'shopee', alvo_tipo: 'bloco', alvo: '1', codigo: 'b1' });
+  const links = createLinkService({ getMode: () => 'extension' });
+  const pedidos = [];
+  links.requestLinkShopee = async (a) => { pedidos.push(a); throw new Error('não era para pedir'); };
+  const shopee = { apiUtil: () => false, linkGuardado: () => null, guardarLink: () => true };
+  const envios = createEnvios({ db: m.db, wa: m.wa, links, ml: m.ml, fast: true, dir: m.dir, shopee });
+  try {
+    const r = await envios.linksRastreioShopee({ urlProduto: URL_PRODUTO_SHOPEE, jids: ['111@g.us', '222@g.us'], base: LINK_EXT });
+    assert.deepEqual(r['111@g.us'], { link: LINK_EXT, codigo: null, nivel: 'nenhum', bloco_id: null, esperado: 1, motivo: 'subid_extensao_indisponivel' });
+    assert.deepEqual(r['222@g.us'], { link: LINK_EXT, codigo: null, nivel: 'padrao', bloco_id: null, esperado: 0, motivo: null });
+    assert.deepEqual(pedidos, []);
+  } finally { m.db.close(); }
+});
+
+test('CA2/CA9: no envio, links_rastreio do payload é conferido de novo: fora do formato → link base; sem o mapa, associação nova conta como não rastreada', async () => {
+  const m = montar(); terceiroGrupo(m.db);
+  const envios = createEnvios({ db: m.db, wa: m.wa, links: m.links, ml: m.ml, fast: true, dir: m.dir, shopee: {} });
+  const payload = {
+    url: URL_PRODUTO_SHOPEE, loja: 'shopee', shop_id: SHOP, item_id: ITEM, tag_id: null, etiqueta: null, template_id: 1, template_criado_em: tplCriadoEm(m.db),
+    fonte_dados: 'api', origem: { tipo: 'manual' }, link_afiliado: LINK_API, offer: { ...OFERTA_SHOPEE, image: null },
+  };
+  const ok = (codigo, bloco_id) => ({ link: `https://s.shopee.com.br/Sub${codigo}`, codigo, nivel: 'bloco', bloco_id, esperado: 1, motivo: null });
+  try {
+    const id = inserirEnvio(m.db, { ...payload, links_rastreio: {
+      '111@g.us': { ...ok('b1', 1), link: 'https://evil.example/x' },
+      '222@g.us': ok('b2', 2),
+      [G3]: { ...ok('b3', 3), codigo: 'b-3' },
+    } }, GRUPOS3);
+    await envios.runEnvio(id);
+    assert.equal(statusDe(m.db, id), 'concluido');
+    assert.deepEqual(m.wa.simulated.map(linkDoTexto), [LINK_API, 'https://s.shopee.com.br/Subb2', LINK_API]);
+    assert.deepEqual(rastreados(m.db, id).map((l) => [l.jid, l.link, l.codigo, l.nivel, l.bloco_id, l.esperado, l.motivo]), [
+      ['111@g.us', LINK_API, null, 'nenhum', null, 1, 'link_invalido'],
+      ['222@g.us', 'https://s.shopee.com.br/Subb2', 'b2', 'bloco', 2, 1, null],
+      [G3, LINK_API, null, 'nenhum', null, 1, 'link_invalido'],
+    ]);
+
+    // mapa que não é objeto: todos com o base
+    for (const lixo of ['lixo', [ok('b1', 1)], 7]) {
+      m.wa.simulated.length = 0;
+      const x = inserirEnvio(m.db, { ...payload, links_rastreio: lixo }, ['222@g.us']);
+      await envios.runEnvio(x);
+      assert.deepEqual(m.wa.simulated.map(linkDoTexto), [LINK_API], JSON.stringify(lixo));
+    }
+
+    // envio gravado sem o mapa (antes da associação existir): sai com o base; a linha diz que era esperado e não saiu
+    bloco(m.db, 9, [G3]);
+    rastreio.salvar(m.db, { loja: 'shopee', alvo_tipo: 'bloco', alvo: '9', codigo: 'b9' });
+    m.wa.simulated.length = 0;
+    const antigo = inserirEnvio(m.db, payload, ['222@g.us', G3]);
+    await envios.runEnvio(antigo);
+    assert.deepEqual(m.wa.simulated.map(linkDoTexto), [LINK_API, LINK_API]);
+    assert.deepEqual(rastreados(m.db, antigo).map((l) => [l.jid, l.codigo, l.nivel, l.esperado, l.motivo]), [
+      ['222@g.us', null, 'padrao', 0, null], [G3, null, 'nenhum', 1, 'sem_link_rastreio'],
+    ]);
+  } finally { m.db.close(); }
+});
+
+test('CA1: falha ao gravar a linha de rastreio não derruba o envio nem vaza a mensagem do banco', async (t) => {
+  const erros = t.mock.method(console, 'error', () => {});
+  const m = montar();
+  const { envios } = filaML(m);
+  try {
+    m.db.exec('DROP TABLE rastreio_envios');
+    const id = inserirEnvio(m.db, payloadML(m.db), ['111@g.us']);
+    await envios.runEnvio(id);
+    assert.equal(statusDe(m.db, id), 'concluido');
+    assert.equal(m.wa.simulated.length, 1);
+    assert.ok(erros.mock.callCount() >= 1);
+    for (const { arguments: a } of erros.mock.calls) assert.doesNotMatch(a.join(' '), /rastreio_envios|meli\.la|111@g\.us/);
+  } finally { m.db.close(); }
 });
 
 test('nenhum teste deste arquivo acessou a rede', () => {

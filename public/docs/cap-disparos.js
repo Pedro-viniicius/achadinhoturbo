@@ -106,7 +106,7 @@ docsCapitulo({
           'Abra [[Disparo manual]].',
           'Cole o link do produto e clique em “Identificar”. O painel reconhece a loja, lê título, preço e foto e mostra “pronto para disparar”.',
           'Marque os grupos em “Grupos que vão receber”.',
-          'Escolha o template e a “Etiqueta”. A etiqueta só existe no Mercado Livre.',
+          'Escolha o template e a “Etiqueta”. A etiqueta só existe no Mercado Livre. Se o grupo tem código de rastreio, a etiqueta dele vence a que você escolheu (veja [Rastreio por grupo](#docs/grupos/rastreio)).',
           'Confira a prévia e clique em “Disparar”.',
           'Veja o resultado no cartão “Histórico”, ao lado.',
         ] },
@@ -207,7 +207,7 @@ docsCapitulo({
           'Clique em “Criar disparo automático”.',
         ] },
         { p: 'Cada disparo vira um cartão com interruptor e os botões “Enviar agora”, “Ver ofertas”, “Editar”, “Limpar ‘já enviadas’” e “Excluir”.' },
-        { nota: 'dica', texto: 'Para o mesmo grupo receber de duas etiquetas, crie dois disparos apontando para ele.' },
+        { nota: 'dica', texto: 'Para o mesmo grupo receber de duas etiquetas, crie dois disparos apontando para ele. Se o grupo tem código de rastreio, a etiqueta dele vence a do disparo ([veja aqui](#docs/grupos/rastreio)).' },
       ],
     },
     {

@@ -751,6 +751,17 @@ const FATOS = [
   { nome: 'tamanho máximo da mensagem', valor: 4096, texto: (v) => new RegExp(`[Aa]té ${v} caracteres`), codigo: [['src/envios.js', /const MAX_TEXTO = (\d+);/]] },
   { nome: 'validade do convite (dias)', valor: 7, texto: (v) => new RegExp(`(?:convite|link) vale ${v} dias`), codigo: [['src/auth.js', /export const CONVITE_MS = (\d+) \* 24 \* 60 \* 60 \* 1000;/]] },
   { nome: 'fontes por regra', valor: 5, texto: (v) => new RegExp(`aceita até (?:${numero(v)}) fontes`), codigo: [['src/db.js', /export const MAX_SOURCES = (\d+);/]] },
+  { nome: 'Sub_ids da Shopee por envio', valor: 10, texto: (v) => new RegExp(`até ${v} Sub_ids por envio`), codigo: [['src/envios.js', /export const MAX_SUBIDS_POR_ENVIO = (\d+);/]] },
+  { nome: 'tamanho do Sub_id da Shopee', valor: 30, texto: (v) => new RegExp(`Sub_id[^.]{0,80}até ${v} caracteres`), codigo: [['src/shopee.js', /export const RE_SUB_ID = \/\^\[A-Za-z0-9\]\{1,(\d+)\}\$\/;/], ['src/rastreio.js', /export const MAX_SUB_ID = (\d+);/]] },
+  { nome: 'guarda do histórico do rastreio (dias)', valor: 400, texto: (v) => new RegExp(`histórico do rastreio[^.]{0,80}${v} dias`), codigo: [['src/rastreio.js', /export const RETENCAO_RASTREIO_DIAS = (\d+);/]] },
+  { nome: 'cobertura Boa (%)', valor: 90, texto: (v) => new RegExp(`Boa[^.]{0,30}${v}% ou mais`), codigo: [['public/ganhos.js', /const chave = p >= (\d+) \? 'boa'/]] },
+  { nome: 'cobertura Baixa (%)', valor: 60, texto: (v) => new RegExp(`Baixa[^.]{0,30}abaixo de ${v}%`), codigo: [['public/ganhos.js', /p >= \d+ \? 'boa' : p >= (\d+) \? 'parcial'/]] },
+  { nome: 'cobertura da loja que leva Atenção (%)', valor: 80, texto: (v) => new RegExp(`Atenção[^.]{0,120}abaixo de ${v}%`), codigo: [['public/ganhos.js', /const GANHOS_LIMIAR_LOJA = (\d+);/]] },
+  { nome: 'tamanho máximo do arquivo de comissões (MB)', valor: 5, texto: (v) => new RegExp(`até ${v} MB`), codigo: [['src/csv.js', /export const MAX_BYTES_ARQUIVO = (\d+) \* 1024 \* 1024;/], ['public/ganhos.js', /const GANHOS_MAX_BYTES = (\d+) \* 1024 \* 1024;/]] },
+  // 100_000 no código: o grupo captura só as centenas de milhar (o "_000" fixo); o texto diz "até 100.000 linhas"
+  { nome: 'linhas máximas do arquivo de comissões (milhares)', valor: 100, texto: (v) => new RegExp(`até ${v}\\.000 linhas`), codigo: [['src/csv.js', /export const MAX_LINHAS_ARQUIVO = (\d+)_000;/]] },
+  { nome: 'dias máximos de um gasto com anúncios', valor: 366, texto: (v) => new RegExp(`gasto[^.]{0,60}até ${v} dias`), codigo: [['src/ganhos.js', /export const MAX_DIAS_GASTO = (\d+);/], ['public/ganhos.js', /const GANHOS_MAX_DIAS_GASTO = (\d+);/]] },
+  { nome: 'caracteres da observação do gasto', valor: 200, texto: (v) => new RegExp(`observação[^.]{0,40}até ${v} caracteres`), codigo: [['src/ganhos.js', /export const MAX_NOTA = (\d+);/], ['public/ganhos.js', /const GANHOS_MAX_NOTA = (\d+);/]] },
 ];
 
 test('FATOS: cada número aparece nos Docs e no README e bate com a constante do código', () => {

@@ -15,6 +15,11 @@
 // O link (https://s.shopee.com.br/…, da conta do dono: API primeiro, extensão de reserva) é gerado AO CRIAR o envio,
 // a partir do endereço do produto sem parâmetros, e guardado no payload: qualquer falha recusa sem gravar nada, e o
 // envio (inclusive o agendado) não depende de rede para o link. O preparar só confere o link guardado.
+// Rastreio por grupo (plano dashboard-ganhos, etapa 7; ADR-006): o link é um por CÓDIGO distinto entre os grupos
+// (src/rastreio.js, agrupar; a associação do grupo/bloco vence a etiqueta escolhida, P1). Sem associação, um link só,
+// como antes (CA9). O código associado que falha cai no link de afiliado padrão, com `motivo`; nunca link comum.
+// Shopee: os links com Sub_id saem ao criar (linksRastreioShopee) e ficam em `payload.links_rastreio`, conferidos de
+// novo no envio. Cada grupo que recebeu a oferta ganha uma linha em rastreio_envios (CA1).
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -22,13 +27,15 @@ import crypto from 'node:crypto';
 import express from 'express';
 import { addLog, getSetting } from './db.js';
 import * as lojasPadrao from './lojas.js';
+import * as rastreio from './rastreio.js';
+import { LIMITE_SHOPEE_ATINGIDO } from './links.js';
 import { LinkNaoResolvido } from './amazon.js';
-import { ErroShopee, LinkShopeeNaoResolvido, LINK_SHOPEE, RE_ID_AFILIADO, extrairIds } from './shopee.js';
+import { ErroShopee, LinkShopeeNaoResolvido, LINK_SHOPEE, RE_ID_AFILIADO, RE_SUB_ID, extrairIds } from './shopee.js';
 import { montarEnquete } from './whatsapp.js';
 import { renderTemplate, discountPct } from './template.js';
 import { sleep, jitter } from './util.js';
 
-const { PLATAFORMAS, LojaNaoConectada } = lojasPadrao;
+const { PLATAFORMAS, LojaNaoConectada, SubIdIndisponivel } = lojasPadrao;
 
 const HHMM = /^([01]?\d|2[0-3]):([0-5]\d)$/;
 const DATA = /^(\d{4})-(\d{2})-(\d{2})$/;
@@ -74,6 +81,15 @@ const LINK_EXEMPLO_SHOPEE = 'https://s.shopee.com.br/(gerado ao disparar)';
 const CAUSAS_SHOPEE = new Set(['sem_credenciais', 'credencial_recusada', 'conta_restrita', 'sem_acesso', 'cota', 'nao_encontrado', 'indisponivel']);
 const chaveShopee = (ids) => `SHOPEE:${ids.shopId}.${ids.itemId}`;
 const urlDoAsin = (asin) => `https://www.amazon.com.br/dp/${asin}`;
+// Rastreio (plano dashboard-ganhos, D5): no máximo 10 links com Sub_id por envio da Shopee; do 11º em diante, o base
+export const MAX_SUBIDS_POR_ENVIO = 10;
+const ORIGENS_RASTREIO = new Set(['manual', 'catalogo', 'espelho']);
+const MAX_MOTIVO_RASTREIO = 40;
+/** Linha do grupo que fica com o link base da Shopee: sem código, esperado ou não, com o motivo. */
+const baseShopee = (link, motivo, esperado = 1) => ({ link, codigo: null, nivel: esperado ? 'nenhum' : 'padrao', bloco_id: null, esperado, motivo });
+/** Só guarda o mapa no payload se algum grupo tem associação: sem nenhuma, o payload é o de antes (CA9). */
+const comLinksRastreio = (mapa) => (Object.values(mapa).some((l) => l.esperado) ? { links_rastreio: mapa } : {});
+const tagDoLink = (link) => { try { return new URL(link).searchParams.get('tag') || null; } catch { return null; } };
 /** Link com a tag mascarada, para as prévias do painel (CA7): a tag só vai inteira ao WhatsApp. */
 const mascararTag = (link) => String(link).replace(/([?&]tag=)[^&#]*/, '$1•••');
 
@@ -324,6 +340,21 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
     .run(id, ocorrencia, Date.now(), jid, nome, ok ? 1 : 0, erro);
   const logDe = (e, p) => (o) => addLog(db, { rule: { id: null, name: origemDoLog(e.tipo, p) }, offer_title: tituloDe(e.tipo, p) || null, ...o });
 
+  /**
+   * Linha de rastreio_envios do grupo que recebeu a oferta (CA1). Falha ao gravar não desfaz o envio (a mensagem já
+   * saiu) e vai ao console só pelo código do erro (a mensagem do banco pode trazer o link e o grupo).
+   */
+  function gravarRastreio(e, p, jid, linha) {
+    if (e.tipo !== 'oferta' || !linha?.link || !rastreio.LOJAS.includes(p.loja)) return;
+    const origem = ORIGENS_RASTREIO.has(p.origem?.tipo) ? p.origem.tipo : 'manual';
+    try {
+      rastreio.registrar(db, {
+        jid, loja: p.loja, origem, rule_id: origem === 'catalogo' ? p.origem.rule_id : null, envio_id: e.id, oferta_chave: p.offer?.key,
+        link: linha.link, codigo: linha.codigo, nivel: linha.nivel, bloco_id: linha.bloco_id, esperado: linha.esperado, motivo: linha.motivo,
+      });
+    } catch (err) { console.error('[envios] rastreio do envio:', err?.code || err?.name || 'erro'); }
+  }
+
   /** Grupos do corpo: lista não vazia, sem repetir, só grupos que existem na tabela `groups`. */
   function validarGrupos(lista) {
     if (!Array.isArray(lista) || !lista.length) throw new Error('Escolha ao menos um grupo.');
@@ -496,6 +527,75 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
   }
 
   /**
+   * Grupos de um envio divididos por código de rastreio (rastreio.agrupar). Se a leitura das associações falhar, o envio
+   * segue como sem associação (um código só, o padrão): o rastreio nunca impede a oferta de sair.
+   */
+  function agruparPorCodigo(loja, jids, padrao = null) {
+    const semAssociacao = () => [{ codigo: padrao, nivel: 'padrao', bloco_id: null, esperado: 0, motivo: null, jids: [...jids] }];
+    if (!rastreio.LOJAS.includes(loja)) return semAssociacao();
+    try { return rastreio.agrupar(db, { loja, jids, padrao }); } catch (e) {
+      console.error('[envios] associações de rastreio:', e?.code || e?.name || 'erro'); // sem a mensagem: pode trazer valores da query
+      return semAssociacao();
+    }
+  }
+
+  /**
+   * Um link da Shopee com o Sub_id (lojas: guardado → API → extensão, só se SUBID_PELA_EXTENSAO). → { link } se o
+   * Sub_id foi aplicado e o link é s.shopee.com.br; senão { motivo } (limite_shopee, subid_nao_aplicado,
+   * subid_extensao_indisponivel ou falha_link). Nunca lança.
+   */
+  async function linkComSubId(urlProduto, subId, idAfiliado) {
+    try {
+      const r = await lojas.linkAfiliadoShopeeRastreado(urlProduto, { shopee, links, idAfiliado, subId });
+      if (typeof r?.link !== 'string' || !LINK_SHOPEE.test(r.link)) return { motivo: 'falha_link' };
+      if (r.sub_id == null) return { motivo: 'subid_nao_aplicado' };
+      return r.sub_id === subId ? { link: r.link } : { motivo: 'falha_link' };
+    } catch (e) {
+      if (e instanceof SubIdIndisponivel) return { motivo: e.motivo };
+      if (e?.message === LIMITE_SHOPEE_ATINGIDO) return { motivo: 'limite_shopee' };
+      return { motivo: 'falha_link' };
+    }
+  }
+
+  /**
+   * Links da Shopee por Sub_id para os grupos de um envio (plano dashboard-ganhos, D5), gerados ao criar (Disparo
+   * manual) ou no "Enviar" do catálogo. `base` é o link de afiliado padrão (já gerado, ou o do catálogo): vale para
+   * quem não tem Sub_id e para toda falha. Um pedido por Sub_id distinto, até MAX_SUBIDS_POR_ENVIO; depois do limite
+   * da Shopee (ou sem a API, com a extensão sem Sub_id), os Sub_ids seguintes nem são pedidos.
+   * → { [jid]: { link, codigo, nivel, bloco_id, esperado, motivo } }. `base` fora de LINK_SHOPEE → ErroShopee('link_falhou').
+   */
+  async function linksRastreioShopee({ urlProduto, jids, base } = {}) {
+    if (typeof base !== 'string' || !LINK_SHOPEE.test(base)) throw new ErroShopee('link_falhou');
+    const porGrupo = {};
+    const porCodigo = new Map(); // Sub_id → { link } | { motivo }: o mesmo Sub_id nunca é pedido duas vezes
+    let pedidos = 0;
+    let parou = null; // motivo que vale para todos os Sub_ids seguintes (nenhum pedido a mais)
+    const idAfiliado = idAfiliadoShopee();
+    for (const g of agruparPorCodigo('shopee', Array.isArray(jids) ? jids : [])) {
+      let linha;
+      if (!g.codigo) linha = { link: base, codigo: null, nivel: g.nivel, bloco_id: g.bloco_id, esperado: g.esperado, motivo: g.motivo };
+      else {
+        if (!porCodigo.has(g.codigo)) {
+          let feito;
+          if (parou) feito = { motivo: parou };
+          else if (pedidos >= MAX_SUBIDS_POR_ENVIO) feito = { motivo: 'limite_subids' };
+          else {
+            pedidos++;
+            feito = await linkComSubId(urlProduto, g.codigo, idAfiliado);
+            if (feito.motivo === 'limite_shopee' || feito.motivo === 'subid_extensao_indisponivel') parou = feito.motivo;
+          }
+          porCodigo.set(g.codigo, feito);
+        }
+        const feito = porCodigo.get(g.codigo);
+        linha = feito.link ? { link: feito.link, codigo: g.codigo, nivel: g.nivel, bloco_id: g.bloco_id, esperado: 1, motivo: null }
+          : baseShopee(base, feito.motivo);
+      }
+      for (const jid of g.jids) porGrupo[jid] = { ...linha };
+    }
+    return porGrupo;
+  }
+
+  /**
    * Oferta da Shopee do disparo manual: ids, dados da API, os ajustes do painel e o link de afiliado, gerado por
    * último (só depois de a oferta estar válida). → campos do payload (a `url` passa a ser o endereço sem parâmetros)
    */
@@ -630,7 +730,12 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
         origem: { tipo: 'manual' },
       };
       if (loja.id === 'amazon') payload = { ...base, ...(await ofertaAmazon(url, conteudo.ajustes)) };
-      else if (loja.id === 'shopee') payload = { ...base, ...(await ofertaShopee(url, conteudo.ajustes)) };
+      else if (loja.id === 'shopee') {
+        const oferta = await ofertaShopee(url, conteudo.ajustes);
+        // os links com Sub_id vêm depois do base (o fallback de todos): falha de um Sub_id nunca recusa o envio
+        const porGrupo = await linksRastreioShopee({ urlProduto: oferta.url, jids: groupJids, base: oferta.link_afiliado });
+        payload = { ...base, ...oferta, ...comLinksRastreio(porGrupo) };
+      }
       else {
         const lida = await lerOfertaComUrl(loja.id, url, { ml, amazon, lojas });
         payload = { ...base, url: lida.url, offer: lida.offer };
@@ -664,8 +769,96 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
     }
   }
 
-  /** O que vai a cada grupo, preparado uma vez por ocorrência. → { enviar(jid) → texto do log } */
-  async function preparar(tipo, p) {
+  /**
+   * Linha de `payload.links_rastreio` conferida de novo no envio (o payload fica no banco): Sub_id com link
+   * s.shopee.com.br, ou o base. Qualquer coisa fora disso vira o base com motivo 'link_invalido'.
+   */
+  function entradaShopee(e, base) {
+    if (!e || typeof e !== 'object' || Array.isArray(e)) return baseShopee(base, 'link_invalido');
+    if (e.nivel === 'grupo' || e.nivel === 'bloco') {
+      const bloco = e.bloco_id == null ? null : Number.isInteger(e.bloco_id) ? e.bloco_id : NaN;
+      if (typeof e.link === 'string' && LINK_SHOPEE.test(e.link) && typeof e.codigo === 'string' && RE_SUB_ID.test(e.codigo) && !Number.isNaN(bloco)) {
+        return { link: e.link, codigo: e.codigo, nivel: e.nivel, bloco_id: bloco, esperado: 1, motivo: null };
+      }
+      return baseShopee(base, 'link_invalido');
+    }
+    if (e.nivel === 'padrao' || e.nivel === 'nenhum') {
+      const motivo = typeof e.motivo === 'string' && e.motivo ? e.motivo.slice(0, MAX_MOTIVO_RASTREIO) : null;
+      return { link: base, codigo: null, nivel: e.nivel, bloco_id: null, esperado: e.esperado ? 1 : 0, motivo };
+    }
+    return baseShopee(base, 'link_invalido');
+  }
+
+  /**
+   * Link de cada grupo, um pedido por código distinto. → Map jid → { link, codigo, nivel, bloco_id, esperado, motivo }
+   * ou { erro } (o link padrão do grupo não saiu). Sem nenhum link, lança o erro do padrão (o envio inteiro falha,
+   * como antes). Shopee: o link guardado no payload, sem rede. Amazon: a tag de Conexões é o padrão; o ID de
+   * rastreamento associado é montado do ASIN. Mercado Livre: a etiqueta do envio é o padrão.
+   */
+  async function linksPorGrupo(p, etiqueta, jids, avisos = []) {
+    const porGrupo = new Map();
+    if (p.loja === 'shopee') {
+      const mapa = p.links_rastreio && typeof p.links_rastreio === 'object' && !Array.isArray(p.links_rastreio) ? p.links_rastreio : null;
+      for (const jid of jids) {
+        if (mapa && Object.hasOwn(mapa, jid)) { porGrupo.set(jid, entradaShopee(mapa[jid], p.link_afiliado)); continue; }
+        // sem a linha (envio criado antes da associação, ou sem nenhuma ao criar): o base; a associação de agora conta
+        // como esperada e não rastreada
+        const [g] = agruparPorCodigo('shopee', [jid]);
+        porGrupo.set(jid, g?.esperado ? baseShopee(p.link_afiliado, 'sem_link_rastreio') : baseShopee(p.link_afiliado, null, 0));
+      }
+      return porGrupo;
+    }
+    const ehAmazon = p.loja === 'amazon';
+    const cache = new Map(); // código → { link } | { e }: cada código é pedido uma vez só, na ordem dos grupos
+    // ML: a etiqueta do envio e a associada estão no mesmo espaço (a associada igual à do envio não é pedida de novo);
+    // Amazon: o padrão é o link de hoje (tag de Conexões), à parte das tags associadas
+    const gerar = async (codigo, padrao) => {
+      const tag = padrao && !ehAmazon ? etiqueta : codigo;
+      const chave = padrao && ehAmazon ? '\u0000padrao' : tag;
+      if (!cache.has(chave)) {
+        let r;
+        try {
+          if (ehAmazon && padrao) r = { link: await lojas.linkAfiliado('amazon', { url: urlDoAsin(p.asin), asin: p.asin }, { links, amazon }) };
+          else if (ehAmazon) r = { link: amazon.montarLink(p.asin, { tag }) };
+          else r = { link: await lojas.linkAfiliado(p.loja, { url: p.url, tag }, { links, amazon }) };
+        } catch (e) { r = { e }; }
+        cache.set(chave, r);
+      }
+      return cache.get(chave);
+    };
+    // o código padrão: a etiqueta do envio (ML) ou a tag de Conexões, lida do link montado (Amazon)
+    const codigoPadrao = (r) => (ehAmazon ? tagDoLink(r.link) : etiqueta);
+    let primeiroErro = null;
+    for (const g of agruparPorCodigo(p.loja, jids, ehAmazon ? null : etiqueta)) {
+      const associado = g.nivel === 'grupo' || g.nivel === 'bloco';
+      let linha;
+      const r = associado ? await gerar(g.codigo, false) : await gerar(null, true);
+      if (r.link) {
+        linha = associado ? { link: r.link, codigo: g.codigo, nivel: g.nivel, bloco_id: g.bloco_id, esperado: 1, motivo: null }
+          : { link: r.link, codigo: codigoPadrao(r), nivel: 'padrao', bloco_id: null, esperado: g.esperado, motivo: g.motivo };
+      } else {
+        // o código associado falhou: o link de afiliado padrão (nunca link comum), com o motivo
+        const padrao = associado ? await gerar(null, true) : r;
+        linha = padrao.link ? { link: padrao.link, codigo: codigoPadrao(padrao), nivel: 'padrao', bloco_id: null, esperado: 1, motivo: associado ? 'falha_link' : g.motivo }
+          : { erro: padrao.e };
+        // a mesma frase das regras (src/scheduler.js), sem o ID recusado nem a tag
+        if (ehAmazon && associado && padrao.link) {
+          avisos.push(`Rastreio: o ID de rastreamento do ${g.nivel} foi recusado; ${g.jids.length === 1 ? 'o grupo recebeu' : 'os grupos receberam'} o link com a sua tag.`);
+        }
+      }
+      if (linha.erro) primeiroErro ??= linha.erro;
+      for (const jid of g.jids) porGrupo.set(jid, linha);
+    }
+    if (primeiroErro && ![...porGrupo.values()].some((l) => l.link)) throw primeiroErro;
+    return porGrupo;
+  }
+
+  /**
+   * O que vai a cada grupo, preparado uma vez por ocorrência, para os grupos `jids` que faltam.
+   * → { enviar(jid) → texto do log, falha(jid) → motivo do grupo sem link (ou null), rastreio(jid) → linha do rastreio,
+   *   avisos (oferta) → frases para o Histórico, nível aviso (ID de rastreamento da Amazon recusado) }
+   */
+  async function preparar(tipo, p, jids = []) {
     if (tipo === 'oferta') {
       const ehAmazon = p.loja === 'amazon';
       const ehShopee = p.loja === 'shopee';
@@ -677,7 +870,7 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
       // o template é o mesmo id e a mesma criação (renomear ou editar não muda created_at; apagar e recriar muda)
       const tpl = Number.isInteger(p.template_id) && db.prepare('SELECT body, created_at FROM templates WHERE id = ?').get(p.template_id);
       if (!tpl || (p.template_criado_em != null && tpl.created_at !== p.template_criado_em)) throw new Error('o template foi apagado');
-      let link;
+      let porGrupo; const avisos = [];
       try {
         // Shopee: o link gerado ao criar (API ou extensão), conferido de novo; nada de rede nem de link montado aqui
         if (ehShopee && !(typeof p.link_afiliado === 'string' && LINK_SHOPEE.test(p.link_afiliado))) throw new Error('o link da Shopee guardado no envio não é válido');
@@ -687,13 +880,15 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
         // sem ASIN válido no payload, nada de resolver link na hora do envio: só o ASIN gravado ao criar vale
         if (ehAmazon && !RE_ASIN.test(String(p.asin ?? ''))) throw new Error('o produto da Amazon está sem ASIN');
         // Amazon: sempre https://www.amazon.com.br/dp/<ASIN>?tag=<tag>, montado do ASIN (nunca o link que veio)
-        if (ehShopee) link = p.link_afiliado;
-        else if (ehAmazon) link = await lojas.linkAfiliado('amazon', { url: urlDoAsin(p.asin), asin: p.asin }, { links, amazon });
-        else link = await lojas.linkAfiliado(p.loja, { url: p.url, tag: etiqueta }, { links, amazon });
+        porGrupo = await linksPorGrupo(p, etiqueta, jids, avisos);
       } catch (e) {
         throw new Error(`link de afiliado não gerado: ${e?.message || 'erro desconhecido'}`);
       }
-      const texto = renderTemplate(tpl.body, { ...p.offer, link }, tplOpts(db));
+      const textos = new Map(); // link → texto: um por código, não por grupo
+      const textoDe = (link) => {
+        if (!textos.has(link)) textos.set(link, renderTemplate(tpl.body, { ...p.offer, link }, tplOpts(db)));
+        return textos.get(link);
+      };
       // foto: a enviada pelo painel (Buffer) ou a URL que a loja devolveu, só de CDN permitido (o Baileys baixa a URL)
       let foto = null; let mimetype = null;
       if (p.enviar_foto !== false && p.upload) {
@@ -702,10 +897,20 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
         try { foto = await fs.promises.readFile(path.join(pastaFotos, m[0])); } catch { throw new Error('a foto não foi encontrada (foi apagada?)'); }
         mimetype = MIME[m[1]];
       } else if (p.enviar_foto !== false && p.offer?.image && lojas.imagemPermitida(p.loja, p.offer.image)) foto = p.offer.image;
-      const ok = ehAmazon ? 'Enviado com a tag de associado da Amazon'
-        : ehShopee ? 'Enviado com o link de afiliado da Shopee' : `Enviado com a etiqueta ${etiqueta}`;
+      const okDe = (linha) => (ehAmazon ? 'Enviado com a tag de associado da Amazon'
+        : ehShopee ? 'Enviado com o link de afiliado da Shopee' : `Enviado com a etiqueta ${linha.codigo}`);
       return {
+        avisos,
+        falha(jid) {
+          const l = porGrupo.get(jid);
+          if (l?.link) return null;
+          return `link de afiliado não gerado: ${l?.erro?.message || 'erro desconhecido'}`;
+        },
+        rastreio: (jid) => (porGrupo.get(jid)?.link ? porGrupo.get(jid) : null),
         async enviar(jid) {
+          const linha = porGrupo.get(jid);
+          if (!linha?.link) throw new Error('link de afiliado não gerado');
+          const texto = textoDe(linha.link); const ok = okDe(linha);
           if (foto) {
             try { await wa.sendImage(jid, foto, texto, ...(mimetype ? [{ mimetype }] : [])); return ok; } catch { /* cai para o texto, como as regras */ }
             await wa.sendText(jid, texto); return `${ok} (sem a foto: ela não carregou)`;
@@ -788,7 +993,8 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
       ok = jids.length - faltam.length;
       let envio = null;
       if (faltam.length) {
-        try { envio = await preparar(e.tipo, p); } catch (err) { motivo = limparErro(err?.message); }
+        try { envio = await preparar(e.tipo, p, faltam); } catch (err) { motivo = limparErro(err?.message); }
+        for (const aviso of envio?.avisos || []) log({ level: 'aviso', message: aviso });
       }
       if (faltam.length && !envio) {
         // nada dá para enviar (link não gerado, foto apagada…): erro em cada grupo, sem tentar
@@ -804,10 +1010,19 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
           const agora = estadoDe(n);
           if (agora?.status !== 'enviando' || agora.next_run_at !== ocorrencia) break;
           const jid = faltam[i]; const nome = nomeDoGrupo(jid);
+          // só os grupos deste link ficam sem a oferta (ex.: o padrão falhou e o código associado não): sem tentar
+          const semLink = envio.falha?.(jid);
+          if (semLink) {
+            const m = limparErro(semLink);
+            registrar(n, ocorrencia, jid, nome, false, m); erro++;
+            log({ level: 'erro', group_name: nome, message: `Não enviado: ${m}` });
+            continue;
+          }
           try {
             const detalhe = await envio.enviar(jid);
             registrar(n, ocorrencia, jid, nome, true, null); ok++;
             log({ level: 'ok', group_name: nome, message: detalhe });
+            gravarRastreio(e, p, jid, envio.rastreio?.(jid));
           } catch (err) {
             const m = limparErro(err?.message);
             registrar(n, ocorrencia, jid, nome, false, m); erro++;
@@ -971,6 +1186,7 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
 
   return {
     criar,
+    linksRastreioShopee,
     identificar: identificarLink,
     processarPendentes,
     runEnvio,
