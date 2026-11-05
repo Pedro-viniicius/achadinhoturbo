@@ -1129,7 +1129,7 @@ test('Ler mais (etapa 11): toda chave de LEIA_MAIS existe em TIPS e todo destino
     'manual.link': 'disparo-manual/mercado-livre', 'manual.amazon': 'disparo-manual/amazon', 'manual.shopee': 'disparo-manual/shopee',
     'regras.template': 'templates/linha-some', templates: 'templates/linha-some', whatsapp: 'primeiros-passos/whatsapp', equipe: 'equipe/papeis',
     'equipe.convite': 'equipe/convidar', 'ajustes.privacidade': 'privacidade/retencao', links: 'grupos/rotacionador', 'links.modo': 'grupos/rotacionador',
-    'links.proximo': 'grupos/proximo-grupo', relatorios: 'resultados/avisos', 'relatorios.virada': 'resultados/avisos' };
+    'links.proximo': 'grupos/proximo-grupo', relatorios: 'resultados/avisos', 'relatorios.virada': 'resultados/avisos', 'remetente': 'disparo-automatico/remetentes' };
   assert.deepEqual(LEIA, SPEC);
   // todo ícone q('chave') de uma tela com destino sai com data-docs; os demais seguem sem
   for (const chave of Object.keys(TIPS)) {

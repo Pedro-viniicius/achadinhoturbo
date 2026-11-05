@@ -15,6 +15,12 @@
 // O link (https://s.shopee.com.br/…, da conta do dono: API primeiro, extensão de reserva) é gerado AO CRIAR o envio,
 // a partir do endereço do produto sem parâmetros, e guardado no payload: qualquer falha recusa sem gravar nada, e o
 // envio (inclusive o agendado) não depende de rede para o link. O preparar só confere o link guardado.
+// Remetente (plano envio-pelo-socio, D4 e D5): a oferta de um link mandado pelo sócio no privado sai pela mesma montagem
+// do Disparo manual (montarOferta; o criar faz as mesmas duas metades e o INSERT), com o texto da mensagem completando
+// os dados da loja (mesclarOferta) e só com o link do dono: situacaoLink diz, sem rede, o que impede o link; o preparar
+// barra o ML no modo direto; o ML só vai à Central com o endereço de um produto, sem parâmetros (urlDeProdutoMl: nem o
+// meli.la nem a vitrine de outro afiliado). Os erros que o remetente distingue levam `.codigo` ('sem_dados',
+// 'link_invalido'), com a mensagem de sempre.
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -24,6 +30,8 @@ import { addLog, getSetting } from './db.js';
 import * as lojasPadrao from './lojas.js';
 import { LinkNaoResolvido } from './amazon.js';
 import { ErroShopee, LinkShopeeNaoResolvido, LINK_SHOPEE, RE_ID_AFILIADO, extrairIds } from './shopee.js';
+import { mesclarOferta } from './oferta-texto.js';
+import { hostPermitido } from './ml.js';
 import { montarEnquete } from './whatsapp.js';
 import { renderTemplate, discountPct } from './template.js';
 import { sleep, jitter } from './util.js';
@@ -74,6 +82,13 @@ const LINK_EXEMPLO_SHOPEE = 'https://s.shopee.com.br/(gerado ao disparar)';
 const CAUSAS_SHOPEE = new Set(['sem_credenciais', 'credencial_recusada', 'conta_restrita', 'sem_acesso', 'cota', 'nao_encontrado', 'indisponivel']);
 const chaveShopee = (ids) => `SHOPEE:${ids.shopId}.${ids.itemId}`;
 const urlDoAsin = (asin) => `https://www.amazon.com.br/dp/${asin}`;
+// Remetente (plano envio-pelo-socio, D4)
+const SEM_PRECO = 'Preencha o preço do produto.';
+const SEM_TITULO_ML = 'Não consegui ler o título do produto.';
+const SEM_PRODUTO_ML = 'Não achei o produto deste link do Mercado Livre.';
+// origens em que o Mercado Livre nunca sai com link comum (modo direto, sem comissão): catálogo (fonte-catalogo-etiqueta,
+// D4) e remetente (envio-pelo-socio, D5: seria o meli.la de outro afiliado)
+const SO_COM_AFILIACAO = new Set(['catalogo', 'remetente']);
 /** Link com a tag mascarada, para as prévias do painel (CA7): a tag só vai inteira ao WhatsApp. */
 const mascararTag = (link) => String(link).replace(/([?&]tag=)[^&#]*/, '$1•••');
 
@@ -150,6 +165,66 @@ function lojaDoLink(url, lojas) {
 }
 
 const soCamposDaOferta = (o) => Object.fromEntries(CAMPOS_OFERTA.map((k) => [k, o?.[k] ?? null]));
+
+/** Erro com o código que o remetente grava no item (src/remetentes.js). A mensagem é a de sempre. */
+function comCodigo(erro, codigo) {
+  erro.codigo = codigo;
+  return erro;
+}
+const semDados = (mensagem) => comCodigo(new Error(mensagem), 'sem_dados');
+
+/**
+ * Link que não chegou a um produto → o mesmo erro (classe, causa e mensagem) com `.codigo = 'link_invalido'`. Instância
+ * nova: o objeto que o resolvedor lançou pode ser compartilhado (cache), e o `.codigo` dele ('invalido'|'nao_produto') fica.
+ */
+function comoLinkInvalido(e) {
+  if (e instanceof LinkNaoResolvido) return comCodigo(new LinkNaoResolvido(e.causa), 'link_invalido');
+  if (e instanceof LinkShopeeNaoResolvido) return comCodigo(new LinkShopeeNaoResolvido(e.causa), 'link_invalido');
+  return e;
+}
+
+/** Caminho de anúncio: o id no começo (produto.mercadolivre.com.br/MLB-123456…-_JM, …/MLB123456…). */
+const ANUNCIO_ML = /^\/MLB-?(\d{6,})/i;
+/** Caminho de catálogo: /p/MLB… no começo ou depois de um slug só (www.mercadolivre.com.br/<slug>/p/MLB…). */
+const CATALOGO_ML = /^\/(?:[^/]+\/)?p\/MLB(\d+)/i;
+
+/**
+ * Produto do Mercado Livre que pode ir à Central numa origem só com afiliação (SO_COM_AFILIACAO: remetente e catálogo;
+ * plano envio-pelo-socio, S1 e Q4): https na porta padrão, sem usuário nem senha, host do Mercado Livre, nem o
+ * encurtador (meli.la) nem a busca (lista.…), nem a vitrine social (/social/…, também escrita com %xx), que seriam os
+ * de outro afiliado, e o caminho de um anúncio (MLB-… no começo) ou de um catálogo (/p/MLB…, no começo ou depois de um
+ * slug). A chave do remetente (chaveMercadoLivre, src/remetentes.js) sai daqui, para as duas não divergirem.
+ * → { url: origin + pathname (a query e o fragmento, onde vem o rastreio de terceiro como matt_tool e matt_word, ficam
+ * de fora), chave: 'MLB123…' (anúncio) ou 'CATALOGO:MLB123…' (o número do catálogo não é o de um anúncio) } ou null.
+ */
+export function produtoMl(url) {
+  let u;
+  try { u = new URL(url); } catch { return null; }
+  if (u.protocol !== 'https:' || u.port !== '' || u.username || u.password || !hostPermitido(u.href)) return null;
+  if (/(?:^|\.)meli\.la$/i.test(u.hostname) || /^lista\./i.test(u.hostname)) return null;
+  let caminho;
+  try { caminho = decodeURIComponent(u.pathname); } catch { return null; }
+  if (/\/social(?:\/|$)/i.test(caminho)) return null;
+  // os padrões olham o caminho como ele vai à Central (sem decodificar): %xx no lugar de uma letra não casa
+  const catalogo = CATALOGO_ML.exec(u.pathname);
+  if (catalogo) return { url: u.origin + u.pathname, chave: `CATALOGO:MLB${catalogo[1]}` };
+  const anuncio = ANUNCIO_ML.exec(u.pathname);
+  return anuncio ? { url: u.origin + u.pathname, chave: `MLB${anuncio[1]}` } : null;
+}
+
+/** O endereço do produtoMl (origin + pathname) ou null. */
+const urlDeProdutoMl = (url) => produtoMl(url)?.url ?? null;
+
+/**
+ * Dados da loja com o texto do remetente completando campo a campo (mesclarOferta: a loja primeiro, a imagem só da
+ * loja). `causa` (a API não respondeu) = nada veio da loja. Sem complemento, os dados da loja como vieram.
+ * → { dados (campos do template, com a key da loja), fonte: 'api'|'api+texto'|'texto'|null (null sem complemento) }
+ */
+function completarComTexto(produto, causa, complemento) {
+  if (!complemento) return { dados: produto, fonte: null };
+  const { oferta, fonte } = mesclarOferta(causa ? null : produto, complemento);
+  return { dados: { key: produto.key, ...oferta }, fonte };
+}
 
 /** Lê o produto no servidor (o que o navegador manda não é confiável) e guarda só os campos do template. */
 async function lerOferta(lojaId, url, { ml, amazon, lojas }) {
@@ -289,11 +364,12 @@ export function proximaOcorrencia(repetir, depoisDe = Date.now()) {
 }
 
 /**
- * Nome da origem no log (log.rule_name): "Disparo manual", "Mensagem", "Enquete", "Espelho: <nome>" ou
- * "Catálogo: <regra>" (oferta do catálogo aprovada na revisão, src/catalogo-itens.js).
+ * Nome da origem no log (log.rule_name): "Disparo manual", "Mensagem", "Enquete", "Espelho: <nome>",
+ * "Catálogo: <regra>" (oferta do catálogo aprovada na revisão, src/catalogo-itens.js) ou "Remetente: <nome>" (link
+ * mandado pelo sócio no privado, src/remetentes.js).
  */
 function origemDoLog(tipo, p) {
-  const prefixo = { espelho: 'Espelho', catalogo: 'Catálogo' }[p?.origem?.tipo];
+  const prefixo = { espelho: 'Espelho', catalogo: 'Catálogo', remetente: 'Remetente' }[p?.origem?.tipo];
   if (prefixo) {
     const nome = String(p.origem.nome ?? '').replace(/\s+/g, ' ').trim().slice(0, 80);
     return `${prefixo}: ${nome || 'sem nome'}`;
@@ -422,16 +498,30 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
     }
   }
 
-  /** Oferta da Amazon do disparo manual: ASIN, dados da API e os ajustes do painel. → campos do payload */
-  async function ofertaAmazon(url, ajustes) {
+  /**
+   * Oferta da Amazon: ASIN, dados da API (completados pelo `complemento`, o texto do remetente) e os ajustes do painel.
+   * Sem título (ou sem preço, com `exigirPreco`) → erro `sem_dados`. → campos do payload
+   */
+  async function ofertaAmazon(url, ajustes, { complemento = null, exigirPreco = false } = {}) {
     const asin = await asinDoLink(url);
     const { produto, causa } = await produtoAmazon(asin);
-    const offer = aplicarAjustes(produto, ajustes);
-    if (!offer.title) throw new Error(causa ? 'Não consegui buscar os dados na Amazon: preencha o título do produto.' : 'Preencha o título do produto.');
+    const { dados, fonte } = completarComTexto(produto, causa, complemento);
+    const offer = aplicarAjustes(dados, ajustes);
+    if (!offer.title) throw semDados(causa ? 'Não consegui buscar os dados na Amazon: preencha o título do produto.' : 'Preencha o título do produto.');
+    if (exigirPreco && offer.price == null) throw semDados(SEM_PRECO);
     return {
-      asin, fonte_dados: !causa && igualAApi(produto, offer, ajustes) ? 'api' : 'manual',
+      asin, fonte_dados: fonteDosDados({ produto, dados, offer, ajustes, causa, fonte, complemento }),
       ...(ajustes.upload ? { upload: ajustes.upload } : {}), offer,
     };
+  }
+
+  /**
+   * fonte_dados da oferta da Amazon ou da Shopee. Sem complemento: 'api' se saiu como a API mandou, senão 'manual'.
+   * Com complemento: a fonte da mescla ('api', 'api+texto' ou 'texto'), ou 'manual' se um ajuste do painel mudou algo.
+   */
+  function fonteDosDados({ produto, dados, offer, ajustes, causa, fonte, complemento }) {
+    if (complemento) return fonte && igualAApi(dados, offer, ajustes) ? fonte : 'manual';
+    return !causa && igualAApi(produto, offer, ajustes) ? 'api' : 'manual';
   }
 
   /** ID de afiliado da Shopee salvo em Conexões (só a coluna `config`: nenhum segredo é lido). → texto ou '' */
@@ -496,19 +586,124 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
   }
 
   /**
-   * Oferta da Shopee do disparo manual: ids, dados da API, os ajustes do painel e o link de afiliado, gerado por
-   * último (só depois de a oferta estar válida). → campos do payload (a `url` passa a ser o endereço sem parâmetros)
+   * Oferta da Shopee: ids, dados da API (completados pelo `complemento`, o texto do remetente), os ajustes do painel e
+   * o link de afiliado, gerado por último (só depois de a oferta estar válida). Sem título (ou sem preço, com
+   * `exigirPreco`) → erro `sem_dados`, sem pedir o link. → campos do payload (a `url` passa a ser o endereço sem parâmetros)
    */
-  async function ofertaShopee(url, ajustes) {
+  async function ofertaShopee(url, ajustes, { complemento = null, exigirPreco = false } = {}) {
     const { ids, produto, causa } = await produtoShopee(url);
-    const offer = aplicarAjustes(produto, ajustes);
-    if (!offer.title) throw new Error(causa ? 'Não consegui buscar os dados na Shopee: preencha o título do produto.' : 'Preencha o título do produto.');
+    const { dados, fonte } = completarComTexto(produto, causa, complemento);
+    const offer = aplicarAjustes(dados, ajustes);
+    if (!offer.title) throw semDados(causa ? 'Não consegui buscar os dados na Shopee: preencha o título do produto.' : 'Preencha o título do produto.');
+    if (exigirPreco && offer.price == null) throw semDados(SEM_PRECO);
     const link = await linkShopee(ids.urlProduto);
     return {
       url: ids.urlProduto, shop_id: ids.shopId, item_id: ids.itemId, link_afiliado: link,
-      fonte_dados: !causa && igualAApi(produto, offer, ajustes) ? 'api' : 'manual',
+      fonte_dados: fonteDosDados({ produto, dados, offer, ajustes, causa, fonte, complemento }),
       ...(ajustes.upload ? { upload: ajustes.upload } : {}), offer,
     };
+  }
+
+  /**
+   * Oferta do Mercado Livre: o produto lido na página (o meli.la de afiliado leva ao produto de verdade, e é ele que
+   * vai à Central no envio), completado pelo `complemento`. Origem só com afiliação (remetente, catálogo): só sai o
+   * endereço de um produto, sem parâmetros (urlDeProdutoMl); o resto (o meli.la que não levou a um produto, a vitrine
+   * de outro afiliado) é recusado com `link_invalido`, mesmo com nome e preço no texto, porque seria o link de outro
+   * afiliado. → campos do payload (fonte_dados só com complemento)
+   */
+  async function ofertaMercadoLivre(lojaId, url, origem, { complemento = null, exigirPreco = false } = {}) {
+    const lida = await lerOfertaComUrl(lojaId, url, { ml, amazon, lojas });
+    let urlProduto = lida.url;
+    if (SO_COM_AFILIACAO.has(origem?.tipo)) {
+      urlProduto = urlDeProdutoMl(lida.url);
+      if (!urlProduto) throw comCodigo(new Error(SEM_PRODUTO_ML), 'link_invalido');
+    }
+    const { dados: offer, fonte } = completarComTexto(lida.offer, null, complemento);
+    if (exigirPreco && !offer.title) throw semDados(SEM_TITULO_ML);
+    if (exigirPreco && offer.price == null) throw semDados(SEM_PRECO);
+    return { url: urlProduto, ...(complemento ? { fonte_dados: fonte } : {}), offer };
+  }
+
+  /**
+   * Checagens da oferta sem rede, na ordem do Disparo manual: loja conhecida e integrada (a não conectada é recusada
+   * antes de qualquer coisa: CA2), template e, por loja, a etiqueta (ML), a tag da Amazon ou o ID e o caminho do link
+   * da Shopee. → { url, loja, template, etiqueta? (ML), ajustes? (Amazon e Shopee) }
+   */
+  function conteudoDaOferta({ url, template_id: templateId, tag_id: tagId, ajustes } = {}) {
+    const { url: limpo, loja } = lojaDoLink(url, lojas);
+    const conteudo = { url: limpo, loja, template: templateDe(db, templateId) };
+    if (loja.id === 'amazon') {
+      // a Amazon não tem etiqueta: o link leva a tag de associado de Conexões (sem ela, não dispara: CA2)
+      if (!amazon) throw new Error(SEM_AMAZON);
+      if (!temTagAmazon()) throw new Error(SEM_TAG);
+      conteudo.ajustes = validarAjustes(ajustes);
+    } else if (loja.id === 'shopee') {
+      // a Shopee não tem etiqueta: o link sai com o ID de afiliado de Conexões, pela API ou pela extensão (CA3)
+      if (!shopee) throw new Error(SEM_SHOPEE);
+      if (!idAfiliadoShopee()) throw new Error(SEM_ID_SHOPEE);
+      if (!caminhoLinkShopee()) throw new Error(SEM_LINK_SHOPEE);
+      conteudo.ajustes = validarAjustes(ajustes);
+    } else conteudo.etiqueta = etiquetaDe(db, tagId);
+    return conteudo;
+  }
+
+  /**
+   * O que depende de rede, depois das checagens de conteudoDaOferta: o produto (Mercado Livre, ou link resolvido e API
+   * da Amazon ou da Shopee) e o link de afiliado da Shopee. Não grava nada. → payload da oferta
+   */
+  async function payloadDaOferta({ url, loja, etiqueta, template, ajustes }, { origem, complemento = null, exigirPreco = false }) {
+    const base = {
+      url, loja: loja.id, tag_id: etiqueta?.id ?? null, etiqueta: etiqueta?.name ?? null,
+      template_id: template.id, template_criado_em: template.created_at, // created_at: ver preparar (Q6)
+      origem,
+    };
+    const opcoes = { complemento, exigirPreco };
+    try {
+      if (loja.id === 'amazon') return { ...base, ...(await ofertaAmazon(url, ajustes, opcoes)) };
+      if (loja.id === 'shopee') return { ...base, ...(await ofertaShopee(url, ajustes, opcoes)) };
+    } catch (e) { throw comoLinkInvalido(e); }
+    return { ...base, ...(await ofertaMercadoLivre(loja.id, url, origem, opcoes)) };
+  }
+
+  /**
+   * Oferta pronta para a fila, sem gravar: as checagens sem rede e depois a rede (o criar faz as mesmas duas metades,
+   * com os grupos e o horário no meio, e o INSERT). `dados` = { url, template_id, tag_id (ML; vazio = a primeira
+   * etiqueta), ajustes (Amazon e Shopee) }. `origem` vai no payload ({ tipo: 'manual' }, { tipo: 'remetente',
+   * remetente_id, nome }…). `complemento` (lerOfertaDoTexto do texto do remetente) completa os dados da loja campo a
+   * campo. `exigirPreco`: sem título ou sem preço, erro `sem_dados` (em todas as lojas). Link sem produto: `link_invalido`.
+   * → payload (o mesmo formato do que o criar grava)
+   */
+  async function montarOferta(dados, { origem, complemento = null, exigirPreco = false } = {}) {
+    if (!origem || typeof origem !== 'object' || typeof origem.tipo !== 'string') throw new Error('Origem da oferta inválida.');
+    return payloadDaOferta(conteudoDaOferta(dados ?? {}), { origem, complemento, exigirPreco });
+  }
+
+  /**
+   * Por que o link de afiliado do dono não sairia agora para esta loja, sem rede (plano envio-pelo-socio, D5):
+   * 'sem_etiqueta', 'modo_direto' (link comum, sem comissão) ou 'sem_extensao' (Mercado Livre); 'sem_tag_amazon' (também
+   * sem o cliente da Amazon); 'sem_id_shopee' ou 'sem_link_shopee' (sem API útil nem extensão, ou sem o cliente da
+   * Shopee). Loja sem integração → 'link_invalido'. null = o link sai.
+   */
+  function situacaoLink(lojaId, { tag_id: tagId = null } = {}) {
+    if (lojaId === 'mercadolivre') {
+      let etiqueta = null;
+      try { etiqueta = etiquetaDe(db, tagId, { exigir: false }); } catch { etiqueta = null; }
+      if (!etiqueta) return 'sem_etiqueta';
+      const modo = modoLink();
+      if (modo === 'fake') return null;
+      if (modo !== 'extension') return 'modo_direto';
+      return links?.status?.()?.online === true ? null : 'sem_extensao';
+    }
+    if (lojaId === 'amazon') {
+      let tem = false;
+      try { tem = !!amazon && temTagAmazon(); } catch { tem = false; }
+      return tem ? null : 'sem_tag_amazon';
+    }
+    if (lojaId === 'shopee') {
+      if (!idAfiliadoShopee()) return 'sem_id_shopee';
+      return shopee && caminhoLinkShopee() ? null : 'sem_link_shopee';
+    }
+    return 'link_invalido';
   }
 
   /**
@@ -586,23 +781,8 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
     if (tipo === 'oferta' && quando === 'repetir') throw new Error('O disparo manual sai agora ou agendado para hoje.');
 
     // 1. conteúdo, sem rede (a loja não conectada é recusada aqui, antes de qualquer coisa: CA2)
-    let conteudo;
-    if (tipo === 'oferta') {
-      const { url, loja } = lojaDoLink(b.url, lojas);
-      conteudo = { url, loja, template: templateDe(db, b.template_id) };
-      if (loja.id === 'amazon') {
-        // a Amazon não tem etiqueta: o link leva a tag de associado de Conexões (sem ela, não dispara: CA2)
-        if (!amazon) throw new Error(SEM_AMAZON);
-        if (!temTagAmazon()) throw new Error(SEM_TAG);
-        conteudo.ajustes = validarAjustes(b.ajustes);
-      } else if (loja.id === 'shopee') {
-        // a Shopee não tem etiqueta: o link sai com o ID de afiliado de Conexões, pela API ou pela extensão (CA3)
-        if (!shopee) throw new Error(SEM_SHOPEE);
-        if (!idAfiliadoShopee()) throw new Error(SEM_ID_SHOPEE);
-        if (!caminhoLinkShopee()) throw new Error(SEM_LINK_SHOPEE);
-        conteudo.ajustes = validarAjustes(b.ajustes);
-      } else conteudo.etiqueta = etiquetaDe(db, b.tag_id);
-    } else conteudo = tipo === 'mensagem' ? validarMensagem(b) : validarEnquete(b);
+    const conteudo = tipo === 'oferta' ? conteudoDaOferta({ url: b.url, template_id: b.template_id, tag_id: b.tag_id, ajustes: b.ajustes })
+      : tipo === 'mensagem' ? validarMensagem(b) : validarEnquete(b);
     // 2. grupos e horário
     const groupJids = validarGrupos(b.group_jids);
     const now = Date.now();
@@ -622,20 +802,8 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
     // 3. o que depende de rede: o produto (Mercado Livre, ou link resolvido e API da Amazon ou da Shopee), o link de
     // afiliado da Shopee e a prévia do link. Qualquer falha aqui também acontece antes do INSERT: nada é gravado.
     let payload;
-    if (tipo === 'oferta') {
-      const { url, loja, etiqueta, template } = conteudo;
-      const base = {
-        url, loja: loja.id, tag_id: etiqueta?.id ?? null, etiqueta: etiqueta?.name ?? null,
-        template_id: template.id, template_criado_em: template.created_at, // created_at: ver preparar (Q6)
-        origem: { tipo: 'manual' },
-      };
-      if (loja.id === 'amazon') payload = { ...base, ...(await ofertaAmazon(url, conteudo.ajustes)) };
-      else if (loja.id === 'shopee') payload = { ...base, ...(await ofertaShopee(url, conteudo.ajustes)) };
-      else {
-        const lida = await lerOfertaComUrl(loja.id, url, { ml, amazon, lojas });
-        payload = { ...base, url: lida.url, offer: lida.offer };
-      }
-    } else if (tipo === 'mensagem' && conteudo.imagem === 'previa') {
+    if (tipo === 'oferta') payload = await payloadDaOferta(conteudo, { origem: { tipo: 'manual' } });
+    else if (tipo === 'mensagem' && conteudo.imagem === 'previa') {
       const previa = await lerPrevia(conteudo.previa_url);
       // o WhatsApp liga a prévia ao link escrito na mensagem: se ele não estiver no texto, vai no fim
       const texto = conteudo.texto.includes(conteudo.previa_url) ? conteudo.texto : `${conteudo.texto}\n\n${conteudo.previa_url}`.trim();
@@ -681,8 +849,9 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
       try {
         // Shopee: o link gerado ao criar (API ou extensão), conferido de novo; nada de rede nem de link montado aqui
         if (ehShopee && !(typeof p.link_afiliado === 'string' && LINK_SHOPEE.test(p.link_afiliado))) throw new Error('o link da Shopee guardado no envio não é válido');
-        // catálogo (plano fonte-catalogo-etiqueta, D4): o ML nunca sai com link comum, nem se o modo mudou depois da revisão
-        if (p.origem?.tipo === 'catalogo' && !semEtiqueta && !['extension', 'fake'].includes(modoLink())) throw new Error('os links do Mercado Livre estão no modo direto (sem comissão)');
+        // catálogo (plano fonte-catalogo-etiqueta, D4) e remetente (envio-pelo-socio, D5): o ML nunca sai com link comum,
+        // nem se o modo mudou depois da revisão ou da chegada (o do remetente seria o meli.la de outro afiliado)
+        if (SO_COM_AFILIACAO.has(p.origem?.tipo) && !semEtiqueta && !['extension', 'fake'].includes(modoLink())) throw new Error('os links do Mercado Livre estão no modo direto (sem comissão)');
         if (ehAmazon && !amazon) throw new Error(SEM_AMAZON);
         // sem ASIN válido no payload, nada de resolver link na hora do envio: só o ASIN gravado ao criar vale
         if (ehAmazon && !RE_ASIN.test(String(p.asin ?? ''))) throw new Error('o produto da Amazon está sem ASIN');
@@ -971,6 +1140,8 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
 
   return {
     criar,
+    montarOferta,
+    situacaoLink,
     identificar: identificarLink,
     processarPendentes,
     runEnvio,

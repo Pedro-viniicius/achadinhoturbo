@@ -15,8 +15,8 @@ import { createWhatsApp } from '../src/whatsapp.js';
 import { createLinkService } from '../src/links.js';
 import { createScheduler } from '../src/scheduler.js';
 import { createEnvios, proximaOcorrencia, limparErro, semMetadados } from '../src/envios.js';
-import { createAmazon } from '../src/amazon.js';
-import { createShopee, URL_API as URL_API_SHOPEE } from '../src/shopee.js';
+import { createAmazon, LinkNaoResolvido } from '../src/amazon.js';
+import { createShopee, URL_API as URL_API_SHOPEE, LinkShopeeNaoResolvido } from '../src/shopee.js';
 import { createEspelho } from '../src/espelho.js';
 import * as lojasPadrao from '../src/lojas.js';
 
@@ -1898,7 +1898,11 @@ test('S2: só o Disparo manual pede o link da Shopee: o espelho, as regras e o e
   assert.deepEqual(chamadas(/['"]link_shopee['"]/g).filter((c) => !c.startsWith('links.js:')), [], 'só links.js monta o pedido link_shopee');
   assert.deepEqual(chamadas(/linkAfiliado\(\s*['"]shopee['"]/g), ['envios.js:linkShopee']);
   assert.deepEqual(chamadas(/(?<!function )\blinkShopee\(/g), ['envios.js:ofertaShopee']);
-  assert.deepEqual(chamadas(/(?<!function )\bofertaShopee\(/g), ['envios.js:criar']);
+  // a montagem da oferta (plano envio-pelo-socio, etapa 4) saiu do criar para payloadDaOferta, que só o criar (Disparo
+  // manual) e o montarOferta chamam; o montarOferta é só do remetente (src/remetentes.js, plano envio-pelo-socio, D4)
+  assert.deepEqual(chamadas(/(?<!function )\bofertaShopee\(/g), ['envios.js:payloadDaOferta']);
+  assert.deepEqual(chamadas(/(?<!function )\bpayloadDaOferta\(/g).sort(), ['envios.js:criar', 'envios.js:montarOferta']);
+  assert.deepEqual(chamadas(/\.montarOferta\(/g).filter((c) => !c.startsWith('remetentes.js:')), [], 'só o remetente usa o montarOferta');
   assert.match(fontes['envios.js'].slice(fontes['envios.js'].indexOf('async function criar(')), /origem: \{ tipo: 'manual' \}/, 'criar é o Disparo manual');
   for (const arq of ['espelho.js', 'scheduler.js', 'avisos.js']) {
     assert.doesNotMatch(fontes[arq], /requestLinkShopee|gerarLink|linkAfiliado\(\s*['"]shopee/, arq);
@@ -1974,6 +1978,364 @@ test('S3: o teto de acessos barrando o link curto vira 400 com a frase de cota d
     assert.match(p.json.erro, /^Não consegui gerar o seu link de afiliado da Shopee: a extensão do Chrome não está conectada/);
     assert.equal(contar(s.db, 'SELECT COUNT(*) AS n FROM envios'), 0);
   } finally { await s.fechar(); }
+});
+
+// ---------------------------------------------------------------------------------------------
+// montarOferta e situacaoLink (plano envio-pelo-socio, etapa 4; CA4, CA5, CA6). A oferta do remetente sai pela mesma
+// montagem do Disparo manual (criar = montarOferta + INSERT): os dados da loja primeiro, o texto da mensagem completa
+// campo a campo, e só sai link do dono. Fila montada direto (sem servidor), com as 3 lojas e fetch falso.
+const ORIGEM_REM = { tipo: 'remetente', remetente_id: 7, nome: ' Sócio \n Pedro ' };
+const URL_MELI = 'https://meli.la/1AbCdEf';
+const URL_ML_ACHADO = 'https://produto.mercadolivre.com.br/MLB-9876543210-fone-achado-_JM';
+
+/** Erro que a promessa lança (falha o teste se ela não lançar). */
+async function erroDe(promessa) {
+  try { await promessa; } catch (e) { return e; }
+  assert.fail('era para lançar');
+}
+
+/** ML falso com a página do produto como pedido: `url` achada (ou o link colado) e os campos de `campos`. */
+function mlPagina({ url = null, ...campos } = {}) {
+  const chamadas = [];
+  return {
+    chamadas,
+    async resolveOffer(c) {
+      chamadas.push(c.url);
+      return { key: 'MLB9876543210', url: url ?? c.url, title: 'Fone Bom', price: 89.9, oldPrice: null, discountPct: null, sold: 1200, freeShipping: false, image: IMG, ...campos };
+    },
+  };
+}
+
+/**
+ * Fila de envios com as 3 lojas: ML pelo `ml` (ou o mlFalso), Amazon e Shopee de verdade com fetch falso. O modo dos
+ * links fica em `estado.modo`; a API da Amazon em `estado.api`, a da Shopee em `estadoS.api`. `pedidosShopee` guarda
+ * cada endereço pedido à extensão da Shopee.
+ */
+function montarLojas({ amazonApi = 'ok', shopeeApi = 'ok', modo = 'fake', ml = null, conexaoShopee = CONEXAO_SHOPEE, comAmazon = true, comShopee = true } = {}) {
+  const m = montar();
+  const estado = { modo, api: amazonApi };
+  const fetchA = fetchAmazon(estado);
+  const conexao = { tag: TAG, credencial_versao: '3.1', credencial_id: CRED_ID, credencial_secret: SEGREDO };
+  const amazon = comAmazon ? createAmazon({ db: m.db, fetch: fetchA, esperar: async () => {}, lerConexao: () => conexao }) : null;
+  const estadoS = { api: shopeeApi, nos: null, link: LINK_API };
+  const fetchS = fetchShopee(estadoS);
+  const config = {}; for (const k of ['id_afiliado', 'app_id']) if (conexaoShopee[k]) config[k] = conexaoShopee[k];
+  m.db.prepare("INSERT INTO conexoes (plataforma, config, segredos, updated_at) VALUES ('shopee', ?, ?, ?)")
+    .run(JSON.stringify(config), JSON.stringify(conexaoShopee.chave ? { chave: conexaoShopee.chave } : {}), Date.now());
+  const shopee = comShopee ? createShopee({ db: m.db, fetch: fetchS }) : null;
+  const links = createLinkService({ getMode: () => estado.modo });
+  const pedidosShopee = [];
+  const pedirShopee = links.requestLinkShopee;
+  links.requestLinkShopee = (a) => { pedidosShopee.push(a.url); return pedirShopee(a); };
+  const envios = createEnvios({ db: m.db, wa: m.wa, links, ml: ml ?? m.ml, fast: true, dir: m.dir, amazon, shopee });
+  return { ...m, envios, links, estado, estadoS, conexao, fetchA, fetchS, shopee, pedidosShopee };
+}
+
+test('etapa 4 (CA5): montarOferta do ML com complemento: a loja primeiro e o texto completa; o meli.la achado vira o produto; nada é gravado', async () => {
+  const s = montarLojas({ ml: mlPagina({ url: URL_ML_ACHADO }) });
+  try {
+    const tpl = s.db.prepare('SELECT created_at FROM templates WHERE id = 1').get().created_at;
+    const complemento = { title: 'Título do texto', price: 10, oldPrice: 149.9, coupon: 'FONE10', freeShipping: true, sold: 5 };
+    const p = await s.envios.montarOferta({ url: URL_MELI, template_id: 1, tag_id: 2 }, { origem: ORIGEM_REM, complemento, exigirPreco: true });
+    assert.deepEqual(p, {
+      url: URL_ML_ACHADO, loja: 'mercadolivre', tag_id: 2, etiqueta: 'etiquetaB', template_id: 1, template_criado_em: tpl, origem: ORIGEM_REM,
+      fonte_dados: 'api+texto',
+      offer: { key: 'MLB9876543210', title: 'Fone Bom', price: 89.9, oldPrice: 149.9, discountPct: 40, sold: 1200, freeShipping: true, coupon: 'FONE10', image: IMG },
+    });
+    assert.deepEqual(s.ml.chamadas, [], 'o ML lido é o injetado');
+    assert.equal(contar(s.db, 'SELECT COUNT(*) AS n FROM envios'), 0, 'montarOferta não grava');
+    // sem complemento e sem etiqueta escolhida: a primeira etiqueta, os dados só da loja e o payload sem fonte_dados (como o criar)
+    const so = await s.envios.montarOferta({ url: URL_MELI, template_id: 1 }, { origem: { tipo: 'manual' } });
+    assert.deepEqual([so.tag_id, so.etiqueta, so.fonte_dados, so.offer.coupon, so.offer.oldPrice], [1, 'etiquetaA', undefined, null, null]);
+  } finally { s.db.close(); }
+});
+
+test('etapa 4: criar = montarOferta + INSERT (o payload gravado é o mesmo, nas 3 lojas)', async () => {
+  const s = montarLojas();
+  try {
+    const casos = [
+      [{ url: URL_ML, template_id: 1, tag_id: 2 }, {}],
+      [{ url: URL_CURTO, template_id: 1, ajustes: { coupon: 'AMZ5' } }, {}],
+      [{ url: URL_PRODUTO_SHOPEE, template_id: 1, ajustes: { title: 'Fone à mão' } }, { omitir: ['link_afiliado'] }],
+    ];
+    for (const [dados, { omitir = [] }] of casos) {
+      const r = await s.envios.criar({ tipo: 'oferta', group_jids: ['111@g.us'], ...dados });
+      await terminar(s.db, r.id);
+      const gravado = payloadDe(s.db, r.id);
+      const montado = await s.envios.montarOferta(dados, { origem: { tipo: 'manual' } });
+      for (const k of omitir) { assert.ok(gravado[k] && montado[k]); delete gravado[k]; delete montado[k]; } // o link fake muda a cada pedido
+      assert.deepEqual(montado, gravado, dados.url);
+    }
+  } finally { s.db.close(); }
+});
+
+test('etapa 4 (CA4/CA5): ML do remetente que continua no meli.la é recusado com link_invalido (o Disparo manual segue igual); sem preço → sem_dados', async () => {
+  const s = montarLojas({ ml: mlPagina() }); // a página não informa o produto: o link continua o meli.la colado
+  try {
+    const e = await erroDe(s.envios.montarOferta({ url: URL_MELI, template_id: 1 }, { origem: ORIGEM_REM, exigirPreco: true }));
+    assert.deepEqual([e.codigo, e.message], ['link_invalido', 'Não achei o produto deste link do Mercado Livre.'], 'S1 (rodada 2): não é falta de dados, é link que não leva a um produto');
+    const manual = await s.envios.montarOferta({ url: URL_MELI, template_id: 1 }, { origem: { tipo: 'manual' } });
+    assert.equal(manual.url, URL_MELI, 'o Disparo manual continua mandando o link colado à Central');
+
+    // página sem preço: exigirPreco recusa; o preço do texto completa
+    const semPreco = montarLojas({ ml: mlPagina({ url: URL_ML_ACHADO, price: null }) });
+    try {
+      const e2 = await erroDe(semPreco.envios.montarOferta({ url: URL_MELI, template_id: 1 }, { origem: ORIGEM_REM, exigirPreco: true }));
+      assert.equal(e2.codigo, 'sem_dados');
+      const p = await semPreco.envios.montarOferta({ url: URL_MELI, template_id: 1 }, { origem: ORIGEM_REM, complemento: { price: 79.9 }, exigirPreco: true });
+      assert.deepEqual([p.offer.title, p.offer.price, p.fonte_dados], ['Fone Bom', 79.9, 'api+texto']);
+      // sem exigirPreco, a falta do preço não barra (o Disparo manual do ML nunca exigiu)
+      assert.equal((await semPreco.envios.montarOferta({ url: URL_MELI, template_id: 1 }, { origem: { tipo: 'manual' } })).offer.price, null);
+      // sem título nem no texto
+      const semTitulo = montarLojas({ ml: mlPagina({ url: URL_ML_ACHADO, title: null }) });
+      try {
+        const e3 = await erroDe(semTitulo.envios.montarOferta({ url: URL_MELI, template_id: 1 }, { origem: ORIGEM_REM, complemento: { price: 5 }, exigirPreco: true }));
+        assert.equal(e3.codigo, 'sem_dados');
+      } finally { semTitulo.db.close(); }
+    } finally { semPreco.db.close(); }
+  } finally { s.db.close(); }
+});
+
+// S1 (envio-pelo-socio, rodada 2): no ML de quem só sai com afiliação (remetente; catálogo pelo SO_COM_AFILIACAO), só o
+// endereço de um produto vai à Central, e sem parâmetros: a vitrine /social/ e o rastreio (matt_tool, matt_word) de outro
+// afiliado nunca passam. O Disparo manual continua como era.
+test('S1: ML do remetente só sai com o endereço de um produto, sem query nem fragmento; vitrine /social/, meli.la e o resto → link_invalido', async () => {
+  const CATALOGO = 'https://www.mercadolivre.com.br/fone-x/p/MLB79725856';
+  const RASTREIO = '?matt_tool=88888&matt_word=OUTRO&forceInApp=true#topo';
+  const SOCIAL = 'https://www.mercadolivre.com.br/social/outroafiliado?matt_tool=99999&forceInApp=true';
+  const aceitos = [
+    [`${URL_ML_ACHADO}${RASTREIO}`, URL_ML_ACHADO],
+    [`${CATALOGO}${RASTREIO}`, CATALOGO],
+    [CATALOGO, CATALOGO],
+    [URL_ML_ACHADO, URL_ML_ACHADO],
+  ];
+  for (const [achada, esperada] of aceitos) {
+    for (const origem of [ORIGEM_REM, { tipo: 'catalogo', rule_id: 3, nome: 'Regra' }]) {
+      const s = montarLojas({ ml: mlPagina({ url: achada }) });
+      try {
+        const p = await s.envios.montarOferta({ url: URL_MELI, template_id: 1 }, { origem, exigirPreco: true });
+        assert.equal(p.url, esperada, `${origem.tipo}: ${achada}`);
+        // o link colado direto (a página devolve o próprio endereço) também perde a query
+        const direto = montarLojas({ ml: mlPagina() });
+        try {
+          assert.equal((await direto.envios.montarOferta({ url: achada, template_id: 1 }, { origem, exigirPreco: true })).url, esperada, `colado: ${achada}`);
+        } finally { direto.db.close(); }
+      } finally { s.db.close(); }
+    }
+  }
+  const recusados = [
+    SOCIAL,
+    'https://www.mercadolivre.com.br/social/MLB-9876543210-fone', // vitrine com cara de produto
+    'https://meli.la/2ZyXwVu',
+    'http://produto.mercadolivre.com.br/MLB-9876543210-fone-achado-_JM',
+    'https://usuario:senha@produto.mercadolivre.com.br/MLB-9876543210-fone-achado-_JM',
+    'https://www.mercadolivre.com.br/ofertas',
+    'https://www.mercadolivre.com.br/ofertas?item_id=MLB9876543210', // o produto só na query
+    'https://lista.mercadolivre.com.br/fone',
+  ];
+  for (const achada of recusados) {
+    const s = montarLojas({ ml: mlPagina({ url: achada }) });
+    try {
+      // nem com o nome e o preço no texto do remetente: o link não leva a um produto
+      const e = await erroDe(s.envios.montarOferta({ url: URL_MELI, template_id: 1 }, { origem: ORIGEM_REM, complemento: { title: 'Fone', price: 50 }, exigirPreco: true }));
+      assert.deepEqual([e.codigo, e.message], ['link_invalido', 'Não achei o produto deste link do Mercado Livre.'], achada);
+      assert.equal(contar(s.db, 'SELECT COUNT(*) AS n FROM envios'), 0);
+    } finally { s.db.close(); }
+  }
+  // a vitrine colada direto (a página não achou o produto em destaque) é recusada; o Disparo manual segue igual
+  const s = montarLojas({ ml: mlPagina() });
+  try {
+    assert.equal((await erroDe(s.envios.montarOferta({ url: SOCIAL, template_id: 1 }, { origem: ORIGEM_REM, exigirPreco: true }))).codigo, 'link_invalido');
+    assert.equal((await s.envios.montarOferta({ url: SOCIAL, template_id: 1 }, { origem: { tipo: 'manual' } })).url, SOCIAL, 'manual: como era');
+    const comRastreio = `${URL_ML_ACHADO}${RASTREIO}`;
+    assert.equal((await s.envios.montarOferta({ url: comRastreio, template_id: 1 }, { origem: { tipo: 'manual' } })).url, comRastreio, 'manual: como era');
+  } finally { s.db.close(); }
+});
+
+// Q4 e resíduo do S1 (envio-pelo-socio, rodada 2): porta fora da padrão, /social/ escrito com %xx, o MLB… solto no meio
+// do caminho (perfil de loja) e o host da busca (lista.) não passam; os formatos de produto de sempre continuam passando.
+test('Q4/S1: ML do remetente com porta, %73ocial, MLB… fora do começo do caminho ou da busca (lista.) → link_invalido; os formatos de produto seguem aceitos', async () => {
+  const CATALOGO = 'https://www.mercadolivre.com.br/fone-x/p/MLB79725856';
+  const aceitos = [
+    [URL_ML_ACHADO, URL_ML_ACHADO],
+    ['https://produto.mercadolivre.com.br:443/MLB-9876543210-fone-achado-_JM', URL_ML_ACHADO], // a porta padrão some no URL
+    ['https://produto.mercadolivre.com.br/mlb-9876543210-outro-nome-_JM?utm_source=x', 'https://produto.mercadolivre.com.br/mlb-9876543210-outro-nome-_JM'],
+    ['https://produto.mercadolivre.com.br/MLB9876543210', 'https://produto.mercadolivre.com.br/MLB9876543210'],
+    ['https://www.mercadolivre.com.br/MLB-9876543210-fone-_JM', 'https://www.mercadolivre.com.br/MLB-9876543210-fone-_JM'],
+    [CATALOGO, CATALOGO],
+    ['https://www.mercadolivre.com.br/p/MLB79725856', 'https://www.mercadolivre.com.br/p/MLB79725856'],
+    [`${CATALOGO}/s?quantity=1`, `${CATALOGO}/s`], // "outras opções de compra" do catálogo
+    ['https://www.mercadolivre.com.br/fone-%C3%A9/p/MLB79725856', 'https://www.mercadolivre.com.br/fone-%C3%A9/p/MLB79725856'], // slug com acento
+  ];
+  for (const [achada, esperada] of aceitos) {
+    const s = montarLojas({ ml: mlPagina({ url: achada }) });
+    try {
+      assert.equal((await s.envios.montarOferta({ url: URL_MELI, template_id: 1 }, { origem: ORIGEM_REM, exigirPreco: true })).url, esperada, achada);
+    } finally { s.db.close(); }
+  }
+  const recusados = [
+    'https://produto.mercadolivre.com.br:8443/MLB-3000000112-x-_JM', // Q4: a porta ia junto no origin
+    'https://www.mercadolivre.com.br/%73ocial/outro-MLB-123456789?matt_tool=1', // /social/ com %xx
+    'https://www.mercadolivre.com.br/%53OCIAL/MLB-123456789',
+    'https://www.mercadolivre.com.br/MLB-9876543210/%73ocial/outroafiliado', // o produto na frente, a vitrine depois
+    'https://www.mercadolivre.com.br/fone-x/p/MLB79725856%2Fsocial', // o %2F vira barra para quem decodifica
+    'https://www.mercadolivre.com.br/fone-x/p/MLB79725856%E0%A4%A', // %xx que não decodifica
+    'https://www.mercadolivre.com.br/perfil/LOJA_X/MLB123456789', // MLB… solto no fim do caminho
+    'https://www.mercadolivre.com.br/loja/MLB-123456789',
+    'https://www.mercadolivre.com.br/fone/%4DLB-123456789',
+    'https://www.mercadolivre.com.br/a/b/p/MLB79725856', // catálogo só depois de um slug
+    'https://lista.mercadolivre.com.br/MLB-9876543210-fone', // a busca, mesmo com cara de anúncio
+    'https://lista.mercadolivre.com.br/p/MLB79725856',
+    'https://api.mercadolibre.com/items/MLB9876543210',
+  ];
+  for (const achada of recusados) {
+    const s = montarLojas({ ml: mlPagina({ url: achada }) });
+    try {
+      // nem com o nome e o preço no texto do remetente
+      const e = await erroDe(s.envios.montarOferta({ url: URL_MELI, template_id: 1 }, { origem: ORIGEM_REM, complemento: { title: 'Fone', price: 50 }, exigirPreco: true }));
+      assert.deepEqual([e.codigo, e.message], ['link_invalido', 'Não achei o produto deste link do Mercado Livre.'], achada);
+      assert.equal(contar(s.db, 'SELECT COUNT(*) AS n FROM envios'), 0);
+    } finally { s.db.close(); }
+  }
+  // colado direto (a página devolve o próprio endereço): a mesma recusa
+  for (const colado of ['https://www.mercadolivre.com.br/perfil/LOJA_X/MLB123456789', 'https://www.mercadolivre.com.br/%73ocial/outro-MLB-123456789?matt_tool=1']) {
+    const s = montarLojas({ ml: mlPagina() });
+    try {
+      assert.equal((await erroDe(s.envios.montarOferta({ url: colado, template_id: 1 }, { origem: ORIGEM_REM, exigirPreco: true }))).codigo, 'link_invalido', colado);
+      assert.equal((await s.envios.montarOferta({ url: colado, template_id: 1 }, { origem: { tipo: 'manual' } })).url, colado, 'manual: como era');
+    } finally { s.db.close(); }
+  }
+});
+
+test('etapa 4 (CA5): montarOferta da Amazon com a API e complemento: a API primeiro, o texto só completa o que ela não trouxe', async () => {
+  const s = montarLojas();
+  try {
+    const complemento = { title: 'Do texto', price: 10, oldPrice: 500, coupon: 'AMZ10', freeShipping: true, sold: 300 };
+    const p = await s.envios.montarOferta({ url: URL_CURTO, template_id: 1 }, { origem: ORIGEM_REM, complemento, exigirPreco: true });
+    assert.deepEqual(p.offer, { ...OFERTA_API, coupon: 'AMZ10', freeShipping: true, sold: 300 });
+    assert.deepEqual([p.loja, p.asin, p.url, p.fonte_dados, p.tag_id, p.etiqueta, p.origem], ['amazon', ASIN, URL_CURTO, 'api+texto', null, null, ORIGEM_REM]);
+    assert.equal(contar(s.db, 'SELECT COUNT(*) AS n FROM envios'), 0);
+  } finally { s.db.close(); }
+});
+
+test('etapa 4 (CA5): Amazon sem API sai com os dados do texto; sem título ou sem preço → sem_dados (mensagem de hoje); link sem produto → link_invalido', async () => {
+  const s = montarLojas({ amazonApi: '403' });
+  try {
+    const p = await s.envios.montarOferta({ url: URL_CURTO, template_id: 1 },
+      { origem: ORIGEM_REM, complemento: { title: 'Fone do texto', price: 79.9, oldPrice: 99.9, discountPct: 20 }, exigirPreco: true });
+    assert.deepEqual(p.offer, { key: `ASIN:${ASIN}`, title: 'Fone do texto', price: 79.9, oldPrice: 99.9, discountPct: 20, sold: null, freeShipping: false, coupon: null, image: null });
+    assert.deepEqual([p.asin, p.fonte_dados], [ASIN, 'texto']);
+
+    const semTitulo = await erroDe(s.envios.montarOferta({ url: URL_CURTO, template_id: 1 }, { origem: ORIGEM_REM, complemento: { price: 79.9 }, exigirPreco: true }));
+    assert.deepEqual([semTitulo.codigo, semTitulo.message], ['sem_dados', 'Não consegui buscar os dados na Amazon: preencha o título do produto.']);
+    const semPreco = await erroDe(s.envios.montarOferta({ url: URL_CURTO, template_id: 1 }, { origem: ORIGEM_REM, complemento: { title: 'Fone do texto' }, exigirPreco: true }));
+    assert.equal(semPreco.codigo, 'sem_dados');
+    // sem exigirPreco (Disparo manual), o preço continua opcional
+    assert.equal((await s.envios.montarOferta({ url: URL_CURTO, template_id: 1 }, { origem: ORIGEM_REM, complemento: { title: 'Fone do texto' } })).offer.price, null);
+    // o criar também marca o erro de título (a mensagem é a mesma de sempre)
+    const doCriar = await erroDe(s.envios.criar({ tipo: 'oferta', url: URL_CURTO, template_id: 1, group_jids: ['111@g.us'] }));
+    assert.deepEqual([doCriar.codigo, doCriar.message], ['sem_dados', 'Não consegui buscar os dados na Amazon: preencha o título do produto.']);
+
+    const link = await erroDe(s.envios.montarOferta({ url: URL_BUSCA, template_id: 1 }, { origem: ORIGEM_REM, complemento: { title: 'X', price: 1 } }));
+    assert.ok(link instanceof LinkNaoResolvido);
+    assert.equal(link.codigo, 'link_invalido');
+    assert.equal(link.message, new LinkNaoResolvido(link.causa).message, 'a mensagem de hoje');
+    assert.equal(contar(s.db, 'SELECT COUNT(*) AS n FROM envios'), 0);
+  } finally { s.db.close(); }
+});
+
+test('etapa 4 (CA4/CA5): Shopee sem API sai com o texto e o link da conta do dono; sem preço → sem_dados antes de pedir o link; link sem produto → link_invalido', async () => {
+  const s = montarLojas({ shopeeApi: '10035' });
+  try {
+    const p = await s.envios.montarOferta({ url: URL_CURTO_SHOPEE, template_id: 1 },
+      { origem: ORIGEM_REM, complemento: { title: 'Fone do texto', price: 59.9, coupon: 'SHOPEE5' }, exigirPreco: true });
+    assert.deepEqual(p.offer, { key: `SHOPEE:${SHOP}.${ITEM}`, title: 'Fone do texto', price: 59.9, oldPrice: null, discountPct: null, sold: null, freeShipping: false, coupon: 'SHOPEE5', image: null });
+    assert.deepEqual([p.loja, p.url, p.shop_id, p.item_id, p.fonte_dados, p.origem], ['shopee', URL_PRODUTO_SHOPEE, SHOP, ITEM, 'texto', ORIGEM_REM]);
+    assert.match(p.link_afiliado, /^https:\/\/s\.shopee\.com\.br\/fake\d+$/, 'o link gerado pela conta do dono (simulação), nunca o colado');
+    assert.deepEqual(s.pedidosShopee, [URL_PRODUTO_SHOPEE]);
+
+    const semPreco = await erroDe(s.envios.montarOferta({ url: URL_PRODUTO_SHOPEE, template_id: 1 }, { origem: ORIGEM_REM, complemento: { title: 'Fone do texto' }, exigirPreco: true }));
+    assert.equal(semPreco.codigo, 'sem_dados');
+    const semTitulo = await erroDe(s.envios.montarOferta({ url: URL_PRODUTO_SHOPEE, template_id: 1 }, { origem: ORIGEM_REM, complemento: { price: 5 }, exigirPreco: true }));
+    assert.deepEqual([semTitulo.codigo, semTitulo.message], ['sem_dados', 'Não consegui buscar os dados na Shopee: preencha o título do produto.']);
+    assert.equal(s.pedidosShopee.length, 1, 'sem dados, o link não é pedido');
+
+    const link = await erroDe(s.envios.montarOferta({ url: URL_BUSCA_SHOPEE, template_id: 1 }, { origem: ORIGEM_REM, complemento: { title: 'X', price: 1 } }));
+    assert.ok(link instanceof LinkShopeeNaoResolvido);
+    assert.equal(link.codigo, 'link_invalido');
+    assert.equal(link.message, new LinkShopeeNaoResolvido(link.causa).message, 'a mensagem de hoje');
+    assert.equal(s.fetchS.chamadas.filter((c) => c.consulta?.startsWith('mutation')).length, 0, 'sem acesso à API, nem tenta gerar o link por ela');
+  } finally { s.db.close(); }
+});
+
+test('etapa 4 (CA4): situacaoLink diz, sem rede, por que o link do dono não sairia (ou null)', async () => {
+  const s = montarLojas();
+  try {
+    const sit = (loja, tagId = null) => s.envios.situacaoLink(loja, { tag_id: tagId });
+    // Mercado Livre: etiqueta, modo e extensão
+    assert.equal(sit('mercadolivre'), null);
+    assert.equal(sit('mercadolivre', 2), null);
+    assert.equal(sit('mercadolivre', 999), 'sem_etiqueta');
+    assert.equal(sit('mercadolivre', 'x'), 'sem_etiqueta');
+    s.estado.modo = 'direct';
+    assert.equal(sit('mercadolivre'), 'modo_direto');
+    s.estado.modo = 'extension';
+    assert.equal(sit('mercadolivre'), 'sem_extensao');
+    // Amazon e Shopee na mesma fila, enquanto a extensão está fora: a API da Shopee ainda é útil
+    assert.equal(sit('amazon'), null);
+    assert.equal(sit('shopee'), null);
+    await s.links.poll(0); // a extensão aparece
+    assert.equal(sit('mercadolivre'), null);
+    s.conexao.tag = '';
+    assert.equal(sit('amazon'), 'sem_tag_amazon');
+    s.db.prepare("UPDATE conexoes SET config = '{}' WHERE plataforma = 'shopee'").run();
+    assert.equal(sit('shopee'), 'sem_id_shopee');
+    s.db.prepare('DELETE FROM tags').run();
+    assert.equal(sit('mercadolivre'), 'sem_etiqueta');
+    assert.notEqual(sit('magalu'), null, 'loja sem integração nunca libera');
+    assert.notEqual(sit(undefined), null);
+    assert.deepEqual([s.fetchA.chamadas.length, s.fetchS.chamadas.length], [0, 0], 'nenhuma rede');
+  } finally { s.db.close(); }
+
+  // Shopee sem API e com a extensão fora (ML em extensão): sem caminho para o link
+  const semCaminho = montarLojas({ modo: 'extension', conexaoShopee: { id_afiliado: ID_AF } });
+  try { assert.equal(semCaminho.envios.situacaoLink('shopee', {}), 'sem_link_shopee'); } finally { semCaminho.db.close(); }
+  // sem os clientes das lojas (servidor antes da ligação)
+  const semClientes = montarLojas({ comAmazon: false, comShopee: false });
+  try {
+    assert.equal(semClientes.envios.situacaoLink('amazon', {}), 'sem_tag_amazon');
+    assert.equal(semClientes.envios.situacaoLink('shopee', {}), 'sem_link_shopee');
+  } finally { semClientes.db.close(); }
+});
+
+test('etapa 4 (CA4/CA6): ML do remetente nunca sai no modo direto (o preparar barra); sai com a etiqueta e o log "Remetente: <nome>"', async () => {
+  const s = montarLojas();
+  try {
+    const tpl = s.db.prepare('SELECT created_at FROM templates WHERE id = 1').get().created_at;
+    const payload = {
+      url: URL_MELI, loja: 'mercadolivre', tag_id: 1, etiqueta: 'etiquetaA', template_id: 1, template_criado_em: tpl, origem: ORIGEM_REM,
+      fonte_dados: 'api', offer: { key: 'MLB9876543210', title: 'Fone Bom', price: 89.9, oldPrice: null, discountPct: null, sold: null, freeShipping: false, coupon: null, image: null },
+    };
+    const gravar = () => Number(s.db.prepare(`INSERT INTO envios (tipo, payload, group_jids, quando, status, next_run_at, created_at)
+      VALUES ('oferta', ?, ?, 'agora', 'pendente', ?, ?)`).run(JSON.stringify(payload), JSON.stringify(['222@g.us']), Date.now(), Date.now()).lastInsertRowid);
+    s.estado.modo = 'direct';
+    const recusado = gravar();
+    await s.envios.runEnvio(recusado);
+    assert.equal(statusDe(s.db, recusado), 'erro');
+    assert.equal(s.db.prepare('SELECT erro FROM envio_resultados WHERE envio_id = ?').get(recusado).erro,
+      'link de afiliado não gerado: os links do Mercado Livre estão no modo direto (sem comissão)');
+    assert.equal(s.wa.simulated.length, 0, 'o meli.la recebido nunca sai');
+
+    s.estado.modo = 'fake';
+    const ok = gravar();
+    await s.envios.runEnvio(ok);
+    assert.equal(statusDe(s.db, ok), 'concluido');
+    assert.match(s.wa.simulated[0].text, /Compre aqui: https:\/\/meli\.la\/fake-etiquetaA-\d+$/);
+    assert.doesNotMatch(s.wa.simulated[0].text, /1AbCdEf/);
+    assert.deepEqual(linhas(s.db, 'SELECT rule_id, rule_name, group_name, offer_title, message FROM log WHERE level = ?', 'ok'),
+      [{ rule_id: null, rule_name: 'Remetente: Sócio Pedro', group_name: 'Tech', offer_title: 'Fone Bom', message: 'Enviado com a etiqueta etiquetaA' }]);
+    assert.equal(s.db.prepare("SELECT rule_name FROM log WHERE message LIKE '%modo direto%'").get()?.rule_name, 'Remetente: Sócio Pedro');
+  } finally { s.db.close(); }
 });
 
 test('nenhum teste deste arquivo acessou a rede', () => {

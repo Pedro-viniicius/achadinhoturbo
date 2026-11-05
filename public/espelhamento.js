@@ -15,7 +15,6 @@
 const TEXTOS_ESPELHAMENTO = {
   novo: 'Novo espelhamento', criar: 'Criar espelhamento', editarTitulo: 'Editar espelhamento',
   chip: 'Espelhamento',
-  subRegras: 'Também pode espelhar ofertas da Amazon de outros grupos.',
   verRegistro: 'Ver registro', editar: 'Editar', excluir: 'Excluir', salvar: 'Salvar', cancelar: 'Cancelar', salvando: 'Salvando…',
   pausado: 'Pausado',
   semGrupos: 'Conecte o WhatsApp em Números de WhatsApp para escolher os grupos.',
@@ -55,7 +54,7 @@ const TEXTOS_ESPELHAMENTO = {
   // Histórico
   hist: {
     titulo: 'Histórico', sub: 'Tudo que foi enviado e tudo que deu errado, com o motivo.',
-    tipo: 'Tipo', tudo: 'Tudo', automatico: 'Disparo automático', espelhamento: 'Espelhamento',
+    tipo: 'Tipo', tudo: 'Tudo', automatico: 'Disparo automático', espelhamento: 'Espelhamento', remetente: 'Remetente',
     regra: 'Regra', todasRegras: 'Todos os espelhamentos', resultado: 'Mostrar', todosResultados: 'Tudo', soFila: 'Só o que está na fila',
     ultimas24: 'Últimas 24 h', espelhadas: 'Espelhadas', descartadas: 'Descartadas', naFila: 'Na fila', precisamDeVoce: 'Precisam de você',
     carregando: 'Carregando…',
@@ -273,10 +272,10 @@ function formEspelhamento(e) {
 }
 
 // ---------- Histórico: seletor "Tipo" (compartilhado com a visão de sempre) ----------
-/** HTML do seletor "Tipo" (Tudo | Disparo automático | Espelhamento | Catálogo). Ligue com histLigarTipo(). */
+/** HTML do seletor "Tipo" (Tudo | Disparo automático | Espelhamento | Catálogo | Remetente). Ligue com histLigarTipo(). */
 function histTipoHtml(tipo) {
   const H = TEXTOS_ESPELHAMENTO.hist;
-  return `<span class="rotulo-campo" id="hs-tipo-r">${H.tipo}</span>${dispSegHtml('hs-tipo', [['', H.tudo], ['automatico', H.automatico], ['espelhamento', H.espelhamento], ['catalogo', TEXTOS_REVISAO_CATALOGO.tipo]], tipo, 'hs-tipo-r')}`;
+  return `<span class="rotulo-campo" id="hs-tipo-r">${H.tipo}</span>${dispSegHtml('hs-tipo', [['', H.tudo], ['automatico', H.automatico], ['espelhamento', H.espelhamento], ['catalogo', TEXTOS_REVISAO_CATALOGO.tipo], ['remetente', H.remetente]], tipo, 'hs-tipo-r')}`;
 }
 function histLigarTipo(nivel = '') { dispLigarSeg($('#hs-tipo'), (v) => histIr({ tipo: v }, nivel)); }
 /** Muda o filtro do Histórico: o endereço passa a mostrá-lo (sem nova entrada no histórico do navegador) e a página é refeita. */
@@ -337,16 +336,16 @@ function espLinhaHtml(it) {
     <td class="esp-oferta"><span class="trunca" title="${esc(titulo)}">${esc(titulo)}</span>${espAsinOk(it.asin) ? `<span class="dica-celula"><a class="alvo24" href="https://www.amazon.com.br/dp/${esc(String(it.asin).toUpperCase())}" target="_blank" rel="noopener" aria-label="${H.verNaAmazon}" style="text-decoration:underline">${esc(String(it.asin).toUpperCase())}</a></span>` : ''}</td>
     <td class="esp-resultado"><span class="${r.cls}">${espTextoHtml(r)}</span>${r.detalhe ? `<span class="dica-celula">${esc(r.detalhe)}</span>` : ''}${r.extra.map((x) => `<span class="dica-celula">${esc(x)}</span>`).join('')}${botao ? `<div style="margin-top:6px">${botao}</div>` : ''}</td></tr>`;
 }
-function espKpisHtml() {
+function espKpisHtml(live) {
   const H = TEXTOS_ESPELHAMENTO.hist; const info = ESP.info; if (!info) return '';
   const regra = ESP_H.regra ? ESP.lista.find((x) => String(x.id) === String(ESP_H.regra)) : null;
   const c = (regra ? regra.contadores_24h : info.totais_24h) || {}; const fila = c.na_fila || 0;
-  return `<div class="kpis esp-kpis" aria-live="polite">
+  return `<div class="kpis esp-kpis"${live ? ' aria-live="polite"' : ''}>
     <div class="kpi"><div class="rotulo">${H.espelhadas}</div><div class="valor">${c.espelhadas || 0}</div><div class="nota">${H.ultimas24}</div></div>
     <div class="kpi"><div class="rotulo">${H.descartadas}</div><div class="valor">${c.descartadas || 0}</div><div class="nota">${H.ultimas24}</div></div>
     <div class="kpi${fila > 0 ? ' atencao' : ''}"><div class="rotulo">${H.naFila}</div><div class="valor">${fila}</div><div class="nota">${fila > 0 ? H.precisamDeVoce : H.ultimas24}</div></div></div>`;
 }
-function espCorpoHtml() {
+function espCorpoHtml(live) {
   const H = TEXTOS_ESPELHAMENTO.hist;
   let lista;
   if (!ESP_H.itens.length) {
@@ -357,7 +356,7 @@ function espCorpoHtml() {
       <p class="dica" role="status" id="esp-contagem" style="margin:10px 0 0">${ESP_H.fim ? H.fim(ESP_H.itens.length) : H.mostrando(ESP_H.itens.length)}</p>
       <div class="linha" style="margin-top:8px"><button type="button" id="esp-mais" ${ESP_H.fim ? 'hidden' : ''}>${H.mostrarMais}</button></div>`;
   }
-  return espKpisHtml() + lista;
+  return espKpisHtml(live) + lista;
 }
 const espConsulta = (antes) => {
   const p = new URLSearchParams({ limite: String(ESP_PAGINA) });
@@ -390,7 +389,14 @@ async function paginaHistoricoEspelhamento(params) {
     const mais = $('#esp-mais'); if (mais) mais.onclick = tentar(() => espMostrarMais(ger));
     $$('[data-completar]', corpo).forEach((b) => (b.onclick = tentar(() => completarEspelhamento(Number(b.dataset.completar)))));
   };
-  const pintar = () => { corpo.innerHTML = espCorpoHtml(); ligarCorpo(); };
+  let pintado = ''; // o corpo da última pintura, sem aria-live: compara com o das atualizações automáticas
+  // Atualização automática: não repinta com o foco dentro do corpo (o foco se perderia) nem quando nada mudou
+  // (o aria-live repetiria os KPIs). Só a primeira pintura anuncia; as seguintes não levam aria-live.
+  const pintar = (auto) => {
+    const html = espCorpoHtml(false);
+    if (auto && (html === pintado || corpo.contains(document.activeElement))) return;
+    pintado = html; corpo.innerHTML = auto ? html : espCorpoHtml(true); ligarCorpo();
+  };
   const carregar = async (primeira) => {
     try {
       const [info, itens] = await Promise.all([api('/espelhos'), api(espConsulta())]);
@@ -402,7 +408,7 @@ async function paginaHistoricoEspelhamento(params) {
         const menor = itens.at(-1).id; ESP_H.itens = [...itens, ...ESP_H.itens.filter((x) => x.id < menor)];
         if (primeira) ESP_H.fim = false;
       }
-      pintar();
+      pintar(!primeira);
     } catch (e) {
       if (!ativa() || !primeira) return; // numa atualização automática que falha, fica o que já está na tela
       filtros();

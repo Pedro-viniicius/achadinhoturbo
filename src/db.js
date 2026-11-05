@@ -109,6 +109,23 @@ CREATE INDEX IF NOT EXISTS idx_cat_lista ON catalogo_itens (rule_id, status, COA
 CREATE TABLE IF NOT EXISTS catalogo_cursores (
   rule_id INTEGER NOT NULL, filtro TEXT NOT NULL, cursor TEXT, pronto INTEGER NOT NULL DEFAULT 0,
   atualizado_em INTEGER, PRIMARY KEY (rule_id, filtro));
+-- Envio pelo sócio: números de WhatsApp autorizados a mandar links no privado. jid e lid são dado pessoal (nunca saem
+-- do servidor) e só existem aqui: excluir o remetente apaga o número. destino_jids: lista JSON de grupos.
+CREATE TABLE IF NOT EXISTS remetentes (
+  id INTEGER PRIMARY KEY, nome TEXT NOT NULL, jid TEXT NOT NULL UNIQUE, lid TEXT UNIQUE,
+  enabled INTEGER NOT NULL DEFAULT 1, destino_jids TEXT NOT NULL DEFAULT '[]', template_id INTEGER, tag_id INTEGER,
+  enviar_foto INTEGER NOT NULL DEFAULT 1, max_por_hora INTEGER NOT NULL DEFAULT 10, dedupe_horas INTEGER NOT NULL DEFAULT 24,
+  responder INTEGER NOT NULL DEFAULT 1, created_at INTEGER, updated_at INTEGER);
+-- Um item por link recebido de um remetente. status: recebido|processando|enviado|duplicado|descartado|erro.
+-- Sem texto da mensagem e sem número: o remetente vai pelo id e pelo nome.
+CREATE TABLE IF NOT EXISTS remetente_itens (
+  id INTEGER PRIMARY KEY, remetente_id INTEGER NOT NULL, remetente_nome TEXT, msg_id TEXT NOT NULL, ts INTEGER NOT NULL,
+  url TEXT NOT NULL DEFAULT '', loja TEXT, complemento TEXT, status TEXT NOT NULL DEFAULT 'recebido', codigo TEXT, motivo TEXT,
+  chave TEXT, oferta TEXT, fonte_dados TEXT, envio_id INTEGER, decidido_em INTEGER, respondido_em INTEGER);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_rem_msg ON remetente_itens (remetente_id, msg_id, url);
+CREATE INDEX IF NOT EXISTS idx_rem_status ON remetente_itens (status, ts);
+CREATE INDEX IF NOT EXISTS idx_rem_dedupe ON remetente_itens (remetente_id, chave, status, decidido_em);
+CREATE INDEX IF NOT EXISTS idx_rem_hora ON remetente_itens (remetente_id, ts);
 `;
 
 // Colunas acrescentadas depois da primeira versão (ALTER TABLE só se faltar).
@@ -120,6 +137,10 @@ const EXTRA_COLUMNS = [
   ['rules', 'sources', 'TEXT'],
   ['sessions', 'last_seen', 'INTEGER'],
   ['sessions', 'user_id', 'INTEGER'],
+  // envio pelo sócio (rodada 2): hora em que o item chegou ao programa (o limite por hora conta por ela, não pelo ts da
+  // mensagem, que pode chegar atrasada) e quantos links a linha 'limite' representa (a resposta "Recebi N links")
+  ['remetente_itens', 'chegou_em', 'INTEGER'],
+  ['remetente_itens', 'qtd_links', 'INTEGER'],
 ];
 
 // "[ … ]" é um pedaço opcional: some sozinho quando algum placeholder dentro dele está vazio (renderTemplate).

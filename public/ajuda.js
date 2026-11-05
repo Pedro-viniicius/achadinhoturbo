@@ -3,7 +3,7 @@
 
 const TIPS = {
   // disparo automático (as chaves continuam “regras”: a API e o conceito são os mesmos)
-  'regras': 'Um disparo automático escolhe a etiqueta, o template, as fontes de ofertas, os grupos e o ritmo. Pode ter quantos quiser. Também há o tipo Espelhamento, que pega ofertas da Amazon de outros grupos.',
+  'regras': 'Um disparo automático escolhe a etiqueta, o template, as fontes de ofertas, os grupos e o ritmo. Pode ter quantos quiser. Também há o tipo Espelhamento, que pega ofertas da Amazon de outros grupos, e o Remetente, que envia os links que um número de confiança manda no privado.',
   // espelhamento da Amazon
   'espelhamento': 'Pega ofertas da Amazon postadas em outros grupos, busca título, preço e foto, põe a sua tag e envia ao seu grupo com a mensagem completa.',
   'espelhamento.origem': 'Grupos onde o número conectado está e que você quer vigiar. O painel só lê links da Amazon; o resto da conversa é ignorado.',
@@ -12,6 +12,12 @@ const TIPS = {
   'espelhamento.repetir': 'Por quantas horas o mesmo produto da Amazon não é reenviado por este espelhamento. Padrão: 168 h (7 dias). 0 = pode repetir. Fora desse prazo, ele sai de novo.',
   'espelhamento.fila': 'Quando falta o título ou o preço, nem a API nem o texto da mensagem de origem trouxeram: “esperar eu completar” deixa a oferta na fila do Histórico até você completar ou descartar; “enviar mesmo assim” manda o formato curto, com o que houver e o link.',
   'espelhamento.formato': 'Sem acesso à API, o painel lê o texto da mensagem de origem. Funciona bem assim: título na 1ª linha, depois “De R$ …”, “Por R$ …”, “NN% OFF”, o frete e “Compre aqui: <link>” com o link completo da Amazon. Sem título ou sem preço no texto, a oferta espera na fila (ou sai no formato curto, conforme a regra).',
+  // remetente (links enviados por outro número, no privado do número conectado)
+  'remetente': 'Um número de WhatsApp de confiança, como o do seu sócio, que pode mandar links de produto no privado do número conectado. O programa monta a oferta com a sua afiliação e envia aos grupos escolhidos aqui, sem você aprovar. Vale para Mercado Livre, Amazon e Shopee. Qualquer outro número é ignorado.',
+  'remetente.numero': 'O número do WhatsApp de quem vai mandar os links, com DDD (ex.: (35) 99999-1234). O programa confere se ele existe no WhatsApp. Fica só no seu computador, aparece mascarado no painel e é apagado se você excluir o remetente.',
+  'remetente.destino': 'Os grupos que recebem os links deste remetente. “Marcar um bloco” só ajuda a marcar: se você mudar o bloco depois, esta lista não muda.',
+  'remetente.responder': 'Manda ao remetente uma frase curta dizendo se o link saiu, por exemplo “Enviado para 3 grupos.” A frase nunca leva link, número nem nome de grupo. Desligado, ele não recebe nada.',
+  'remetente.limite': 'Links por hora: o máximo que este remetente pode mandar por hora (padrão 10, de 1 a 60). Os que passam disso são descartados. Horas sem repetir: o mesmo produto não sai de novo por este remetente nesse prazo (padrão 24 h; 0 = pode repetir).',
   'regras.etiqueta': 'Etiqueta ML padrão: a etiqueta de afiliado do Mercado Livre (ML), da Central de Afiliados, não o app Etiqueta, usada nos links deste disparo quando a fonte não tem uma própria. É o que atribui a comissão a você. Fica opcional quando todas as fontes são do Catálogo e só de Amazon e/ou Shopee.',
   'fonte.etiqueta': 'Etiqueta ML desta fonte: a etiqueta de afiliado do Mercado Livre (ML) usada nos links das ofertas desta fonte (não é o app Etiqueta). Assim um disparo manda ofertas de 2 a 5 etiquetas diferentes, uma por fonte. “A etiqueta ML padrão” usa a do campo de cima.',
   'regras.template': 'Modelo da mensagem. Campos como {PRECO_PRODUTO} são preenchidos com a oferta; linha com campo vazio some sozinha. Para uma parte da linha sumir sozinha, ponha-a entre colchetes: [ … ].',
@@ -161,6 +167,7 @@ const LEIA_MAIS = {
   'links.proximo': 'grupos/proximo-grupo',
   'relatorios': 'resultados/avisos',
   'relatorios.virada': 'resultados/avisos',
+  'remetente': 'disparo-automatico/remetentes',
 };
 const LEIA_MAIS_DESTINO = /^[a-z0-9-]+\/[a-z0-9-]+$/; // único formato que vira href do link (sempre interno)
 const leiaMaisDe = (chave) => (typeof chave === 'string' && Object.hasOwn(LEIA_MAIS, chave) && LEIA_MAIS_DESTINO.test(LEIA_MAIS[chave]) ? LEIA_MAIS[chave] : '');

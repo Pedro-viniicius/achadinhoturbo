@@ -246,3 +246,35 @@ test('R4: resposta atrasada do log não sobrescreve a visão Espelhamento nem um
   solta(); await atrasada;
   assert.equal(h.pagina.innerHTML, 'ESPELHAMENTO', 'a resposta atrasada do log sobrescreveu a visão Espelhamento');
 });
+
+// ---------- Histórico > Espelhamento: atualização automática (mesmo critério do D2 do Remetente) ----------
+test('D2: a atualização automática do Espelhamento não repinta com o foco dentro do corpo nem sem mudança, e não leva aria-live', async () => {
+  const els = new Map(); const timers = [];
+  const novo = () => ({ _html: '', hidden: false, dataset: {}, value: '', textContent: '', set innerHTML(v) { this._html = String(v); }, get innerHTML() { return this._html; } });
+  const get = (sel) => { if (!els.has(sel)) els.set(sel, novo()); return els.get(sel); };
+  const doc = { activeElement: null }; let focoDentro = false;
+  let titulo = 'Primeiro'; let chamadas = 0;
+  const ctx = {
+    URLSearchParams,     esc: (x) => String(x ?? ''), hora: () => '', q: () => '', zap: (x) => x, tentar: (fn) => fn,
+    document: doc, $: (sel) => (sel === '#dlg' ? { open: false } : get(sel)), $$: () => [],
+    rotaAtual: () => 'historico', dispSegHtml: () => '', dispLigarSeg() {}, histIr() {}, paginaHistorico: {},
+    clearTimeout() {}, setTimeout: (fn) => { timers.push(fn); return timers.length; },
+    api: async (rota) => {
+      if (rota === '/espelhos') return { espelhos: [], totais_24h: { espelhadas: 1 } };
+      chamadas++; return [item({ id: 1, oferta: { title: titulo } })];
+    },
+  };
+  vm.createContext(ctx);
+  vm.runInContext(`${fonte}\nglobalThis.__h = { paginaHistoricoEspelhamento };`, ctx);
+  await ctx.__h.paginaHistoricoEspelhamento(new URLSearchParams(''));
+  const corpo = get('#esp-corpo'); corpo.contains = (x) => x != null && focoDentro;
+  const gravacoes = []; let html = corpo._html;
+  Object.defineProperty(corpo, 'innerHTML', { configurable: true, get: () => html, set: (v) => { html = v; gravacoes.push(v); } });
+  assert.match(html, /aria-live="polite"/); assert.match(html, /Primeiro/);
+  const tick = async () => { const antes = chamadas; await timers.shift()(); assert.equal(chamadas, antes + 1); };
+  await tick(); assert.equal(gravacoes.length, 0, 'nada mudou: não repinta');
+  titulo = 'Segundo'; doc.activeElement = 'foco'; focoDentro = true;
+  await tick(); assert.equal(gravacoes.length, 0); assert.doesNotMatch(html, /Segundo/);
+  focoDentro = false;
+  await tick(); assert.equal(gravacoes.length, 1); assert.match(html, /Segundo/); assert.doesNotMatch(html, /aria-live/);
+});

@@ -283,15 +283,18 @@ function fcatCartao(r) {
 }
 function paginaRegras() {
   $('#pagina').innerHTML = `<div class="topo"><div><h1>Disparo automático ${q('regras')}</h1>
-    <p class="sub">Antes chamado de Regras. Cada disparo automático escolhe uma etiqueta, os grupos, o template e o ritmo. Pode ter quantos quiser. ${TEXTOS_ESPELHAMENTO.subRegras}</p></div>
-    <div class="linha"><button class="pri" id="nova">Novo disparo automático</button><button id="novo-esp">${TEXTOS_ESPELHAMENTO.novo}</button>${q('espelhamento')}</div></div><div id="lista"></div>`;
+    <p class="sub">Antes chamado de Regras. Cada disparo automático escolhe uma etiqueta, os grupos, o template e o ritmo. Pode ter quantos quiser. ${TEXTOS_REMETENTE.subRegras}</p></div>
+    <div class="linha"><button class="pri" id="nova">Novo disparo automático</button><button id="novo-esp">${TEXTOS_ESPELHAMENTO.novo}</button>${q('espelhamento')}${podeEquipe() ? `<button id="novo-rem">${TEXTOS_REMETENTE.novo}</button>${q('remetente')}` : ''}</div></div><div id="lista"></div>`;
   $('#nova').onclick = () => formRegra();
   $('#novo-esp').onclick = () => formEspelhamento();
+  if (podeEquipe()) $('#novo-rem').onclick = () => formRemetente(); // remetente: só o Dono cria (o servidor também recusa)
   listaRegras();
   carregarEspelhos().then(listaRegras); // os espelhamentos chegam depois; se a rota falhar, a lista mostra o aviso e as regras seguem
+  carregarRemetentes().then(listaRegras); // idem para os remetentes (remetentes.js)
   $('#lista').onclick = tentar(async (ev) => {
     const b = ev.target.closest('[data-act]'); if (!b) return;
     if (b.dataset.act.startsWith('esp-')) return espelhamentoAcao(b);
+    if (b.dataset.act.startsWith('rem-')) return remetenteAcao(b);
     const id = Number(b.closest('[data-id]').dataset.id); const r = S.rules.find((x) => x.id === id); const act = b.dataset.act;
     if (act === 'ligar') { await api(`/rules/${id}/enabled`, 'POST', { enabled: b.checked }); aviso(b.checked ? 'Disparo automático ligado' : 'Disparo automático pausado'); await recarregarRegras(); }
     if (act === 'rodar') { await api(`/rules/${id}/run`, 'POST'); aviso('Envio iniciado. Acompanhe no Histórico.'); setTimeout(recarregarRegras, 800); }
@@ -303,12 +306,12 @@ function paginaRegras() {
 }
 function listaRegras() {
   const el = $('#lista'); if (!el) return;
-  // lista mista: os disparos automáticos e, depois, os espelhamentos (espelhamento.js)
-  const vazio = !S.rules.length && !ESP.lista.length;
-  el.innerHTML = S.rules.map(cartaoRegra).join('') + cartoesEspelhamento()
+  // lista mista: os disparos automáticos e, depois, os espelhamentos (espelhamento.js) e os remetentes (remetentes.js)
+  const vazio = !S.rules.length && !ESP.lista.length && !REM.lista.length;
+  el.innerHTML = S.rules.map(cartaoRegra).join('') + cartoesEspelhamento() + cartoesRemetentes()
     + (vazio ? '<div class="vazio">Nenhum disparo automático ainda. Cadastre uma etiqueta em <a href="#conexoes">Conexões</a>, conecte o WhatsApp em <a href="#numeros">Números de WhatsApp</a> e crie o primeiro.</div>' : '');
 }
-async function recarregarRegras() { S.rules = await api('/rules'); await carregarEspelhos(); listaRegras(); }
+async function recarregarRegras() { S.rules = await api('/rules'); await Promise.all([carregarEspelhos(), carregarRemetentes()]); listaRegras(); }
 
 function opcoes(lista, sel, vazio) {
   return (vazio ? `<option value="">${vazio}</option>` : '') + lista.map((o) => `<option value="${o.id}" ${o.id === sel ? 'selected' : ''}>${esc(o.name)}</option>`).join('');
@@ -608,12 +611,14 @@ function paginaGrupos() {
 }
 
 // ---------- histórico ----------
-// Filtros no endereço: #historico?tipo=espelhamento&regra=3&status=na_fila (tipo: automatico | espelhamento | catalogo;
-// vazio = tudo). As visões Espelhamento ("Completar") e Catálogo ("Revisar oferta") estão em espelhamento.js.
+// Filtros no endereço: #historico?tipo=espelhamento&regra=3&status=na_fila (tipo: automatico | espelhamento | catalogo |
+// remetente; vazio = tudo). As visões Espelhamento ("Completar") e Catálogo ("Revisar oferta") estão em espelhamento.js;
+// a visão Remetente, em remetentes.js.
 async function paginaHistorico(nivel = '', params = null) {
-  const tipo = ['automatico', 'espelhamento', 'catalogo'].includes(params?.get('tipo')) ? params.get('tipo') : '';
+  const tipo = ['automatico', 'espelhamento', 'catalogo', 'remetente'].includes(params?.get('tipo')) ? params.get('tipo') : '';
   if (tipo === 'espelhamento') return paginaHistoricoEspelhamento(params);
   if (tipo === 'catalogo') return paginaHistoricoCatalogo(params);
+  if (tipo === 'remetente') return paginaHistoricoRemetente(params);
   const g = ++ESP_H.ger; clearTimeout(paginaHistorico.t); // para a atualização automática da visão Espelhamento, se estava aberta
   // "Disparo automático": o servidor devolve só as linhas de regra (rule_id), no mesmo limite de "Tudo"
   const filtros = [nivel ? `nivel=${nivel}` : '', tipo === 'automatico' ? 'tipo=automatico' : ''].filter(Boolean).join('&');
@@ -652,7 +657,7 @@ function paginaAjustes() {
       <div class="grade"><label class="campo">Guardar por (dias)<input id="ret" type="number" min="0" max="3650" value="${a.retencao_dias ?? 90}"><small>0 = guardar para sempre (não recomendado).</small></label></div>
       <div class="linha"><button class="pri" id="sr">Salvar</button>${podeEquipe() ? '<button id="limpar-agora">Apagar o que já passou do prazo</button>' : `<small class="dica">${SO_DONO_DICA.limpar}</small>`}</div></div>`;
   $('#sr').onclick = tentar(async () => { await api('/ajustes', 'PUT', { retencao_dias: $('#ret').value }); await atualizarEstado(); aviso('Salvo'); });
-  if ($('#limpar-agora')) $('#limpar-agora').onclick = tentar(async () => { const r = await api('/privacidade/limpar', 'POST'); aviso(`Apagados: ${r.eventos ?? 0} eventos, ${r.leituras ?? 0} leituras, ${r.cliques ?? 0} cliques, ${r.espelhamento ?? 0} itens do espelhamento`); });
+  if ($('#limpar-agora')) $('#limpar-agora').onclick = tentar(async () => { const r = await api('/privacidade/limpar', 'POST'); aviso(`Apagados: ${r.eventos ?? 0} eventos, ${r.leituras ?? 0} leituras, ${r.cliques ?? 0} cliques, ${r.espelhamento ?? 0} itens do espelhamento, ${r.remetentes ?? 0} itens dos remetentes`); });
   $('#sa').onclick = tentar(async () => { await api('/ajustes', 'PUT', { delay_group_s: $('#dg').value, delay_offer_s: $('#do').value }); await atualizarEstado(); aviso('Pausas salvas'); });
   const exemploTitulo = tentar(async () => { const r = await api('/templates/preview', 'POST', { body: '{TITULO_PRODUTO}', amostra: { title: 'Fones De Ouvido Usb-c Tipo C Com Microfone Integrado Som Estéreo Alta Qualidade Controle Chamadas Compatível Com iPhone 15 16 17 Android Samsung Premium' } }); $('#tm-ex').textContent = 'Exemplo: “' + r.texto + '”'; });
   exemploTitulo();

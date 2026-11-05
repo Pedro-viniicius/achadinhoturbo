@@ -86,6 +86,7 @@ docsCapitulo({
             ['Números que recebem avisos', 'Guardados, mas a tela mostra o número mascarado.'],
             ['Nomes e e-mails da equipe e dos convidados', 'Guardados. Do convite, só uma impressão do link (hash), nunca o link.'],
             ['Espelhamento', 'O nome do grupo de origem e o texto da mensagem, **mascarado** (e-mails, telefones e sequências de 8 ou mais dígitos viram `…`) e cortado em 1000 caracteres. Nunca quem postou. O texto não vai para o navegador nem para o log.'],
+            ['Números dos remetentes', 'Guardados, entram no backup e são apagados ao excluir o remetente. A tela mostra o número mascarado. Do que o remetente manda, o texto da mensagem não é guardado: só os campos lidos dele (título, preço, cupom), já mascarados, e só até o link ser decidido.'],
             ['Ofertas do Catálogo', 'Título, preço, foto, categoria e link. Sem dado pessoal.'],
             ['Fotos de Disparar mensagem', 'Sem metadados. Apagadas 7 dias depois de não terem mais envio ativo.'],
             ['Sessão do WhatsApp', 'Uma pasta dentro de `data`. Equivale a uma senha.'],
@@ -119,9 +120,9 @@ docsCapitulo({
       id: 'retencao', titulo: 'Prazo de guarda e apagar',
       onde: '[[Ajustes → Privacidade dos grupos]]',
       blocos: [
-        { p: 'Eventos, leituras e cliques dos grupos e os itens já decididos do espelhamento são apagados depois do prazo em “Guardar por (dias)”. O padrão é **90 dias**. A limpeza roda ao iniciar o programa e a cada 6 horas.' },
+        { p: 'Eventos, leituras e cliques dos grupos, os itens já decididos do espelhamento e os itens já decididos dos remetentes são apagados depois do prazo em “Guardar por (dias)”. O padrão é **90 dias**. A limpeza roda ao iniciar o programa e a cada 6 horas.' },
         { nota: 'aviso', texto: '0 significa guardar para sempre, e então os textos do espelhamento também ficam. Não é recomendado.' },
-        { p: 'Para aplicar o prazo agora, use “Apagar o que já passou do prazo” (só o Dono). Ficam de fora o que ainda está na fila do espelhamento e o item enviado que ainda conta para o “não repetir”.' },
+        { p: 'Para aplicar o prazo agora, use “Apagar o que já passou do prazo” (só o Dono). Ficam de fora o que ainda está na fila do espelhamento e dos remetentes e o item enviado que ainda conta para o “não repetir”.' },
         { passos: [
           '**Apagar um espelhamento** apaga na hora todos os itens e textos dele.',
           '**Desconectar o WhatsApp** pergunta se você também quer apagar o histórico de entradas, saídas, leituras e cliques dos grupos. Responda sim só se não for mais usar esse número aqui.',
@@ -244,7 +245,7 @@ docsCapitulo({
         { p: 'Em “Como gerar o link de afiliado” há duas opções:' },
         { passos: [
           '**Pela extensão do Chrome (com a etiqueta, gera comissão)**: o modo de verdade.',
-          '**Link direto, sem etiqueta (só para testar, não gera comissão)**: só para testar o fluxo. Nesse modo, as ofertas do Mercado Livre que vêm do Catálogo não saem.',
+          '**Link direto, sem etiqueta (só para testar, não gera comissão)**: só para testar o fluxo. Nesse modo, as ofertas do Mercado Livre que vêm do Catálogo ou de um remetente não saem.',
         ] },
       ],
     },

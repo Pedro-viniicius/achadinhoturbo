@@ -3,7 +3,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  extrairUrls, lerOfertaDoTexto, lerPreco, normalizar, palavraBloqueada, temCaraDeLink,
+  extrairUrls, lerOfertaDoTexto, lerPreco, mesclarOferta, normalizar, palavraBloqueada, temCaraDeLink,
   FIXTURES, FIXTURES_ESPERADO, HOSTS_AMAZON, MAX_URL, MAX_URLS, TITULO_MAX,
 } from '../src/oferta-texto.js';
 import { mascararPessoais } from '../src/privacidade.js';
@@ -337,4 +337,132 @@ test('privacidade + oferta-texto: a oferta lida do texto mascarado é a mesma', 
 test('temCaraDeLink (exportada para o catálogo, S2): domínio sem esquema, mesmo depois de "..." ou "+", e menção', () => {
   for (const v of ['...bit.ly/x', '+bit.ly/x', 'Fone bit.ly/abc', 'veja evil.example', 'http://evil.example', 'fale com @loja', '%bit.ly/x']) assert.equal(temCaraDeLink(v), true, v);
   for (const v of ['Fone Bluetooth JBL', 'Amazon.com.br', 'Cabo 3.5mm 1.5m', 'R$ 1.299,90', 'PROMO10', 'Casa e Decoração', '']) assert.equal(temCaraDeLink(v), false, v);
+});
+
+// ---------- mesclarOferta: dados da loja primeiro, o texto completa campo a campo (CA5) ----------
+
+const VAZIA = { title: null, price: null, oldPrice: null, discountPct: null, sold: null, freeShipping: false, coupon: null, image: null };
+const DA_LOJA = { title: 'Fone JBL', price: 80, oldPrice: 100, discountPct: 20, sold: 300, freeShipping: false, coupon: null, image: 'https://m.media-amazon.com/images/I/x.jpg' };
+
+test('mesclarOferta: sem loja e sem texto não há oferta nem fonte; os campos têm os mesmos nomes de sempre', () => {
+  for (const args of [[null, {}], [null], [undefined, undefined], [null, null]]) {
+    assert.deepEqual(mesclarOferta(...args), { oferta: VAZIA, fonte: null });
+  }
+  assert.deepEqual(Object.keys(mesclarOferta(null, {}).oferta), Object.keys(VAZIA));
+});
+
+test('mesclarOferta: só a loja → fonte "api", e o texto não entra', () => {
+  const r = mesclarOferta(DA_LOJA, {});
+  assert.equal(r.fonte, 'api');
+  assert.deepEqual(r.oferta, DA_LOJA);
+});
+
+test('mesclarOferta: só o texto → fonte "texto" e a imagem fica nula', () => {
+  const doTexto = { title: 'Fone no texto', price: 90, oldPrice: 120, discountPct: 25, sold: 50, freeShipping: true, coupon: 'PROMO10', urls: ['https://x'] };
+  const r = mesclarOferta(null, doTexto);
+  assert.equal(r.fonte, 'texto');
+  assert.deepEqual(r.oferta, { title: 'Fone no texto', price: 90, oldPrice: 120, discountPct: 25, sold: 50, freeShipping: true, coupon: 'PROMO10', image: null });
+});
+
+test('mesclarOferta: loja + texto → "api+texto"; a loja vence campo a campo e o texto completa o que falta', () => {
+  const daLoja = { ...VAZIA, title: 'Título da loja', price: 80, image: 'https://m.media-amazon.com/images/I/x.jpg' };
+  const doTexto = { title: 'Título do texto', price: 70, oldPrice: 100, sold: 40, freeShipping: true, coupon: 'OFF5' };
+  const r = mesclarOferta(daLoja, doTexto);
+  assert.equal(r.fonte, 'api+texto');
+  assert.equal(r.oferta.title, 'Título da loja');
+  assert.equal(r.oferta.price, 80);
+  assert.equal(r.oferta.oldPrice, 100);
+  assert.equal(r.oferta.discountPct, 20); // da conta dos dois preços (80 e 100)
+  assert.equal(r.oferta.sold, 40);
+  assert.equal(r.oferta.freeShipping, true);
+  assert.equal(r.oferta.coupon, 'OFF5');
+});
+
+test('mesclarOferta: a loja completa e o texto não acrescenta nada → "api" (texto não conta como fonte)', () => {
+  const doTexto = { title: 'Outro', price: 1, oldPrice: 2, discountPct: 50, sold: 1, freeShipping: false, coupon: null };
+  const r = mesclarOferta(DA_LOJA, doTexto);
+  assert.equal(r.fonte, 'api');
+  assert.deepEqual(r.oferta, DA_LOJA);
+});
+
+test('mesclarOferta: preço antigo menor ou igual ao atual é descartado, venha de onde vier', () => {
+  for (const velho of [80, 79.99, 10]) {
+    const daLoja = mesclarOferta({ ...VAZIA, price: 80, oldPrice: velho }, {});
+    assert.equal(daLoja.oferta.oldPrice, null, `loja ${velho}`);
+    assert.equal(daLoja.oferta.discountPct, null, `loja ${velho}`);
+    assert.equal(daLoja.fonte, 'api', `loja ${velho}`);
+    const doTexto = mesclarOferta(null, { price: 80, oldPrice: velho });
+    assert.equal(doTexto.oferta.oldPrice, null, `texto ${velho}`);
+    assert.equal(doTexto.oferta.discountPct, null, `texto ${velho}`);
+  }
+  // o antigo da loja descartado NÃO cai para o do texto (a loja manda) e não conta como fonte
+  const r = mesclarOferta({ ...VAZIA, price: 80, oldPrice: 70 }, { oldPrice: 120 });
+  assert.equal(r.oferta.oldPrice, null);
+  assert.equal(r.fonte, 'api');
+});
+
+test('mesclarOferta: preço antigo sem preço atual é descartado e não conta como fonte', () => {
+  const r = mesclarOferta(null, { oldPrice: 100 });
+  assert.equal(r.oferta.oldPrice, null);
+  assert.equal(r.fonte, null);
+  assert.equal(mesclarOferta({ ...VAZIA, oldPrice: 100 }, {}).fonte, null);
+});
+
+test('mesclarOferta: preço antigo maior que o atual vale e o desconto sai da conta dos dois', () => {
+  const r = mesclarOferta(null, { price: 75, oldPrice: 100 });
+  assert.equal(r.oferta.oldPrice, 100);
+  assert.equal(r.oferta.discountPct, 25);
+  // preço da loja + antigo do texto: a conta usa os dois
+  assert.equal(mesclarOferta({ ...VAZIA, price: 50 }, { oldPrice: 100 }).oferta.discountPct, 50);
+  // o antigo que ficou na oferta conta como fonte: preço da loja + antigo do texto = os dois
+  assert.equal(mesclarOferta({ ...VAZIA, price: 50 }, { oldPrice: 100 }).fonte, 'api+texto');
+  assert.equal(mesclarOferta({ ...VAZIA, price: 50, oldPrice: 100 }, { oldPrice: 90 }).fonte, 'api');
+});
+
+test('mesclarOferta: o desconto da loja vale; 0 da loja significa "não veio" e cai na conta dos preços', () => {
+  assert.equal(mesclarOferta({ ...VAZIA, price: 80, oldPrice: 100, discountPct: 33 }, {}).oferta.discountPct, 33);
+  assert.equal(mesclarOferta({ ...VAZIA, price: 80, oldPrice: 100, discountPct: 0 }, {}).oferta.discountPct, 20);
+});
+
+test('mesclarOferta: o "NN% OFF" do texto só vale quando o preço também vem do texto', () => {
+  // preço do texto (loja sem preço): o percentual do texto vale
+  const r1 = mesclarOferta(null, { price: 90, discountPct: 30 });
+  assert.equal(r1.oferta.discountPct, 30);
+  assert.equal(r1.fonte, 'texto');
+  const r2 = mesclarOferta({ ...VAZIA, title: 'Fone' }, { price: 90, discountPct: 30 });
+  assert.equal(r2.oferta.discountPct, 30);
+  assert.equal(r2.fonte, 'api+texto');
+  // preço da loja: o percentual do texto fala de outro preço e é ignorado
+  const r3 = mesclarOferta({ ...VAZIA, price: 80 }, { price: 90, discountPct: 30 });
+  assert.equal(r3.oferta.price, 80);
+  assert.equal(r3.oferta.discountPct, null);
+  assert.equal(r3.fonte, 'api');
+  // os dois preços conhecidos: a conta dos preços vem antes do percentual do texto
+  assert.equal(mesclarOferta(null, { price: 75, oldPrice: 100, discountPct: 30 }).oferta.discountPct, 25);
+});
+
+test('mesclarOferta: a imagem vem só da loja, nunca do texto (nem de campo "image" do texto)', () => {
+  assert.equal(mesclarOferta(null, { title: 'x', image: 'https://evil.example/a.jpg', urls: ['https://evil.example/b.jpg'] }).oferta.image, null);
+  assert.equal(mesclarOferta({ ...VAZIA, title: 'x' }, { image: 'https://evil.example/a.jpg' }).oferta.image, null);
+  assert.equal(mesclarOferta(DA_LOJA, { image: 'https://evil.example/a.jpg' }).oferta.image, DA_LOJA.image);
+});
+
+test('mesclarOferta: frete grátis é verdadeiro se qualquer lado diz; vazio e zero não viram dado', () => {
+  assert.equal(mesclarOferta({ ...VAZIA, title: 'x', freeShipping: true }, {}).oferta.freeShipping, true);
+  assert.equal(mesclarOferta({ ...VAZIA, title: 'x', freeShipping: true }, {}).fonte, 'api');
+  const r = mesclarOferta({ ...VAZIA, title: 'x' }, { freeShipping: true });
+  assert.equal(r.oferta.freeShipping, true);
+  assert.equal(r.fonte, 'api+texto');
+  assert.equal(mesclarOferta(null, { freeShipping: false }).fonte, null);
+  // string vazia da loja não vale: o texto completa
+  const v = mesclarOferta({ ...VAZIA, title: '', coupon: '' }, { title: 'Do texto', coupon: 'ABC' });
+  assert.equal(v.oferta.title, 'Do texto');
+  assert.equal(v.oferta.coupon, 'ABC');
+  assert.equal(v.fonte, 'texto');
+});
+
+test('mesclarOferta: não muda os objetos recebidos', () => {
+  const daLoja = Object.freeze({ ...DA_LOJA });
+  const doTexto = Object.freeze({ title: 'a', price: 1, urls: Object.freeze(['https://x']) });
+  assert.doesNotThrow(() => mesclarOferta(daLoja, doTexto));
 });

@@ -664,3 +664,9 @@ mark { background:color-mix(in oklab, var(--warn) 30%, var(--surface)); color:va
 @media (max-width:600px) { .q[data-docs]::after { width:44px; height:44px; } }
 .docs-nota--erro .docs-nota-t span { color:#fff; }
 @media (prefers-color-scheme: dark) { .docs-nota--erro .docs-nota-t span { color:var(--grafite); } }
+
+/* Remetente/Espelhamento/Visão Geral em telas muito estreitas: os KPIs em uma coluna, sem quebrar palavra no meio */
+@media (max-width:400px) {
+  .esp-kpis { grid-template-columns:minmax(0,1fr); }
+  .esp-kpis .kpi .rotulo { overflow-wrap:normal; letter-spacing:.04em; }
+}

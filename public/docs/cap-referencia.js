@@ -51,6 +51,7 @@ docsCapitulo({
           ['Ocorrência', 'Cada vez que algo acontece em um disparo agendado ou repetido: um horário que chegou e foi enviado, pulado ou falhou.'],
           ['Repetição', 'Mensagem que sai sozinha nos dias da semana e horários escolhidos (até 6 horários).'],
           ['Enquete', 'Pergunta com 2 a 12 opções para o grupo votar, enviada em Disparar mensagem.'],
+          ['Remetente', 'Número de WhatsApp de confiança, cadastrado por você em [[Disparo automático → Novo remetente]], que manda links de produto no privado do número conectado. O programa monta a oferta com a sua afiliação e envia para os grupos daquele remetente. Qualquer outro número é ignorado.'],
         ], titulo: 'Disparos' },
         { termos: [
           ['Espelhamento', 'Disparo que copia ofertas da Amazon de grupos de origem para os seus grupos, com a sua tag e a mensagem completa.'],
@@ -182,6 +183,7 @@ docsCapitulo({
             ['Não repetir a mesma oferta (espelhamento)', '168 h por padrão, de 0 a 8760 (0 = pode repetir)', 'Campo “Não repetir a mesma oferta por (horas)” no espelhamento'],
             ['Máximo por hora (espelhamento)', '10 por hora por padrão, de 0 a 60 (0 = sem limite)', 'Campo “Máximo por hora” no espelhamento'],
             ['Links lidos no espelhamento', 'até 5 links por mensagem; até 60 links por hora por grupo de origem', 'Fixo'],
+            ['Remetente', '10 links por hora por remetente por padrão, de 1 a 60 links por hora; 24 h sem repetir o mesmo produto por padrão (0 = pode repetir); até 5 links por mensagem; mensagem com mais de 2 h é ignorada; até 20 respostas por hora', 'Campos “No máximo (links por hora)” e “Não repetir o mesmo produto por (horas)” no remetente'],
             ['Palavras bloqueadas', 'até 50 palavras de até 60 caracteres', 'Fixo'],
             ['Fila para completar', 'expira em 24 h, ou nas horas de “Não repetir” se forem mais', 'Campo “Não repetir a mesma oferta por (horas)”'],
             ['Revisão do Catálogo', 'até 50 ofertas esperando por disparo; o Histórico mostra as 200 mais recentes', 'Fixo'],

@@ -4,6 +4,11 @@
 //
 // Além de enviar, registra o que acontece nos grupos: quem entrou (pelo link ou adicionado),
 // quem saiu (ou foi removido) e quem leu as suas mensagens. É a base da Visão Geral.
+//
+// Também ouve mensagens novas: as dos grupos (espelhamento, `onMensagem`) e as da conversa privada (envio pelo
+// sócio, `onPrivada`). Privacidade (LGPD): o ouvinte de grupos nunca entrega participante nem pushName. O privado
+// entrega os identificadores do remetente (`ids`: número e LID, que são dado pessoal) só ao handler, que os usa para
+// casar com os remetentes cadastrados e descarta o resto. Eles nunca vão a log, console ou mensagem de erro daqui.
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -150,6 +155,13 @@ function tsDaMensagem(v) {
 
 const MAX_IDS_ENVIADOS = 1000;
 
+/** Conversa privada: número (`@s.whatsapp.net`) ou LID (`@lid`), já sem o `:device`. Grupo, status, canal e bot não casam. */
+const JID_PRIVADO = /^\d+@(?:s\.whatsapp\.net|lid)$/;
+const JID_NUMERO = /^\d+@s\.whatsapp\.net$/;
+const JID_LID = /^\d+@lid$/;
+/** bareJid de uma string que precisa casar com `padrao`; qualquer outra coisa vira ''. */
+const jidSe = (v, padrao) => { const j = typeof v === 'string' ? bareJid(v) : ''; return padrao.test(j) ? j : ''; };
+
 /** Só o nome do erro (ex.: 'SyntaxError'), nunca a mensagem: ela pode carregar texto recebido do grupo (S7). */
 const nomeDoErro = (e) => (typeof e?.name === 'string' && /^[A-Za-z_$][\w$]{0,63}$/.test(e.name) ? e.name : 'Error');
 
@@ -221,6 +233,7 @@ export function createWhatsApp({ db, dir, dryRun = false, pseudo = (id) => id, d
   let sock = null; let starting = false; let stopped = false; let syncTimer = null;
   const simulated = []; // mensagens "enviadas" no modo simulação
   let aoReceber = typeof onMensagem === 'function' ? onMensagem : null;
+  let aoReceberPrivada = null; // onPrivada: só é ligado pelo servidor
   // ids das mensagens que este programa enviou (os últimos 1000): voltam pelo messages.upsert e são ignorados (anti-laço)
   const idsEnviados = new Set();
   function registrarEnvio(enviada) {
@@ -286,27 +299,77 @@ export function createWhatsApp({ db, dir, dryRun = false, pseudo = (id) => id, d
   }
 
   /**
-   * Mensagens novas nos grupos (messages.upsert). Só `notify` (o que chega agora, não o histórico) e só grupos.
-   * Entrega ao handler apenas { jid, fromMe, texto, msgId, ts }: nunca participante, pushName ou outro dado da pessoa.
-   * `texto` chega cortado em MAX_TEXTO_RECEBIDO caracteres (S1). Ver em textoDaMensagem a decisão R9 (link duplicado).
+   * Formas do remetente de uma conversa privada, sem o `:device`: o `remoteJid` (número ou LID) e o par dele no
+   * `remoteJidAlt` (atributo do servidor que o Baileys preenche fora de grupo: com LID, traz o número; com número, o
+   * LID, que o remetente aprende quando casou pelo número). Quando só há o LID, o número vem do mapa LID→número do
+   * Baileys (`signalRepository.lidMapping.getPNForLID`, local). O mapa é esforço: sem ele, ou se falhar, fica só o
+   * LID, sem lançar e sem escrever nada.
+   */
+  async function idsDoRemetente(key, jid) {
+    const ids = [jid];
+    if (JID_NUMERO.test(jid)) {
+      const lid = jidSe(key.remoteJidAlt, JID_LID);
+      if (lid) ids.push(lid);
+      return ids;
+    }
+    const alt = jidSe(key.remoteJidAlt, JID_NUMERO);
+    if (alt) ids.push(alt);
+    else if (JID_LID.test(jid) && !dryRun) {
+      try {
+        const pn = jidSe(await sock?.signalRepository?.lidMapping?.getPNForLID?.(jid), JID_NUMERO);
+        if (pn) ids.push(pn);
+      } catch { /* sem o número: casa só pelo LID guardado */ }
+    }
+    return [...new Set(ids)];
+  }
+
+  /** Entrega uma mensagem privada ao handler. Nunca rejeita: o erro vai ao console só pelo nome (S7, CA9). */
+  async function entregarPrivada(key, jid, texto, msgId, ts) {
+    try {
+      const ids = await idsDoRemetente(key, jid);
+      const handler = aoReceberPrivada;
+      if (handler) await handler({ ids, texto, msgId, ts });
+    } catch (e) { console.error('[remetente] erro no handler:', nomeDoErro(e)); }
+  }
+
+  /**
+   * Mensagens novas (messages.upsert). Só `notify` (o que chega agora, não o histórico). Ignora o que o próprio
+   * programa enviou (`idsEnviados`). `texto` chega cortado em MAX_TEXTO_RECEBIDO caracteres (S1). Ver em
+   * textoDaMensagem a decisão R9 (link duplicado).
+   * - Grupos → `onMensagem`: { jid, fromMe, texto, msgId, ts }, nunca participante, pushName ou outro dado da pessoa.
+   * - Conversa privada (número ou LID; nunca status, canal, grupo nem mensagem minha) → `onPrivada`:
+   *   { ids, texto, msgId, ts }, sem pushName. `ids` (ver idsDoRemetente) serve só para casar com os remetentes.
    * Nada aqui lança para o Baileys; o erro do handler vai ao console só com o nome do erro (`e.name`), nunca com
-   * `e.message`, que pode trazer trecho da mensagem (ex.: SyntaxError do JSON.parse) (S7).
+   * `e.message`, que pode trazer trecho da mensagem (ex.: SyntaxError do JSON.parse) ou o número (S7).
+   * Devolve uma promessa que resolve quando as entregas privadas terminam (os testes esperam por ela); nunca rejeita.
    */
   function onMensagens(upsert) {
-    if (!aoReceber || upsert?.type !== 'notify' || !Array.isArray(upsert.messages)) return;
+    if ((!aoReceber && !aoReceberPrivada) || upsert?.type !== 'notify' || !Array.isArray(upsert.messages)) return Promise.resolve();
+    const privadas = [];
     for (const msg of upsert.messages) {
+      let rotulo = '[espelho]';
       try {
         const key = msg?.key;
         const msgId = typeof key?.id === 'string' ? key.id : '';
         const jid = typeof key?.remoteJid === 'string' ? key.remoteJid : '';
         if (!msgId || idsEnviados.has(msgId)) continue;
-        if (!jid.endsWith('@g.us')) continue;
+        if (jid.endsWith('@g.us')) {
+          if (!aoReceber) continue;
+          const texto = textoDaMensagem(msg.message).slice(0, MAX_TEXTO_RECEBIDO);
+          if (!texto) continue;
+          const entrega = { jid, fromMe: key.fromMe === true, texto, msgId, ts: tsDaMensagem(msg.messageTimestamp) };
+          Promise.resolve(aoReceber(entrega)).catch((e) => console.error('[espelho] erro no handler:', nomeDoErro(e)));
+          continue;
+        }
+        rotulo = '[remetente]';
+        const privado = jidSe(jid, JID_PRIVADO);
+        if (!aoReceberPrivada || !privado || key.fromMe === true) continue;
         const texto = textoDaMensagem(msg.message).slice(0, MAX_TEXTO_RECEBIDO);
         if (!texto) continue;
-        const entrega = { jid, fromMe: key.fromMe === true, texto, msgId, ts: tsDaMensagem(msg.messageTimestamp) };
-        Promise.resolve(aoReceber(entrega)).catch((e) => console.error('[espelho] erro no handler:', nomeDoErro(e)));
-      } catch (e) { console.error('[espelho] erro no handler:', nomeDoErro(e)); }
+        privadas.push(entregarPrivada(key, privado, texto, msgId, tsDaMensagem(msg.messageTimestamp)));
+      } catch (e) { console.error(`${rotulo} erro no handler:`, nomeDoErro(e)); }
     }
+    return Promise.all(privadas).then(() => undefined);
   }
 
   async function connect() {
@@ -423,6 +486,20 @@ export function createWhatsApp({ db, dir, dryRun = false, pseudo = (id) => id, d
     return achado?.exists && achado.jid ? { jid: bareJid(achado.jid), existe: true } : { jid: montado, existe: false };
   }
 
+  /**
+   * LID (`…@lid`, sem o `:device`) de um número (`…@s.whatsapp.net`), pelo `getLIDForPN` do Baileys, que pode consultar
+   * o WhatsApp (USYNC): quem chama põe freio. É esforço: null no modo simulado, sem conexão, sem mapa ou em falha.
+   * Nunca lança nem escreve no console (o número é dado pessoal).
+   */
+  async function lidDe(jid) {
+    const pn = jidSe(jid, JID_NUMERO);
+    if (dryRun || !pn) return null;
+    try { return jidSe(await sock?.signalRepository?.lidMapping?.getLIDForPN?.(pn), JID_LID) || null; } catch { return null; }
+  }
+
+  /** O número conectado (`…@s.whatsapp.net`, sem o `:device`), ou null desconectado e no modo simulado. */
+  const meuJid = () => jidSe(state.me, JID_NUMERO) || null;
+
   /** Busca o link de convite do grupo (exige ser admin) e guarda. */
   async function fetchInvite(jid) {
     if (dryRun) { const code = 'SIMULADO' + jid.replace(/\D/g, '').slice(-6); db.prepare('UPDATE groups SET invite_code = ? WHERE jid = ?').run(code, jid); return code; }
@@ -473,12 +550,14 @@ export function createWhatsApp({ db, dir, dryRun = false, pseudo = (id) => id, d
 
   return {
     state: () => ({ ...state }), isReady, connect, logout, syncGroups, sendText, sendImage, sendPoll, resolverNumero,
-    fetchInvite, createNextGroup, simulated,
+    fetchInvite, createNextGroup, simulated, lidDe, meuJid,
     /** Define quem recebe as mensagens novas dos grupos ({ jid, fromMe, texto, msgId, ts }); null desliga. */
     onMensagem: (handler) => { aoReceber = typeof handler === 'function' ? handler : null; },
+    /** Define quem recebe as mensagens novas da conversa privada ({ ids, texto, msgId, ts }); null desliga. */
+    onPrivada: (handler) => { aoReceberPrivada = typeof handler === 'function' ? handler : null; },
     // usados nos testes para simular eventos do WhatsApp e conferir o que vai ao Baileys
     _onParticipants: onParticipants, _onReceipts: onReceipts, _onMensagens: onMensagens,
-    _usarSocket: (falso) => { sock = falso; state.status = 'open'; },
+    _usarSocket: (falso) => { sock = falso; state.status = 'open'; if (falso?.user?.id) state.me = falso.user.id; },
     // reconecta sozinho ao abrir o programa se já houver sessão salva
     autoStart: () => { if (!dryRun && fs.existsSync(path.join(authDir, 'creds.json'))) connect(); },
   };
