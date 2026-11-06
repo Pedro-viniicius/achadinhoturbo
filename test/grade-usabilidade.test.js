@@ -71,12 +71,17 @@ async function subirPainel() {
     filho.once('exit', (c) => { clearTimeout(timer); falha(new Error(`servidor saiu (${c}):\n${saida}`)); });
   });
   const base = `http://127.0.0.1:${porta}`;
-  const corpo = { name: 'Regra QA', enabled: true, tag_id: 1, template_id: 1, group_jids: ['111@g.us'], per_run: 3, interval_min: 60, window_start: '08:00', window_end: '22:00',
-    sources: [{ type: 'list', config: { items: 'https://produto.mercadolivre.com.br/MLB-2000001-x | Item | 10 | 20' } }],
-    grade: { dias: [0, 1, 2, 3, 4, 5, 6], horarios: HORAS.map((hora, i) => ({ hora, qtd: (i % 3) + 1, template_id: null })) } };
-  const r = await fetch(`${base}/api/rules`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(corpo) });
+  const r = await fetch(`${base}/api/rules`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(CORPO_REGRA) });
   assert.equal(r.status, 200, 'a regra de teste deve ser criada pela API');
-  return { base, porta, filho, dir };
+  return { base, porta, filho, dir, regraId: (await r.json()).id };
+}
+const CORPO_REGRA = { name: 'Regra QA', enabled: true, tag_id: 1, template_id: 1, group_jids: ['111@g.us'], per_run: 3, interval_min: 60, window_start: '08:00', window_end: '22:00',
+  sources: [{ type: 'list', config: { items: 'https://produto.mercadolivre.com.br/MLB-2000001-x | Item | 10 | 20' } }],
+  grade: { dias: [0, 1, 2, 3, 4, 5, 6], horarios: HORAS.map((hora, i) => ({ hora, qtd: (i % 3) + 1, template_id: null })) } };
+/** Os testes compartilham o painel e alguns SALVAM (U4, ordem pendente): quem depende das 10 horas de origem restaura a regra antes de abrir o formulário. */
+async function restaurarRegra() {
+  const r = await fetch(`${painel.base}/api/rules/${painel.regraId}`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(CORPO_REGRA) });
+  assert.equal(r.status, 200, 'a regra de teste deve voltar ao estado de origem');
 }
 
 async function subirChrome() {
@@ -146,7 +151,8 @@ const ESTADO = `({
 })`;
 
 /** Abre o "Editar" da regra com um clique de verdade, na janela `largura` x `altura`, e devolve a página pronta. */
-async function abrirFormulario(t, { largura = 1130, altura = 965 } = {}) {
+async function abrirFormulario(t, { largura = 1130, altura = 965, regraId = null, antes = null, restaurar = false } = {}) {
+  if (restaurar) await restaurarRegra();
   const p = await abrirAba(`${painel.base}/#disparo-automatico`);
   t.after(() => p.fechar());
   await p.tela(largura, altura);
@@ -174,7 +180,8 @@ async function abrirFormulario(t, { largura = 1130, altura = 965 } = {}) {
     gravarEventos: () => p.js(`window.__ev = []; for (const tipo of ['mousedown', 'mouseup', 'click']) document.addEventListener(tipo, (e) => { const li = e.target.closest?.('li.gh-linha'); window.__ev.push({ tipo, linha: li?.dataset.k ?? null, hora: li?.querySelector('.gh-h').value ?? null, alvo: e.target.tagName + '.' + (e.target.dataset?.gh || e.target.className || '') }); }, true)`),
     eventos: () => p.js('window.__ev'),
   };
-  const [x, y] = await a.centro('button[data-act=editar]');
+  if (antes) await p.js(antes); // gancho: roda com a página pronta e o formulário ainda fechado (ex.: segurar uma resposta do servidor)
+  const [x, y] = await a.centro(regraId ? `article.regra[data-id="${regraId}"] button[data-act=editar]` : 'button[data-act=editar]');
   await a.apertarSoltar(x, y);
   await p.esperar(`document.querySelector('#dlg').open && document.querySelectorAll('#gh-lista > li').length === ${HORAS.length}`);
   // o confirm nativo trava o CDP: um falso registra o texto e responde `window.__resp`; os pedidos que gravam também
@@ -419,14 +426,58 @@ test('U3: Desfazer de "Remover" devolve os MESMOS nós na posição original, co
   assert.ok(btn.visivel && btn.w >= 24 && btn.h >= 24, 'o botão Desfazer está à vista e tem tamanho de alvo');
   await a.clicar('#gh-desfazer', { rolar: false });
   const e = await a.estado();
-  assert.deepEqual(e.horas, ['09:00', '10:00', '11:00', '12:00', '13:00', '14:00', '15:00', '15:30', '16:00', '17:00'],
-    'a linha voltou à posição original (e a ordem pendente foi aplicada ao ir para o botão, fora da lista, sem perder o clique)');
+  assert.deepEqual(e.horas, ['15:30', '09:00', '10:00', '11:00', '12:00', '13:00', '14:00', '15:00', '16:00', '17:00'],
+    'a linha voltou exatamente à posição de antes do Remover: o Desfazer não aplica a ordem pendente (a 15:30 ainda espera na 1ª posição)');
   assert.equal(await a.js(`document.querySelector('${NA_LISTA}[data-k="${k}"]').__eu`), 'a mesma linha', 'o mesmo nó voltou (não foi recriado)');
   assert.equal(await a.js(`document.querySelector('${li} .gh-q').value`), '7');
   assert.equal(await a.js(`document.querySelector('${li} .gh-t').value`), tpl);
   assert.equal(e.foco, '12:00', 'o foco vai para a linha devolvida');
   assert.equal(await a.js(TAMANHO('#gh-desfazer')).then((x) => x.visivel), false, 'o Desfazer some depois de usado');
   assert.equal((await a.js(TAMANHO('#gh-desf'))).texto, 'Horário 12:00 de volta.');
+  // a ordem pendente continua valendo: ao sair da lista a linha editada vai para o lugar certo, com aviso e contorno
+  await a.clicar('[name=dedupe_days]');
+  const f = await a.estado();
+  assert.deepEqual(f.horas, ['09:00', '10:00', '11:00', '12:00', '13:00', '14:00', '15:00', '15:30', '16:00', '17:00']);
+  assert.equal(await a.js("document.querySelector('#gh-mov').textContent"), 'Horário 15:30 movido para a posição 8.');
+  assert.equal(await a.js(`getComputedStyle(document.querySelector('${NA_LISTA}:nth-child(8)')).outlineStyle`), 'solid', 'a linha movida tem contorno');
+  assert.equal(await a.js(`document.querySelector('${NA_LISTA}:nth-child(8) .gh-h').value`), '15:30');
+});
+
+// R1 (rodada 2) — o foco que vai para o "Desfazer" não pode aplicar a ordem pendente: o nó de referência mudava de lugar,
+// a linha voltava no ponto errado e a outra se movia depois, sem aviso nem contorno
+test('R1: trocar 08:00 por 10:30, remover 10:00 e Desfazer: 10:00 volta ao ponto de antes; ao sair da lista a 10:30 vai ao lugar certo com aviso e contorno', NAV, async (t) => {
+  const a = await abrirFormulario(t, { restaurar: true });
+  await a.digitarHora(`${NA_LISTA}:nth-child(1) .gh-h`, '1030'); // foco na lista; 10:30 espera na 1ª posição
+  assert.equal((await a.estado()).foco, '10:30');
+  const k30 = await a.js("document.activeElement.closest('li').dataset.k");
+  const k10 = await a.chaveDe('10:00');
+  await a.clicar(`${NA_LISTA}[data-k="${k10}"] [data-gh=remover]`);
+  assert.deepEqual((await a.estado()).horas, ['10:30', '09:00', '11:00', '12:00', '13:00', '14:00', '15:00', '16:00', '17:00']);
+  await a.clicar('#gh-desfazer', { rolar: false });
+  const e = await a.estado();
+  assert.deepEqual(e.horas, ['10:30', '09:00', '10:00', '11:00', '12:00', '13:00', '14:00', '15:00', '16:00', '17:00'], 'a 10:00 voltou ao ponto original; nada foi reordenado');
+  assert.equal(e.chaves[2], k10, 'é o mesmo nó');
+  assert.equal(await a.js("document.querySelector('#gh-mov').textContent"), '', 'nenhum aviso de "movido" antes de sair da lista');
+  await a.clicar('[name=dedupe_days]'); // foco fora da lista
+  const f = await a.estado();
+  assert.deepEqual(f.horas, ['09:00', '10:00', '10:30', '11:00', '12:00', '13:00', '14:00', '15:00', '16:00', '17:00']);
+  assert.equal(f.chaves[2], k30, 'a linha editada é o mesmo nó');
+  assert.equal(await a.js("document.querySelector('#gh-mov').textContent"), 'Horário 10:30 movido para a posição 3.', 'o aviso diz onde a linha foi parar');
+  assert.equal(await a.js(`getComputedStyle(document.querySelector('${NA_LISTA}[data-k="${k30}"]')).outlineStyle`), 'solid', 'e a linha tem contorno');
+});
+
+test('R1: Desfazer depois de "Limpar tudo" devolve as linhas na ordem e os mesmos nós; com ordem pendente antes, a ordem vale ao limpar', NAV, async (t) => {
+  const a = await abrirFormulario(t, { restaurar: true });
+  await a.digitarHora(`${NA_LISTA}:nth-child(1) .gh-h`, '1030');
+  await a.js("[...document.querySelectorAll('#gh-lista > li')].forEach((li, i) => { li.__n = i; })");
+  await a.clicar('#gh-limpar');
+  assert.deepEqual((await a.estado()).horas, []);
+  await a.clicar('#gh-desfazer', { rolar: false });
+  const e = await a.estado();
+  assert.deepEqual(e.horas, ['09:00', '10:00', '10:30', '11:00', '12:00', '13:00', '14:00', '15:00', '16:00', '17:00'], 'a ordem pendente valeu ao ir para o "Limpar tudo" (fora da lista)');
+  assert.deepEqual(await a.js("[...document.querySelectorAll('#gh-lista > li')].map((li) => li.__n)"), [1, 2, 0, 3, 4, 5, 6, 7, 8, 9], 'os mesmos nós');
+  await a.clicar('[name=dedupe_days]');
+  assert.deepEqual((await a.estado()).horas, ['09:00', '10:00', '10:30', '11:00', '12:00', '13:00', '14:00', '15:00', '16:00', '17:00'], 'nada mais se move');
 });
 
 test('U3: o Desfazer some na próxima alteração da lista e cada aviso é escrito uma vez (o leitor de tela não repete)', NAV, async (t) => {
@@ -456,7 +507,7 @@ test('U3: "Limpar tudo" não pede confirm e o Desfazer devolve todas as linhas, 
   assert.equal(await a.js('document.activeElement.id'), 'gh-add', 'o foco vai para "+ Adicionar horário"');
   await a.clicar('#gh-desfazer', { rolar: false });
   const depois = await a.js("[...document.querySelectorAll('#gh-lista > li')].map((li) => [li.querySelector('.gh-h').value, li.querySelector('.gh-q').value, li.querySelector('.gh-t').value, li.__n])");
-  // a linha 15:30 estava fora de ordem; ao levar o foco ao "Desfazer" (fora da lista) a ordem pendente vale
+  // a linha 15:30 estava fora de ordem; o "Limpar tudo" está fora da lista: ao clicar nele a ordem pendente já valeu
   const ordenadas = antes.map((l, n) => [...l, n]).sort((x, y) => (x[0] < y[0] ? -1 : 1));
   assert.deepEqual(depois.map((l) => l.slice(0, 3)), ordenadas.map((l) => l.slice(0, 3)), 'mesmas linhas e mesmos valores');
   assert.deepEqual(depois.map((l) => l[3]), ordenadas.map((l) => l[3]), 'os mesmos nós');
@@ -667,6 +718,20 @@ test('U4: voltar o valor ao original não conta como alteração; Salvar não pe
   assert.deepEqual(await a.js('window.__conf'), []);
 });
 
+// R4 (rodada 2) — a assinatura do U4 compara os horários por hora: a ordem na tela (pendente enquanto o foco está na lista) não conta
+test('U4: voltar a hora ao valor original com a linha ainda fora do lugar não conta como alteração (Esc fecha sem perguntar)', NAV, async (t) => {
+  const a = await abrirFormulario(t, { restaurar: true });
+  await editarPrimeiraLinha(a); // 08:00 -> 15:30
+  await a.clicar('[name=dedupe_days]'); // a linha vai para a 8ª posição
+  assert.equal((await a.estado()).horas.indexOf('15:30'), 7, 'pré-condição: a linha editada mudou de lugar');
+  await a.digitarHora(`${NA_LISTA}:nth-child(8) .gh-h`, '0800'); // a hora volta ao original; a linha espera na 8ª posição
+  const e = await a.estado();
+  assert.equal(e.horas.indexOf('08:00'), 7, 'pré-condição: a linha com 08:00 ainda está fora do lugar (ordem pendente, foco na lista)');
+  await a.tecla('Escape', 27); await dorme(200);
+  assert.deepEqual(await a.js('window.__conf'), [], 'nenhuma pergunta: o formulário voltou ao que era');
+  assert.equal(await a.js('document.querySelector("#dlg").open'), false, 'Esc fecha direto');
+});
+
 test('U4: mudar o modo ("Em horários marcados") conta como alteração; voltar ao modo original, não', NAV, async (t) => {
   const a = await abrirFormulario(t);
   await a.js("document.querySelector('#r-modo button[data-v=intervalo]').click()");
@@ -677,4 +742,186 @@ test('U4: mudar o modo ("Em horários marcados") conta como alteração; voltar 
   await a.js("document.querySelector('#r-modo button[data-v=grade]').click()");
   await a.tecla('Escape', 27); await dorme(200);
   assert.equal(await a.js('document.querySelector("#dlg").open'), false, 'de volta ao modo original, fecha direto');
+});
+
+// =====================================================================================================================
+// Rodada 1 da revisão (R1 a R4, D1)
+// =====================================================================================================================
+
+// R1 — com "removido" e "movido" à vista ao mesmo tempo, o aviso de "movido" some no mousedown e a lista saltava entre o
+// aperto e o soltar. A linha de avisos reserva a altura do pior caso em cada largura: nada abaixo dela muda de lugar.
+const AVISOS_JUNTOS = ['Horário 12:00 removido.', 'Horário 15:30 movido para a posição 7.']; // 12:00 sai: restam 9 linhas
+
+/** Põe os avisos (texto de "removido" com Desfazer, texto de "movido") diretamente na barra e devolve a altura da linha de avisos. */
+const alturaComAvisos = (a, desf, comBotao, mov) => a.js(`(() => {
+  document.querySelector('.gh-desf-txt').textContent = ${JSON.stringify(desf)}; document.querySelector('#gh-desfazer').hidden = !${comBotao};
+  document.querySelector('#gh-mov').textContent = ${JSON.stringify(mov)};
+  return Math.round(document.querySelector('.gh-estado').getBoundingClientRect().height * 10) / 10; })()`);
+
+/** Altura da linha de avisos igual em todos os casos, para cada largura de `larguras`; devolve as larguras que falharam. */
+async function alturasDosAvisos(t, larguras) {
+  const a = await abrirFormulario(t, { restaurar: true });
+  // os textos vêm da própria tela (TEXTOS_GRADE): o pior caso é o que o código escreve, não uma cópia que pode ficar velha
+  // Só entram combinações que a tela produz: "removido" (com Desfazer) convive com "movido" (a ordem pendente vale depois do Remover);
+  // "removidos" (Limpar tudo) e "adicionado" (Adicionar) apagam o outro aviso.
+  const T = await a.js(`(() => { const T = TEXTOS_GRADE; return { semHora: T.removido(T.semHora), removidos: T.removidos(48), movido: T.movido('15:30', 48), adicionado: T.adicionado('15:30', 48) }; })()`);
+  assert.equal(T.semHora, 'Horário sem hora removido.', 'o texto de uma linha sem hora é o que o código escreve');
+  const casos = [['vazia', '', false, ''], ['só removido', AVISOS_JUNTOS[0], true, ''], ['só removido (linha sem hora)', T.semHora, true, ''], ['só "48 removidos"', T.removidos, true, ''],
+    ['só movido', '', false, T.movido], ['só adicionado', '', false, T.adicionado], ['os dois', AVISOS_JUNTOS[0], true, T.movido],
+    ['os dois, os mais longos (linha sem hora)', T.semHora, true, T.movido]];
+  const falhas = [];
+  for (const largura of larguras) {
+    await a.tela(largura, 900); await dorme(80);
+    const alturas = []; for (const [, d, b, m] of casos) alturas.push(await alturaComAvisos(a, d, b, m));
+    if (new Set(alturas).size !== 1) falhas.push(`${largura} px: ${casos.map((c, i) => `${c[0]}=${alturas[i]}`).join(', ')}`);
+  }
+  return falhas;
+}
+
+test('R1: a linha de avisos tem a MESMA altura vazia, só com "removido", só com "movido" e com os dois juntos, de 320 a 1280 px', NAV, async (t) => {
+  const falhas = await alturasDosAvisos(t, [320, 360, 375, 414, 480, 600, 601, 640, 660, 700, 720, 760, 900, 1130, 1280]);
+  assert.deepEqual(falhas, [], `a altura da linha de avisos mudou com o conteúdo (tudo abaixo dela salta): ${falhas.join(' | ')}`);
+});
+
+test('R1: 341 a 351 px: a linha de avisos tem a mesma altura com os dois avisos juntos', NAV, async (t) => {
+  const falhas = await alturasDosAvisos(t, [341, 346, 351]);
+  assert.deepEqual(falhas, [], `a altura da linha de avisos mudou com o conteúdo: ${falhas.join(' | ')}`);
+});
+
+for (const largura of [640, 375, 320]) test(`R1: ${largura} px: com "removido" e "movido" à vista, apertar a parte de baixo de "Copiar" não move nada antes de soltar e o clique copia`, NAV, async (t) => {
+  const a = await abrirFormulario(t, { largura, altura: 900, restaurar: true });
+  await editarPrimeiraLinha(a);
+  const k12 = await a.chaveDe('12:00');
+  await a.clicar(`${NA_LISTA}[data-k="${k12}"] [data-gh=remover]`); // "removido" + Desfazer
+  await a.clicar('[name=dedupe_days]'); // foco fora da lista: a ordem pendente vale e o aviso de "movido" aparece
+  assert.equal((await a.js(TAMANHO('#gh-desf'))).texto.replace(/\s+/g, ' '), `${AVISOS_JUNTOS[0]} Desfazer`, 'pré-condição: o aviso de remoção está à vista');
+  assert.equal((await a.js(TAMANHO('#gh-mov'))).texto, AVISOS_JUNTOS[1], 'pré-condição: o aviso de movido está à vista junto com o de remoção');
+  const k = await a.chaveDe('13:00');
+  const alvo = `${NA_LISTA}[data-k="${k}"] [data-gh=copiar]`;
+  const [x] = await a.centro(alvo); // rola o botão para o meio da janela
+  const medir = () => a.js(`(() => { const b = document.querySelector(${JSON.stringify(alvo)}).getBoundingClientRect();
+    return { y: b.top, h: b.height, estado: document.querySelector('.gh-estado').getBoundingClientRect().height, linhas: document.querySelectorAll('#gh-lista > li').length }; })()`);
+  const antes = await medir();
+  const y = antes.y + antes.h - 3; // a parte de baixo do botão: é onde um salto de poucos pixels faz o mouse sair dele
+  await a.gravarEventos();
+  await a.mouse('mouseMoved', x, y); await a.mouse('mousePressed', x, y);
+  const apertado = await medir();
+  await a.mouse('mouseReleased', x, y); await dorme(150);
+  const ev = await a.eventos();
+  assert.equal(apertado.estado, antes.estado, `a linha de avisos mudou de altura no mousedown (${antes.estado} -> ${apertado.estado} px)`);
+  assert.equal(apertado.y, antes.y, `o botão saltou ${apertado.y - antes.y} px entre o aperto e o soltar`);
+  assert.equal((await medir()).linhas, antes.linhas + 1, `"Copiar" não copiou. Eventos: ${sequencia(ev)}`);
+});
+
+// R3 — Remover e Desfazer devolviam a linha sem a marca de "editada" e ela mudava de lugar sem aviso nem contorno
+test('R3: trocar 08:00 por 15:30, Remover e Desfazer: ao sair da lista a linha vai para o lugar certo COM aviso e contorno', NAV, async (t) => {
+  const a = await abrirFormulario(t, { restaurar: true });
+  await editarPrimeiraLinha(a);
+  const k = await a.js("document.activeElement.closest('li').dataset.k");
+  await a.clicar(`${NA_LISTA}[data-k="${k}"] [data-gh=remover]`);
+  await a.clicar('#gh-desfazer', { rolar: false });
+  assert.equal((await a.estado()).horas.indexOf('15:30'), 0, 'pré-condição: a ordem continua pendente (o foco está na lista)');
+  await a.clicar('[name=dedupe_days]');
+  const e = await a.estado();
+  assert.equal(e.horas.indexOf('15:30'), 7, 'a linha foi para a 8ª posição');
+  assert.equal(await a.js("document.querySelector('#gh-mov').textContent"), 'Horário 15:30 movido para a posição 8.', 'e o aviso diz onde ela foi parar');
+  assert.equal(await a.js(`getComputedStyle(document.querySelector('${NA_LISTA}[data-k="${k}"]')).outlineStyle`), 'solid', 'e a linha tem contorno');
+  assert.equal(e.chaves[7], k, 'é o mesmo nó');
+});
+
+// R2 — Esc com a dica "?" fixa aberta deve fechar só a dica, mesmo com o formulário alterado
+test('R2: Esc com uma dica "?" fixa aberta e o formulário alterado fecha só a dica (não pergunta); o 2º Esc, sim', NAV, async (t) => {
+  const a = await abrirFormulario(t, { restaurar: true });
+  await sujar(a);
+  await a.js('window.__resp = false');
+  await a.clicar('#gh-lista-h .q'); // "?" dos Horários: tem "Ler mais", então a dica fica fixa dentro do diálogo
+  await a.esperar("!!document.querySelector('#dlg #tip.tip-fixo')");
+  await a.tecla('Escape', 27); await dorme(250);
+  assert.deepEqual(await a.js('window.__conf'), [], 'o Esc que fecha a dica não pergunta "Descartar as alterações?"');
+  assert.equal(await a.js('document.querySelector("#dlg").open'), true, 'o diálogo continua aberto');
+  assert.equal(await a.js("!!document.querySelector('#tip.tip-fixo')"), false, 'e a dica fechou');
+  assert.equal(await a.js(`document.querySelector('${NA_LISTA}:nth-child(1) .gh-q').value`), '19', 'com os dados');
+  await a.tecla('Escape', 27); await dorme(250); // sem dica: volta a perguntar
+  assert.deepEqual(await a.js('window.__conf'), ['Descartar as alterações?']);
+  assert.equal(await a.js('document.querySelector("#dlg").open'), true);
+});
+
+test('R2: Esc com uma dica "?" fixa aberta e o formulário SEM alteração fecha só a dica; o 2º Esc fecha o diálogo', NAV, async (t) => {
+  const a = await abrirFormulario(t, { restaurar: true });
+  await a.clicar('#gh-lista-h .q');
+  await a.esperar("!!document.querySelector('#dlg #tip.tip-fixo')");
+  await a.tecla('Escape', 27); await dorme(250);
+  assert.equal(await a.js('document.querySelector("#dlg").open'), true, 'o 1º Esc fecha só a dica');
+  assert.equal(await a.js("!!document.querySelector('#tip.tip-fixo')"), false);
+  await a.tecla('Escape', 27); await dorme(250);
+  assert.equal(await a.js('document.querySelector("#dlg").open'), false, 'o 2º Esc fecha o diálogo');
+  assert.deepEqual(await a.js('window.__conf'), []);
+});
+
+test('R2: um evento `cancel` do <dialog> com a dica "?" fixa aberta é cancelado sem perguntar (com ou sem alteração)', NAV, async (t) => {
+  const a = await abrirFormulario(t, { restaurar: true });
+  await a.js('window.__resp = true'); // se o formulário perguntasse, aceitar deixaria o `cancel` passar: o teste pegaria pela pergunta
+  await a.clicar('#gh-lista-h .q');
+  await a.esperar("!!document.querySelector('#dlg #tip.tip-fixo')");
+  const pedir = () => a.js("(() => { const ev = new Event('cancel', { cancelable: true }); document.querySelector('#dlg').dispatchEvent(ev); return ev.defaultPrevented; })()");
+  assert.equal(await pedir(), true, 'sem alteração: o pedido de fechar é recusado enquanto a dica está aberta');
+  await sujar(a);
+  assert.equal(await pedir(), true, 'com alteração: também, e sem perguntar');
+  assert.deepEqual(await a.js('window.__conf'), []);
+  assert.equal(await a.js('document.querySelector("#dlg").open'), true);
+});
+
+// R4 — as categorias do catálogo chegam depois e repintam as caixas (na ordem do servidor): o estado inicial acompanha
+// enquanto o dono não mexeu em nada (comInicial); depois que ele mexeu, o que ele fez continua contando
+const CATEGORIAS_DO_SERVIDOR = [{ nome: 'Beleza', total: 5, lojas: { amazon: 3, ml: 1, shopee: 1 } }, { nome: 'Casa', total: 7, lojas: { amazon: 4, ml: 2, shopee: 1 } }];
+const SEGURAR_CATEGORIAS = `(() => { window.__cats = new Promise((ok) => { window.__liberarCats = ok; }); const f0 = window.fetch;
+  window.fetch = (u, o) => (String(u).includes('/api/catalogo/categorias') ? window.__cats.then(() => new Response(JSON.stringify({ categorias: ${JSON.stringify(CATEGORIAS_DO_SERVIDOR)}, total: 12 }), { status: 200, headers: { 'content-type': 'application/json' } })) : f0(u, o)); })()`;
+const CATS_NA_TELA = "[...document.querySelectorAll('#dlg .fc-cats input[type=checkbox]')].map((c) => c.value)";
+
+/** Regra com fonte Catálogo cujas categorias marcadas estão em ordem DIFERENTE da que o servidor devolve (Casa, Beleza). */
+async function criarRegraCatalogo(t) {
+  const corpo = { name: 'Regra Catálogo', enabled: false, tag_id: 1, template_id: 1, group_jids: ['111@g.us'], per_run: 3, interval_min: 60, window_start: '08:00', window_end: '22:00',
+    sources: [{ type: 'catalogo', config: { categorias: ['Casa', 'Beleza'], lojas: ['amazon'], ordem: 'atualizacao' } }],
+    grade: { dias: [0, 1, 2, 3, 4, 5, 6], horarios: HORAS.map((hora) => ({ hora, qtd: 1, template_id: null })) } };
+  const r = await fetch(`${painel.base}/api/rules`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(corpo) });
+  assert.equal(r.status, 200, `a regra com fonte Catálogo deve ser criada pela API (${r.status})`);
+  const { id } = await r.json();
+  t.after(() => fetch(`${painel.base}/api/rules/${id}`, { method: 'DELETE' }));
+  return id;
+}
+
+test('R4: categorias do catálogo chegam em outra ordem e o dono não mexeu em nada: Cancelar fecha direto (sem perguntar)', NAV, async (t) => {
+  const id = await criarRegraCatalogo(t);
+  const a = await abrirFormulario(t, { regraId: id, antes: SEGURAR_CATEGORIAS });
+  assert.deepEqual(await a.js(CATS_NA_TELA), ['Casa', 'Beleza'], 'pré-condição: antes da chegada, a ordem é a da regra');
+  await a.js('window.__liberarCats()');
+  await a.esperar(`${CATS_NA_TELA}[0] === 'Beleza'`);
+  assert.deepEqual(await a.js(CATS_NA_TELA), ['Beleza', 'Casa'], 'pré-condição: as caixas foram repintadas na ordem do servidor');
+  await a.clicar('#cancelar');
+  assert.deepEqual(await a.js('window.__conf'), [], 'a chegada das categorias não conta como alteração do dono');
+  assert.equal(await a.js('document.querySelector("#dlg").open'), false);
+});
+
+test('R4: o dono altera um campo ANTES de as categorias chegarem: Cancelar continua perguntando', NAV, async (t) => {
+  const id = await criarRegraCatalogo(t);
+  const a = await abrirFormulario(t, { regraId: id, antes: SEGURAR_CATEGORIAS });
+  await seta(a, '[name=name]', 'Outro nome');
+  await a.js('window.__liberarCats(); window.__resp = false');
+  await a.esperar(`${CATS_NA_TELA}[0] === 'Beleza'`);
+  await a.clicar('#cancelar');
+  assert.deepEqual(await a.js('window.__conf'), ['Descartar as alterações?']);
+  assert.equal(await a.js('document.querySelector("#dlg").open'), true, 'recusar mantém o diálogo aberto');
+  assert.equal(await a.js('document.querySelector("[name=name]").value'), 'Outro nome');
+});
+
+// D1 — a 320 px nada do bloco da grade passa da borda do bloco
+test('D1: 320 px: nenhum elemento do bloco da grade passa da borda do bloco (sem rolagem horizontal própria)', NAV, async (t) => {
+  for (const largura of [320, 375]) {
+    const a = await abrirFormulario(t, { largura, altura: 900, restaurar: true });
+    const r = await a.js(`(() => { const g = document.querySelector('#r-grade'); const lim = g.getBoundingClientRect().right + 0.5;
+      return { sw: g.scrollWidth, cw: g.clientWidth, fora: [...g.querySelectorAll('*')].filter((e) => e.getBoundingClientRect().width > 0 && e.getBoundingClientRect().right > lim && !e.closest('[hidden]')).map((e) => e.tagName + '.' + e.className).slice(0, 8) }; })()`);
+    assert.deepEqual(r.fora, [], `${largura} px: elementos do bloco da grade fora da borda: ${r.fora.join(', ')}`);
+    assert.ok(r.sw <= r.cw, `${largura} px: o bloco da grade rola na horizontal (${r.sw} > ${r.cw})`);
+    await a.clicar('#cancelar');
+  }
 });

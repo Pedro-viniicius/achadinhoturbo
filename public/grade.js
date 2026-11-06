@@ -304,7 +304,7 @@ function gradeLigar(raiz, { regra = {}, nGrupos = () => 0, lerIntervalo = () => 
   const form = $('#f', raiz) || raiz; // os ouvintes ficam no formulário: somem com ele quando o diálogo é refeito
   const editadas = new Set(); // linhas cuja hora mudou (ou nasceram) desde a última ordenação, da mais antiga à mais recente
   let marcada = null; // a linha destacada depois de mudar de lugar
-  let desfazer = null; // { itens: [{ li, depois, indice }] } da última remoção (ou do Limpar tudo)
+  let desfazer = null; // { itens: [{ li, depois, indice, editada }] } da última remoção (ou do Limpar tudo); `editada` (só no Remover): a hora estava pendente de ordem
   const padraoNome = () => gradeNomeTemplate(gradeInteiro(tplRegra?.value)) ?? '—';
   const qtdPadrao = () => { const n = gradeInteiro(lerIntervalo().per_run); return n >= 1 && n <= gradeLimites().max_qtd ? n : 3; };
 
@@ -489,7 +489,7 @@ function gradeLigar(raiz, { regra = {}, nGrupos = () => 0, lerIntervalo = () => 
   // sem confirm: nada é gravado antes do Salvar e o "Desfazer" devolve as linhas, com o que estava digitado
   $('#gh-limpar', raiz).onclick = () => {
     const todas = lis(); if (!todas.length) return;
-    desfazer = { itens: todas.map((li, indice) => ({ li, depois: null, indice })) };
+    desfazer = { itens: todas.map((li, indice) => ({ li, depois: null, indice })) }; // o botão está fora da lista: a ordem pendente já foi aplicada
     for (const li of todas) { editadas.delete(li); li.remove(); }
     limparMovida(); atualizar();
     avisoDesfazer(T.removidos(todas.length), true);
@@ -498,9 +498,10 @@ function gradeLigar(raiz, { regra = {}, nGrupos = () => 0, lerIntervalo = () => 
   $('#gh-desfazer', raiz).onclick = () => {
     if (!desfazer) return;
     const itens = desfazer.itens;
-    for (const { li, depois, indice } of itens) {
+    for (const { li, depois, indice, editada } of itens) {
       const ref = depois && depois.parentNode === lista ? depois : (lis()[indice] ?? null);
       lista.insertBefore(li, ref);
+      if (editada) editadas.add(li); // a hora ainda espera a ordem: ao sair da lista a linha vai para o lugar certo, com aviso e contorno
     }
     desfazer = null; limparMovida(); atualizar();
     avisoDesfazer(itens.length === 1 ? T.devolvido(rotuloDe(itens[0].li)) : T.devolvidos(itens.length));
@@ -518,7 +519,7 @@ function gradeLigar(raiz, { regra = {}, nGrupos = () => 0, lerIntervalo = () => 
       // o 2º clique de um clique duplo cairia na linha que subiu para o lugar desta: só vale o 1º (teclado: detail 0)
       if (e.detail > 1) return;
       const todas = lis(); const i = todas.indexOf(li); const rot = rotuloDe(li);
-      desfazer = { itens: [{ li, depois: li.nextElementSibling, indice: i }] };
+      desfazer = { itens: [{ li, depois: li.nextElementSibling, indice: i, editada: editadas.has(li) }] };
       editadas.delete(li); li.remove(); limparMovida(); atualizar();
       avisoDesfazer(T.removido(rot), true);
       const foco = lis()[Math.max(0, i - 1)];
@@ -527,7 +528,9 @@ function gradeLigar(raiz, { regra = {}, nGrupos = () => 0, lerIntervalo = () => 
   });
   // Nada de mover linha no focusout do horário: o focusout acontece no mousedown do próximo clique e a lista saltaria
   // antes do mouseup, perdendo o clique (Q1). A ordem fica pendente e vale quando o foco vai para FORA da lista.
-  form.addEventListener('focusin', (e) => { if (!lista.contains(e.target)) ordenar(); });
+  // Exceção: o "Desfazer" devolve a linha ao ponto onde estava ANTES do Remover; se a ordem pendente fosse aplicada antes
+  // do clique, o nó de referência mudaria de lugar e a linha voltaria no ponto errado (e a outra se moveria sem aviso).
+  form.addEventListener('focusin', (e) => { if (!lista.contains(e.target) && e.target.id !== 'gh-desfazer') ordenar(); });
   lista.addEventListener('input', (e) => {
     const el = e.target;
     if (!el?.matches?.('.gh-h, .gh-q, .gh-t')) return;

@@ -67,7 +67,7 @@ textarea { resize:vertical; min-height:96px; }
 textarea.mono, .mono { font-family:var(--mono); font-size:13px; }
 label.campo { display:grid; gap:4px; font-weight:600; font-size:14px; }
 label.campo small, .dica { font-weight:400; color:var(--muted); font-size:13px; }
-.grade { display:grid; gap:14px; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); }
+.grade { display:grid; gap:14px; grid-template-columns:repeat(auto-fit,minmax(min(200px,100%),1fr)); }
 /* campo esticado pela linha da grade (vizinho com dica longa): rótulo e controle ficam juntos no topo */
 .grade > label.campo, .grade > div.campo { align-content:start; }
 .linha { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
@@ -796,18 +796,27 @@ nav a[href="#ganhos"] { --ic:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3
 .gh-acoes button { padding:6px 10px; min-height:24px; }
 /* Barra da lista: fica acima das linhas e GRUDA no topo do diálogo enquanto a lista está à vista. Assim "+ Adicionar
    horário" não foge do cursor quando a lista cresce, e o aviso de linha movida / "Desfazer" está sempre visível. A linha
-   de avisos tem altura mínima fixa: nada abaixo da barra salta quando um aviso aparece. Em telas estreitas só a linha
-   de avisos gruda (a barra inteira ocuparia boa parte da tela). */
+   de avisos tem altura mínima fixa, a do PIOR caso da largura ("removido" + Desfazer e "movido" juntos, que quebram em
+   duas ou três linhas quando falta largura): nada abaixo da barra salta quando um aviso aparece ou some (o de "movido"
+   some no mousedown, e a lista não pode mexer entre o aperto e o soltar). Em telas estreitas só a linha de avisos gruda
+   (a barra inteira ocuparia boa parte da tela). Alturas reservadas: 34 px a partir de 761 px; 56 px de 601 a 760; 76 px de 441 a 600; 96 px de 366 a 440; 120 px
+   em ≤ 365 px (medidos 115 px com o Desfazer de 44 px). Em ≤ 600 px a faixa fica no fluxo com essa altura e só gruda
+   quando há aviso; o scroll-padding-top acompanha o que gruda (0 sem aviso). */
 .gh-tit-linha { display:flex; flex-wrap:wrap; align-items:baseline; justify-content:space-between; gap:0 12px; }
 .gh-barra { position:sticky; top:0; z-index:3; display:grid; gap:4px; padding:6px 0 4px; background:var(--surface); }
 .gh-estado { display:flex; flex-wrap:wrap; align-items:center; gap:2px 0; min-height:34px; font-size:14px; }
 .gh-desf { display:inline-flex; align-items:center; gap:8px; margin-right:16px; }
 .gh-desf:not(:has(.gh-desf-txt:not(:empty))), .gh-mov:empty { margin-right:0; }
 .gh-mov { margin-right:16px; }
-.gh-desf button { min-height:28px; padding:2px 12px; }
+/* Desfazer com cara de botão (borda e texto na cor de destaque), sem mexer no grade.js que o marca como .leve */
+.gh-desf button.leve { min-height:32px; padding:2px 14px; border:1px solid var(--primary-text); color:var(--primary-text); background:var(--surface); font-weight:600; }
 /* linha que acabou de mudar de lugar: contorno (não só cor) até a próxima ação do dono; sem animação */
 .gh-linha.gh-movida { outline:2px solid var(--primary-text); outline-offset:3px; background:var(--primary-tint); border-radius:10px; }
-#dlg:has(#r-grade) { scroll-padding-top:96px; scroll-padding-bottom:80px; }
+#dlg:has(#r-grade:not([hidden])) { scroll-padding-top:96px; scroll-padding-bottom:80px; }
+@media (min-width:601px) and (max-width:760px) {
+  .gh-estado { min-height:56px; } /* "removido" e "movido" juntos já não cabem numa linha (51 px) */
+  #dlg:has(#r-grade:not([hidden])) { scroll-padding-top:120px; }
+}
 .gh-vazio { padding:20px 16px; }
 .gh-resumo, .gh-aviso { margin:0; }
 .gh-gerador .gh-tpl { grid-column:1 / -1; }
@@ -822,9 +831,21 @@ nav a[href="#ganhos"] { --ic:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3
   .gh-acoes button { flex:1 1 0; min-height:44px; }
   .gh-modelos button.chip, #gh-add, #gh-limpar, .gh-gerador .linha button { min-height:44px; }
   .gh-barra { display:contents; }
-  .gh-estado { position:sticky; top:0; z-index:3; min-height:56px; padding:4px 0; background:var(--surface); }
-  .gh-desf button { min-height:44px; }
-  #dlg:has(#r-grade) { scroll-padding-top:70px; }
+  .gh-estado { min-height:76px; padding:4px 0; background:var(--surface); } /* 75 px no pior caso: Desfazer de 44 px + 1 linha de "movido"; no fluxo, reservada, quando não há aviso */
+  .gh-estado:has(.gh-desf-txt:not(:empty), .gh-mov:not(:empty)) { position:sticky; top:0; z-index:3; } /* só gruda quando há aviso */
+  .gh-desf button.leve { min-height:44px; }
+  #dlg:has(#r-grade:not([hidden])) { scroll-padding-top:0; }
+  #dlg:has(#r-grade:not([hidden]):has(.gh-desf-txt:not(:empty), .gh-mov:not(:empty))) { scroll-padding-top:90px; }
+}
+@media (max-width:440px) {
+  .gh-linha { padding:8px; }
+  .gh-acoes button { min-width:0; padding-inline:4px; } /* 320 px com barra de rolagem: sobram ~150 px; Copiar + 16 px + Remover precisam caber sem estourar o bloco */
+  .gh-estado { min-height:96px; } /* o "movido" quebra em duas linhas: Desfazer de 44 px + 2 linhas */
+  #dlg:has(#r-grade:not([hidden]):has(.gh-desf-txt:not(:empty), .gh-mov:not(:empty))) { scroll-padding-top:110px; }
+}
+@media (max-width:365px) {
+  .gh-estado { min-height:120px; } /* 320 a 365 px: o "movido" quebra em três linhas (115 px medidos com o Desfazer) */
+  #dlg:has(#r-grade:not([hidden]):has(.gh-desf-txt:not(:empty), .gh-mov:not(:empty))) { scroll-padding-top:134px; }
 }
 
 /* Grupo vivo (public/grupovivo.js; spec grade-de-disparos, "Layout: Grupo vivo", "Formulário" e "Galeria") */
