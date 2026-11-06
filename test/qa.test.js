@@ -1120,7 +1120,7 @@ test('Ler mais (etapa 11): toda chave de LEIA_MAIS existe em TIPS e todo destino
     assert.ok(CAPS[cap].secoes.some((x) => x.id === sec), `${chave}: a seção ${destino} não existe`);
   }
   // mapa inicial da spec (docs/produto/specs/docs-do-sistema.md, seção 3)
-  const SPEC = { 'conexoes.amazon': 'conexoes/amazon', 'espelhamento.formato': 'espelhamento/formato', 'espelhamento.fila': 'espelhamento/fila', espelhamento: 'espelhamento/criar',
+  const SPEC = { 'conexoes.amazon': 'conexoes/amazon', 'conexoes.magalu': 'conexoes/magalu', 'espelhamento.formato': 'espelhamento/formato', 'espelhamento.fila': 'espelhamento/fila', espelhamento: 'espelhamento/criar',
     'conexoes.shopee': 'conexoes/shopee', 'conexoes.shopee.id': 'perguntas/id-shopee', 'conexoes.shopee.appid': 'perguntas/id-shopee', 'conexoes.shopee.senha': 'perguntas/id-shopee',
     'conexoes.shopee.extensao': 'primeiros-passos/extensao', 'ajustes.extensao': 'primeiros-passos/extensao', 'conexoes.catalogo': 'conexoes/catalogo',
     'conexoes.catalogo.endereco': 'conexoes/catalogo', 'conexoes.catalogo.token': 'conexoes/catalogo', 'regras.etiqueta': 'perguntas/etiqueta-desta-fonte',

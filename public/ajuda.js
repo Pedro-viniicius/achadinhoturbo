@@ -13,7 +13,7 @@ const TIPS = {
   'espelhamento.fila': 'Quando falta o título ou o preço, nem a API nem o texto da mensagem de origem trouxeram: “esperar eu completar” deixa a oferta na fila do Histórico até você completar ou descartar; “enviar mesmo assim” manda o formato curto, com o que houver e o link.',
   'espelhamento.formato': 'Sem acesso à API, o painel lê o texto da mensagem de origem. Funciona bem assim: título na 1ª linha, depois “De R$ …”, “Por R$ …”, “NN% OFF”, o frete e “Compre aqui: <link>” com o link completo da Amazon. Sem título ou sem preço no texto, a oferta espera na fila (ou sai no formato curto, conforme a regra).',
   // remetente (links enviados por outro número, no privado do número conectado)
-  'remetente': 'Um número de WhatsApp de confiança, como o do seu sócio, que pode mandar links de produto no privado do número conectado. O programa monta a oferta com a sua afiliação e envia aos grupos escolhidos aqui, sem você aprovar. Vale para Mercado Livre, Amazon e Shopee. Qualquer outro número é ignorado.',
+  'remetente': 'Um número de WhatsApp de confiança, como o do seu sócio, que pode mandar links de produto no privado do número conectado. O programa monta a oferta com a sua afiliação e envia aos grupos escolhidos aqui, sem você aprovar. Vale para Mercado Livre, Amazon, Shopee e Magalu. Qualquer outro número é ignorado.',
   'remetente.numero': 'O número do WhatsApp de quem vai mandar os links, com DDD (ex.: (35) 99999-1234). O programa confere se ele existe no WhatsApp. Fica só no seu computador, aparece mascarado no painel e é apagado se você excluir o remetente.',
   'remetente.destino': 'Os grupos que recebem os links deste remetente. “Marcar um bloco” só ajuda a marcar: se você mudar o bloco depois, esta lista não muda.',
   'remetente.responder': 'Manda ao remetente uma frase curta dizendo se o link saiu, por exemplo “Enviado para 3 grupos.” A frase nunca leva link, número nem nome de grupo. Desligado, ele não recebe nada.',
@@ -104,11 +104,12 @@ const TIPS = {
   'ajustes.extensao': 'Fica em Conexões. A extensão fica no seu Chrome, logada no Mercado Livre, e é quem gera os links e busca a lista da Central. Cookies nunca saem do navegador.',
   // disparo manual
   'manual': 'Dispare uma oferta agora ou em um horário de hoje, sem criar disparo automático. Cole o link, escolha grupos e template.',
-  'manual.link': 'Cole o link do produto. “Identificar” descobre a loja e lê título, preço e foto. Mercado Livre, Amazon e Shopee geram link de afiliado; Magalu e Facebook ainda não.',
+  'manual.link': 'Cole o link do produto. “Identificar” descobre a loja e lê título, preço e foto. Mercado Livre, Amazon, Shopee e Magalu geram link de afiliado; Facebook ainda não. Na Magalu o painel não lê o produto: você preenche título e preço.',
   'manual.shopee': 'Cole um link da Shopee (da página do produto ou curto, como s.shopee.com.br ou shp.ee). O painel gera o seu link de afiliado ao disparar (pela extensão do Chrome ou pela API). Com a API, busca também os dados; sem ela, preencha título e preço à mão. A Shopee não informa o preço antigo, só o desconto. Produto fora do programa de afiliados também pode ser disparado (pode não gerar comissão): preencha os dados à mão.',
+  'manual.magalu': 'Cole um link da Magalu (página do produto, no Magazine Você ou no site da Magalu, ou um link curto). O painel monta o seu link de afiliado com o nome da sua loja de parceiro. Ele não lê a página: preencha título e preço (foto é opcional, por upload). Se o link for de outra loja de parceiro, sai com a sua. A Magalu não separa os ganhos por grupo.',
   'manual.amazon': 'Cole um link da Amazon (link.amazon, amzn.to ou da página do produto). O painel busca os dados; você confere, ajusta e envia. Se a busca falhar, preencha à mão.',
   'manual.agendar': 'Desligado, envia na hora. Ligado, envia no horário de hoje que você escolher. Se o programa reiniciar antes, o envio continua agendado.',
-  'manual.etiqueta': 'Etiqueta usada no link meli.la desta mensagem. É o que atribui a comissão a você. Na Amazon, vale a tag de associado de Conexões. Na Shopee, vale o ID de afiliado de Conexões.',
+  'manual.etiqueta': 'Etiqueta usada no link meli.la desta mensagem. É o que atribui a comissão a você. Na Amazon, vale a tag de associado de Conexões. Na Shopee, vale o ID de afiliado de Conexões. Na Magalu, vale o nome da loja de parceiro de Conexões.',
   // disparar mensagem
   'mensagem': 'Texto livre ou enquete para os grupos escolhidos. Serve para avisos, sorteios e chamadas que não são oferta.',
   'mensagem.formato': 'No WhatsApp: *negrito*, _itálico_, ~riscado~.',
@@ -124,12 +125,14 @@ const TIPS = {
   'relatorios.limite': 'Limite de membros que já vem preenchido ao criar um link no rotacionador. Links que já existem não mudam: o aviso de lotação usa o limite de cada link. O máximo do WhatsApp é 1.024.',
   'relatorios.avisos': '“Grupo lotando”: um grupo chegou perto do limite. “Erro de disparo”: uma mensagem não saiu.',
   // conexões e equipe
-  'conexoes': 'Onde ficam as lojas e a extensão que geram os seus links de afiliado. Mercado Livre, Amazon e Shopee funcionam hoje; Magalu e Facebook guardam os dados para quando forem implementados. O Catálogo do Etiqueta é uma fonte de ofertas, não uma loja.',
+  'conexoes': 'Onde ficam as lojas e a extensão que geram os seus links de afiliado. Mercado Livre, Amazon, Shopee e Magalu funcionam hoje; o Facebook guarda os dados para quando for implementado. O Catálogo do Etiqueta é uma fonte de ofertas, não uma loja.',
   'conexoes.shopee': 'O link curto de afiliado da Shopee sai pela extensão do Chrome logada no portal de afiliados e, quando houver acesso, pela API. A API (pedida na Shopee, resposta em até 3 dias úteis) busca também título, preço e foto. Sem a API você preenche título e preço à mão. Quando o link sai pela extensão, o painel confere o número da conta que vem no endereço longo e recusa se for outra conta. Espelhamento da Shopee não existe; nas regras automáticas, a Shopee só entra pela fonte Catálogo, sempre com revisão.',
   'conexoes.shopee.id': 'O número da sua conta de afiliado da Shopee (só números). Vai nos seus links e define de quem é a comissão. Não é o AppID nem a tag da Amazon.',
   'conexoes.shopee.appid': 'Número do aplicativo da API, que a Shopee mostra depois de liberar o acesso. Não é segredo, mas é diferente do ID de afiliado: o painel recusa os dois iguais.',
   'conexoes.shopee.senha': 'Senha da API de afiliados da Shopee. Equivale a uma senha: fica guardada no seu computador e não volta para esta tela.',
   'conexoes.shopee.extensao': 'Os links da Shopee saem pela extensão do Chrome. O Chrome precisa estar aberto e logado no portal de afiliados da Shopee (affiliate.shopee.com.br, “Link personalizado”), e a extensão na versão 1.3.0 ou mais nova (recarregue em chrome://extensions depois de atualizar). O mesmo produto reaproveita o link gerado por até 7 dias (enquanto o programa não reiniciar), e há um limite de 60 links por hora pela extensão.',
+  'conexoes.magalu': 'Programa Parceiro Magalu (Magazine Você). O link de afiliado sai com o nome da sua loja de parceiro: não há senha nem API. A Magalu não deixa o painel ler o produto: título, preço e foto você preenche no Disparo manual. O painel não consegue confirmar que o nome existe: use “Conferir minha loja”.',
+  'conexoes.magalu.loja': 'O trecho depois de magazinevoce.com.br/ no endereço da sua loja de parceiro. Se o endereço é magazinevoce.com.br/minhaloja, escreva minhaloja. Nome errado gera link de outra loja e a comissão não vem para você.',
   'conexoes.amazon': 'A API oficial da Amazon (Creators API) busca título, preço e foto. Exige conta de Associados aprovada e vendas qualificadas recentes. Sem ela, o painel usa o texto escrito na mensagem de origem.',
   'conexoes.catalogo': 'O Etiqueta é o seu outro programa de ofertas, no mesmo computador. Aqui você diz onde ele está e onde fica o arquivo do token; o painel lê as ofertas e as categorias dele. Não é a etiqueta de afiliado do Mercado Livre.',
   'conexoes.catalogo.endereco': 'Endereço do servidor do Etiqueta. O padrão é http://127.0.0.1:8765. Só vale endereço deste computador.',
@@ -162,6 +165,7 @@ const DICA_OPCIONAL = 'Para um pedaço da linha sumir sozinho, ponha-o entre col
 // o link; TIPS não muda. Um teste (test/qa.test.js) confere que toda chave existe em TIPS e todo destino existe nos capítulos.
 const LEIA_MAIS = {
   'conexoes.amazon': 'conexoes/amazon',
+  'conexoes.magalu': 'conexoes/magalu',
   'espelhamento.formato': 'espelhamento/formato',
   'espelhamento.fila': 'espelhamento/fila',
   'espelhamento': 'espelhamento/criar',

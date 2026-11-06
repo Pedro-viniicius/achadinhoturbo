@@ -34,12 +34,13 @@ docsCapitulo({
           ['Etiqueta (o app)', 'Seu outro programa, que coleta e organiza ofertas e roda neste computador (`servidor.py`). Quando este painel diz “etiqueta” sozinho, é a etiqueta de afiliado do Mercado Livre; quando diz “Catálogo”, são as ofertas do app Etiqueta.'],
           ['meli.la', 'Link curto do Mercado Livre gerado pela Central de Afiliados, já com a sua etiqueta.'],
           ['Central de Afiliados', 'Área do Mercado Livre para afiliados. A lista “Produtos selecionados para você” é a fonte padrão do disparo automático.'],
-          ['Loja conectada', 'Loja cujos dados você já cadastrou em Conexões. Hoje Mercado Livre, Amazon e Shopee funcionam de fato.'],
+          ['Loja conectada', 'Loja cujos dados você já cadastrou em Conexões. Hoje Mercado Livre, Amazon, Shopee e Magalu funcionam de fato.'],
           ['ID de afiliado', 'Número da sua conta de afiliado da Shopee (ex.: `98765432101`). Vai no link e define de quem é a comissão. Fica em [[Conexões → Shopee]].'],
           ['AppID e Senha da API', 'Dados do aplicativo da API de afiliados da Shopee. Só existem depois que a Shopee libera o acesso. A senha equivale a uma senha de banco: fica no seu computador.'],
           ['Open API de Afiliados', 'Acesso técnico da Shopee que permite ao painel buscar dados do produto e gerar links pela API. É preciso pedir; a conta não vem com ele. Sem ele, os links saem pela extensão do Chrome.'],
           ['Link personalizado', 'Ferramenta do portal de afiliados da Shopee (`affiliate.shopee.com.br`) que gera o link curto com o seu ID. A extensão do Chrome usa essa ferramenta por você.'],
           ['Tag de associado', 'Identificador do afiliado na Amazon (ex.: `seunome-20`). Vai no link e define de quem é a comissão. Fica em [[Conexões → Amazon]].'],
+          ['Loja de parceiro (Magalu)', 'O nome da sua loja no Parceiro Magalu (Magazine Você). Vai no endereço do link e define de quem é a comissão. Fica em [[Conexões → Magalu]].'],
           ['Extensão', 'Complemento do Chrome que fala com a Central de Afiliados usando a sua sessão. Nada de cookie sai do navegador.'],
         ], titulo: 'Lojas e afiliado' },
         { termos: [
@@ -142,7 +143,15 @@ docsCapitulo({
             ['Arquivo do token não encontrado', 'O painel não achou ou não conseguiu ler o arquivo, ou ele está vazio ou fora do formato.', 'Confira o caminho (o arquivo precisa se chamar `api_token.txt`) e a permissão de leitura. Se o arquivo for novo, gere o token de novo no Etiqueta.'],
           ],
         } },
-        { p: '**Magalu e Facebook**' },
+        { p: '**Magalu**' },
+        { tabela: {
+          colunas: ['Selo', 'O que significa', 'O que fazer'],
+          linhas: [
+            ['Falta configurar', 'O nome da sua loja de parceiro não está salvo.', 'Salve o nome em [[Conexões → Magalu]]. Sem ele, nenhum link da Magalu sai.'],
+            ['Configurada', 'O nome da loja está salvo. O painel não confirma que a loja existe: ele só sabe que o nome tem a forma certa.', 'Use “Conferir minha loja” no cartão e veja se abre a página da sua loja.'],
+          ],
+        } },
+        { p: '**Facebook**' },
         { tabela: {
           colunas: ['Selo', 'O que significa', 'O que fazer'],
           linhas: [

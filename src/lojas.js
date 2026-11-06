@@ -1,10 +1,11 @@
 // Ponto único de loja: descobre de que loja é um link e, para as lojas já integradas, lê o
-// produto e gera o link de afiliado. Hoje funcionam o Mercado Livre, a Amazon e a Shopee. As outras lojas
+// produto e gera o link de afiliado. Hoje funcionam o Mercado Livre, a Amazon, a Shopee e a Magalu. As outras lojas
 // aparecem em Conexões (campos que já podem ser salvos) e são recusadas com LojaNaoConectada.
 //
 // SSRF: identificar() só olha o hostname e nunca acessa a rede. O Mercado Livre lê a página (resolveOffer, que
 // segue só hosts do ML); a Amazon e a Shopee só resolvem o link pelos redirecionamentos e consultam a API oficial
-// (src/amazon.js e src/shopee.js, injetados). A imagem só passa se vier do CDN da própria loja (imagemPermitida).
+// (src/amazon.js e src/shopee.js, injetados); a Magalu só resolve o link curto pelos redirecionamentos (src/magalu.js,
+// injetado) e não lê nada. A imagem só passa se vier do CDN da própria loja (imagemPermitida).
 //
 // Amazon (plano espelhamento-amazon, etapa 7): o link enviado é sempre https://www.amazon.com.br/dp/<ASIN>?tag=<tag>
 // (montarLink de amazon.js, com a tag de Conexões na hora da chamada): o slug, os parâmetros de rastreio e a tag
@@ -17,6 +18,11 @@
 // o mesmo produto não pede outro link à API nem à extensão a cada disparo (S2). Confiável = veio da API, ou da
 // extensão com um longLink cujo an_<ID> é o ID salvo; sem essa prova, o link vale só para o disparo atual.
 //
+// Magalu (plano integracao-magalu, etapa 2; ADR-008): o link enviado é sempre
+// https://www.magazinevoce.com.br/<loja de parceiro de Conexões>/[<slug>/]p/<codigo>/[<cat>/[<sub>/]] (montarLinkMagalu
+// de magalu.js, sem rede), refeito do endereço do produto: a loja de outro parceiro, utm e fragmento do link de origem
+// nunca seguem. Não há leitura do produto (a página é bloqueada para o servidor): título, preço e foto vêm à mão.
+//
 // Catálogo do Etiqueta (plano fonte-catalogo-etiqueta, etapa 3): não é loja, é uma fonte de ofertas que entra no
 // registro só para ter o cartão de Conexões. `hosts: []` (identificar nunca a devolve; lerProduto e linkAfiliado a
 // recusam) e nenhum segredo: o token fica num arquivo do dono e aqui só se guarda o CAMINHO dele (quem lê o arquivo
@@ -26,6 +32,7 @@ import path from 'node:path';
 import { IMAGEM_PERMITIDA, offerKey } from './ml.js';
 import { IMAGEM_AMAZON, ErroAmazon, LinkNaoResolvido, extrairAsin } from './amazon.js';
 import { IMAGEM_SHOPEE, ErroShopee, LinkShopeeNaoResolvido, LINK_SHOPEE, RE_ID_AFILIADO, RE_SUB_ID, extrairIds, afiliadoDoLongLink } from './shopee.js';
+import { HOSTS_MAGALU, RE_LOJA_MAGALU, LinkMagaluNaoResolvido, extrairProdutoMagalu, montarLinkMagalu } from './magalu.js';
 import { brl } from './template.js';
 
 const MAX_URL = 4096;
@@ -105,12 +112,14 @@ const LISTA = [
     ],
   },
   {
-    id: 'magalu', nome: 'Magalu', implementada: false,
-    descricao: 'Parceiro Magalu: o link leva o nome da sua loja de parceiro.',
-    hosts: ['magazineluiza.com.br', 'www.magazineluiza.com.br', 'magazinevoce.com.br', 'www.magazinevoce.com.br', 'magalu.com'],
+    // Um dado só, o nome da loja de parceiro (texto: vai em todo link enviado). Sem API, sem segredo.
+    id: 'magalu', nome: 'Magalu', implementada: true,
+    descricao: 'Parceiro Magalu (Magazine Você): o link de afiliado sai com o nome da sua loja de parceiro. A Magalu não deixa o painel ler o produto: título, preço e foto você preenche no Disparo manual.',
+    hosts: [...HOSTS_MAGALU],
     campos: [
-      { nome: 'loja', rotulo: 'Nome da sua loja', tipo: 'texto', max: 60, padrao: '^[A-Za-z0-9_-]{2,60}$',
-        ajuda: 'Como aparece no endereço da sua loja de parceiro.' },
+      { nome: 'loja', rotulo: 'Nome da sua loja', tipo: 'texto', max: 60, padrao: RE_LOJA_MAGALU.source,
+        erro: 'Escreva só o nome da loja (o trecho depois de magazinevoce.com.br/), com letras, números, hífen ou _.',
+        ajuda: 'É o trecho que vem depois de magazinevoce.com.br/ no endereço da sua loja. Se o endereço é magazinevoce.com.br/minhaloja, escreva minhaloja. Só letras, números, hífen e _.' },
     ],
   },
   {
@@ -276,6 +285,28 @@ async function lerProdutoShopee(url, shopee) {
 }
 
 /**
+ * Magalu: o produto do próprio link (extrairProdutoMagalu, sem rede) ou, para link curto, de magalu.resolver (só
+ * redirecionamentos entre hosts da Magalu, sem abrir a página). O resultado é refeito por extrairProdutoMagalu a partir
+ * do urlProduto: o que vem do resolvedor injetado também precisa ser um endereço de produto da Magalu. Sem leitura:
+ * título, preço e foto voltam null (vêm à mão). `lojaDoLink` é a loja de parceiro do link colado (para o aviso de
+ * outra loja); nunca entra no link. Falha (ou link curto sem o cliente) → LinkMagaluNaoResolvido { causa }.
+ */
+async function lerProdutoMagalu(url, magalu) {
+  let p = extrairProdutoMagalu(url);
+  if (!p) {
+    if (typeof magalu?.resolver !== 'function') throw new LinkMagaluNaoResolvido('invalido');
+    p = await magalu.resolver(url);
+  }
+  const v = extrairProdutoMagalu(p?.urlProduto);
+  if (!v) throw new LinkMagaluNaoResolvido('invalido');
+  const lojaDoLink = typeof p.lojaDoLink === 'string' && RE_LOJA_MAGALU.test(p.lojaDoLink) ? p.lojaDoLink : null;
+  return {
+    key: `MAGALU:${v.codigo}`, codigo: v.codigo, urlProduto: v.urlProduto, sellerId: v.sellerId, lojaDoLink,
+    title: null, price: null, oldPrice: null, discountPct: null, sold: null, freeShipping: null, coupon: null, image: null,
+  };
+}
+
+/**
  * Pedir link com Sub_id à extensão do Chrome? Ligado desde o P4 do plano dashboard-ganhos: a extensão manda o Sub_id
  * ao "Link personalizado" do portal em advancedLinkParams.subId1 (SHOPEE_SUBID_CAMPO em extension/background.js;
  * formato em docs/produto/referencias/relatorios-dos-portais.md). Sem a Open API (ou se ela falhar), o pedido com
@@ -386,13 +417,16 @@ export async function linkAfiliadoShopeeRastreado(base, { shopee, links, idAfili
  * Lê título, preço e foto do produto. Mercado Livre: ml.resolveOffer (injetado). Amazon: amazon (createAmazon,
  * injetado) → { key: 'ASIN:<ASIN>', asin, title, price, oldPrice, discountPct, image, … }. Shopee: shopee
  * (createShopee, injetado) → { key: 'SHOPEE:<shop>.<item>', shopId, itemId, urlProduto, title, price, oldPrice:null,
- * discountPct, sold, image, extra: { loja_nome, nota, preco_max }, … }.
+ * discountPct, sold, image, extra: { loja_nome, nota, preco_max }, … }. Magalu: magalu (createMagalu, injetado, só
+ * para link curto) → { key: 'MAGALU:<codigo>', codigo, urlProduto, sellerId, lojaDoLink, title:null, price:null, … }
+ * (lerProdutoMagalu: nada é lido).
  * A imagem fora do CDN da loja vira null: o envio busca essa URL no servidor.
  */
-export async function lerProduto(id, url, { ml, amazon, shopee } = {}) {
+export async function lerProduto(id, url, { ml, amazon, shopee, magalu } = {}) {
   const limpo = exigirLoja(id, url);
   if (id === 'amazon') return lerProdutoAmazon(limpo, amazon);
   if (id === 'shopee') return lerProdutoShopee(limpo, shopee);
+  if (id === 'magalu') return lerProdutoMagalu(limpo, magalu);
   if (!ml?.resolveOffer) throw new Error('Leitura de produtos do Mercado Livre indisponível.');
   const offer = await ml.resolveOffer({ key: offerKey(limpo), url: limpo });
   return { ...offer, image: imagemSegura('mercadolivre', offer?.image) };
@@ -407,9 +441,13 @@ export async function lerProduto(id, url, { ml, amazon, shopee } = {}) {
  *   mensagem fixa (nunca carrega ID, segredo nem token).
  * - Shopee: o shortLink https://s.shopee.com.br/… (linkAfiliadoShopee). Parte de `urlProduto` (o endereço já
  *   resolvido pelo servidor, ex.: o do payload) ou de `url`; `idAfiliado` é o ID salvo em Conexões. `tag` é ignorada.
+ * - Magalu: https://www.magazinevoce.com.br/<lojaParceiro>/… (montarLinkMagalu, sem rede). Parte de `urlProduto` ou de
+ *   `url`, que precisa ser um endereço de produto (link curto é resolvido antes, por lerProduto). `lojaParceiro` é o
+ *   nome salvo em Conexões; fora de RE_LOJA_MAGALU → ErroMagalu('sem_loja'). `tag` é ignorada.
  */
-export async function linkAfiliado(id, { url, tag, asin, urlProduto } = {}, { links, amazon, shopee, idAfiliado } = {}) {
+export async function linkAfiliado(id, { url, tag, asin, urlProduto } = {}, { links, amazon, shopee, idAfiliado, lojaParceiro } = {}) {
   if (id === 'shopee') return (await linkAfiliadoShopeeRastreado(urlProduto ?? url, { shopee, links, idAfiliado })).link;
+  if (id === 'magalu') return montarLinkMagalu(exigirLoja(id, urlProduto ?? url), lojaParceiro);
   const limpo = exigirLoja(id, url);
   if (id === 'amazon') {
     exigirAmazon(amazon, 'montarLink');

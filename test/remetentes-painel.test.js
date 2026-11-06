@@ -204,6 +204,11 @@ test('CA11: o problema real vem do servidor, com "!" textual, a classe do nível
   const direto = t.rodar('cartaoRemetente(__r, true)');
   assert.match(direto, /<p class="nivel-aviso aviso-cartao" role="status"><b>!<\/b> Os links do Mercado Livre estão no modo direto\./);
   assert.doesNotMatch(direto, /href="#conexoes"/);
+  // Magalu sem a loja de parceiro (integracao-magalu, etapa 5): a frase do servidor, no mesmo lugar e com o link
+  t.ctx.__r = remetente({ problema: { nivel: 'aviso', texto: 'Os links da Magalu não saem: falta o nome da sua loja de parceiro. Cadastre em Conexões.', conexao: 'magalu' } });
+  const magalu = t.rodar('cartaoRemetente(__r, true)');
+  assert.match(magalu, /<p class="nivel-aviso aviso-cartao" role="status"><b>!<\/b> Os links da Magalu não saem: falta o nome da sua loja de parceiro\. Cadastre em Conexões\./);
+  assert.match(magalu, /href="#conexoes"/);
   t.ctx.__r = remetente({ problema: null });
   assert.doesNotMatch(t.rodar('cartaoRemetente(__r, true)'), /aviso-cartao/);
 });
@@ -501,6 +506,11 @@ test('Histórico Remetente: texto e classe de cada resultado (nunca só cor)', (
   assert.equal(r({ status: 'descartado', codigo: 'limite', motivo: 'passou do limite de links por hora' }).texto, 'Descartada: passou do limite de links por hora');
   const af = r({ status: 'erro', codigo: 'sem_tag_amazon', motivo: 'falta a tag da Amazon' });
   assert.deepEqual([af.cls, af.texto, af.conexoes], ['nivel-aviso', 'Não saiu: falta a tag da Amazon', true]);
+  // Magalu sem a loja de parceiro: também é de afiliação (aviso, com link para Conexões); sem título, o nome da loja
+  const magalu = r({ status: 'erro', codigo: 'sem_loja_magalu', motivo: 'falta o nome da loja de parceiro da Magalu', loja: 'magalu', oferta: null });
+  assert.deepEqual([magalu.cls, magalu.texto, magalu.conexoes], ['nivel-aviso', 'Não saiu: falta o nome da loja de parceiro da Magalu', true]);
+  t.ctx.__it = item({ loja: 'magalu', oferta: null });
+  assert.equal(t.rodar('remTituloItem(__it)'), 'Produto da Magalu');
   const e = r({ status: 'erro', codigo: 'falha', motivo: 'falha inesperada ao montar a oferta' });
   assert.deepEqual([e.cls, e.texto, !!e.conexoes], ['nivel-erro', 'Não saiu: falha inesperada ao montar a oferta', false]);
   assert.equal(r({ status: 'processando' }).texto, 'Processando…');

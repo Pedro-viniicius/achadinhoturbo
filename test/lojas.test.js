@@ -8,6 +8,7 @@ import {
 import { createLinkService, LIMITE_SHOPEE_ATINGIDO } from '../src/links.js';
 import { createAmazon, ErroAmazon, LinkNaoResolvido, HOSTS_AMAZON, MENSAGENS_AMAZON } from '../src/amazon.js';
 import { createShopee, ErroShopee, LinkShopeeNaoResolvido, HOSTS_SHOPEE, MENSAGENS_SHOPEE, URL_API, RE_ID_AFILIADO } from '../src/shopee.js';
+import { createMagalu, ErroMagalu, LinkMagaluNaoResolvido, HOSTS_MAGALU, LINK_MAGALU, MENSAGENS_MAGALU, RE_LOJA_MAGALU } from '../src/magalu.js';
 
 const IMG = 'https://http2.mlstatic.com/D_NQ_NP_123-O.jpg';
 const URL_ML = 'https://produto.mercadolivre.com.br/MLB-1234567890-fone-bom-_JM';
@@ -38,10 +39,10 @@ async function semRede(fn) {
   return chamadas;
 }
 
-test('lojas: registro com as 6 plataformas, campos da tela Conexões e ML, Amazon, Shopee e Catálogo implementados', () => {
+test('lojas: registro com as 6 plataformas, campos da tela Conexões e ML, Amazon, Shopee, Magalu e Catálogo implementados', () => {
   const lista = Object.values(PLATAFORMAS);
   assert.deepEqual(lista.map((p) => p.id), ['mercadolivre', 'amazon', 'shopee', 'magalu', 'facebook', 'catalogo']);
-  assert.deepEqual(lista.filter((p) => p.implementada).map((p) => p.id), ['mercadolivre', 'amazon', 'shopee', 'catalogo']);
+  assert.deepEqual(lista.filter((p) => p.implementada).map((p) => p.id), ['mercadolivre', 'amazon', 'shopee', 'magalu', 'catalogo']);
   const campos = Object.fromEntries(lista.map((p) => [p.id, p.campos.map((c) => `${c.nome}:${c.tipo}`)]));
   assert.deepEqual(campos, {
     mercadolivre: ['etiqueta:texto'],
@@ -147,7 +148,9 @@ test('lojas: identificar reconhece cada loja pelo host e pelo encurtador', () =>
       'https://www.amazon.com.br/Roteador-Mesh/dp/B0FG2MD49G?tag=outro-20&crid=X'],
     shopee: ['https://s.shopee.com.br/AbC123', 'https://shp.ee/abc', 'https://shope.ee/abc', 'https://shopee.com.br/Fone-i.123.456'],
     magalu: ['https://www.magazinevoce.com.br/magazineminhaloja/p/123/', 'https://magazinevoce.com.br/x',
-      'https://www.magazineluiza.com.br/fone/p/123/', 'https://divulgador.magalu.com/abc'],
+      'https://www.magazineluiza.com.br/fone/p/123/', 'https://divulgador.magalu.com/abc', 'https://magalu.com/x', 'https://www.magalu.com/x',
+      'https://maga.lu/Ab12', 'https://x.maga.lu/Ab12', 'https://magazineluiza.onelink.me/AbCd/xyz', 'https://go.magazineluiza.onelink.me/x',
+      'https://m.magazineluiza.com.br/x', 'HTTPS://WWW.MAGAZINELUIZA.COM.BR/x'],
     facebook: ['https://www.facebook.com/minhapagina', 'https://facebook.com/x', 'https://m.facebook.com/x', 'https://fb.com/x', 'https://fb.me/x'],
   };
   for (const [id, urls] of Object.entries(casos)) {
@@ -157,6 +160,19 @@ test('lojas: identificar reconhece cada loja pelo host e pelo encurtador', () =>
   assert.deepEqual(identificar('https://amzn.to/3xYz'), { id: 'amazon', nome: 'Amazon', implementada: true });
   assert.deepEqual(identificar('https://link.amazon/aBc12XyZ'), { id: 'amazon', nome: 'Amazon', implementada: true });
   assert.deepEqual(identificar('https://shp.ee/abc'), { id: 'shopee', nome: 'Shopee', implementada: true });
+  for (const u of ['https://maga.lu/x', 'https://magazineluiza.onelink.me/x', 'https://www.magazinevoce.com.br/x', 'https://magalu.com/x']) {
+    assert.deepEqual(identificar(u), { id: 'magalu', nome: 'Magalu', implementada: true }, u);
+  }
+});
+
+test('lojas: os hosts da Magalu são exatamente os de magalu.js, que o resolvedor aceita seguir (CA2)', () => {
+  assert.deepEqual(PLATAFORMAS.magalu.hosts, [...HOSTS_MAGALU]);
+  for (const h of HOSTS_MAGALU) assert.equal(identificar(`https://${h}/x`)?.id, 'magalu', h);
+  for (const u of ['https://magazineluiza.com.br.evil.com/x', 'https://xmagalu.com/x', 'https://magalu.com.evil.com/x', 'https://notmaga.lu/x',
+    'https://maga.lu.evil.com/x', 'https://magazineluiza.onelink.me.evil.com/x', 'https://evil.onelink.me/x', 'https://onelink.me/x',
+    'https://xmagazinevoce.com.br/x', 'https://magazineluiza.com/x', 'https://evil.com/?u=https://maga.lu/x', 'https://maga.lu@evil.com/x']) {
+    assert.equal(identificar(u), null, u);
+  }
 });
 
 test('lojas: todo host que identificar dá como Shopee é um host que o resolvedor de shopee.js aceita seguir', () => {
@@ -200,7 +216,9 @@ test('lojas: identificar e as recusas não acessam a rede', async () => {
     identificar(URL_ML); identificar('https://amzn.to/x'); identificar('https://evil.com/');
     await assert.rejects(previaDoLink('https://example.com/pagina', { ml }));
     await assert.rejects(previaDoLink('https://amzn.to/x', { ml }), /só funciona com links do Mercado Livre/);
-    await assert.rejects(lerProduto('magalu', 'https://www.magazinevoce.com.br/x', { ml }), LojaNaoConectada);
+    await assert.rejects(lerProduto('magalu', 'https://www.magazinevoce.com.br/x', { ml }), (e) => e instanceof LinkMagaluNaoResolvido && e.causa === 'invalido');
+    await assert.rejects(lerProduto('magalu', 'https://maga.lu/x', { ml }), (e) => e instanceof LinkMagaluNaoResolvido && e.causa === 'invalido');
+    await assert.rejects(lerProduto('facebook', 'https://fb.com/x', { ml }), LojaNaoConectada);
     await assert.rejects(lerProduto('shopee', 'https://shp.ee/x', { ml }), /Serviço da Shopee indisponível/);
     await assert.rejects(lerProduto('amazon', 'https://amzn.to/x', { ml }), /Serviço da Amazon indisponível/);
   });
@@ -233,18 +251,14 @@ test('lojas: lerProduto recusa loja desconhecida e link de outra loja sem chamar
   assert.equal(ml.chamadas.length, 0);
 });
 
-test('lojas: Magalu e Facebook lançam LojaNaoConectada com o nome na mensagem', async () => {
+test('lojas: Facebook (a única loja não implementada) lança LojaNaoConectada com o nome na mensagem', async () => {
   const ml = mlFalso();
   const links = { chamadas: 0, async requestLink() { this.chamadas++; return 'https://meli.la/x'; } };
-  const err = await lerProduto('magalu', 'https://www.magazinevoce.com.br/x', { ml }).catch((e) => e);
+  const err = await lerProduto('facebook', 'https://fb.com/x', { ml }).catch((e) => e);
   assert.ok(err instanceof LojaNaoConectada && err instanceof Error);
-  assert.equal(err.message, 'Magalu identificada, mas ainda não está conectada. Configure em Conexões.');
-  assert.deepEqual(err.loja, { id: 'magalu', nome: 'Magalu', implementada: false });
-  const outras = { magalu: ['Magalu', 'https://www.magazinevoce.com.br/x'], facebook: ['Facebook', 'https://fb.com/x'] };
-  for (const [id, [nome, url]] of Object.entries(outras)) {
-    await assert.rejects(lerProduto(id, url, { ml }), (e) => e instanceof LojaNaoConectada && e.message.startsWith(nome) && e.loja.id === id);
-    await assert.rejects(linkAfiliado(id, { url, tag: 'seunome-20' }, { links }), (e) => e instanceof LojaNaoConectada && e.loja.id === id);
-  }
+  assert.equal(err.message, 'Facebook identificada, mas ainda não está conectada. Configure em Conexões.');
+  assert.deepEqual(err.loja, { id: 'facebook', nome: 'Facebook', implementada: false });
+  await assert.rejects(linkAfiliado('facebook', { url: 'https://fb.com/x', tag: 'seunome-20' }, { links }), (e) => e instanceof LojaNaoConectada && e.loja.id === 'facebook');
   assert.equal(ml.chamadas.length, 0);
   assert.equal(links.chamadas, 0);
 });
@@ -1040,6 +1054,132 @@ test('R3/S2: reservaVagas — com Sub_id, a extensão só é chamada com mais va
   real.submit((await proximo2).id, { ok: true, link: CURTO });
   assert.deepEqual(await r2, { link: CURTO, sub_id: null });
   assert.equal(real.vagasShopee(), 10);
+});
+
+// ------------------------------------------------------------------------- Magalu (plano integracao-magalu, etapa 2)
+const LOJA_MAGALU = 'magazineminhaloja';
+const OUTRA_MAGALU = 'magazineoutroparceiro';
+const COD_MAGALU = '237962600';
+const CANON_MAGALU = `https://www.magazineluiza.com.br/smartphone-galaxy-a15/p/${COD_MAGALU}/te/ga15/`;
+const LINK_DONO = `https://www.magazinevoce.com.br/${LOJA_MAGALU}/smartphone-galaxy-a15/p/${COD_MAGALU}/te/ga15/`;
+const VAZIOS_MAGALU = { title: null, price: null, oldPrice: null, discountPct: null, sold: null, freeShipping: null, coupon: null, image: null };
+
+/** Cliente da Magalu falso: resolver devolve `resposta` (ou lança) e conta as chamadas. */
+function magaluFalso(resposta) {
+  const chamadas = [];
+  return { chamadas, async resolver(url) { chamadas.push(url); if (resposta instanceof Error) throw resposta; return resposta; } };
+}
+
+test('lojas Magalu (CA1): registro com a descrição, a dica e a frase de recusa da spec; o padrão é RE_LOJA_MAGALU', () => {
+  const p = PLATAFORMAS.magalu;
+  assert.equal(p.implementada, true);
+  assert.equal(p.descricao, 'Parceiro Magalu (Magazine Você): o link de afiliado sai com o nome da sua loja de parceiro. A Magalu não deixa o painel ler o produto: título, preço e foto você preenche no Disparo manual.');
+  assert.equal(p.campos.length, 1);
+  const c = p.campos[0];
+  assert.equal(c.nome, 'loja'); assert.equal(c.rotulo, 'Nome da sua loja'); assert.equal(c.tipo, 'texto'); assert.equal(c.max, 60);
+  assert.equal(c.padrao, RE_LOJA_MAGALU.source);
+  assert.equal(c.padrao, '^[A-Za-z0-9_-]{2,60}$');
+  assert.equal(c.ajuda, 'É o trecho que vem depois de magazinevoce.com.br/ no endereço da sua loja. Se o endereço é magazinevoce.com.br/minhaloja, escreva minhaloja. Só letras, números, hífen e _.');
+  assert.equal(c.erro, 'Escreva só o nome da loja (o trecho depois de magazinevoce.com.br/), com letras, números, hífen ou _.');
+});
+
+test('lojas Magalu: lerProduto lê o produto do link sem rede e sem resolvedor; nada é lido da página (D3)', async () => {
+  const magalu = magaluFalso(new Error('não devia resolver'));
+  const chamadas = await semRede(async () => {
+    assert.deepEqual(await lerProduto('magalu', `  ${CANON_MAGALU}?utm_source=zap&seller_id=lojaboa#x `, { magalu }), {
+      key: `MAGALU:${COD_MAGALU}`, codigo: COD_MAGALU, urlProduto: `${CANON_MAGALU}?seller_id=lojaboa`, sellerId: 'lojaboa', lojaDoLink: null, ...VAZIOS_MAGALU,
+    });
+    // link da loja de outro parceiro: o endereço canônico não leva a loja dele; ela só volta em lojaDoLink
+    const outro = await lerProduto('magalu', `https://www.magazinevoce.com.br/${OUTRA_MAGALU}/smartphone-galaxy-a15/p/${COD_MAGALU}/te/ga15/`);
+    assert.deepEqual(outro, { key: `MAGALU:${COD_MAGALU}`, codigo: COD_MAGALU, urlProduto: CANON_MAGALU, sellerId: null, lojaDoLink: OUTRA_MAGALU, ...VAZIOS_MAGALU });
+    assert.ok(!outro.urlProduto.includes(OUTRA_MAGALU));
+  });
+  assert.equal(chamadas, 0);
+  assert.equal(magalu.chamadas.length, 0);
+});
+
+test('lojas Magalu (CA6): link curto passa pelo resolvedor injetado; o que ele devolve é conferido de novo', async () => {
+  const bom = magaluFalso({ codigo: COD_MAGALU, urlProduto: CANON_MAGALU, sellerId: null, lojaDoLink: OUTRA_MAGALU });
+  assert.deepEqual(await lerProduto('magalu', 'https://maga.lu/Ab12', { magalu: bom }),
+    { key: `MAGALU:${COD_MAGALU}`, codigo: COD_MAGALU, urlProduto: CANON_MAGALU, sellerId: null, lojaDoLink: OUTRA_MAGALU, ...VAZIOS_MAGALU });
+  assert.deepEqual(bom.chamadas, ['https://maga.lu/Ab12']);
+  // resolvedor que devolve algo que não é produto da Magalu (ou campos adulterados): invalido, sem confiar nele
+  for (const ruim of [null, {}, { urlProduto: 'https://evil.com/x/p/237962600/' }, { urlProduto: 'https://maga.lu/x' }, { urlProduto: 42 }]) {
+    await assert.rejects(lerProduto('magalu', 'https://maga.lu/Ab12', { magalu: magaluFalso(ruim) }), (e) => e instanceof LinkMagaluNaoResolvido && e.causa === 'invalido', JSON.stringify(ruim));
+  }
+  const adulterado = await lerProduto('magalu', 'https://maga.lu/Ab12', {
+    magalu: magaluFalso({ codigo: 'outro', urlProduto: CANON_MAGALU, sellerId: '<x>', lojaDoLink: 'loja ruim/../x' }),
+  });
+  assert.equal(adulterado.codigo, COD_MAGALU, 'o código vem do endereço refeito');
+  assert.equal(adulterado.sellerId, null);
+  assert.equal(adulterado.lojaDoLink, null);
+  // a falha do resolvedor segue com a causa dele
+  await assert.rejects(lerProduto('magalu', 'https://maga.lu/Ab12', { magalu: magaluFalso(new LinkMagaluNaoResolvido('nao_produto')) }),
+    (e) => e instanceof LinkMagaluNaoResolvido && e.causa === 'nao_produto');
+  // sem o cliente, o link curto é invalido sem rede
+  assert.equal(await semRede(async () => {
+    for (const url of ['https://maga.lu/Ab12', 'https://magazineluiza.onelink.me/AbCd/x', 'https://divulgador.magalu.com/q']) {
+      await assert.rejects(lerProduto('magalu', url), (e) => e instanceof LinkMagaluNaoResolvido && e.causa === 'invalido', url);
+    }
+  }), 0);
+});
+
+test('lojas Magalu (CA6): ponta a ponta com createMagalu (fetch falso): 302 do curto vira o produto sem pedir a página', async () => {
+  const chamadas = [];
+  const fetch = async (url) => { chamadas.push(String(url)); return new Response(null, { status: 302, headers: { location: `https://www.magazinevoce.com.br/${OUTRA_MAGALU}/smartphone-galaxy-a15/p/${COD_MAGALU}/te/ga15/?utm_source=app` } }); };
+  const magalu = createMagalu({ fetch });
+  const p = await lerProduto('magalu', 'https://magazineluiza.onelink.me/AbCd/xyz', { magalu });
+  assert.equal(p.urlProduto, CANON_MAGALU);
+  assert.equal(p.lojaDoLink, OUTRA_MAGALU);
+  assert.deepEqual(chamadas, ['https://magazineluiza.onelink.me/AbCd/xyz']);
+  assert.equal(await linkAfiliado('magalu', { urlProduto: p.urlProduto }, { lojaParceiro: LOJA_MAGALU }), LINK_DONO);
+});
+
+test('lojas Magalu (CA3): linkAfiliado monta o link com a loja de Conexões, sem rede; nunca a loja do link colado, utm nem fragmento', async () => {
+  const links = { chamadas: 0, async requestLink() { this.chamadas++; return 'https://meli.la/x'; } };
+  const chamadas = await semRede(async () => {
+    assert.equal(await linkAfiliado('magalu', { urlProduto: CANON_MAGALU }, { lojaParceiro: LOJA_MAGALU }), LINK_DONO);
+    assert.equal(await linkAfiliado('magalu', { url: `https://www.magazinevoce.com.br/${OUTRA_MAGALU}/smartphone-galaxy-a15/p/${COD_MAGALU}/te/ga15/?utm_source=x#${OUTRA_MAGALU}`, tag: 'seunome-20' },
+      { lojaParceiro: LOJA_MAGALU, links }), LINK_DONO);
+    assert.equal(await linkAfiliado('magalu', { url: 'https://maga.lu/x', urlProduto: `${CANON_MAGALU}?seller_id=lojaboa&utm_medium=y` }, { lojaParceiro: LOJA_MAGALU }),
+      `${LINK_DONO}?seller_id=lojaboa`);
+    for (const l of [await linkAfiliado('magalu', { url: `https://magazinevoce.com.br/${OUTRA_MAGALU}/p/${COD_MAGALU}/` }, { lojaParceiro: LOJA_MAGALU })]) {
+      assert.match(l, LINK_MAGALU);
+      assert.ok(!l.includes(OUTRA_MAGALU), l);
+    }
+  });
+  assert.equal(chamadas, 0);
+  assert.equal(links.chamadas, 0, 'a etiqueta do ML não entra');
+});
+
+test('lojas Magalu: linkAfiliado sem loja válida é ErroMagalu sem_loja; link curto, de outra loja ou que não é produto é recusado sem rede', async () => {
+  const chamadas = await semRede(async () => {
+    for (const lojaParceiro of [undefined, null, '', 'a', 'minha loja', 'loja/../x', 42]) {
+      await assert.rejects(linkAfiliado('magalu', { urlProduto: CANON_MAGALU }, { lojaParceiro }), (e) => {
+        assert.ok(e instanceof ErroMagalu, String(lojaParceiro));
+        assert.equal(e.tipo, 'sem_loja');
+        assert.equal(e.message, MENSAGENS_MAGALU.sem_loja);
+        return true;
+      });
+    }
+    // o link curto é resolvido antes (lerProduto): aqui ele não vira link nem acessa a rede
+    for (const url of ['https://maga.lu/Ab12', 'https://www.magazineluiza.com.br/', `https://www.magazineluiza.com.br/x/../p/${COD_MAGALU}/`]) {
+      await assert.rejects(linkAfiliado('magalu', { url }, { lojaParceiro: LOJA_MAGALU }), (e) => e instanceof LinkMagaluNaoResolvido && e.causa === 'invalido', url);
+    }
+    for (const url of [`https://evil.com/x/p/${COD_MAGALU}/`, URL_ML, undefined]) {
+      await assert.rejects(linkAfiliado('magalu', { url }, { lojaParceiro: LOJA_MAGALU }), /não é da loja Magalu/, String(url));
+    }
+  });
+  assert.equal(chamadas, 0);
+});
+
+test('lojas Magalu (CA8): previaDoLink continua só do Mercado Livre e a Magalu segue sem foto permitida', async () => {
+  const ml = mlFalso();
+  for (const url of [CANON_MAGALU, 'https://maga.lu/x']) {
+    await assert.rejects(previaDoLink(url, { ml }), (e) => !(e instanceof LojaNaoConectada) && /só funciona com links do Mercado Livre/.test(e.message));
+  }
+  assert.equal(ml.chamadas.length, 0);
+  for (const img of ['https://a-static.mlcdn.com.br/x.jpg', 'https://www.magazineluiza.com.br/x.jpg', IMG]) assert.equal(imagemPermitida('magalu', img), false, img);
 });
 
 test('R5: o padrão do ID de afiliado da tela Conexões é o RE_ID_AFILIADO de shopee.js', () => {

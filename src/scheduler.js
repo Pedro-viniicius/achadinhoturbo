@@ -91,12 +91,12 @@ export function alignToWindow(ts, start, end) {
  * Grupo vivo (src/rotinas.js, plano grade-de-disparos D7): no horário, cada rotina ligada grava uma ocorrência 'agora'
  * na mesma fila de envios e acorda o tick; o passo das rotinas roda antes das regras e depois de cada regra.
  */
-export function createScheduler({ db, wa, links, ml = mlDefault, fast = false, dir = null, amazon = null, shopee = null, catalogo = null, catalogoItens = null }) {
+export function createScheduler({ db, wa, links, ml = mlDefault, fast = false, dir = null, amazon = null, shopee = null, magalu = null, catalogo = null, catalogoItens = null }) {
   const running = new Set();
   let timer = null; let primeiro = null; let ticking = false; let recuperacao = null;
   let acordado = false; // um "agora" chegou com o tick em andamento: ele passa nos envios de novo antes de terminar
   // O "agora" não envia por conta própria: grava pendente e acorda o tick, que manda um envio de cada vez (S14)
-  const envios = createEnvios({ db, wa, links, ml, fast, dir, acordar, amazon, shopee });
+  const envios = createEnvios({ db, wa, links, ml, fast, dir, acordar, amazon, shopee, magalu });
   const avisos = createAvisos({ db, wa });
   // receber() (ouvinte do WhatsApp) e cada envio que o espelho cria chamam acordar(): a oferta sai neste tick
   const espelho = createEspelho({ db, wa, amazon, envios, acordar });

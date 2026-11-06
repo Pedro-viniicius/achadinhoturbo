@@ -130,11 +130,12 @@ docsCapitulo({
       id: 'por-onde-comecar', titulo: 'Por onde começar',
       leia: 'perguntas/precisa-api',
       blocos: [
-        { p: 'Para começar você só precisa do Mercado Livre; Amazon, Shopee e Catálogo podem esperar. A API só poupa digitação. Veja o que funciona sem ela:' },
+        { p: 'Para começar você só precisa do Mercado Livre; Amazon, Shopee, Magalu e Catálogo podem esperar. A API só poupa digitação. Veja o que funciona sem ela:' },
         { tabela: { colunas: ['Loja', 'Sem API', 'Com API'], linhas: [
           ['Mercado Livre', 'Funciona: extensão do Chrome e etiqueta.', 'Não usa API.'],
           ['Amazon', 'Funciona com a tag. Os dados vêm do texto da mensagem de origem ou você preenche.', 'Título, preço, preço antigo e foto vêm da Amazon.'],
           ['Shopee', 'Funciona com o ID de afiliado e o Chrome logado no portal. O link sai pela extensão e você preenche título e preço.', 'O painel busca título, preço e foto.'],
+          ['Magalu', 'Funciona só com o nome da sua loja de parceiro. O link sai com ele; você preenche título e preço e confere a loja pelo link do cartão.', 'Nada a mais: não existe API.'],
         ] } },
       ],
     },
@@ -202,6 +203,25 @@ docsCapitulo({
       ],
     },
     {
+      id: 'magalu', titulo: 'Magalu: o nome da sua loja',
+      soDono: true,
+      onde: '[[Conexões → Magalu]]',
+      blocos: [
+        { p: 'A Magalu não tem API nem senha. O painel só precisa do **nome da sua loja de parceiro** (Magazine Você): o link de afiliado sai com esse nome, e a comissão vai para a sua loja.' },
+        { passos: [
+          'Abra [[Conexões → Magalu]].',
+          'Escreva o “Nome da sua loja”: é o trecho que vem depois de `magazinevoce.com.br/` no endereço da sua loja. Se o endereço é `magazinevoce.com.br/minhaloja`, escreva `minhaloja` (só letras, números, hífen e _).',
+          'Clique em “Salvar”. O selo passa para “Configurada”.',
+          'Clique em “Conferir minha loja” e veja se abre a página da sua loja.',
+        ] },
+        { p: 'No [[Disparo manual]], cole o link do produto. O link que vai ao grupo é sempre `https://www.magazinevoce.com.br/<sua loja>/…`, montado na hora do envio. O link que um [remetente](#docs/disparo-automatico/remetentes) manda também sai com a sua loja, com título e preço escritos na mensagem dele.' },
+        { p: 'A Magalu fica de fora do Catálogo, das regras do Disparo automático, do espelhamento, do rastreio por grupo, da página Ganhos e da importação de comissões. Ela não separa os ganhos por grupo.' },
+        { nota: 'aviso', texto: 'O painel não confirma que o nome existe. Nome errado gera um link de outra loja, e a comissão não vem para você: use sempre “Conferir minha loja”.' },
+        { nota: 'erro', texto: '“O link que você colou é de outra loja de parceiro. O envio sai com a sua loja, não com essa.” Nada a fazer: o painel troca a loja do link pela sua.' },
+        { nota: 'dica', texto: 'O painel não lê o produto na Magalu: título e preço são seus (use o preço que aparece na página da Magalu) e a foto é opcional, por upload.' },
+      ],
+    },
+    {
       id: 'catalogo', titulo: 'Catálogo do Etiqueta',
       soDono: true,
       onde: '[[Conexões → Catálogo do Etiqueta]]',
@@ -224,7 +244,7 @@ docsCapitulo({
       id: 'sem-api', titulo: 'O que funciona sem API',
       leia: 'perguntas/precisa-api',
       blocos: [
-        { p: 'Você não precisa de API para começar: o quadro por loja está no topo do capítulo, em [Por onde começar](#docs/conexoes/por-onde-comecar). Hoje só Mercado Livre, Amazon e Shopee enviam; link de Magalu ou Facebook é reconhecido, mas o painel avisa que a loja não está conectada.' },
+        { p: 'Você não precisa de API para começar: o quadro por loja está no topo do capítulo, em [Por onde começar](#docs/conexoes/por-onde-comecar). Hoje Mercado Livre, Amazon, Shopee e Magalu enviam; link do Facebook é reconhecido, mas o painel avisa que a loja não está conectada.' },
       ],
     },
   ],

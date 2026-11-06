@@ -44,6 +44,7 @@ docsCapitulo({
             ['Mercado Livre', 'Extensão do Chrome e etiqueta. Já funciona.', 'Não usa API.'],
             ['Amazon', 'Com a tag, funciona. Os dados vêm do texto da mensagem de origem (no espelhamento) ou você preenche (no Disparo manual).', 'Título, preço, preço antigo e foto vêm da Amazon. A API exige conta de Associados aprovada e **10 vendas qualificadas nos últimos 30 dias** na Amazon.com.br.'],
             ['Shopee', 'Com o ID de afiliado e o Chrome logado no portal de afiliados, o link sai pela extensão e você preenche título e preço.', 'O painel busca os dados do produto. Peça o acesso em `affiliate.shopee.com.br/open_api` (resposta em até 3 dias úteis).'],
+            ['Magalu', 'Só o nome da sua loja de parceiro: o link sai com ele e você preenche título e preço no Disparo manual.', 'Não há API pública da Magalu para parceiro: o painel não lê o produto.'],
           ],
         } },
       ],

@@ -1,6 +1,7 @@
-// Remetente: números cadastrados pelo dono que mandam, no privado do WhatsApp, links de Mercado Livre, Amazon ou Shopee;
-// o programa monta a oferta com a afiliação do dono e a envia aos grupos do remetente. Aqui: cartões (Disparo automático),
-// formulário "Novo remetente" / "Editar remetente" com a máscara de telefone BR e a visão Remetente do Histórico.
+// Remetente: números cadastrados pelo dono que mandam, no privado do WhatsApp, links de Mercado Livre, Amazon, Shopee
+// ou Magalu; o programa monta a oferta com a afiliação do dono e a envia aos grupos do remetente. Aqui: cartões (Disparo
+// automático), formulário "Novo remetente" / "Editar remetente" com a máscara de telefone BR e a visão Remetente do
+// Histórico.
 // Spec: docs/produto/specs/envio-pelo-socio.md. Plano: docs/produto/planos/envio-pelo-socio.md (etapa 7).
 // Rotas: GET/POST /api/remetentes, PUT/DELETE /api/remetentes/:id, POST /api/remetentes/:id/enabled,
 // GET /api/remetentes/itens. A escrita é só do Dono (o servidor responde 403 ao Operador; o Operador não vê os botões).
@@ -37,7 +38,7 @@ const TEXTOS_REMETENTE = {
   destino: 'Grupos de destino', destinoDica: 'Para onde vão os links que este número mandar.', buscaDestino: 'Buscar grupo de destino',
   blocoDica: 'O bloco só ajuda a marcar. Se você mudar o bloco depois, esta lista não muda.',
   etiqueta: 'Etiqueta do Mercado Livre', etiquetaPadrao: 'A etiqueta ML padrão',
-  etiquetaDica: 'Vale só para links do Mercado Livre. Amazon e Shopee usam a configuração de Conexões.',
+  etiquetaDica: 'Vale só para links do Mercado Livre. Amazon, Shopee e Magalu usam a configuração de Conexões.',
   template: 'Template', gerenciarTemplates: 'Gerenciar templates', camposTemplate: 'Campos do template',
   previaLoja: 'Exemplo da prévia', previaLegenda: 'Exemplo. Linha sem valor some sozinha.',
   lojas: [['ml', 'Mercado Livre'], ['amazon', 'Amazon'], ['shopee', 'Shopee']],
@@ -70,7 +71,7 @@ const TEXTOS_REMETENTE = {
     mostrarMais: 'Mostrar mais', carregandoMais: 'Carregando…',
     mostrando: (n) => `Mostrando ${n} ${n === 1 ? 'link' : 'links'}.`, fim: (n) => `Mostrando ${n === 1 ? 'o único link' : `todos os ${n} links`}.`,
     semRemetente: '(remetente excluído)', semLink: 'Mensagem sem link de loja',
-    produto: { mercadolivre: 'Produto do Mercado Livre', amazon: 'Produto da Amazon', shopee: 'Produto da Shopee' },
+    produto: { mercadolivre: 'Produto do Mercado Livre', amazon: 'Produto da Amazon', shopee: 'Produto da Shopee', magalu: 'Produto da Magalu' },
     enviada: 'Enviada', processando: 'Processando…', enviando: 'enviando…', semMotivo: 'sem motivo registrado',
     descartada: (m) => `Descartada: ${m}`, naoSaiu: (m) => `Não saiu: ${m}`,
     erroGrupos: (n) => `Erro ao enviar para ${n} ${n === 1 ? 'grupo' : 'grupos'}`,
@@ -85,7 +86,7 @@ const REM_AMOSTRA_SHOPEE = {
   sold: 1500, freeShipping: true, coupon: '', link: 'https://s.shopee.com.br/•••',
 };
 /** Códigos de bloqueio por falta de afiliação (src/remetentes.js): a linha do Histórico leva a Conexões. */
-const REM_AFILIACAO = new Set(['sem_etiqueta', 'modo_direto', 'sem_extensao', 'sem_tag_amazon', 'sem_id_shopee', 'sem_link_shopee']);
+const REM_AFILIACAO = new Set(['sem_etiqueta', 'modo_direto', 'sem_extensao', 'sem_tag_amazon', 'sem_id_shopee', 'sem_link_shopee', 'sem_loja_magalu']);
 
 // Estado: lista de remetentes (Disparo automático e Histórico) e da visão Remetente do Histórico.
 const REM = { lista: [], info: null, erro: '' };

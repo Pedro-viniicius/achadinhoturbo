@@ -2,6 +2,9 @@
 // Mercado Livre: etiquetas de afiliado + extensão do Chrome. Amazon: tag, credencial da API e teste (4 estados do selo).
 // Shopee (plano integracao-shopee, etapa 9): ID de afiliado, AppID e Senha da API em dois fieldset, linha da extensão,
 // aviso "Antes de usar", 6 selos e teste por `resultado`. As funções `cx*` são puras (testadas em test/shopee-painel.test.js).
+// Magalu (plano integracao-magalu, etapa 4; spec docs/produto/specs/integracao-magalu.md, seção 1): um campo só (o nome da loja
+// de parceiro), sem "Testar": no lugar, o link "Conferir minha loja", montado só do nome SALVO que casa a regra. As funções
+// `cxMagalu*` são puras (testadas em test/magalu-painel.test.js).
 // Catálogo do Etiqueta (plano fonte-catalogo-etiqueta, etapa 6): cartão próprio no fim do arquivo (`cxCat*`, testadas
 // em test/catalogo-conexoes-painel.test.js); cartaoConexao, aplicarConexao e ligarConexao desviam para ele.
 // Carrega antes de app.js: só define funções. Os utilitários de app.js e paineis.js ($, $$, esc, api,
@@ -75,6 +78,18 @@ const TEXTOS_CONEXOES = {
       indisponivel: 'A Shopee não respondeu agora. Tente de novo em alguns minutos.',
       sem_id: 'Credenciais aceitas, mas falta o ID de afiliado.',
     },
+  },
+  // Magalu: o link de afiliado leva o nome da loja de parceiro (sem API, senha nem leitura do produto). Nenhuma frase repete o valor digitado.
+  magalu: {
+    conferir: 'Conferir minha loja (abre em outra aba)',
+    nadaSalvo: 'Nada salvo ainda.',
+    salveParaConferir: 'Salve o nome da loja para poder conferir.',
+    naoConfirma: 'O painel não consegue confirmar que o nome existe: use “Conferir minha loja”.',
+    enderecoColado: 'Escreva só o nome da loja, sem o endereço. Se o endereço é magazinevoce.com.br/minhaloja, escreva minhaloja.',
+    espacoAcento: 'O nome da loja não leva espaços nem acentos. Copie do endereço da sua loja, depois de magazinevoce.com.br/.',
+    tamanho: 'O nome da loja tem de 2 a 60 caracteres.',
+    caractere: 'Use só letras, números, hífen ou _ no nome da loja.',
+    recusadaServidor: 'Escreva só o nome da loja', // começo da frase fixa do servidor (src/lojas.js, `erro` do campo): leva o foco ao campo
   },
   // Catálogo do Etiqueta (plano fonte-catalogo-etiqueta, etapa 6; spec, seção 1). Não é loja: é fonte de ofertas.
   catalogo: {
@@ -288,6 +303,10 @@ function cxFalhaVerificacao(p) {
 /** Linha de estado do cartão: { texto, aviso }. A falha da verificação fica visível ao recarregar, em texto e não só no selo. */
 function cxLinhaEstado(p) {
   const T = TEXTOS_CONEXOES; const shopee = p?.id === 'shopee';
+  if (p?.id === 'magalu') { // sem verificação no servidor: só diz o que está salvo e, sem nome, como conferir depois
+    const salvo = p.updated_at ? T.salvoEm(p.updated_at) : T.magalu.nadaSalvo;
+    return { texto: [salvo, cxMagaluHref(p) ? '' : T.magalu.salveParaConferir].filter(Boolean).join(' '), aviso: false };
+  }
   const base = p.updated_at ? T.salvoEm(p.updated_at) : shopee ? T.shopee.nadaSalvo : T.nadaSalvo;
   const falha = cxFalhaVerificacao(p);
   const faltaId = shopee && ['pronta', 'sem_acesso', 'erro_credencial'].includes(p.estado) && !p.config?.id_afiliado ? T.shopee.faltaId : '';
@@ -326,7 +345,40 @@ function cxCruzaShopee(campos) {
   return id && app && id === app ? TEXTOS_CONEXOES.shopee.appIdIgual : '';
 }
 /** Elemento que leva o foco quando o servidor recusa o AppID igual ao ID (a mensagem é fixa). */
-const cxElDoErro = (form, msg) => (String(msg || '').includes('O AppID e o ID de afiliado') ? form.elements.namedItem('app_id') : undefined);
+const cxElDoErro = (form, msg) => {
+  const m = String(msg || '');
+  if (m.includes('O AppID e o ID de afiliado')) return form.elements.namedItem('app_id');
+  return m.startsWith(TEXTOS_CONEXOES.magalu.recusadaServidor) ? form.elements.namedItem('loja') : undefined;
+};
+
+// ---------- Magalu: peças puras do cartão ----------
+/** Mesma regra do campo `loja` de src/lojas.js (RE_LOJA_MAGALU); o teste confere que não divergiram. */
+const CX_MAGALU_RE_LOJA = /^[A-Za-z0-9_-]{2,60}$/;
+/**
+ * Endereço de "Conferir minha loja": só do nome SALVO (nunca o digitado) e só se casa a regra; senão ''. O nome vai
+ * por encodeURIComponent (a regra já exclui qualquer caractere que precise dele, mas o href nunca depende só dela).
+ */
+function cxMagaluHref(p) {
+  const loja = p?.config?.loja;
+  return typeof loja === 'string' && CX_MAGALU_RE_LOJA.test(loja) ? `https://www.magazinevoce.com.br/${encodeURIComponent(loja)}/` : '';
+}
+/** HTML do link-botão (string vazia sem loja salva: o link não existe). `href` vem de cxMagaluHref. */
+function cxMagaluLinkHtml(href) {
+  return href ? `<a class="btn" data-conferir href="${esc(href)}" target="_blank" rel="noopener" style="text-decoration:none;overflow-wrap:anywhere">${TEXTOS_CONEXOES.magalu.conferir}</a>` : '';
+}
+/**
+ * Erro do nome da loja antes de enviar (só chamada com valor não vazio: vazio apaga). A regra vem do registro
+ * (`c.padrao`); a frase depende do engano mais provável, na ordem da spec: endereço colado, espaço ou acento, tamanho, outro caractere.
+ */
+function cxErroCampoMagalu(c, v) {
+  const T = TEXTOS_CONEXOES.magalu;
+  let re = null; try { re = c?.padrao ? new RegExp(c.padrao) : null; } catch { /* o servidor confere */ }
+  if ((re || CX_MAGALU_RE_LOJA).test(v)) return '';
+  if (/[/.]|http/i.test(v)) return T.enderecoColado;
+  if (/\s|[^\x00-\x7f]/.test(v)) return T.espacoAcento;
+  if (v.length < 2 || v.length > 60) return T.tamanho;
+  return T.caractere;
+}
 
 /** Os dois fieldset da Shopee: o que identifica a conta × o que é credencial da API. Cada campo leva a sua ajuda (`?`). */
 function cxFormShopee(p, campos) {
@@ -342,6 +394,7 @@ function cartaoConexao(p) {
   const id = esc(p.id); const campos = Array.isArray(p.campos) ? p.campos : [];
   const amazon = p.id === 'amazon' && p.implementada;
   const shopee = p.id === 'shopee' && p.implementada;
+  const magalu = p.id === 'magalu' && p.implementada;
   const ext = cxExtLinha(p);
   const aviso = shopee
     ? `<p class="ext-linha${ext.off ? ' off' : ''}" role="status" data-ext><span data-ext-txt>${ext.texto}</span> ${q('conexoes.shopee.extensao')}</p>
@@ -352,12 +405,14 @@ function cartaoConexao(p) {
       : p.implementada ? '' : `<div class="aviso-impl"><p>${campos.length ? TEXTOS_CONEXOES.avisoImpl : TEXTOS_CONEXOES.avisoImplSemCampos}</p></div>`;
   const desc = amazon ? TEXTOS_CONEXOES.amazonDesc : p.descricao;
   const form = !campos.length ? '' : `<form novalidate>
-      ${shopee ? cxFormShopee(p, campos) : campos.map((c) => campoConexao(p, c)).join('')}
-      <div class="acoes"><button type="submit" class="pri">Salvar</button><button type="button" data-testar aria-describedby="cx-${id}-estado">Testar</button></div>
-      <p class="estado-linha" id="cx-${id}-estado" role="status"></p>
+      ${shopee ? cxFormShopee(p, campos) : magalu ? campos.map((c) => campoConexao(p, c, { tip: 'conexoes.magalu.loja', minusculas: true })).join('') : campos.map((c) => campoConexao(p, c)).join('')}
+      <div class="acoes"><button type="submit" class="pri">Salvar</button>${magalu
+        ? '<span data-conferir-box style="display:contents"></span>'
+        : `<button type="button" data-testar aria-describedby="cx-${id}-estado">Testar</button>`}</div>
+      <p class="estado-linha" id="cx-${id}-estado" role="status"></p>${magalu ? '\n      <p class="dica" data-magalu-nota hidden></p>' : ''}
     </form>`;
   return `<article class="card conexao" id="cx-${id}" aria-labelledby="cx-${id}-h">
-    <header class="cab"><h2 id="cx-${id}-h">${esc(p.nome || p.id)}${amazon ? ' ' + q('conexoes.amazon') : shopee ? ' ' + q('conexoes.shopee') : ''}</h2><span class="estado-pill"></span></header>
+    <header class="cab"><h2 id="cx-${id}-h">${esc(p.nome || p.id)}${amazon ? ' ' + q('conexoes.amazon') : shopee ? ' ' + q('conexoes.shopee') : magalu ? ' ' + q('conexoes.magalu') : ''}</h2><span class="estado-pill"></span></header>
     ${desc ? `<p class="desc">${esc(desc)}</p>` : ''}
     ${aviso}${form}
   </article>`;
@@ -365,13 +420,14 @@ function cartaoConexao(p) {
 
 /**
  * Um campo do registro. Sem `value` no segredo (nunca vem do servidor) e sem maxlength (cortaria a chave colada sem avisar).
- * `opcoes`: numerico (inputmode=numeric) e tip (chave do `?` de ajuda; o segredo usa 'conexoes.segredo' por padrão).
+ * `opcoes`: numerico (inputmode=numeric), minusculas (autocapitalize=none: nome que o teclado do celular não deve capitalizar)
+ * e tip (chave do `?` de ajuda; o segredo usa 'conexoes.segredo' por padrão).
  */
 function campoConexao(p, c, opcoes = {}) {
   const id = `cx-${esc(p.id)}-${esc(c.nome)}`;
   const dica = c.ajuda ? `<small class="dica" id="${id}-dica">${esc(c.ajuda)}</small>` : '';
   const desc = c.ajuda ? ` aria-describedby="${id}-dica"` : '';
-  const modo = opcoes.numerico ? ' inputmode="numeric"' : '';
+  const modo = (opcoes.numerico ? ' inputmode="numeric"' : '') + (opcoes.minusculas ? ' autocapitalize="none"' : '');
   if (c.tipo === 'segredo') {
     // new-password: o Chrome não preenche aqui a senha do painel que ele guardou
     return `<label class="campo"><span>${esc(c.rotulo)} ${q(opcoes.tip || 'conexoes.segredo')}</span>
@@ -417,7 +473,9 @@ function aplicarConexao(art, p) {
       el.placeholder = !salvos ? TEXTOS_CONEXOES.segredoSoDono : salvos.includes(c.nome) ? TEXTOS_CONEXOES.segredoSalvo : '';
     } else el.value = p.config?.[c.nome] ?? '';
   }
-  $('[data-testar]', form).disabled = cxTestarBloqueado(p); // "Testar" só depois de salvar; a linha abaixo diz por quê
+  const testar = $('[data-testar]', form); // a Magalu não tem "Testar": no lugar, "Conferir minha loja"
+  if (testar) testar.disabled = cxTestarBloqueado(p); // "Testar" só depois de salvar; a linha abaixo diz por quê
+  if (p.id === 'magalu') pintarConferirMagalu(form, p);
   if (p.id === 'shopee') { // a linha de contexto do fieldset da API só vale enquanto não há credenciais salvas
     const ctx = $('[data-ctx-api]', form);
     if (ctx) ctx.hidden = !!(p.config?.app_id && salvos?.includes('chave'));
@@ -426,6 +484,14 @@ function aplicarConexao(art, p) {
   const { texto, aviso } = cxLinhaEstado(p);
   linha.textContent = texto;
   if (aviso) linha.classList.add('aviso');
+}
+
+/** "Conferir minha loja" (só com nome salvo válido) e a nota de que o painel não confirma que o nome existe (só em `pronta`). */
+function pintarConferirMagalu(form, p) {
+  const href = cxMagaluHref(p);
+  const box = $('[data-conferir-box]', form); if (box) box.innerHTML = cxMagaluLinkHtml(href);
+  const nota = $('[data-magalu-nota]', form);
+  if (nota) { const ver = p.estado === 'pronta' && !!href; nota.hidden = !ver; nota.textContent = ver ? TEXTOS_CONEXOES.magalu.naoConfirma : ''; }
 }
 
 /** Erro de um campo, igual ao que o servidor confere (max e padrao do registro). Nunca repete o valor. */
@@ -443,7 +509,7 @@ function lerFormConexao(form, p) {
     const el = form.elements.namedItem(c.nome); if (!el || el.disabled) continue;
     const v = String(el.value || '').trim();
     if (c.tipo === 'segredo' && !v) continue;
-    const msg = v ? (p.id === 'shopee' ? cxErroCampoShopee(c, v) : erroCampoConexao(c, v)) : '';
+    const msg = v ? (p.id === 'shopee' ? cxErroCampoShopee(c, v) : p.id === 'magalu' ? cxErroCampoMagalu(c, v) : erroCampoConexao(c, v)) : '';
     if (msg) erros.push({ msg, el }); else campos[c.nome] = v;
   }
   if (p.id === 'shopee' && !erros.length) {
@@ -472,7 +538,7 @@ function ligarConexao(art, p) {
       mostrarErros(form, [{ msg: e.message, el: cxElDoErro(form, e.message) }]);
     } finally { salvar.disabled = false; salvar.textContent = 'Salvar'; }
   };
-  testar.onclick = async () => {
+  if (testar) testar.onclick = async () => {
     testar.disabled = true; testar.textContent = 'Testando…';
     try {
       const r = await api('/conexoes/' + encodeURIComponent(atual.id) + '/testar', 'POST', {});

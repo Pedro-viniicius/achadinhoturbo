@@ -26,6 +26,11 @@
 // barra o ML no modo direto; o ML só vai à Central com o endereço de um produto, sem parâmetros (produtoMl: nem o
 // meli.la nem a vitrine de outro afiliado). Os erros que o remetente distingue levam `.codigo` ('sem_dados',
 // 'link_invalido'), com a mensagem de sempre.
+// Magalu (plano integracao-magalu, D2 a D6; ADR-008): sem etiqueta e sem leitura do produto (título e preço à mão, foto
+// só por upload). O payload guarda só o endereço canônico do produto (magazineluiza) e o código; o link
+// https://www.magazinevoce.com.br/<loja>/… é montado no preparar, sem rede, com a loja de parceiro salva em Conexões
+// NA HORA DO ENVIO (como a tag da Amazon). A loja do link colado nunca segue: vira só o aviso `outra_loja` do Identificar.
+// Sem rastreio por grupo (rastreio.LOJAS não tem a Magalu).
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -37,6 +42,7 @@ import * as rastreio from './rastreio.js';
 import { LIMITE_SHOPEE_ATINGIDO } from './links.js';
 import { LinkNaoResolvido } from './amazon.js';
 import { ErroShopee, LinkShopeeNaoResolvido, LINK_SHOPEE, RE_ID_AFILIADO, RE_SUB_ID, extrairIds } from './shopee.js';
+import { LinkMagaluNaoResolvido, LINK_MAGALU, RE_LOJA_MAGALU, extrairProdutoMagalu } from './magalu.js';
 import { mesclarOferta } from './oferta-texto.js';
 import { hostPermitido } from './ml.js';
 import { montarEnquete } from './whatsapp.js';
@@ -93,6 +99,9 @@ const LINK_EXEMPLO_SHOPEE = 'https://s.shopee.com.br/(gerado ao disparar)';
 const CAUSAS_SHOPEE = new Set(['sem_credenciais', 'credencial_recusada', 'conta_restrita', 'sem_acesso', 'cota', 'nao_encontrado', 'indisponivel']);
 const chaveShopee = (ids) => `SHOPEE:${ids.shopId}.${ids.itemId}`;
 const urlDoAsin = (asin) => `https://www.amazon.com.br/dp/${asin}`;
+// Magalu (plano integracao-magalu, D2 e D3)
+const SEM_LOJA_MAGALU = 'Falta o nome da sua loja de parceiro da Magalu. Cadastre em Conexões → Magalu antes de disparar.';
+const SEM_LEITURA_MAGALU = 'sem_leitura'; // causa interna: nada vem da Magalu (a página é bloqueada), os dados são à mão
 // Rastreio (plano dashboard-ganhos, D5): no máximo 10 links com Sub_id por envio da Shopee; do 11º em diante, o base
 export const MAX_SUBIDS_POR_ENVIO = 10;
 // Vagas do teto de links da Shopee por hora (src/links.js) que o Sub_id nunca usa: ficam para o link base, sem o qual a
@@ -203,6 +212,7 @@ const semDados = (mensagem) => comCodigo(new Error(mensagem), 'sem_dados');
 function comoLinkInvalido(e) {
   if (e instanceof LinkNaoResolvido) return comCodigo(new LinkNaoResolvido(e.causa), 'link_invalido');
   if (e instanceof LinkShopeeNaoResolvido) return comCodigo(new LinkShopeeNaoResolvido(e.causa), 'link_invalido');
+  if (e instanceof LinkMagaluNaoResolvido) return comCodigo(new LinkMagaluNaoResolvido(e.causa), 'link_invalido');
   return e;
 }
 
@@ -416,10 +426,12 @@ function origemDoLog(tipo, p) {
  * O agendador chama recuperar() ao iniciar e processarPendentes() a cada tick e depois de cada regra, e passa
  * `acordar` (pede um tick já): é por ele que o "agora" sai. Sem agendador, o "agora" chama processarPendentes().
  * `amazon`: cliente de src/amazon.js (createAmazon); sem ele, oferta da Amazon é recusada. `shopee`: cliente de
- * src/shopee.js (createShopee); sem ele, oferta da Shopee é recusada. `lojas`: o módulo src/lojas.js (injetável nos
- * testes). O Identificar do Disparo manual (identificar) usa os mesmos ml/amazon/shopee/lojas do envio.
+ * src/shopee.js (createShopee); sem ele, oferta da Shopee é recusada. `magalu`: cliente de src/magalu.js (createMagalu),
+ * só para resolver link curto; sem ele, o link curto da Magalu vira 'invalido' (o de produto não precisa dele).
+ * `lojas`: o módulo src/lojas.js (injetável nos testes). O Identificar do Disparo manual (identificar) usa os mesmos
+ * ml/amazon/shopee/magalu/lojas do envio.
  */
-export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acordar = null, amazon = null, shopee = null, lojas = lojasPadrao } = {}) {
+export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acordar = null, amazon = null, shopee = null, magalu = null, lojas = lojasPadrao } = {}) {
   const pastaFotos = dir ? path.join(dir, 'uploads') : null;
   const pausaEntreGrupos = () => (fast ? 0 : Number(getSetting(db, 'delay_group_s', 6)));
   // o modo em que o serviço de links vai gerar o link (src/links.js): simulação = links falsos, sem extensão
@@ -580,6 +592,53 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
     const linha = db.prepare("SELECT config FROM conexoes WHERE plataforma = 'shopee'").get();
     const id = lerJson(linha?.config, null)?.id_afiliado;
     return typeof id === 'string' && RE_ID_AFILIADO.test(id.trim()) ? id.trim() : '';
+  }
+
+  /**
+   * Nome da loja de parceiro da Magalu salvo em Conexões (só a coluna `config`), revalidado contra RE_LOJA_MAGALU a cada
+   * leitura: o valor no banco pode ter sido mexido. → texto ou ''
+   */
+  function lojaParceiroMagalu() {
+    const linha = db.prepare("SELECT config FROM conexoes WHERE plataforma = 'magalu'").get();
+    const loja = lerJson(linha?.config, null)?.loja;
+    return typeof loja === 'string' && RE_LOJA_MAGALU.test(loja.trim()) ? loja.trim() : '';
+  }
+
+  /**
+   * Produto da Magalu (lojas.lerProduto: o próprio link ou, se curto, os redirecionamentos; nada é lido da página),
+   * refeito por extrairProdutoMagalu. → { codigo, urlProduto, lojaDoLink, produto (campos nulos, key MAGALU:<codigo>) }.
+   * Link que não chega a um produto → LinkMagaluNaoResolvido { causa: 'invalido' | 'nao_produto' }. Outro erro vira
+   * 'invalido', com só o nome dele no console (nada de link, loja ou URL).
+   */
+  async function produtoMagalu(url) {
+    let o;
+    try { o = await lojas.lerProduto('magalu', url, { ml, amazon, shopee, magalu }); } catch (e) {
+      if (e instanceof LinkMagaluNaoResolvido || e instanceof LojaNaoConectada) throw e;
+      console.error('[envios] link da Magalu:', e?.name || 'erro');
+      throw new LinkMagaluNaoResolvido('invalido');
+    }
+    const v = extrairProdutoMagalu(o?.urlProduto);
+    if (!v) throw new LinkMagaluNaoResolvido('invalido');
+    const lojaDoLink = typeof o.lojaDoLink === 'string' && RE_LOJA_MAGALU.test(o.lojaDoLink) ? o.lojaDoLink : null;
+    return { codigo: v.codigo, urlProduto: v.urlProduto, lojaDoLink, produto: { ...soCamposDaOferta(null), key: `MAGALU:${v.codigo}` } };
+  }
+
+  /**
+   * Oferta da Magalu: o produto do link, os dados do `complemento` (o texto do remetente) e os ajustes do painel. Sem
+   * título (ou sem preço, com `exigirPreco`) → erro `sem_dados`. O link não entra no payload: sai no preparar, com a loja
+   * de parceiro da hora do envio. → campos do payload (`url` = o endereço canônico do produto, sem a loja de ninguém)
+   */
+  async function ofertaMagalu(url, ajustes, { complemento = null, exigirPreco = false } = {}) {
+    const { codigo, urlProduto, produto } = await produtoMagalu(url);
+    const causa = SEM_LEITURA_MAGALU;
+    const { dados, fonte } = completarComTexto(produto, causa, complemento);
+    const offer = aplicarAjustes(dados, ajustes);
+    if (!offer.title) throw semDados('Preencha o título do produto.');
+    if (exigirPreco && offer.price == null) throw semDados(SEM_PRECO);
+    return {
+      url: urlProduto, codigo, fonte_dados: fonteDosDados({ produto, dados, offer, ajustes, causa, fonte, complemento }),
+      ...(ajustes.upload ? { upload: ajustes.upload } : {}), offer,
+    };
   }
 
   /**
@@ -757,7 +816,7 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
   /**
    * Checagens da oferta sem rede, na ordem do Disparo manual: loja conhecida e integrada (a não conectada é recusada
    * antes de qualquer coisa: CA2), template e, por loja, a etiqueta (ML), a tag da Amazon ou o ID e o caminho do link
-   * da Shopee. → { url, loja, template, etiqueta? (ML), ajustes? (Amazon e Shopee) }
+   * da Shopee, ou a loja de parceiro da Magalu. → { url, loja, template, etiqueta? (ML), ajustes? (Amazon, Shopee e Magalu) }
    */
   function conteudoDaOferta({ url, template_id: templateId, tag_id: tagId, ajustes } = {}) {
     const { url: limpo, loja } = lojaDoLink(url, lojas);
@@ -773,13 +832,17 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
       if (!idAfiliadoShopee()) throw new Error(SEM_ID_SHOPEE);
       if (!caminhoLinkShopee()) throw new Error(SEM_LINK_SHOPEE);
       conteudo.ajustes = validarAjustes(ajustes);
+    } else if (loja.id === 'magalu') {
+      // a Magalu não tem etiqueta: o link leva o nome da loja de parceiro de Conexões (sem ele, não dispara)
+      if (!lojaParceiroMagalu()) throw new Error(SEM_LOJA_MAGALU);
+      conteudo.ajustes = validarAjustes(ajustes);
     } else conteudo.etiqueta = etiquetaDe(db, tagId);
     return conteudo;
   }
 
   /**
    * O que depende de rede, depois das checagens de conteudoDaOferta: o produto (Mercado Livre, ou link resolvido e API
-   * da Amazon ou da Shopee) e o link de afiliado da Shopee. Não grava nada. → payload da oferta
+   * da Amazon ou da Shopee, ou o produto do link da Magalu) e o link de afiliado da Shopee. Não grava nada. → payload da oferta
    */
   async function payloadDaOferta({ url, loja, etiqueta, template, ajustes }, { origem, complemento = null, exigirPreco = false }) {
     const base = {
@@ -791,6 +854,7 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
     try {
       if (loja.id === 'amazon') return { ...base, ...(await ofertaAmazon(url, ajustes, opcoes)) };
       if (loja.id === 'shopee') return { ...base, ...(await ofertaShopee(url, ajustes, opcoes)) };
+      if (loja.id === 'magalu') return { ...base, ...(await ofertaMagalu(url, ajustes, opcoes)) };
     } catch (e) { throw comoLinkInvalido(e); }
     return { ...base, ...(await ofertaMercadoLivre(loja.id, url, origem, opcoes)) };
   }
@@ -812,7 +876,7 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
    * Por que o link de afiliado do dono não sairia agora para esta loja, sem rede (plano envio-pelo-socio, D5):
    * 'sem_etiqueta', 'modo_direto' (link comum, sem comissão) ou 'sem_extensao' (Mercado Livre); 'sem_tag_amazon' (também
    * sem o cliente da Amazon); 'sem_id_shopee' ou 'sem_link_shopee' (sem API útil nem extensão, ou sem o cliente da
-   * Shopee). Loja sem integração → 'link_invalido'. null = o link sai.
+   * Shopee); 'sem_loja_magalu' (sem o nome da loja de parceiro). Loja sem integração → 'link_invalido'. null = o link sai.
    */
   function situacaoLink(lojaId, { tag_id: tagId = null } = {}) {
     if (lojaId === 'mercadolivre') {
@@ -833,6 +897,7 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
       if (!idAfiliadoShopee()) return 'sem_id_shopee';
       return shopee && caminhoLinkShopee() ? null : 'sem_link_shopee';
     }
+    if (lojaId === 'magalu') return lojaParceiroMagalu() ? null : 'sem_loja_magalu';
     return 'link_invalido';
   }
 
@@ -862,10 +927,45 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
   }
 
   /**
+   * Identificar da Magalu → { loja, motivo:null, editavel:true, produto, causa, causa_link, loja_parceiro, outra_loja,
+   * pode_disparar, texto, template_id, etiqueta:null }. Nada é lido da página: o produto vem com os campos nulos. Sem
+   * loja de parceiro salva → causa_link 'sem_loja' (o produto ainda volta, para a tela) e texto null (não há link real).
+   * Link que não chega a um produto → causa 'invalido'|'nao_produto', produto null. `outra_loja`: há loja salva e o link
+   * colado é da loja de outro parceiro, sem diferenciar maiúsculas (só o booleano; o nome dela nunca sai daqui). Sem loja
+   * salva é sempre false: o link pode ser da própria loja do dono, ainda não cadastrada. O texto leva o link real, com a
+   * loja salva.
+   */
+  async function identificarMagalu(url, loja, template) {
+    const salva = lojaParceiroMagalu();
+    const base = {
+      loja, motivo: null, editavel: true, produto: null, causa: null, causa_link: salva ? null : 'sem_loja',
+      loja_parceiro: salva || null, outra_loja: false, pode_disparar: false, texto: null, template_id: template.id, etiqueta: null,
+    };
+    let dados;
+    try { dados = await produtoMagalu(url); } catch (e) {
+      if (e instanceof LojaNaoConectada) throw e;
+      return { ...base, causa: e?.causa === 'nao_produto' ? 'nao_produto' : 'invalido' };
+    }
+    const outraLoja = !!salva && !!dados.lojaDoLink && dados.lojaDoLink.toLowerCase() !== salva.toLowerCase();
+    let texto = null;
+    if (salva) {
+      let link;
+      try { link = await lojas.linkAfiliado('magalu', { urlProduto: dados.urlProduto }, { lojaParceiro: salva }); } catch (e) {
+        if (e instanceof LojaNaoConectada) throw e;
+        return { ...base, causa: 'invalido' };
+      }
+      if (typeof link !== 'string' || !LINK_MAGALU.test(link)) return { ...base, causa: 'invalido' };
+      texto = renderTemplate(template.body, { ...dados.produto, link }, tplOpts(db));
+    }
+    return { ...base, produto: dados.produto, outra_loja: outraLoja, pode_disparar: !!salva, texto };
+  }
+
+  /**
    * POST /api/disparo/identificar: loja do link e, se integrada, o produto e o texto com o template.
    * Amazon: { loja, motivo:null, editavel:true, produto, causa, texto (tag mascarada), template_id, etiqueta:null,
    * tag_salva }. Sem tag → causa 'sem_tag' sem acessar a rede; link que não chega a um produto → 'invalido' ou
-   * 'nao_produto' (produto null); API fora → produto com os campos nulos e a causa. Shopee: identificarShopee.
+   * 'nao_produto' (produto null); API fora → produto com os campos nulos e a causa. Shopee: identificarShopee. Magalu:
+   * identificarMagalu.
    */
   async function identificarLink(corpo) {
     const url = typeof corpo?.url === 'string' ? corpo.url.trim() : '';
@@ -877,6 +977,7 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
     }
     const template = templateDe(db, corpo.template_id);
     if (loja.id === 'shopee') return identificarShopee(url, loja, template);
+    if (loja.id === 'magalu') return identificarMagalu(url, loja, template);
     if (loja.id === 'amazon') {
       if (!amazon) throw new Error(SEM_AMAZON);
       const base = { loja, motivo: null, editavel: true, produto: null, causa: null, texto: null, template_id: template.id, etiqueta: null, tag_salva: true };
@@ -992,10 +1093,23 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
    * Link de cada grupo, um pedido por código distinto. → Map jid → { link, codigo, nivel, bloco_id, esperado, motivo }
    * ou { erro } (o link padrão do grupo não saiu). Sem nenhum link, lança o erro do padrão (o envio inteiro falha,
    * como antes). Shopee: o link guardado no payload, sem rede. Amazon: a tag de Conexões é o padrão; o ID de
-   * rastreamento associado é montado do ASIN. Mercado Livre: a etiqueta do envio é o padrão.
+   * rastreamento associado é montado do ASIN. Mercado Livre: a etiqueta do envio é o padrão. Magalu: um link só, montado
+   * agora do endereço do produto com a loja de parceiro de agora (sem rede, sem rastreio por grupo).
    */
   async function linksPorGrupo(p, etiqueta, jids, avisos = []) {
     const porGrupo = new Map();
+    if (p.loja === 'magalu') {
+      let linha;
+      try {
+        // lojas.linkAfiliado: a loja revalidada e a Magalu ainda integrada (implementada:false barra o envio aqui)
+        const link = await lojas.linkAfiliado('magalu', { urlProduto: p.url }, { lojaParceiro: lojaParceiroMagalu() });
+        if (typeof link !== 'string' || !LINK_MAGALU.test(link)) throw new Error('o link da Magalu montado não é válido');
+        linha = { link, codigo: null, nivel: 'padrao', bloco_id: null, esperado: 0, motivo: null };
+      } catch (e) { linha = { erro: e }; }
+      for (const jid of jids) porGrupo.set(jid, linha);
+      if (linha.erro) throw linha.erro; // nenhum grupo tem link: o envio inteiro falha, como o padrão das outras lojas
+      return porGrupo;
+    }
     if (p.loja === 'shopee') {
       const mapa = p.links_rastreio && typeof p.links_rastreio === 'object' && !Array.isArray(p.links_rastreio) ? p.links_rastreio : null;
       for (const jid of jids) {
@@ -1061,9 +1175,11 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
     if (tipo === 'oferta') {
       const ehAmazon = p.loja === 'amazon';
       const ehShopee = p.loja === 'shopee';
+      const ehMagalu = p.loja === 'magalu';
       // a etiqueta é a escolhida ao criar, pelo nome: se ela for apagada e outra herdar o id, a comissão não muda de dono.
-      // Só o Mercado Livre tem etiqueta; a Amazon usa a tag de Conexões da hora do envio e a Shopee, o link gerado ao criar.
-      const semEtiqueta = ehAmazon || ehShopee;
+      // Só o Mercado Livre tem etiqueta; a Amazon usa a tag de Conexões da hora do envio, a Shopee o link gerado ao criar e
+      // a Magalu a loja de parceiro de Conexões da hora do envio.
+      const semEtiqueta = ehAmazon || ehShopee || ehMagalu;
       const etiqueta = semEtiqueta ? null : p.etiqueta || (Number.isInteger(p.tag_id) && db.prepare('SELECT name FROM tags WHERE id = ?').get(p.tag_id)?.name);
       if (!semEtiqueta && !etiqueta) throw new Error('a etiqueta foi apagada');
       // o template é o mesmo id e a mesma criação (renomear ou editar não muda created_at; apagar e recriar muda)
@@ -1079,6 +1195,8 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
         if (ehAmazon && !amazon) throw new Error(SEM_AMAZON);
         // sem ASIN válido no payload, nada de resolver link na hora do envio: só o ASIN gravado ao criar vale
         if (ehAmazon && !RE_ASIN.test(String(p.asin ?? ''))) throw new Error('o produto da Amazon está sem ASIN');
+        // Magalu: só o endereço de produto e o código gravados ao criar valem (o link é refeito deles, nunca o colado)
+        if (ehMagalu && (typeof p.codigo !== 'string' || extrairProdutoMagalu(p.url)?.codigo !== p.codigo)) throw new Error('o produto da Magalu está sem código');
         // Amazon: sempre https://www.amazon.com.br/dp/<ASIN>?tag=<tag>, montado do ASIN (nunca o link que veio)
         porGrupo = await linksPorGrupo(p, etiqueta, jids, avisos);
       } catch (e) {
@@ -1098,7 +1216,8 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
         mimetype = MIME[m[1]];
       } else if (p.enviar_foto !== false && p.offer?.image && lojas.imagemPermitida(p.loja, p.offer.image)) foto = p.offer.image;
       const okDe = (linha) => (ehAmazon ? 'Enviado com a tag de associado da Amazon'
-        : ehShopee ? 'Enviado com o link de afiliado da Shopee' : `Enviado com a etiqueta ${linha.codigo}`);
+        : ehShopee ? 'Enviado com o link de afiliado da Shopee'
+          : ehMagalu ? 'Enviado pela Magalu, com a sua loja de parceiro' : `Enviado com a etiqueta ${linha.codigo}`);
       return {
         avisos,
         falha(jid) {

@@ -8,6 +8,9 @@
 // Amazon (plano docs/produto/planos/espelhamento-amazon.md, etapa 10): dadosOferta() é global e também serve ao "Completar" do Histórico.
 // Shopee (plano docs/produto/planos/integracao-shopee.md, etapa 9; spec docs/produto/specs/integracao-shopee.md, seção 2): o fluxo do
 // Identificar é decidido por dispShopeeVeredito() (função pura, testada em test/shopee-painel.test.js).
+// Magalu (plano docs/produto/planos/integracao-magalu.md, etapa 4; spec docs/produto/specs/integracao-magalu.md, seção 2): o painel não
+// lê o produto (dados em branco e editáveis, foto só por upload) e o link sai com a loja de parceiro de Conexões; o Identificar é
+// decidido por dispMagaluVeredito() (função pura, testada em test/magalu-painel.test.js).
 
 const TEXTOS_DISPAROS = {
   manual: {
@@ -115,6 +118,24 @@ const TEXTOS_DISPAROS = {
     previaShopee: 'Mostra os dados acima. O link de afiliado é gerado na hora do envio.',
     linkPrevia: 'https://s.shopee.com.br/(gerado ao disparar)',
     gerando: 'Gerando o seu link…',
+  },
+  // Magalu no Disparo manual: sem leitura do produto (estado normal, não é falha); o link leva o nome da loja de parceiro
+  magalu: {
+    nome: 'Magalu',
+    semLeitura: 'A Magalu não deixa o painel ler o produto. Preencha o título e o preço abaixo; o link já sai com o nome da sua loja.',
+    dicaPreco: 'Use o preço que aparece na página da Magalu.',
+    outraLoja: 'O link que você colou é de outra loja de parceiro. O envio sai com a sua loja, não com essa.',
+    invalido: 'Não reconheci este link da Magalu. Cole o endereço da página do produto (magazinevoce.com.br/… ou magazineluiza.com.br/…). Se era um link curto, abra-o no navegador e copie o endereço da página.',
+    naoProduto: 'Este link não leva a um produto específico. Cole o link da página do produto.',
+    semLoja: 'Magalu identificada, mas falta o nome da sua loja de parceiro.', cadastrarLoja: 'Cadastre em Conexões.',
+    motivoInvalido: 'Cole um link de produto da Magalu.',
+    motivoNaoProduto: 'Cole o link da página do produto.',
+    motivoSemLoja: 'Cadastre o nome da loja da Magalu em Conexões.',
+    motivoGeral: 'Não dá para disparar este link da Magalu.',
+    // `loja` é o nome salvo (texto do servidor, passa por esc); sem nome, a frase sai sem ele
+    etiqueta: (loja) => `O link da Magalu leva o nome da sua loja de parceiro${loja ? `, ${esc(loja)}` : ''} (de <a href="#conexoes">Conexões</a> → Magalu). A Magalu não separa os ganhos por grupo.`,
+    previaMagalu: 'Mostra os dados acima. O link de afiliado leva o nome da sua loja.',
+    linkPrevia: 'https://www.magazinevoce.com.br/(a sua loja)/…',
   },
   // Seção "Dados da oferta" (dadosOferta)
   dados: {
@@ -614,6 +635,53 @@ function dispShopeeVeredito(r) {
   return { tipo: falta.length ? 'parcial' : 'completo', dados: true, mensagem, destaque: false, link, bloqueio, via };
 }
 
+// ---------- Magalu: o que a tela mostra depois do Identificar (funções puras) ----------
+const DISP_HOSTS_MAGALU_CURTOS = ['maga.lu', 'magazineluiza.onelink.me', 'magalu.com'];
+/**
+ * Link curto da Magalu (o host da lista ou subdomínio dele, como divulgador.magalu.com): o servidor precisa seguir o
+ * redirecionamento antes de reconhecer o produto ("Resolvendo o link…").
+ */
+function dispPareceMagaluCurto(url) {
+  try {
+    const h = new URL(url).hostname.toLowerCase();
+    return DISP_HOSTS_MAGALU_CURTOS.some((base) => h === base || h.endsWith(`.${base}`));
+  } catch { return false; }
+}
+/** Nome da loja de parceiro: mesma regra do campo `loja` de Conexões (src/magalu.js RE_LOJA_MAGALU); o teste confere. */
+const DISP_RE_LOJA_MAGALU = /^[A-Za-z0-9_-]{2,60}$/;
+/** O link de afiliado dentro do `texto` do servidor (mesma forma de LINK_MAGALU de src/magalu.js, sem as âncoras); '' se não houver. */
+const DISP_LINK_MAGALU = /https:\/\/www\.magazinevoce\.com\.br\/[A-Za-z0-9_-]{2,60}\/(?:[a-z0-9-]{1,200}\/)?p\/[a-z0-9]{6,20}\/(?:[a-z0-9-]{1,60}\/){0,2}(?:\?seller_id=[A-Za-z0-9_-]{1,60})?/;
+function dispMagaluLink(texto) {
+  const m = typeof texto === 'string' ? DISP_LINK_MAGALU.exec(texto) : null;
+  return m ? m[0] : '';
+}
+/**
+ * Tabela de estados do Identificar da Magalu (spec, seção 2). `r` = resposta de POST /api/disparo/identificar.
+ * Só bloqueiam: `invalido` (inclui link curto que não resolveu), `nao_produto`, `causa_link: sem_loja` e `pode_disparar` que não seja `true`.
+ * Não há leitura do produto: o estado normal é `sem_leitura` (dados em branco e editáveis, linha informativa, sem aviso de falha).
+ * → {
+ *   tipo      'invalido' | 'nao_produto' | 'sem_loja' | 'sem_leitura'
+ *   dados     mostra "Dados da oferta" (em branco)
+ *   mensagem  invalido/nao_produto: o aviso (cartão amarelo); sem_leitura e sem_loja: a linha informativa (`.dica`)
+ *   link      null | { texto, acao }: aviso de que falta a loja de parceiro (sem_loja), com o link para Conexões
+ *   outraLoja a linha de "outra loja de parceiro" (informativa, não bloqueia; nunca diz o nome da outra loja) ou ''
+ *   bloqueio  frase ao lado do botão desabilitado ('' = pode disparar) }
+ */
+function dispMagaluVeredito(r) {
+  const A = TEXTOS_DISPAROS.magalu; r = r || {};
+  const bloqueado = (tipo, mensagem, bloqueio) => ({ tipo, dados: false, mensagem, link: null, outraLoja: '', bloqueio });
+  if (r.causa === 'nao_produto') return bloqueado('nao_produto', A.naoProduto, A.motivoNaoProduto);
+  const p = r.produto && typeof r.produto === 'object' ? r.produto : null;
+  if (r.causa === 'invalido' || !p) return bloqueado('invalido', A.invalido, A.motivoInvalido);
+  const semLoja = r.causa_link === 'sem_loja';
+  const bloqueio = semLoja ? A.motivoSemLoja : r.pode_disparar === true && !r.causa_link ? '' : A.motivoGeral;
+  return {
+    tipo: semLoja ? 'sem_loja' : 'sem_leitura', dados: true, mensagem: A.semLeitura,
+    link: semLoja ? { texto: A.semLoja, acao: A.cadastrarLoja } : null,
+    outraLoja: r.outra_loja === true ? A.outraLoja : '', bloqueio,
+  };
+}
+
 // ================= Disparo manual (F1) =================
 function paginaDisparoManual() {
   const T = TEXTOS_DISPAROS; const t = T.manual;
@@ -639,6 +707,7 @@ function paginaDisparoManual() {
         </div>
         <p class="dica" id="dm-etq-amazon" hidden>${T.amazon.etiqueta} ${q('manual.amazon')}</p>
         <div id="dm-etq-shopee" hidden style="display:grid;gap:4px"><p class="dica" style="margin:0"><span data-etq-txt></span> ${q('manual.shopee')}</p><p class="dica" data-etq-via style="margin:0"></p></div>
+        <p class="dica" id="dm-etq-magalu" hidden><span data-etq-txt></span> ${q('manual.magalu')}</p>
         <label class="campo" id="dm-etq"><span>Etiqueta ${q('manual.etiqueta')}</span>
           ${S.tags.length ? `<select id="dm-tag">${opcoes(S.tags, S.tags[0]?.id)}</select><small>${T.etiquetaDica}</small>`
             : `<select id="dm-tag" disabled><option value="">Nenhuma etiqueta cadastrada</option></select><small>${T.semEtiqueta}</small>`}</label>
@@ -660,28 +729,30 @@ function paginaDisparoManual() {
 
   const form = $('#dm-form'); const inUrl = $('#dm-url'); const btnId = $('#dm-identificar'); const prodEl = $('#dm-prod');
   const selTpl = $('#dm-tpl'); const selTag = $('#dm-tag'); const pv = $('#dm-pv'); const pvLeg = $('#dm-pv-leg');
-  const dadosEl = $('#dm-dados'); const etqEl = $('#dm-etq'); const etqAmazonEl = $('#dm-etq-amazon'); const etqShopeeEl = $('#dm-etq-shopee');
+  const dadosEl = $('#dm-dados'); const etqEl = $('#dm-etq'); const etqAmazonEl = $('#dm-etq-amazon'); const etqShopeeEl = $('#dm-etq-shopee'); const etqMagaluEl = $('#dm-etq-magalu');
   const chkAg = $('#dm-agendar'); const campoHora = $('#dm-hora-campo'); const inHora = $('#dm-hora');
   const btn = $('#dm-disparar'); const motivoEl = $('#dm-motivo'); const kpisEl = $('#dm-kpis'); const histEl = $('#dm-hist');
   // produto: o que a identificação devolveu; texto: a prévia do servidor para o template textoTpl.
   // Amazon e Shopee: dados = a seção "Dados da oferta" (dadosOferta); bloqueio = por que não dá para disparar (link inválido, sem tag,
   // sem caminho para o link); asin só serve à prévia da Amazon; editou = o dono mexeu nos dados (a prévia deixa de ser a do servidor);
-  // via = "Vai sair pela …" (Shopee); seqEtq descarta a leitura do ID de afiliado que chegou depois de o link mudar.
-  const st = { url: '', loja: null, produto: null, texto: '', textoTpl: '', dados: null, bloqueio: '', asin: '', via: '', seqEtq: 0, editou: false, identificando: false, enviando: false, ok: '' };
+  // via = "Vai sair pela …" (Shopee); seqEtq descarta a leitura do ID de afiliado que chegou depois de o link mudar;
+  // lojaParceiro e linkMagalu (Magalu) = o nome salvo e o link de afiliado do `texto` do servidor, para a etiqueta e a prévia.
+  const st = { url: '', loja: null, produto: null, texto: '', textoTpl: '', dados: null, bloqueio: '', asin: '', via: '', seqEtq: 0, lojaParceiro: '', linkMagalu: '', editou: false, identificando: false, enviando: false, ok: '' };
   const ehShopee = () => st.loja?.id === 'shopee';
+  const ehMagalu = () => st.loja?.id === 'magalu';
   form.onsubmit = (e) => e.preventDefault(); // Enter num campo nunca dispara
 
   let seqPv = 0;
   const prever = async () => {
     const n = ++seqPv; const tpl = S.templates.find((x) => String(x.id) === selTpl.value);
     if (!tpl) { pv.textContent = ''; pvLeg.textContent = T.semTemplates; return; }
-    const legenda = () => (st.dados ? (ehShopee() ? T.shopee.previaShopee : T.amazon.previaAmazon) : st.produto ? T.previaProduto : T.previaExemplo);
+    const legenda = () => (st.dados ? (ehShopee() ? T.shopee.previaShopee : ehMagalu() ? T.magalu.previaMagalu : T.amazon.previaAmazon) : st.produto ? T.previaProduto : T.previaExemplo);
     if (st.produto && st.texto && st.textoTpl === selTpl.value && !st.editou) { pv.innerHTML = zap(st.texto); pvLeg.textContent = legenda(); return; }
     const p = st.produto;
     let amostra = null;
-    if (st.dados) { // Amazon e Shopee: a prévia mostra o que está nos campos; o link é só ilustrativo (tag mascarada / gerado ao disparar)
+    if (st.dados) { // Amazon, Shopee e Magalu: a prévia mostra o que está nos campos; o link é ilustrativo (Amazon: tag mascarada; Shopee: gerado ao disparar) ou o real (Magalu)
       const v = st.dados.valores();
-      const link = ehShopee() ? T.shopee.linkPrevia : `https://www.amazon.com.br/dp/${st.asin || '…'}?tag=•••`;
+      const link = ehShopee() ? T.shopee.linkPrevia : ehMagalu() ? st.linkMagalu || T.magalu.linkPrevia : `https://www.amazon.com.br/dp/${st.asin || '…'}?tag=•••`;
       amostra = { title: v.title, price: v.price, oldPrice: v.oldPrice, sold: p?.sold ?? null, freeShipping: v.freeShipping, coupon: v.coupon, discountPct: v.discountPct, link };
     } else if (p) {
       amostra = { title: p.title || '', price: p.price ?? null, oldPrice: p.oldPrice ?? null, sold: p.sold ?? null, freeShipping: !!p.freeShipping, coupon: p.coupon || '', discountPct: p.discountPct ?? null };
@@ -696,7 +767,7 @@ function paginaDisparoManual() {
   const motivo = () => {
     const agora = !chkAg.checked;
     if (agora && S.st.whatsapp?.status !== 'open') return T.motivoWhats;
-    if (agora && modoExt() && !st.dados && !ehShopee() && !S.st.extensao?.online) return T.motivoExtensao; // a Amazon não usa a extensão; na Shopee, quem decide é o servidor (pode_disparar)
+    if (agora && modoExt() && !st.dados && !ehShopee() && !ehMagalu() && !S.st.extensao?.online) return T.motivoExtensao; // a Amazon e a Magalu não usam a extensão; na Shopee, quem decide é o servidor (pode_disparar)
     if (st.identificando) return T.motivoIdentificando;
     if (st.bloqueio) return st.bloqueio;
     if (st.loja && !st.loja.implementada) return T.motivoLoja;
@@ -724,10 +795,11 @@ function paginaDisparoManual() {
   // ----- identificar -----
   const hostAmazon = /(^|\.)(amazon(\.[a-z]{2,3}){1,2}|amazon|amzn\.(to|com)|a\.co)$/i;
   const pareceAmazon = (url) => { try { return hostAmazon.test(new URL(url).hostname); } catch { return false; } };
-  /** Etiqueta do ML (select) × texto fixo da Amazon × texto fixo da Shopee (o ID de afiliado só aparece pelos 4 últimos dígitos). */
+  /** Etiqueta do ML (select) × texto fixo da Amazon × da Shopee (o ID de afiliado só aparece pelos 4 últimos dígitos) × da Magalu (o nome da loja é público). */
   const mostrarEtiqueta = () => {
-    const editavel = !!st.dados; const shp = editavel && ehShopee();
-    etqEl.hidden = editavel; etqAmazonEl.hidden = !editavel || shp; etqShopeeEl.hidden = !shp;
+    const editavel = !!st.dados; const shp = editavel && ehShopee(); const mag = editavel && ehMagalu();
+    etqEl.hidden = editavel; etqAmazonEl.hidden = !editavel || shp || mag; etqShopeeEl.hidden = !shp; etqMagaluEl.hidden = !mag;
+    if (mag) $('[data-etq-txt]', etqMagaluEl).innerHTML = T.magalu.etiqueta(st.lojaParceiro);
     if (shp) { // o ID vem de Conexões (config é texto, não segredo); sem resposta, a frase sai sem o final
       const n = ++st.seqEtq; const via = st.via;
       const pintar = (final) => { $('[data-etq-txt]', etqShopeeEl).innerHTML = T.shopee.etiqueta(final); $('[data-etq-via]', etqShopeeEl).textContent = via; };
@@ -741,6 +813,7 @@ function paginaDisparoManual() {
   const limparProduto = () => {
     st.url = ''; st.loja = null; st.produto = null; st.texto = ''; st.textoTpl = '';
     clearTimeout(st.tPrever); st.dados = null; st.bloqueio = ''; st.asin = ''; st.via = ''; st.seqEtq++; st.editou = false;
+    st.lojaParceiro = ''; st.linkMagalu = '';
     prodEl.innerHTML = ''; prodEl.removeAttribute('style'); dadosEl.innerHTML = ''; mostrarEtiqueta();
     inUrl.classList.remove('invalido'); inUrl.removeAttribute('aria-invalid');
   };
@@ -808,6 +881,26 @@ function paginaDisparoManual() {
     }, { descontoInformado: informado, fonte: loja.nome || T.shopee.nome, notaPreco: dispShopeeFaixa(p, r.extra) });
     dadosEl.innerHTML = ''; dadosEl.appendChild(st.dados.el); mostrarEtiqueta();
   };
+  /**
+   * Magalu: o veredito (dispMagaluVeredito) decide tudo. Sem leitura do produto é o estado normal (linha informativa + campos em
+   * branco); só bloqueiam link inválido, não é produto e falta a loja de parceiro. `outra_loja` é só um aviso.
+   */
+  const pintarMagalu = (r) => {
+    const A = T.magalu; const v = dispMagaluVeredito(r);
+    if (!v.dados) { st.produto = null; st.texto = ''; bloquear(v.mensagem, v.bloqueio); mostrarEtiqueta(); return; }
+    const partes = [];
+    if (v.link) partes.push(`<div class="card-prod aviso" role="alert"><div class="info"><span>${esc(v.link.texto)} <a href="#conexoes">${esc(v.link.acao)}</a></span></div></div>`);
+    partes.push(`<p class="dica" style="margin:0">${esc(v.mensagem)}</p>`);
+    if (v.outraLoja) partes.push(`<p class="dica" style="margin:0">${esc(v.outraLoja)}</p>`);
+    prodEl.innerHTML = partes.join(''); prodEl.style.display = 'grid'; prodEl.style.gap = '8px';
+    st.bloqueio = v.bloqueio;
+    const loja = String(r.loja_parceiro ?? ''); st.lojaParceiro = DISP_RE_LOJA_MAGALU.test(loja) ? loja : '';
+    st.linkMagalu = dispMagaluLink(r.texto);
+    st.dados = dadosOferta({}, () => { // prévia ao vivo, com um pequeno atraso enquanto o dono digita
+      st.editou = true; clearTimeout(st.tPrever); st.tPrever = setTimeout(prever, 250); atualizar();
+    }, { notaPreco: A.dicaPreco });
+    dadosEl.innerHTML = ''; dadosEl.appendChild(st.dados.el); mostrarEtiqueta();
+  };
   const pintarProduto = (r) => {
     const loja = r.loja;
     if (!loja.implementada) {
@@ -816,6 +909,7 @@ function paginaDisparoManual() {
       return;
     }
     if (loja.id === 'shopee') { pintarShopee(r); return; }
+    if (loja.id === 'magalu') { pintarMagalu(r); return; }
     if (r.editavel ?? loja.id === 'amazon') { pintarAmazon(r); return; }
     const p = r.produto;
     if (!p) { pintarFalha(r.motivo || T.semProduto); return; }
@@ -829,7 +923,7 @@ function paginaDisparoManual() {
     const voltarFoco = document.activeElement === btnId;
     limparProduto(); dispErros(form, []);
     st.identificando = true; btnId.disabled = true; btnId.textContent = T.identificando; atualizar();
-    if (pareceAmazon(url) || dispPareceShopeeCurto(url)) prodEl.innerHTML = `<div class="card-prod" role="status"><div class="info"><span>${T.resolvendo}</span></div></div>`; // link curto precisa de redirecionamento
+    if (pareceAmazon(url) || dispPareceShopeeCurto(url) || dispPareceMagaluCurto(url)) prodEl.innerHTML = `<div class="card-prod" role="status"><div class="info"><span>${T.resolvendo}</span></div></div>`; // link curto precisa de redirecionamento
     try {
       const tplId = selTpl.value;
       const r = await dispApi('/disparo/identificar', { method: 'POST', body: { url, template_id: Number(tplId) || null, tag_id: Number(selTag.value) || null } });

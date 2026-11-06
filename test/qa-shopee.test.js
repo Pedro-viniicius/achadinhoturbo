@@ -1060,8 +1060,12 @@ test('Regressão ML: Identificar não editável e Disparar com a etiqueta contin
   } finally { await s2.fechar(); }
 });
 
-test('Regressão Amazon e Magalu: Amazon exige a tag de Conexões e sai com ela; Magalu segue "não conectada"; nenhum dos dois usa a Shopee', async () => {
-  const f = fetchComAmazon();
+test('Regressão Amazon e Magalu: Amazon exige a tag de Conexões e sai com ela; Magalu sai com a loja de parceiro de Conexões; nenhum dos dois usa a Shopee', async () => {
+  const MAGALU = 'https://www.magazinevoce.com.br/lojadosocio/produto/p/abc123/';
+  const CURTO_MAGALU = 'https://maga.lu/Curto1';
+  const base = fetchComAmazon();
+  // o link curto da Magalu passa pelo resolvedor ligado em criarServicos (só o redirecionamento, sem a página)
+  const f = Object.assign(async (url, init) => (String(url) === CURTO_MAGALU ? redir(302, MAGALU) : base(url, init)), base);
   const s = await montar({ modo: 'fake', fetch: f });
   try {
     await s.conectar();
@@ -1077,12 +1081,25 @@ test('Regressão Amazon e Magalu: Amazon exige a tag de Conexões e sai com ela;
     const m = s.msgs().at(-1);
     assert.ok((m.text).includes('amazon.com.br/dp/B0FG2MD49G?tag=pedro-20'), m.text);
     assert.doesNotMatch(m.text, /shopee/i);
-    const magalu = await s.identificar('https://www.magazineluiza.com.br/produto/p/abc/');
-    assert.equal(magalu.status, 200, magalu.txt);
-    assert.equal(magalu.json.loja.implementada, false);
-    assert.match(magalu.json.motivo, /ainda não está conectada/);
-    const m2 = await s.disparar({ url: 'https://www.magazineluiza.com.br/produto/p/abc/' });
+    // Magalu (plano integracao-magalu, etapa 3): sem a loja de parceiro, recusa; com ela, sai com a loja do dono
+    const semLoja = await s.identificar(MAGALU);
+    assert.equal(semLoja.status, 200, semLoja.txt);
+    assert.deepEqual([semLoja.json.loja.implementada, semLoja.json.causa_link, semLoja.json.pode_disparar], [true, 'sem_loja', false]);
+    const m2 = await s.disparar({ url: MAGALU, ajustes: { title: 'Fone Magalu' } });
     assert.equal(m2.status, 400);
+    assert.match(m2.json.erro, /^Falta o nome da sua loja de parceiro da Magalu/);
+    s.db.prepare("INSERT INTO conexoes (plataforma, config, segredos, updated_at) VALUES ('magalu', ?, '{}', ?)").run(JSON.stringify({ loja: 'lojadopedro' }), Date.now());
+    const magalu = await s.identificar(MAGALU);
+    assert.deepEqual([magalu.json.pode_disparar, magalu.json.outra_loja, magalu.json.loja_parceiro], [true, true, 'lojadopedro']);
+    const curto = await s.identificar(CURTO_MAGALU);
+    assert.deepEqual([curto.json.causa, curto.json.produto?.key, curto.json.pode_disparar], [null, 'MAGALU:abc123', true]);
+    assert.ok(!base.chamadas.some((c) => c.url.includes('magazinevoce')), 'a página do produto nunca é pedida');
+    const m3 = await s.disparar({ url: MAGALU, ajustes: { title: 'Fone Magalu', price: '59,90' } });
+    assert.equal(m3.status, 200, m3.txt);
+    await s.assentar();
+    const sm = s.msgs().at(-1).text;
+    assert.ok(sm.includes('https://www.magazinevoce.com.br/lojadopedro/produto/p/abc123/'), sm);
+    assert.doesNotMatch(sm, /lojadosocio|shopee/i);
     assert.deepEqual(f.mutacoes(), []);
     assert.equal(f.api().length, 0, 'a Shopee não foi chamada por links de outras lojas');
   } finally { await s.fechar(); }

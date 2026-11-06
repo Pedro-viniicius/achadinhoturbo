@@ -820,7 +820,7 @@ test('CA5: nenhuma tela mostra a Senha da API (nem em HTML, nem na frase do test
   assert.equal([...html.matchAll(/type="password"/g)].length, 1);
 });
 
-test('as outras lojas seguem iguais: o cartão da Amazon continua sem fieldset e o do Magalu com o aviso "Ainda não implementado"', () => {
+test('as outras lojas seguem iguais: o cartão da Amazon continua sem fieldset e o de uma Magalu "não implementada" (servidor antigo) com o aviso "Ainda não implementado"', () => {
   const amazon = C.cartaoConexao({ id: 'amazon', nome: 'Amazon', implementada: true, estado: 'so_tag', descricao: 'x', campos: [{ nome: 'tag', rotulo: 'Tag', tipo: 'texto', max: 40, ajuda: 'a' }, { nome: 'credencial_id', rotulo: 'ID', tipo: 'segredo', max: 80 }], config: {}, segredos_salvos: [] });
   assert.doesNotMatch(amazon, /<fieldset/); assert.doesNotMatch(amazon, /ext-linha|inputmode/);
   assert.match(amazon, /Antes de usar a API:/); assert.match(amazon, /\[\?conexoes\.segredo\]/, 'o segredo da Amazon mantém a ajuda genérica');

@@ -581,7 +581,7 @@ test('CA11: afiliação só vira problema quando um link foi barrado e o bloquei
   try {
     const { json: { id } } = await h.pedir('/api/remetentes', 'dono', { method: 'POST', body: s.corpo() });
     // a regra do dono: falta de configuração sozinha não vira aviso
-    Object.assign(s.situacao, { mercadolivre: 'sem_etiqueta', amazon: 'sem_tag_amazon', shopee: 'sem_id_shopee' });
+    Object.assign(s.situacao, { mercadolivre: 'sem_etiqueta', amazon: 'sem_tag_amazon', shopee: 'sem_id_shopee', magalu: 'sem_loja_magalu' });
     assert.equal(await problema(), null);
 
     const t = s.relogio.t;
@@ -609,6 +609,7 @@ test('CA11: afiliação só vira problema quando um link foi barrado e o bloquei
       sem_extensao: ['mercadolivre', 'Os links do Mercado Livre não saem: a extensão do Chrome está desconectada. Abra o Chrome e confira em Conexões.'],
       sem_id_shopee: ['shopee', 'Os links da Shopee não saem: falta o ID de afiliado. Cadastre em Conexões.'],
       sem_link_shopee: ['shopee', 'Os links da Shopee não saem: falta a API ou a extensão para gerar o link. Confira em Conexões.'],
+      sem_loja_magalu: ['magalu', 'Os links da Magalu não saem: falta o nome da sua loja de parceiro. Cadastre em Conexões.'],
     };
     let d = t + 1;
     for (const [codigo, [loja, texto]] of Object.entries(frases)) {

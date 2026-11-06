@@ -45,7 +45,7 @@ const DOCS_TEXTOS = {
     ['Painel', 'Onde você configura e acompanha tudo. Abre no navegador, em `http://localhost:3737`.'],
     ['WhatsApp', 'O seu número entra como aparelho conectado e envia as mensagens aos grupos.'],
     ['Extensão do Chrome', 'Usa a sua sessão na Central de Afiliados do Mercado Livre para gerar os links `meli.la` e ler a lista de ofertas. Também gera os links da Shopee.'],
-    ['Lojas', 'Mercado Livre, Amazon e Shopee, configuradas em [[Conexões]]. O Catálogo traz as ofertas do seu app Etiqueta.'],
+    ['Lojas', 'Mercado Livre, Amazon, Shopee e Magalu, configuradas em [[Conexões]]. O Catálogo traz as ofertas do seu app Etiqueta.'],
   ],
   inicioComoTitulo: 'Como usar este livro',
   inicioComo: [

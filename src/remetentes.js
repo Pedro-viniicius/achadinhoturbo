@@ -1,6 +1,11 @@
 // Envio pelo sócio (plano envio-pelo-socio, D2 a D8; ADR-006): números de WhatsApp cadastrados pelo dono (os
-// "remetentes") mandam no privado links do Mercado Livre, da Amazon ou da Shopee, e cada link vira uma oferta com a
-// afiliação do dono na fila única de envios, sem aprovação, para os grupos daquele remetente.
+// "remetentes") mandam no privado links do Mercado Livre, da Amazon, da Shopee ou da Magalu, e cada link vira uma oferta
+// com a afiliação do dono na fila única de envios, sem aprovação, para os grupos daquele remetente. Na Magalu (plano
+// integracao-magalu, etapa 5) nada é lido da loja: título e preço vêm do texto da mensagem, e o link sai com a loja de
+// parceiro do dono, montada no envio a partir do endereço do produto. A loja de parceiro do sócio que vem no link nunca
+// é guardada: o link de produto vira o endereço do produto sem loja (magazineluiza.com.br) e a chave MAGALU:<código>;
+// o link curto (maga.lu, onelink.me, magalu.com e subdomínios) fica sem query nem fragmento; a página da Magalu que não
+// é de produto (busca, vitrine da loja de um parceiro) é descartada já na chegada (link_invalido), sem endereço.
 //
 // Ciclo (o do espelho, src/espelho.js): o ouvinte privado do whatsapp.js (onPrivada) entrega { ids, texto, msgId, ts }
 // a receber(), que é síncrono e sem rede e grava um item `recebido` por link (`remetente_itens`). O tick decide em
@@ -30,6 +35,7 @@ import { addLog } from './db.js';
 import { identificar } from './lojas.js';
 import { extrairAsin } from './amazon.js';
 import { extrairIds } from './shopee.js';
+import { extrairProdutoMagalu } from './magalu.js';
 import { produtoMl } from './envios.js';
 import { extrairUrls, lerOfertaDoTexto, MAX_URLS } from './oferta-texto.js';
 import { mascararPessoais, chaveIp } from './privacidade.js';
@@ -48,15 +54,19 @@ const RESPOSTA_MAX_DIAS = 1;          // mensagem sem resposta há mais que isso
 const MAX_IDS = 5;
 const MAX_MSG_ID = 256;
 const MAX_NOME_LOG = 80;
-const LOJAS = new Set(['mercadolivre', 'amazon', 'shopee']);
+const LOJAS = new Set(['mercadolivre', 'amazon', 'shopee', 'magalu']);
 const ATIVOS = ['recebido', 'processando'];
 const JID_PRIVADO = /^\d+@(?:s\.whatsapp\.net|lid)$/;
 const CAMPOS_OFERTA = ['title', 'price', 'oldPrice', 'discountPct', 'sold', 'freeShipping', 'coupon', 'image'];
 const CAMPOS_TEXTO = ['title', 'price', 'oldPrice', 'discountPct', 'sold', 'freeShipping', 'coupon'];
 const JID_NUMERO = /^\d+@s\.whatsapp\.net$/;
 const JID_LID = /^\d+@lid$/;
-// encurtadores da Amazon e da Shopee (src/amazon.js, src/shopee.js): o código está no caminho, a query é só rastreio
-const ENCURTADORES = ['link.amazon', 'amzn.to', 'amzn.com', 'a.co', 's.shopee.com.br', 'shp.ee', 'shope.ee'];
+// encurtadores da Amazon, da Shopee e da Magalu (src/amazon.js, src/shopee.js, src/magalu.js): o código está no
+// caminho, a query é só rastreio
+const ENCURTADORES = ['link.amazon', 'amzn.to', 'amzn.com', 'a.co', 's.shopee.com.br', 'shp.ee', 'shope.ee', 'maga.lu', 'magazineluiza.onelink.me'];
+// páginas da Magalu (a loja e as lojas de parceiro): o que não é produto aqui (busca, vitrine) pode ter a loja do sócio
+// no caminho e nunca chega a um produto
+const PAGINAS_MAGALU = ['magazineluiza.com.br', 'magazinevoce.com.br'];
 
 // Cadastro e consulta (etapa 6)
 const MAX_NOME = 60;
@@ -120,6 +130,7 @@ const AFILIACAO = Object.freeze({
   sem_tag_amazon: { loja: 'amazon', conexao: 'amazon', texto: 'Os links da Amazon não saem: falta a tag. Cadastre em Conexões.' },
   sem_id_shopee: { loja: 'shopee', conexao: 'shopee', texto: 'Os links da Shopee não saem: falta o ID de afiliado. Cadastre em Conexões.' },
   sem_link_shopee: { loja: 'shopee', conexao: 'shopee', texto: 'Os links da Shopee não saem: falta a API ou a extensão para gerar o link. Confira em Conexões.' },
+  sem_loja_magalu: { loja: 'magalu', conexao: 'magalu', texto: 'Os links da Magalu não saem: falta o nome da sua loja de parceiro. Cadastre em Conexões.' },
 });
 
 /** Erro com status HTTP (montarRotas responde com ele). A mensagem é sempre fixa ou leva só o nome de um remetente. */
@@ -169,7 +180,7 @@ export const MOTIVOS = Object.freeze({
   repetida: (horas) => `repetida (enviada há ${horas} h)`,
   mesma_mensagem: 'mesmo produto de outro link desta mensagem',
   limite: 'passou do limite de links por hora',
-  sem_link_de_loja: 'sem link do Mercado Livre, Amazon ou Shopee',
+  sem_link_de_loja: 'sem link do Mercado Livre, Amazon, Shopee ou Magalu',
   link_invalido: 'link não reconhecido',
   sem_dados: 'sem dados para montar a oferta (título ou preço)',
   desligado: 'o remetente foi desligado',
@@ -181,6 +192,7 @@ export const MOTIVOS = Object.freeze({
   sem_tag_amazon: 'falta a tag da Amazon',
   sem_id_shopee: 'falta o ID da Shopee',
   sem_link_shopee: 'sem como gerar o link da Shopee (API ou extensão)',
+  sem_loja_magalu: 'falta o nome da loja de parceiro da Magalu',
   sem_grupos: 'nenhum grupo de destino disponível',
   sem_template: 'o template foi apagado ou está sem {LINK}',
   falha: 'falha inesperada ao montar a oferta',
@@ -200,7 +212,7 @@ export const RESPOSTAS = Object.freeze({
   montar: 'Não consegui montar esse link agora. O dono vai ver o motivo no painel.',
   sem_dados: 'Não consegui ler os dados desse produto. Mande o link junto com o nome e o preço.',
   link_invalido: 'Não reconheci esse link. Mande o link da página do produto.',
-  sem_link_de_loja: 'Não encontrei um link do Mercado Livre, Amazon ou Shopee nessa mensagem.',
+  sem_link_de_loja: 'Não encontrei um link do Mercado Livre, Amazon, Shopee ou Magalu nessa mensagem.',
   limite: 'Muitos links em pouco tempo. Tente de novo daqui a pouco.',
   varios: (n, { enviados, repetidos, nao }) => {
     const partes = [];
@@ -230,13 +242,16 @@ function lerRemetente(r) {
 /** Endereço sem query nem fragmento (origin + pathname), ou o próprio texto se não for uma URL. */
 const semParametros = (url) => { try { const u = new URL(url); return u.origin + u.pathname; } catch { return url; } };
 
-/** O host é um encurtador da Amazon ou da Shopee (ou subdomínio dele)? */
-function ehEncurtador(url) {
+/** O host da URL é um da lista (ou subdomínio dele)? */
+function hostNaLista(url, lista) {
   try {
     const h = new URL(url).hostname.toLowerCase();
-    return ENCURTADORES.some((e) => h === e || h.endsWith(`.${e}`));
+    return lista.some((e) => h === e || h.endsWith(`.${e}`));
   } catch { return false; }
 }
+
+/** O host é um encurtador da Amazon, da Shopee ou da Magalu (ou subdomínio dele)? */
+const ehEncurtador = (url) => hostNaLista(url, ENCURTADORES);
 
 /**
  * Chave do produto do ML pelo caminho do endereço, sem rede (a query nunca conta), com as regras do produtoMl de
@@ -246,9 +261,13 @@ function ehEncurtador(url) {
 const chaveMercadoLivre = (url) => produtoMl(url)?.chave ?? null;
 
 /**
- * Link de loja → { url (a guardar), loja, chave (rápida, sem rede, ou null) }. A Amazon com ASIN e a Shopee com os ids
- * já ficam no endereço limpo do produto; o ML e os encurtadores, sem query nem fragmento: nada da tag nem do rastreio
- * de terceiro vai ao banco.
+ * Link de loja → { url (a guardar), loja, chave (rápida, sem rede, ou null) }, ou, para a página da Magalu que não é de
+ * produto, o item já decidido { url: '', loja, chave: null, status: 'descartado', codigo: 'link_invalido' }. A Amazon com
+ * ASIN, a Shopee com os ids e a Magalu com o código já ficam no endereço limpo do produto (na Magalu,
+ * magazineluiza.com.br sem a loja de parceiro do link e só com o seller_id válido); o ML e os encurtadores (na Magalu,
+ * maga.lu, onelink.me, magalu.com e subdomínios), sem query nem fragmento; a página da Magalu sem produto (busca,
+ * vitrine de magazineluiza.com.br ou magazinevoce.com.br) não guarda endereço nenhum. Nada da tag, da loja de parceiro
+ * nem do rastreio de terceiro vai ao banco.
  */
 function linkDeLoja(url) {
   const loja = identificar(url)?.id;
@@ -259,6 +278,14 @@ function linkDeLoja(url) {
   } else if (loja === 'shopee') {
     const ids = extrairIds(url);
     if (ids) return { url: ids.urlProduto, loja, chave: `SHOPEE:${ids.shopId}.${ids.itemId}` };
+  } else if (loja === 'magalu') {
+    const p = extrairProdutoMagalu(url);
+    if (p) return { url: p.urlProduto, loja, chave: `MAGALU:${p.codigo}` };
+    // busca ou vitrine (o caminho pode ter a loja do sócio): descartado na chegada, sem endereço e sem rede
+    if (hostNaLista(url, PAGINAS_MAGALU)) return { url: '', loja, chave: null, status: 'descartado', codigo: 'link_invalido' };
+    // o resto é link curto (maga.lu, onelink.me, magalu.com e subdomínios, como divulgador.magalu.com): o código está
+    // no caminho; a query, que pode trazer a loja do sócio, nunca é guardada
+    return { url: semParametros(url), loja, chave: null };
   } else {
     // ML: o meli.la não tem o produto no endereço (a chave só aparece depois da rede, pelo produto achado)
     return { url: semParametros(url), loja, chave: chaveMercadoLivre(url) };
@@ -364,7 +391,7 @@ export function createRemetentes({ db, wa = null, envios = null, acordar = null,
       const ts = Number.isFinite(msg.ts) && msg.ts > 0 ? Math.min(Math.floor(msg.ts), agoraMs) : agoraMs;
       if (agoraMs - ts > PARADO_MAX) return 0; // chegou com o programa fora do ar há mais de 2 h (P10)
 
-      // URLs do texto como veio (antes da máscara, que apagaria um ASIN só de dígitos); só as das 3 lojas
+      // URLs do texto como veio (antes da máscara, que apagaria um ASIN só de dígitos); só as das lojas de LOJAS
       const urls = extrairUrls(texto.slice(0, MAX_TEXTO_RECEBIDO)).slice(0, MAX_URLS);
       if (!urls.length) return 0; // sem link: sem item nem resposta (CA8)
       const vistos = new Set();
@@ -379,7 +406,7 @@ export function createRemetentes({ db, wa = null, envios = null, acordar = null,
       // o texto só completa os dados quando fala de um produto só (P11)
       const complemento = links.length === 1 ? complementoDoTexto(texto) : null;
       const linhas = links.length
-        ? links.map((l) => ({ ...l, status: 'recebido', codigo: null, complemento }))
+        ? links.map((l) => (l.status ? { ...l, complemento: null } : { ...l, status: 'recebido', codigo: null, complemento }))
         : [{ url: '', loja: null, chave: null, status: 'descartado', codigo: 'sem_link_de_loja', complemento: null }];
 
       const decididos = [];
@@ -512,7 +539,7 @@ export function createRemetentes({ db, wa = null, envios = null, acordar = null,
       return decidir(item, rem, porCodigo('falha', { nota: semNumero(e) }), now);
     }
     // a chave do produto achado: no ML, a do endereço do produto (a key da leitura é o meli.la recebido, que muda a cada
-    // afiliado); na Amazon e na Shopee, a da leitura (ASIN, ids)
+    // afiliado); na Amazon, na Shopee e na Magalu, a da leitura (ASIN, ids, código)
     const chave = (item.loja === 'mercadolivre' ? chaveMercadoLivre(payload?.url) : null)
       || (typeof payload?.offer?.key === 'string' && payload.offer.key ? payload.offer.key : item.chave);
     const fonte = payload.fonte_dados || 'api';

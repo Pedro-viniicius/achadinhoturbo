@@ -19,6 +19,7 @@ import * as rastreio from '../src/rastreio.js';
 import { createAmazon, LinkNaoResolvido } from '../src/amazon.js';
 import { createShopee, URL_API as URL_API_SHOPEE, LinkShopeeNaoResolvido } from '../src/shopee.js';
 import { createEspelho } from '../src/espelho.js';
+import { createMagalu, LinkMagaluNaoResolvido } from '../src/magalu.js';
 import * as lojasPadrao from '../src/lojas.js';
 
 let acessosRede = 0;
@@ -34,7 +35,8 @@ const IMG = 'https://http2.mlstatic.com/D_NQ_NP_123-O.jpg';
 const URL_ML = 'https://produto.mercadolivre.com.br/MLB-1234567890-fone-bom-_JM';
 const URL_AMAZON = 'https://www.amazon.com.br/dp/B0ABC12345';
 const URL_MAGALU = 'https://www.magazineluiza.com.br/fone-bom/p/abc123/';
-const MSG_MAGALU = 'Magalu identificada, mas ainda não está conectada. Configure em Conexões.';
+const URL_FACEBOOK = 'https://www.facebook.com/marketplace/item/123456789/';
+const MSG_FACEBOOK = 'Facebook identificada, mas ainda não está conectada. Configure em Conexões.';
 // PNG 1×1 como o sharp grava (o upload regrava a foto: este volta igual, byte a byte) e um JPEG 1×1 de verdade
 // (o upload decodifica a foto: um começo de JPEG não passa mais)
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACXBIWXMAAAsSAAALEgHS3X78AAAADUlEQVQImWNgYPhfDwACggF/NGwuCgAAAABJRU5ErkJggg==', 'base64');
@@ -182,15 +184,16 @@ test('F1: "agora" é recusado com o WhatsApp desconectado e com a extensão offl
   } finally { await s.fechar(); }
 });
 
-test('CA2: link de loja não conectada (Magalu, Facebook) é recusado pelo nome, sem enviar nem gravar nada; identificar mostra o aviso', async () => {
+// A Magalu deixou de ser "não conectada" (plano integracao-magalu, etapa 3): a recusa pelo nome fica com o Facebook
+test('CA2: link de loja não conectada (Facebook) é recusado pelo nome, sem enviar nem gravar nada; identificar mostra o aviso', async () => {
   const s = await subir();
   try {
     s.links.poll(0);
-    const r = await s.post('/api/envios', { tipo: 'oferta', url: URL_MAGALU, group_jids: ['111@g.us'], template_id: 1, quando: 'agora' });
+    const r = await s.post('/api/envios', { tipo: 'oferta', url: URL_FACEBOOK, group_jids: ['111@g.us'], template_id: 1, quando: 'agora' });
     assert.equal(r.status, 400);
-    assert.equal(r.json.erro, MSG_MAGALU);
-    const ag = await s.post('/api/envios', { tipo: 'oferta', url: 'https://magalu.com/xYz', group_jids: ['111@g.us'], quando: 'agendado', agendar_hhmm: '23:59' });
-    assert.equal(ag.status, 400); assert.match(ag.json.erro, /^Magalu identificada/);
+    assert.equal(r.json.erro, MSG_FACEBOOK);
+    const ag = await s.post('/api/envios', { tipo: 'oferta', url: 'https://m.facebook.com/xYz', group_jids: ['111@g.us'], quando: 'agendado', agendar_hhmm: '23:59' });
+    assert.equal(ag.status, 400); assert.match(ag.json.erro, /^Facebook identificada/);
     const fb = await s.post('/api/envios', { tipo: 'oferta', url: 'https://fb.me/abc', group_jids: ['111@g.us'] });
     assert.equal(fb.status, 400); assert.match(fb.json.erro, /^Facebook identificada/);
 
@@ -202,9 +205,9 @@ test('CA2: link de loja não conectada (Magalu, Facebook) é recusado pelo nome,
     const p = (await s.get('/api/envios?tipo=oferta')).json;
     assert.deepEqual(p, { agendadas: [], contadores: { enviados: 0, na_fila: 0, com_erro: 0 }, linhas: [] });
 
-    const id = await s.post('/api/disparo/identificar', { url: URL_MAGALU, template_id: 1 });
+    const id = await s.post('/api/disparo/identificar', { url: URL_FACEBOOK, template_id: 1 });
     assert.equal(id.status, 200, 'a tela mostra o aviso da loja');
-    assert.deepEqual(id.json, { loja: { id: 'magalu', nome: 'Magalu', implementada: false }, motivo: MSG_MAGALU, produto: null, texto: null, template_id: null, etiqueta: null });
+    assert.deepEqual(id.json, { loja: { id: 'facebook', nome: 'Facebook', implementada: false }, motivo: MSG_FACEBOOK, produto: null, texto: null, template_id: null, etiqueta: null });
   } finally { await s.fechar(); }
 });
 
@@ -562,7 +565,9 @@ test('criar: validação por tipo e por quando; nada é gravado nem lido', async
       [{ tipo: 'mensagem', texto: 'oi', imagem: 'upload', upload: '../../disparador.db', group_jids: g }, /Escolha a foto de novo/],
       [{ tipo: 'mensagem', texto: 'oi', imagem: 'upload', upload: `${'a'.repeat(32)}.png`, group_jids: g }, /não foi encontrada/],
       [{ tipo: 'mensagem', texto: 'oi', imagem: 'previa', previa_url: '', group_jids: g }, /link da prévia/],
-      [{ tipo: 'mensagem', texto: 'oi', imagem: 'previa', previa_url: URL_MAGALU, group_jids: g }, /Magalu identificada, mas ainda não está conectada/],
+      [{ tipo: 'mensagem', texto: 'oi', imagem: 'previa', previa_url: URL_FACEBOOK, group_jids: g }, /Facebook identificada, mas ainda não está conectada/],
+      // a Magalu envia no Disparo manual, mas a prévia de link continua só do Mercado Livre (plano integracao-magalu, CA8)
+      [{ tipo: 'mensagem', texto: 'oi', imagem: 'previa', previa_url: URL_MAGALU, group_jids: g }, /^Error: A prévia do link só funciona com links do Mercado Livre\.$/],
       [{ tipo: 'mensagem', texto: 'oi', imagem: 'previa', previa_url: 'https://s.shopee.com.br/abc', group_jids: g }, /só funciona com links do Mercado Livre/],
       [{ tipo: 'mensagem', texto: 'oi', imagem: 'previa', previa_url: URL_AMAZON, group_jids: g }, /só funciona com links do Mercado Livre/],
       [{ tipo: 'mensagem', texto: 'oi', imagem: 'previa', previa_url: 'https://exemplo.com/x', group_jids: g }, /só funciona com links do Mercado Livre/],
@@ -2880,7 +2885,13 @@ test('etapa 4 (CA4): situacaoLink diz, sem rede, por que o link do dono não sai
     assert.equal(sit('shopee'), 'sem_id_shopee');
     s.db.prepare('DELETE FROM tags').run();
     assert.equal(sit('mercadolivre'), 'sem_etiqueta');
-    assert.notEqual(sit('magalu'), null, 'loja sem integração nunca libera');
+    // Magalu (plano integracao-magalu, etapa 3): só o nome da loja de parceiro salvo em Conexões, revalidado na leitura
+    assert.equal(sit('magalu'), 'sem_loja_magalu');
+    s.db.prepare("INSERT INTO conexoes (plataforma, config, segredos, updated_at) VALUES ('magalu', ?, '{}', ?)").run(JSON.stringify({ loja: 'minhaloja' }), Date.now());
+    assert.equal(sit('magalu'), null);
+    s.db.prepare("UPDATE conexoes SET config = ? WHERE plataforma = 'magalu'").run(JSON.stringify({ loja: 'minha loja/../x' }));
+    assert.equal(sit('magalu'), 'sem_loja_magalu', 'valor mexido no banco não vale');
+    assert.notEqual(sit('facebook'), null, 'loja sem integração nunca libera');
     assert.notEqual(sit(undefined), null);
     assert.deepEqual([s.fetchA.chamadas.length, s.fetchS.chamadas.length], [0, 0], 'nenhuma rede');
   } finally { s.db.close(); }
@@ -2924,6 +2935,281 @@ test('etapa 4 (CA4/CA6): ML do remetente nunca sai no modo direto (o preparar ba
       [{ rule_id: null, rule_name: 'Remetente: Sócio Pedro', group_name: 'Tech', offer_title: 'Fone Bom', message: 'Enviado com a etiqueta etiquetaA' }]);
     assert.equal(s.db.prepare("SELECT rule_name FROM log WHERE message LIKE '%modo direto%'").get()?.rule_name, 'Remetente: Sócio Pedro');
   } finally { s.db.close(); }
+});
+
+// ---------- Magalu (plano integracao-magalu, etapa 3): dados à mão, link montado no envio com a loja de parceiro de agora ----------
+const LOJA_DONO = 'minhaloja';
+const LOJA_OUTRO = 'lojadeoutro';
+const CANONICA_MAGALU = 'https://www.magazineluiza.com.br/fone-bom/p/abc123/audio/fones/?seller_id=magazineluiza';
+const URL_OUTRA_LOJA = `https://www.magazinevoce.com.br/${LOJA_OUTRO}/fone-bom/p/ABC123/audio/fones/?seller_id=magazineluiza&utm_source=parceiro#topo`;
+const linkDaLoja = (loja) => `https://www.magazinevoce.com.br/${loja}/fone-bom/p/abc123/audio/fones/?seller_id=magazineluiza`;
+const CURTO_MAGALU = 'https://maga.lu/AbC123';
+const CURTO_FALHA = 'https://magazineluiza.onelink.me/Falha1';
+const BUSCA_MAGALU = 'https://www.magazineluiza.com.br/busca/fone/';
+const VAZIA_MAGALU = { key: 'MAGALU:abc123', title: null, price: null, oldPrice: null, discountPct: null, sold: null, freeShipping: null, coupon: null, image: null };
+const SEM_LOJA_MAGALU = 'Falta o nome da sua loja de parceiro da Magalu. Cadastre em Conexões → Magalu antes de disparar.';
+
+/** fetch falso da Magalu: o curto redireciona (302) para a página na loja de outro parceiro; o outro, para fora da Magalu. */
+function fetchMagalu() {
+  const chamadas = [];
+  const f = async (url, init = {}) => {
+    const u = String(url);
+    chamadas.push({ url: u, metodo: init.method || 'GET' });
+    if (u === CURTO_MAGALU) return new Response(null, { status: 302, headers: { location: URL_OUTRA_LOJA } });
+    if (u === CURTO_FALHA) return new Response(null, { status: 302, headers: { location: 'https://evil.example/fone-bom/p/abc123/' } });
+    throw new Error('rede não prevista no teste');
+  };
+  f.chamadas = chamadas;
+  return f;
+}
+
+/** Servidor com a Magalu: a loja de parceiro salva em Conexões (salvarLoja(null) apaga) e o resolvedor com o fetch falso. */
+async function subirMagalu({ loja = LOJA_DONO, ...opcoes } = {}) {
+  const s = await subir(opcoes);
+  const fetchM = fetchMagalu();
+  const salvarLoja = (nome) => {
+    if (nome == null) { s.db.prepare("DELETE FROM conexoes WHERE plataforma = 'magalu'").run(); return; }
+    s.db.prepare(`INSERT INTO conexoes (plataforma, config, segredos, updated_at) VALUES ('magalu', ?, '{}', ?)
+      ON CONFLICT(plataforma) DO UPDATE SET config = excluded.config, updated_at = excluded.updated_at`).run(JSON.stringify({ loja: nome }), Date.now());
+  };
+  salvarLoja(loja);
+  s.scheduler.envios = createEnvios({ db: s.db, wa: s.wa, links: s.links, ml: s.ml, fast: true, dir: s.dir, magalu: createMagalu({ fetch: fetchM }) });
+  const ofertaMagalu = (corpo = {}) => s.post('/api/envios', { tipo: 'oferta', url: URL_OUTRA_LOJA, template_id: 1, group_jids: ['111@g.us'], quando: 'agora', ...corpo });
+  return { ...s, envios: s.scheduler.envios, fetchM, salvarLoja, ofertaMagalu };
+}
+
+test('Magalu (CA4): identificar devolve editavel, dados em branco, pode_disparar e o texto com o link da loja salva; outra loja vira só o booleano', async () => {
+  const s = await subirMagalu();
+  try {
+    const r = await s.post('/api/disparo/identificar', { url: `  ${URL_OUTRA_LOJA} `, template_id: 1, tag_id: 1 });
+    assert.equal(r.status, 200, r.txt);
+    const { texto, ...resto } = r.json;
+    assert.deepEqual(resto, {
+      loja: { id: 'magalu', nome: 'Magalu', implementada: true }, motivo: null, editavel: true, produto: VAZIA_MAGALU, causa: null,
+      causa_link: null, loja_parceiro: LOJA_DONO, outra_loja: true, pode_disparar: true, template_id: 1, etiqueta: null,
+    });
+    assert.ok(texto.includes(linkDaLoja(LOJA_DONO)), texto);
+    assert.ok(!r.txt.includes(LOJA_OUTRO), 'a loja do outro parceiro nunca sai na resposta');
+    assert.ok(!r.txt.includes('utm_source'), 'nem o rastreio do link colado');
+
+    // o link da própria loja (e o do magazineluiza) não é "outra loja"
+    for (const url of [linkDaLoja('MinhaLoja'), 'https://www.magazineluiza.com.br/fone-bom/p/abc123/']) {
+      const meu = await s.post('/api/disparo/identificar', { url, template_id: 1 });
+      assert.deepEqual([meu.status, meu.json.outra_loja, meu.json.pode_disparar, meu.json.produto?.key], [200, false, true, 'MAGALU:abc123'], url);
+    }
+    // link curto: só o redirecionamento é pedido (GET), nunca a página do produto
+    const curto = await s.post('/api/disparo/identificar', { url: CURTO_MAGALU, template_id: 1 });
+    assert.deepEqual([curto.json.produto, curto.json.outra_loja, curto.json.pode_disparar], [VAZIA_MAGALU, true, true]);
+    assert.ok(curto.json.texto.includes(linkDaLoja(LOJA_DONO)));
+    assert.deepEqual(s.fetchM.chamadas, [{ url: CURTO_MAGALU, metodo: 'GET' }]);
+  } finally { await s.fechar(); }
+});
+
+test('Magalu (CA4/CA6): sem loja salva → causa_link sem_loja e não dispara; link curto que não resolve → invalido; busca → nao_produto', async () => {
+  const s = await subirMagalu({ loja: null });
+  try {
+    const sem = await s.post('/api/disparo/identificar', { url: URL_OUTRA_LOJA, template_id: 1 });
+    assert.equal(sem.status, 200, sem.txt);
+    assert.deepEqual(
+      [sem.json.produto, sem.json.causa, sem.json.causa_link, sem.json.loja_parceiro, sem.json.pode_disparar, sem.json.texto, sem.json.editavel],
+      [VAZIA_MAGALU, null, 'sem_loja', null, false, null, true], 'o produto volta (a tela deixa os campos editáveis), sem link nem texto',
+    );
+    // sem loja salva não há com o que comparar: o link pode ser da própria loja do dono, ainda não cadastrada (R4)
+    assert.equal(sem.json.outra_loja, false);
+    s.salvarLoja('minha loja'); // valor inválido no banco: tratado como sem loja
+    assert.equal((await s.post('/api/disparo/identificar', { url: URL_OUTRA_LOJA, template_id: 1 })).json.causa_link, 'sem_loja');
+    s.salvarLoja(LOJA_DONO);
+
+    const casos = [[CURTO_FALHA, 'invalido'], [BUSCA_MAGALU, 'nao_produto'], ['https://www.magazinevoce.com.br/minhaloja/', 'nao_produto'], ['https://magalu.com:8443/x', 'invalido']];
+    for (const [url, causa] of casos) {
+      const r = await s.post('/api/disparo/identificar', { url, template_id: 1 });
+      assert.equal(r.status, 200, r.txt);
+      assert.deepEqual([r.json.causa, r.json.produto, r.json.pode_disparar, r.json.texto, r.json.outra_loja], [causa, null, false, null, false], url);
+    }
+    assert.deepEqual(s.fetchM.chamadas.map((c) => c.url), [CURTO_FALHA], 'a busca e a vitrine nunca são pedidas');
+  } finally { await s.fechar(); }
+
+  // sem o cliente da Magalu (servidor sem a ligação): o link curto é invalido sem rede; o de produto segue
+  const semCliente = await subir();
+  try {
+    semCliente.db.prepare("INSERT INTO conexoes (plataforma, config, segredos, updated_at) VALUES ('magalu', ?, '{}', ?)").run(JSON.stringify({ loja: LOJA_DONO }), Date.now());
+    assert.equal((await semCliente.post('/api/disparo/identificar', { url: CURTO_MAGALU, template_id: 1 })).json.causa, 'invalido');
+    assert.equal((await semCliente.post('/api/disparo/identificar', { url: URL_MAGALU, template_id: 1 })).json.pode_disparar, true);
+  } finally { await semCliente.fechar(); }
+});
+
+test('Magalu (CA5): disparo agora sai com a loja do dono (nunca a do link colado), foto só por upload, payload sem link nem loja e "Enviado pela Magalu" no Histórico', async () => {
+  const s = await subirMagalu();
+  try {
+    const up = await s.upload(PNG, 'image/png');
+    assert.equal(up.status, 200, up.txt);
+    const r = await s.ofertaMagalu({
+      tag_id: 2, ajustes: { title: 'Fone Bom', price: '89,90', oldPrice: '149,90', coupon: 'MAGA10', freeShipping: true, upload: up.json.id, image: 'https://evil.example/x.jpg', link: 'https://evil.example/' },
+    });
+    assert.equal(r.status, 200, r.txt);
+    assert.equal(await terminar(s.db, r.json.id), 'concluido');
+    const [m] = s.wa.simulated;
+    assert.equal(m.tipo, 'image', 'a foto do upload');
+    assert.ok(m.text.includes(linkDaLoja(LOJA_DONO)), m.text);
+    assert.ok(!m.text.includes(LOJA_OUTRO) && !m.text.includes('utm_source') && !m.text.includes('evil.example'), m.text);
+    assert.match(m.text, /Fone Bom/);
+
+    const p = payloadDe(s.db, r.json.id);
+    const tpl = s.db.prepare('SELECT created_at FROM templates WHERE id = 1').get().created_at;
+    assert.deepEqual(p, {
+      url: CANONICA_MAGALU, loja: 'magalu', tag_id: null, etiqueta: null, template_id: 1, template_criado_em: tpl, origem: { tipo: 'manual' },
+      codigo: 'abc123', fonte_dados: 'manual', upload: up.json.id,
+      offer: { key: 'MAGALU:abc123', title: 'Fone Bom', price: 89.9, oldPrice: 149.9, discountPct: 40, sold: null, freeShipping: true, coupon: 'MAGA10', image: null },
+    });
+    assert.ok(!JSON.stringify(p).includes(LOJA_DONO) && !JSON.stringify(p).includes(LOJA_OUTRO), 'o link é montado no envio: nenhuma loja no payload');
+    assert.deepEqual(linhas(s.db, 'SELECT rule_name, group_name, offer_title, level, message FROM log'),
+      [{ rule_name: 'Disparo manual', group_name: 'Achadinhos', offer_title: 'Fone Bom', level: 'ok', message: 'Enviado pela Magalu, com a sua loja de parceiro' }]);
+    assert.equal(contar(s.db, 'SELECT COUNT(*) AS n FROM rastreio_envios'), 0, 'sem rastreio por grupo na Magalu');
+    const painel = (await s.get('/api/envios?tipo=oferta')).json;
+    assert.deepEqual(painel.linhas.map((l) => [l.titulo, l.loja]), [['Fone Bom', 'Magalu']]);
+
+    // link curto: resolvido ao criar; o payload guarda o endereço canônico, e o envio sai com a loja do dono
+    const c = await s.ofertaMagalu({ url: CURTO_MAGALU, ajustes: { title: 'Fone Curto' } });
+    assert.equal(c.status, 200, c.txt);
+    assert.equal(await terminar(s.db, c.json.id), 'concluido');
+    assert.equal(payloadDe(s.db, c.json.id).url, CANONICA_MAGALU);
+    assert.equal(s.wa.simulated[1].tipo, 'text', 'sem upload, sem foto: a Magalu não tem foto por URL');
+    assert.ok(s.wa.simulated[1].text.includes(linkDaLoja(LOJA_DONO)));
+  } finally { await s.fechar(); }
+});
+
+test('Magalu (CA5/CA6): recusas antes do INSERT: sem loja, sem título, link curto que não resolve, link sem produto e ajustes inválidos', async () => {
+  const s = await subirMagalu({ loja: null });
+  try {
+    const semLoja = await s.ofertaMagalu({ ajustes: { title: 'Fone' } });
+    assert.deepEqual([semLoja.status, semLoja.json.erro], [400, SEM_LOJA_MAGALU]);
+    s.salvarLoja(LOJA_DONO);
+    const casos = [
+      [{ ajustes: {} }, 'Preencha o título do produto.'],
+      [{ ajustes: { title: '   ', price: '10' } }, 'Preencha o título do produto.'],
+      [{ url: CURTO_FALHA, ajustes: { title: 'Fone' } }, 'Não consegui abrir este link da Magalu. Cole o endereço da página do produto.'],
+      [{ url: BUSCA_MAGALU, ajustes: { title: 'Fone' } }, 'Este link da Magalu não leva a um produto.'],
+      [{ ajustes: { title: 'Fone', price: 'abc' } }, 'Preço atual inválido: use só números, como 89,90.'],
+      [{ ajustes: { title: 'Fone', upload: '../../disparador.db' } }, 'Escolha a foto de novo.'],
+      [{ ajustes: 'x' }, 'Dados da oferta inválidos.'],
+    ];
+    for (const [corpo, erro] of casos) {
+      const r = await s.ofertaMagalu(corpo);
+      assert.deepEqual([r.status, r.json.erro], [400, erro], JSON.stringify(corpo));
+    }
+    assert.equal(contar(s.db, 'SELECT COUNT(*) AS n FROM envios'), 0, 'nada gravado');
+    assert.equal(s.wa.simulated.length, 0);
+    assert.deepEqual(s.fetchM.chamadas.map((c) => c.url), [CURTO_FALHA]);
+  } finally { await s.fechar(); }
+});
+
+test('Magalu (CA5): agendado sai com a loja salva na hora do envio; com a loja apagada depois, erro visível e nada sai', async (t) => {
+  const alvo = Date.now() + 3 * 60000;
+  if (new Date(alvo).toDateString() !== new Date().toDateString()) { t.skip('perto da meia-noite: o disparo manual só agenda para hoje'); return; }
+  const T = new Date(alvo).setSeconds(0, 0);
+  const s = await subirMagalu();
+  try {
+    const agendar = () => s.ofertaMagalu({ quando: 'agendado', agendar_hhmm: hhmmDe(alvo), ajustes: { title: 'Fone Agendado', price: 99 } });
+    const r = await agendar();
+    assert.equal(r.status, 200, r.txt);
+    assert.deepEqual([r.json.status, r.json.next_run_at], ['pendente', T]);
+    s.salvarLoja('lojanova'); // a loja trocada depois de agendar vale no envio
+    assert.equal(await s.envios.processarPendentes(T + 1000), 1);
+    assert.equal(statusDe(s.db, r.json.id), 'concluido');
+    assert.ok(s.wa.simulated[0].text.includes(linkDaLoja('lojanova')), s.wa.simulated[0].text);
+    assert.ok(!s.wa.simulated[0].text.includes(LOJA_DONO) && !s.wa.simulated[0].text.includes(LOJA_OUTRO));
+
+    const r2 = await agendar();
+    assert.equal(r2.status, 200, r2.txt);
+    s.salvarLoja(null);
+    await s.envios.processarPendentes(T + 1000);
+    assert.equal(statusDe(s.db, r2.json.id), 'erro');
+    assert.equal(s.wa.simulated.length, 1, 'nada saiu');
+    const erro = 'link de afiliado não gerado: Falta o nome da sua loja de parceiro da Magalu. Cadastre em Conexões → Magalu.';
+    assert.equal(s.db.prepare('SELECT erro FROM envio_resultados WHERE envio_id = ?').get(r2.json.id).erro, erro);
+    assert.equal(s.db.prepare("SELECT message FROM log WHERE level = 'erro'").get().message, `Não enviado: ${erro}`);
+  } finally { await s.fechar(); }
+});
+
+test('Magalu (CA5): o preparar só confia no código e no endereço gravados; a loja vem sempre de Conexões, revalidada', async () => {
+  const s = await subirMagalu();
+  try {
+    const tpl = s.db.prepare('SELECT created_at FROM templates WHERE id = 1').get().created_at;
+    const offer = { ...VAZIA_MAGALU, title: 'Fone Bom', price: 89.9 };
+    const gravar = (extra) => Number(s.db.prepare(`INSERT INTO envios (tipo, payload, group_jids, quando, status, next_run_at, created_at)
+      VALUES ('oferta', ?, ?, 'agora', 'pendente', ?, ?)`).run(JSON.stringify({ loja: 'magalu', template_id: 1, template_criado_em: tpl, origem: { tipo: 'manual' }, offer, ...extra }),
+      JSON.stringify(['111@g.us']), Date.now(), Date.now()).lastInsertRowid);
+    const erroDo = (id) => s.db.prepare('SELECT erro FROM envio_resultados WHERE envio_id = ?').get(id)?.erro;
+    const SEM_CODIGO = 'link de afiliado não gerado: o produto da Magalu está sem código';
+    for (const extra of [{ url: CANONICA_MAGALU }, { url: CANONICA_MAGALU, codigo: 'xyz999' }, { url: 'https://evil.example/p/abc123/', codigo: 'abc123' }, { url: BUSCA_MAGALU, codigo: 'abc123' }]) {
+      const id = gravar(extra);
+      await s.envios.runEnvio(id);
+      assert.deepEqual([statusDe(s.db, id), erroDo(id)], ['erro', SEM_CODIGO], JSON.stringify(extra));
+    }
+    // o endereço gravado pode até ser o da loja de outro parceiro: o link sai com a loja de Conexões
+    const outro = gravar({ url: URL_OUTRA_LOJA, codigo: 'abc123' });
+    await s.envios.runEnvio(outro);
+    assert.equal(statusDe(s.db, outro), 'concluido');
+    assert.ok(s.wa.simulated[0].text.includes(linkDaLoja(LOJA_DONO)), s.wa.simulated[0].text);
+    // a loja mexida no banco não entra no link
+    s.salvarLoja('loja/../evil');
+    const mexida = gravar({ url: CANONICA_MAGALU, codigo: 'abc123' });
+    await s.envios.runEnvio(mexida);
+    assert.match(erroDo(mexida), /^link de afiliado não gerado: Falta o nome da sua loja de parceiro da Magalu/);
+    assert.equal(s.wa.simulated.length, 1);
+  } finally { await s.fechar(); }
+});
+
+test('Magalu (remetente): montarOferta com o texto do sócio e exigirPreco; sem preço → sem_dados; link sem produto → link_invalido', async () => {
+  const s = await subirMagalu();
+  try {
+    const p = await s.envios.montarOferta({ url: CURTO_MAGALU, template_id: 1 }, { origem: ORIGEM_REM, complemento: { title: 'Fone do texto', price: 59.9, coupon: 'MAGA5' }, exigirPreco: true });
+    assert.deepEqual([p.loja, p.url, p.codigo, p.fonte_dados, p.tag_id, p.etiqueta, p.origem], ['magalu', CANONICA_MAGALU, 'abc123', 'texto', null, null, ORIGEM_REM]);
+    assert.deepEqual(p.offer, { ...VAZIA_MAGALU, title: 'Fone do texto', price: 59.9, freeShipping: false, coupon: 'MAGA5' });
+    const semPreco = await erroDe(s.envios.montarOferta({ url: URL_MAGALU, template_id: 1 }, { origem: ORIGEM_REM, complemento: { title: 'Fone' }, exigirPreco: true }));
+    assert.deepEqual([semPreco.codigo, semPreco.message], ['sem_dados', 'Preencha o preço do produto.']);
+    const semTitulo = await erroDe(s.envios.montarOferta({ url: URL_MAGALU, template_id: 1 }, { origem: ORIGEM_REM, complemento: { price: 5 }, exigirPreco: true }));
+    assert.deepEqual([semTitulo.codigo, semTitulo.message], ['sem_dados', 'Preencha o título do produto.']);
+    for (const url of [CURTO_FALHA, BUSCA_MAGALU]) {
+      const e = await erroDe(s.envios.montarOferta({ url, template_id: 1 }, { origem: ORIGEM_REM, complemento: { title: 'X', price: 1 } }));
+      assert.ok(e instanceof LinkMagaluNaoResolvido, url);
+      assert.equal(e.codigo, 'link_invalido');
+      assert.equal(e.message, new LinkMagaluNaoResolvido(e.causa).message, 'a frase fixa');
+    }
+    s.salvarLoja(null);
+    const semLoja = await erroDe(s.envios.montarOferta({ url: URL_MAGALU, template_id: 1 }, { origem: ORIGEM_REM, complemento: { title: 'X', price: 1 } }));
+    assert.equal(semLoja.message, SEM_LOJA_MAGALU);
+    assert.equal(contar(s.db, 'SELECT COUNT(*) AS n FROM envios'), 0);
+  } finally { await s.fechar(); }
+});
+
+test('Magalu (CA9): console e log nunca levam link, nome de loja nem URL: só o nome do erro', async (t) => {
+  const espioes = ['error', 'warn', 'log', 'info'].map((k) => t.mock.method(console, k, () => {}));
+  const s = await subirMagalu();
+  try {
+    await s.post('/api/disparo/identificar', { url: URL_OUTRA_LOJA, template_id: 1 });
+    await s.post('/api/disparo/identificar', { url: CURTO_MAGALU, template_id: 1 });
+    await s.post('/api/disparo/identificar', { url: CURTO_FALHA, template_id: 1 });
+    const ok = await s.ofertaMagalu({ ajustes: { title: 'Fone Bom' } });
+    await terminar(s.db, ok.json.id);
+    await s.ofertaMagalu({ url: CURTO_FALHA, ajustes: { title: 'Fone Bom' } });
+    s.salvarLoja(null);
+    await s.ofertaMagalu({ ajustes: { title: 'Fone Bom' } });
+    // erro inesperado de quem lê o produto, com o link e a loja na mensagem: só o nome dele vai ao console
+    s.salvarLoja(LOJA_DONO);
+    const lojas = { ...lojasPadrao, lerProduto: async () => { throw new TypeError(`falhou ${URL_OUTRA_LOJA} ${LOJA_DONO}`); } };
+    s.scheduler.envios = createEnvios({ db: s.db, wa: s.wa, links: s.links, ml: s.ml, fast: true, dir: s.dir, lojas });
+    const quebrado = await s.post('/api/disparo/identificar', { url: URL_OUTRA_LOJA, template_id: 1 });
+    assert.equal(quebrado.json.causa, 'invalido');
+    const criado = await s.ofertaMagalu({ ajustes: { title: 'Fone Bom' } });
+    assert.deepEqual([criado.status, criado.json.erro], [400, 'Não consegui abrir este link da Magalu. Cole o endereço da página do produto.']);
+
+    const chamadas = espioes.flatMap((e) => e.mock.calls.map((c) => c.arguments.map(String).join(' ')));
+    assert.ok(chamadas.some((c) => c.includes('TypeError')), 'o nome do erro foi ao console');
+    const proibidos = [LOJA_DONO, LOJA_OUTRO, 'magazinevoce', 'magazineluiza', 'maga.lu', 'onelink', 'abc123', 'http'];
+    for (const c of chamadas) for (const x of proibidos) assert.ok(!c.includes(x), `console levou "${x}": ${c}`);
+    for (const { message } of linhas(s.db, 'SELECT message FROM log')) for (const x of proibidos) assert.ok(!String(message).includes(x), `log levou "${x}": ${message}`);
+  } finally { await s.fechar(); }
 });
 
 test('nenhum teste deste arquivo acessou a rede', () => {

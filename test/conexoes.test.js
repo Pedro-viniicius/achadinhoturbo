@@ -115,14 +115,16 @@ test('GET /api/conexoes lista as 6 plataformas na ordem do registro, com campos 
     assert.deepEqual(porId.amazon.situacao, { acesso: 'nao_configurada', verificado_em: null, motivo: MENSAGENS_AMAZON.sem_credenciais });
     assert.equal(porId.amazon.espelhos_ativos, 0);
     assert.deepEqual(porId.magalu.campos.map((c) => c.nome), ['loja']);
+    // Magalu implementada (plano integracao-magalu, etapa 2; CA1): sem nome salvo, falta configurar
+    assert.equal(porId.magalu.implementada, true);
+    assert.equal(porId.magalu.estado, 'falta_configurar', 'Magalu sem o nome da loja');
+    assert.deepEqual(porId.magalu.config, {});
     assert.deepEqual(porId.facebook.campos, [], 'Facebook não tem campos');
     assert.deepEqual(porId.mercadolivre.campos, [], 'ML: a configuração são as etiquetas, não um campo daqui');
     assert.deepEqual(porId.mercadolivre.config, { etiquetas: [] });
     assert.equal(porId.mercadolivre.estado, 'falta_configurar', 'sem etiqueta e sem extensão');
-    for (const id of ['magalu', 'facebook']) {
-      assert.equal(porId[id].implementada, false); assert.equal(porId[id].estado, 'nao_implementada', id);
-      assert.deepEqual(porId[id].config, {});
-    }
+    assert.equal(porId.facebook.implementada, false); assert.equal(porId.facebook.estado, 'nao_implementada');
+    assert.deepEqual(porId.facebook.config, {});
     assert.equal(porId.catalogo.nome, 'Catálogo do Etiqueta');
     assert.equal(porId.catalogo.implementada, true);
     assert.deepEqual(porId.catalogo.campos.map((c) => [c.nome, c.tipo]), [['endereco', 'texto'], ['caminho_token', 'texto']]);
@@ -292,16 +294,56 @@ test('id desconhecido (inclusive constructor e __proto__) responde 404 no PUT e 
   });
 });
 
-test('testar: lojas não implementadas dizem isso (nunca sucesso falso)', async () => {
+test('testar: loja não implementada diz isso; a Magalu cai no teste genérico (nunca sucesso falso)', async () => {
   await comSessao(async ({ api }) => {
-    assert.equal((await api('/conexoes/magalu', { method: 'PUT', body: { campos: { loja: 'minhaloja' } } })).status, 200);
-    const magalu = await api('/conexoes/magalu/testar', { method: 'POST', body: {} });
-    assert.equal(magalu.status, 200);
-    assert.deepEqual(magalu.json, { ok: false, mensagem: 'Magalu ainda não está implementada. Os dados ficam salvos para quando a integração existir.' });
-    for (const id of ['magalu', 'facebook']) {
-      const r = await api(`/conexoes/${id}/testar`, { method: 'POST', body: {} });
-      assert.equal(r.json.ok, false, id); assert.match(r.json.mensagem, /não está implementada/, id);
+    const facebook = await api('/conexoes/facebook/testar', { method: 'POST', body: {} });
+    assert.equal(facebook.status, 200);
+    assert.deepEqual(facebook.json, { ok: false, mensagem: 'Facebook ainda não está implementada.' });
+    // Magalu (plano integracao-magalu, D7): não há como verificar a loja daqui; o painel mostra "Conferir minha loja"
+    for (const campos of [null, { loja: 'minhaloja' }]) {
+      if (campos) assert.equal((await api('/conexoes/magalu', { method: 'PUT', body: { campos } })).status, 200);
+      const magalu = await api('/conexoes/magalu/testar', { method: 'POST', body: {} });
+      assert.equal(magalu.status, 200);
+      assert.deepEqual(magalu.json, { ok: false, mensagem: 'O teste de Magalu ainda não está disponível.' });
+      assert.ok(!magalu.txt.includes('minhaloja'));
     }
+  });
+});
+
+test('Magalu (CA1): nome válido salvo dá pronta; vazio volta a falta_configurar; nome inválido é recusado sem eco e sem gravar', async () => {
+  await comSessao(async ({ api, dir, db }) => {
+    const estado = async () => (await api('/conexoes')).json.find((p) => p.id === 'magalu');
+    assert.equal((await estado()).estado, 'falta_configurar');
+
+    const put = await api('/conexoes/magalu', { method: 'PUT', body: { campos: { loja: '  magazine_Minha-Loja1 ' } } });
+    assert.equal(put.status, 200, put.txt);
+    assert.equal(put.json.estado, 'pronta');
+    assert.deepEqual(put.json.config, { loja: 'magazine_Minha-Loja1' }, 'guardado sem os espaços');
+    assert.equal((await estado()).estado, 'pronta');
+    assert.deepEqual(linhaCrua(dir, 'magalu').config, { loja: 'magazine_Minha-Loja1' });
+
+    const ERRO = 'Escreva só o nome da loja (o trecho depois de magazinevoce.com.br/), com letras, números, hífen ou _.';
+    const ruins = ['https://www.magazinevoce.com.br/outraloja', 'magazinevoce.com.br/outraloja', 'outra loja', 'lojá-ção', 'x',
+      'loja/../x', '<script>alert(1)</script>', 'loja?x=1'];
+    for (const loja of ruins) {
+      const r = await api('/conexoes/magalu', { method: 'PUT', body: { campos: { loja } } });
+      assert.equal(r.status, 400, loja);
+      assert.equal(r.json.erro, ERRO, loja);
+      assert.deepEqual(r.json.erros, [{ campo: 'loja', msg: ERRO }]);
+      assert.ok(!r.txt.includes(loja), `sem eco: ${loja}`);
+    }
+    const longo = await api('/conexoes/magalu', { method: 'PUT', body: { campos: { loja: 'a'.repeat(61) } } });
+    assert.equal(longo.status, 400);
+    assert.equal(longo.json.erro, 'Nome da sua loja: até 60 caracteres.');
+    assert.deepEqual(linhaCrua(dir, 'magalu').config, { loja: 'magazine_Minha-Loja1' }, 'recusa não grava nada');
+    assert.equal((await estado()).estado, 'pronta');
+
+    const apaga = await api('/conexoes/magalu', { method: 'PUT', body: { campos: { loja: '' } } });
+    assert.equal(apaga.status, 200);
+    assert.equal(apaga.json.estado, 'falta_configurar');
+    assert.deepEqual(apaga.json.config, {});
+    const log = JSON.stringify(db.prepare('SELECT * FROM log').all());
+    for (const loja of ruins) assert.ok(!log.includes(loja), 'valor recusado fora do log');
   });
 });
 

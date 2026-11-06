@@ -14,6 +14,7 @@ import { montarRotas as rotasAvisos, lerConfig as configAvisos, viradaMin, limit
 import { montarRotas as rotasConexoes, segredosDe } from './conexoes.js';
 import { createAmazon } from './amazon.js';
 import { createShopee } from './shopee.js';
+import { createMagalu } from './magalu.js';
 import { montarRotas as rotasEspelho } from './espelho.js';
 import { montarRotas as rotasRemetentes } from './remetentes.js';
 import { montarRotas as rotasRotinas, MAX_CONTEUDOS, MAX_HORARIOS_ROTINA } from './rotinas.js';
@@ -60,6 +61,7 @@ const CSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inl
 export function criarServicos({ db, wa, links, fast = FAST, dir = DATA_DIR, ml = mlPadrao, fetch } = {}) {
   const amazon = createAmazon({ db, fetch, lerConexao: () => segredosDe(db, 'amazon') });
   const shopee = createShopee({ db, fetch, lerConexao: () => segredosDe(db, 'shopee') });
+  const magalu = createMagalu({ fetch }); // só o resolvedor de link curto (sem conexão: a loja de parceiro é lida no envio)
   const catalogo = createCatalogo({ db, fetch, lerConexao: () => segredosDe(db, 'catalogo') });
   let scheduler = null;
   const envios = {
@@ -74,7 +76,7 @@ export function criarServicos({ db, wa, links, fast = FAST, dir = DATA_DIR, ml =
     scheduler?.tick().catch((e) => console.error('[agendador]', e?.name || 'erro'));
   };
   const catalogoItens = createCatalogoItens({ db, wa, links, amazon, envios, acordar });
-  scheduler = createScheduler({ db, wa, links, fast, dir, ml, amazon, shopee, catalogo, catalogoItens });
+  scheduler = createScheduler({ db, wa, links, fast, dir, ml, amazon, shopee, magalu, catalogo, catalogoItens });
   wa.onMensagem((m) => scheduler.espelho.receber(m));
   // Para desligar o envio pelo sócio na hora: desligue os remetentes no painel (ou apague esta linha e reinicie)
   wa.onPrivada((m) => scheduler.remetentes.receber(m));

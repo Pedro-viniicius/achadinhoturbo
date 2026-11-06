@@ -1,8 +1,8 @@
 // Envio pelo sócio (plano envio-pelo-socio, etapa 5; CA2 a CA10): o núcleo de src/remetentes.js.
 // createRemetentes direto, com a fila de envios real (createEnvios, modo rápido), o WhatsApp em dryRun (o que "sai"
-// fica em wa.simulated) e os links no modo `fake`. As 3 lojas: ML por um `ml` falso (página lida sem rede), Amazon e
-// Shopee de verdade com fetch falso injetado. O fetch global fica bloqueado no arquivo inteiro e o último teste prova
-// que ele nunca foi chamado. O relógio do módulo é injetado (limite por hora, repetição, expiração, respostas).
+// fica em wa.simulated) e os links no modo `fake`. As 4 lojas: ML por um `ml` falso (página lida sem rede), Amazon,
+// Shopee e Magalu (integracao-magalu, etapa 5: só o resolvedor de link curto) de verdade com fetch falso injetado. O
+// fetch global fica bloqueado no arquivo inteiro e o último teste prova que ele nunca foi chamado. O relógio do módulo é injetado (limite por hora, repetição, expiração, respostas).
 // O cadastro (etapa 6) ainda não existe: o remetente é gravado direto na tabela.
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -15,6 +15,7 @@ import { createLinkService } from '../src/links.js';
 import { createEnvios } from '../src/envios.js';
 import { createAmazon } from '../src/amazon.js';
 import { createShopee, URL_API as URL_API_SHOPEE } from '../src/shopee.js';
+import { createMagalu } from '../src/magalu.js';
 import { extractItemId } from '../src/ml.js';
 import { createRemetentes, RESPOSTAS } from '../src/remetentes.js';
 import * as rastreio from '../src/rastreio.js';
@@ -61,13 +62,20 @@ const URL_SHOPEE = `https://shopee.com.br/Fone-Bom-Sem-Fio-i.${SHOP}.${ITEM}`;
 const IMG_SHOPEE = 'https://down-br.img.susercontent.com/file/br-11134207-7r98o-abc123';
 const LINK_SHOPEE = 'https://s.shopee.com.br/ApiLink123';
 const CHAVE_SHOPEE = 'Senha-Api-SECRETA-q1w2e3';
+// Magalu: o sócio manda o link da loja de parceiro DELE; o que sai leva a do dono (salva em Conexões)
+const LOJA_DONO_MAGALU = 'lojadodono';
+const LOJA_SOCIO_MAGALU = 'lojadosocio';
+const URL_MAGALU_SOCIO = `https://www.magazinevoce.com.br/${LOJA_SOCIO_MAGALU}/fone-bom/p/ABC123DEF/audio/fones/?seller_id=magazineluiza&utm_source=rastreio-socio#topo`;
+const CANONICA_MAGALU = 'https://www.magazineluiza.com.br/fone-bom/p/abc123def/audio/fones/?seller_id=magazineluiza';
+const LINK_DONO_MAGALU = `https://www.magazinevoce.com.br/${LOJA_DONO_MAGALU}/fone-bom/p/abc123def/audio/fones/?seller_id=magazineluiza`;
+const CURTO_MAGALU = 'https://maga.lu/AbC123';
 
 const FRASES = {
   falhaEnvio: 'Não consegui enviar esse link para os grupos. O dono vai ver o motivo no painel.',
   montar: 'Não consegui montar esse link agora. O dono vai ver o motivo no painel.',
   semDados: 'Não consegui ler os dados desse produto. Mande o link junto com o nome e o preço.',
   linkInvalido: 'Não reconheci esse link. Mande o link da página do produto.',
-  semLinkDeLoja: 'Não encontrei um link do Mercado Livre, Amazon ou Shopee nessa mensagem.',
+  semLinkDeLoja: 'Não encontrei um link do Mercado Livre, Amazon, Shopee ou Magalu nessa mensagem.',
   limite: 'Muitos links em pouco tempo. Tente de novo daqui a pouco.',
 };
 
@@ -125,6 +133,21 @@ function fetchShopee() {
   return f;
 }
 
+/** fetch falso da Magalu: o link curto redireciona para a página do produto na loja do sócio. Guarda as URLs. */
+function fetchMagalu() {
+  const chamadas = [];
+  const f = async (url) => {
+    const u = String(url);
+    chamadas.push(u);
+    if (u === CURTO_MAGALU) {
+      return new Response(null, { status: 302, headers: { location: `https://www.magazinevoce.com.br/${LOJA_SOCIO_MAGALU}/fone-bom/p/abc123def/audio/fones/?seller_id=magazineluiza` } });
+    }
+    throw new Error('rede não prevista no teste');
+  };
+  f.chamadas = chamadas;
+  return f;
+}
+
 /**
  * ML falso: a página de cada link. estado.mlDestino: link → produto achado (o meli.la); estado.mlCampos: produto →
  * campos que trocam os padrões (price: null = a página não informa o preço); estado.mlEspera: promessa que segura a
@@ -144,7 +167,7 @@ function mlFalso(estado) {
   };
 }
 
-/** Banco com 2 grupos e 1 etiqueta, WhatsApp simulado, as 3 lojas, a fila de envios real e o módulo com relógio próprio. */
+/** Banco com 2 grupos e 1 etiqueta, WhatsApp simulado, as 4 lojas, a fila de envios real e o módulo com relógio próprio. */
 function montar({ modo = 'fake' } = {}) {
   const dir = tmp();
   const db = openDb(dir);
@@ -161,14 +184,21 @@ function montar({ modo = 'fake' } = {}) {
     .run(JSON.stringify({ id_afiliado: ID_AF, app_id: '123456789' }), JSON.stringify({ chave: CHAVE_SHOPEE }), Date.now());
   const fetchS = fetchShopee();
   const shopee = createShopee({ db, fetch: fetchS });
-  const envios = createEnvios({ db, wa, links, ml, fast: true, dir, amazon, shopee });
+  const fetchM = fetchMagalu();
+  const magalu = createMagalu({ fetch: fetchM });
+  const envios = createEnvios({ db, wa, links, ml, fast: true, dir, amazon, shopee, magalu });
   const relogio = { t: Date.now() };
   const acordou = { n: 0 };
   const criar = () => createRemetentes({ db, wa, envios, acordar: () => { acordou.n++; }, agora: () => relogio.t });
   const rem = criar();
   let seq = 0;
   const s = {
-    dir, db, wa, envios, estado, ml, fetchA, fetchS, conexaoAmazon, relogio, acordou, rem, criar,
+    dir, db, wa, envios, estado, ml, fetchA, fetchS, fetchM, conexaoAmazon, relogio, acordou, rem, criar,
+    /** Nome da loja de parceiro da Magalu em Conexões (sem ele, os links da Magalu não saem). */
+    salvarLojaMagalu(nome) {
+      db.prepare(`INSERT INTO conexoes (plataforma, config, segredos, updated_at) VALUES ('magalu', ?, '{}', ?)
+        ON CONFLICT(plataforma) DO UPDATE SET config = excluded.config, updated_at = excluded.updated_at`).run(JSON.stringify({ loja: nome }), Date.now());
+    },
     /** Remetente gravado direto (o cadastro é a etapa 6). → id */
     cadastrar(extra = {}) {
       const r = { nome: NOME, jid: PN, lid: null, enabled: 1, destino_jids: JSON.stringify([DEST1, DEST2, SUMIDO]), template_id: 1, tag_id: null,
@@ -549,11 +579,110 @@ test('CA6: template apagado, nenhum grupo que exista e link que não é produto:
   assert.deepEqual(statusDe(s.itens()[1]), ['erro', 'sem_template']);
   s.db.prepare('UPDATE remetentes SET template_id = 1').run();
   s.msg(URL_BUSCA_AMAZON);
-  s.msg('Olha https://www.magazineluiza.com.br/fone/p/abc123/ e https://exemplo.com/x');
+  s.msg('Olha https://www.facebook.com/marketplace/item/123 e https://exemplo.com/x'); // loja ainda não implementada e site qualquer
   await s.rodar();
   assert.deepEqual(s.itens().slice(2).map((i) => [...statusDe(i), i.url]), [['descartado', 'link_invalido', URL_BUSCA_AMAZON], ['descartado', 'sem_link_de_loja', '']]);
   assert.deepEqual(s.gravados(), []);
   assert.deepEqual(s.respostas(), [FRASES.montar, FRASES.montar, FRASES.linkInvalido, FRASES.semLinkDeLoja]);
+});
+
+// ------------------------------------------------------------------- Magalu (integracao-magalu, etapa 5; CA7 e CA9)
+
+test('Magalu (CA7): sem a loja de parceiro salva → erro/sem_loja_magalu antes da rede, com o motivo no Histórico, a resposta "montar" e a frase no cartão', async () => {
+  const s = montar();
+  s.cadastrar({ destino_jids: JSON.stringify([DEST1, DEST2]) }); // sem grupo sumido: o problema do cartão é só o da Magalu
+  assert.equal(s.msg(`Fone Bom Sem Fio\nPor R$ 79,90\n${URL_MAGALU_SOCIO}`), 1);
+  const recebido = s.itens()[0];
+  assert.deepEqual([recebido.status, recebido.loja, recebido.chave], ['recebido', 'magalu', 'MAGALU:abc123def']);
+  assert.equal(recebido.url, CANONICA_MAGALU, 'o endereço do produto, sem a loja do sócio, utm nem fragmento');
+  await s.rodar();
+  const it = s.itens()[0];
+  assert.deepEqual(statusDe(it), ['erro', 'sem_loja_magalu']);
+  assert.equal(it.motivo, 'falta o nome da loja de parceiro da Magalu');
+  assert.equal(it.complemento, null);
+  assert.deepEqual(s.gravados(), []);
+  assert.deepEqual(s.fetchM.chamadas, [], 'barrado antes da rede');
+  assert.deepEqual(s.respostas(), [FRASES.montar]);
+  assert.ok(s.logs().some((l) => l.level === 'erro' && l.message === 'Não saiu: falta o nome da loja de parceiro da Magalu'));
+  assert.ok(!tudoNoBanco(s.db).includes(LOJA_SOCIO_MAGALU), 'a loja do sócio não vai ao banco');
+  // o cartão (com a checagem de agora, pela fila de envios real): a frase da Magalu, que leva a Conexões
+  const problema = () => s.rem.listar(s.relogio.t).remetentes[0].problema;
+  assert.deepEqual(problema(), { nivel: 'aviso', texto: 'Os links da Magalu não saem: falta o nome da sua loja de parceiro. Cadastre em Conexões.', conexao: 'magalu' });
+  // o dono salvou a loja: o aviso some, mesmo sem um link novo
+  s.salvarLojaMagalu(LOJA_DONO_MAGALU);
+  assert.equal(problema(), null);
+});
+
+test('Magalu (CA7/CA9): com a loja salva, o link do sócio sai com a loja do dono; a do sócio nunca vai ao banco, ao payload, ao log, ao console nem aos grupos', async (t) => {
+  const espias = capturarConsole(t);
+  const s = montar();
+  s.salvarLojaMagalu(LOJA_DONO_MAGALU);
+  const id = s.cadastrar();
+  assert.equal(s.msg(`Fone Bom Sem Fio\nPor R$ 79,90\n${URL_MAGALU_SOCIO}`), 1);
+  await s.rodar();
+  const it = s.itens()[0];
+  assert.deepEqual([...statusDe(it), it.chave, it.fonte_dados], ['enviado', null, 'MAGALU:abc123def', 'texto']);
+  assert.deepEqual(JSON.parse(it.oferta), { title: 'Fone Bom Sem Fio', price: 79.9, oldPrice: null, discountPct: null, sold: null, freeShipping: false, coupon: null, image: null });
+  const [e] = s.gravados();
+  assert.deepEqual([e.payload.loja, e.payload.url, e.payload.codigo, e.status], ['magalu', CANONICA_MAGALU, 'abc123def', 'concluido']);
+  assert.deepEqual(e.payload.origem, { tipo: 'remetente', remetente_id: id, nome: NOME });
+  assert.deepEqual(e.group_jids, [DEST1, DEST2]);
+  const nosGrupos = s.nosGrupos();
+  assert.equal(nosGrupos.length, 2);
+  for (const m of nosGrupos) {
+    assert.equal(m.tipo, 'text', 'a Magalu não tem foto lida da loja');
+    assert.ok(m.text.includes(LINK_DONO_MAGALU), 'o link sai com a loja do dono');
+  }
+  assert.deepEqual(s.respostas(), ['Enviado para 2 grupos.']);
+  assert.ok(s.logs().some((l) => l.level === 'ok' && /com o texto do remetente/.test(l.message)));
+  assert.deepEqual(s.fetchM.chamadas, [], 'link de produto: sem rede');
+  // a loja do sócio (e o rastreio dele) não segue para lugar nenhum
+  const tudo = [tudoNoBanco(s.db), JSON.stringify(s.wa.simulated), textoDoConsole(espias)].join('\n');
+  for (const x of [LOJA_SOCIO_MAGALU, 'utm_source', 'rastreio-socio', '#topo']) assert.ok(!tudo.includes(x), `vazou ${x}`);
+  assert.doesNotMatch(textoDoConsole(espias), /magazine|maga\.lu|https?:/i, 'o console nunca leva link');
+});
+
+test('Magalu (CA7): com a loja salva e o texto sem preço ou sem título → descartado/sem_dados; o link curto sai sem query, com a loja do dono, e repete pela chave do produto', async () => {
+  const s = montar();
+  s.salvarLojaMagalu(LOJA_DONO_MAGALU);
+  s.cadastrar();
+  s.msg(`Fone Bom Sem Fio ${URL_MAGALU_SOCIO}`); // sem preço
+  s.msg(`Por R$ 79,90 ${URL_MAGALU_SOCIO}`); // sem título
+  s.msg(URL_MAGALU_SOCIO); // sem nada
+  await s.rodar();
+  assert.deepEqual(s.itens().map(statusDe), [['descartado', 'sem_dados'], ['descartado', 'sem_dados'], ['descartado', 'sem_dados']]);
+  assert.deepEqual(s.gravados(), []);
+  assert.deepEqual(s.respostas(), [FRASES.semDados, FRASES.semDados, FRASES.semDados]);
+
+  // o link curto: guardado sem query nem fragmento, sem chave antes da rede; o resolvedor recebe só ele
+  assert.equal(s.msg(`Fone Bom Sem Fio\nPor R$ 79,90\n${CURTO_MAGALU}?af_xp=social&pid=${LOJA_SOCIO_MAGALU}#x`), 1);
+  assert.deepEqual([s.itens()[3].url, s.itens()[3].loja, s.itens()[3].chave], [CURTO_MAGALU, 'magalu', null]);
+  await s.rodar();
+  assert.deepEqual([...statusDe(s.itens()[3]), s.itens()[3].chave], ['enviado', null, 'MAGALU:abc123def']);
+  assert.deepEqual(s.fetchM.chamadas, [CURTO_MAGALU]);
+  assert.ok(s.nosGrupos().every((m) => m.text.includes(LINK_DONO_MAGALU)));
+  assert.ok(!tudoNoBanco(s.db).includes(LOJA_SOCIO_MAGALU));
+  // o mesmo produto pelo link longo, dentro de "horas sem repetir": repetida pela chave rápida, sem rede
+  s.msg(`Fone Bom Sem Fio\nPor R$ 79,90\n${URL_MAGALU_SOCIO}`);
+  await s.rodar();
+  assert.deepEqual(statusDe(s.itens()[4]), ['duplicado', 'repetida']);
+  assert.equal(s.gravados().length, 1);
+  // os encurtadores da Magalu também ficam sem query no onelink
+  s.msg('https://magazineluiza.onelink.me/AbCd/xyz123?pid=socio&c=campanha');
+  assert.equal(s.itens()[5].url, 'https://magazineluiza.onelink.me/AbCd/xyz123');
+  // magalu.com e subdomínios também (Q1/S1/R3: a query pode trazer a loja do sócio)
+  s.msg(`https://magalu.com/AbC123?pid=${LOJA_SOCIO_MAGALU}#x`);
+  s.msg(`https://divulgador.magalu.com/XyZ789?pid=${LOJA_SOCIO_MAGALU}`);
+  assert.deepEqual(s.itens().slice(6).map((i) => [i.url, i.loja, i.chave]),
+    [['https://magalu.com/AbC123', 'magalu', null], ['https://divulgador.magalu.com/XyZ789', 'magalu', null]]);
+  // a página da Magalu que não é de produto (busca, vitrine da loja do sócio): descartada na chegada, sem endereço
+  const antes = s.fetchM.chamadas.length;
+  s.msg(`Olha https://www.magazinevoce.com.br/${LOJA_SOCIO_MAGALU}/busca/fone/?utm_source=x`);
+  s.msg('https://loja.magazineluiza.com.br/busca/fone/');
+  assert.deepEqual(s.itens().slice(8).map((i) => [i.url, i.loja, i.chave, i.status, i.codigo]),
+    [['', 'magalu', null, 'descartado', 'link_invalido'], ['', 'magalu', null, 'descartado', 'link_invalido']]);
+  assert.equal(s.fetchM.chamadas.length, antes, 'sem rede');
+  assert.ok(!tudoNoBanco(s.db).includes(LOJA_SOCIO_MAGALU));
 });
 
 // ------------------------------------------------------------------------------------------------ CA7
