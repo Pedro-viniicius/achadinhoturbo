@@ -473,7 +473,7 @@ function formRegra(r) {
   api('/catalogo/categorias').then((x) => (Array.isArray(x?.categorias) ? x.categorias : [])).catch(() => []).then((lista) => {
     FCAT.lista = lista;
     if (!dlg.open || $('#f', dlg) !== form) return; // o dono já fechou ou abriu outro formulário
-    $$('.fonte', dlg).forEach((el) => { fcatPintarCats(el); fcatAtualizar(el); });
+    comInicial(() => $$('.fonte', dlg).forEach((el) => { fcatPintarCats(el); fcatAtualizar(el); }));
   });
   const reler = $('#fc-reler', dlg);
   if (reler) reler.onclick = async () => {
@@ -488,7 +488,25 @@ function formRegra(r) {
   const ritmo = gradeLigar(dlg, { regra: r, nGrupos: () => grupos.marcados(dlg).length,
     lerIntervalo: () => Object.fromEntries(['per_run', 'interval_min', 'window_start', 'window_end'].map((n) => [n, $(`[name=${n}]`, dlg).value])) });
   grupos.ligar(dlg, { contador: $('#cont', dlg), aoMudar: () => ritmo.atualizar(), aoBloco: (b) => { if (b.tag_id) $('select[name=tag_id]', dlg).value = b.tag_id; } });
-  $('#cancelar').onclick = () => dlg.close();
+  // U4: Cancelar e Esc com alterações não salvas perguntam antes de descartar; sem alteração, fecham direto. O estado
+  // inicial é o do formulário já montado (campos com nome, grupos, fontes e o bloco de horários com o modo).
+  const assinatura = () => JSON.stringify([
+    $$('input[name], select[name], textarea[name]', form).map((el) => [el.name, el.type === 'radio' || el.type === 'checkbox' ? el.checked : el.value]),
+    grupos.marcados(dlg), (lerFontes(), fontes), ritmo.modo(), ritmo.corpo()]);
+  let inicial = assinatura();
+  /** As categorias do catálogo chegam depois e repintam campos: se o dono ainda não mexeu em nada, o novo estado vira o inicial. */
+  const comInicial = (repintar) => { const limpo = assinatura() === inicial; repintar(); if (limpo) inicial = assinatura(); };
+  const podeDescartar = () => assinatura() === inicial || confirm('Descartar as alterações?');
+  $('#cancelar').onclick = () => { if (podeDescartar()) dlg.close(); };
+  const aoCancelar = (ev) => { if ($('#f', dlg) === form && !podeDescartar()) ev.preventDefault(); }; // Esc: o evento `cancel` do <dialog>
+  // O Chrome só deixa cancelar o `cancel` uma vez por ação do usuário: o 2º Esc seguido fecharia sem perguntar. Com
+  // alteração, o Esc é tratado aqui (keydown) e o <dialog> só fecha se o dono aceitar.
+  const aoTecla = (ev) => {
+    if (ev.key !== 'Escape' || ev.isComposing || $('#f', dlg) !== form || assinatura() === inicial) return;
+    ev.preventDefault(); if (podeDescartar()) dlg.close();
+  };
+  const aoFechar = () => { for (const [t, f] of [['cancel', aoCancelar], ['keydown', aoTecla], ['close', aoFechar]]) dlg.removeEventListener(t, f); };
+  dlg.addEventListener('cancel', aoCancelar); dlg.addEventListener('keydown', aoTecla); dlg.addEventListener('close', aoFechar);
   $('#f').onsubmit = tentar(async (ev) => {
     ev.preventDefault(); const f = new FormData($('#f'));
     const g = (k) => f.get(k);

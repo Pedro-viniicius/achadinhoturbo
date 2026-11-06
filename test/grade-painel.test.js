@@ -553,39 +553,89 @@ test('CA2: regra com grade abre com os dias e as linhas salvos; a lista de horá
 // Linhas: Copiar, Remover, Adicionar, Limpar tudo e reordenar ao sair do campo
 // =====================================================================================================================
 
-test('linhas: Copiar (30 min depois ou o próximo livre), Remover (foco na anterior), + Adicionar (1 h depois da última) e Limpar tudo', async () => {
+/** O foco vai para fora da lista (o `focusin` que o navegador dispara): é quando a ordem pendente vale. */
+const foraDaLista = async (t, sel = '#gh-add') => { await disparar(typeof sel === 'string' ? t.$(sel) : sel, 'focusin'); await assentar(); };
+
+test('linhas: Copiar entra logo abaixo da original, Remover leva o foco à anterior, + Adicionar entra no fim; a ordem só vale ao sair da lista', async () => {
   const t = tela({ rules: [regra({ grade: { dias: [0, 1, 2, 3, 4, 5, 6], horarios: [linha('08:00', 2, 2), linha('08:30', 5)] } })] });
   await t.abrir();
-  // Copiar 08:00: 08:30 já existe, o próximo livre com 10 min de folga é 08:40; mesmos valores e foco no horário novo
-  const copiar = t.$$('#gh-lista > li')[0].querySelector('[data-gh="copiar"]');
+  const [nOriginal, nSeguinte] = t.$$('#gh-lista > li');
+  // Copiar 08:00: 08:30 já existe, o próximo livre com 10 min de folga é 08:40; mesmos valores, logo ABAIXO da original e
+  // com o foco no horário novo; as outras linhas não se movem nem são recriadas
+  const copiar = nOriginal.querySelector('[data-gh="copiar"]');
   assert.equal(copiar.getAttribute('aria-label'), 'Copiar horário 08:00');
   await t.clicar(copiar);
-  assert.deepEqual(t.linhas(), [{ hora: '08:00', qtd: '2', template_id: '2' }, { hora: '08:30', qtd: '5', template_id: '' }, { hora: '08:40', qtd: '2', template_id: '2' }]);
-  assert.equal(t.doc.activeElement, t.$$('#gh-lista > li')[2].querySelector('.gh-h'));
-  // + Adicionar: 1 h depois da última, copiando ofertas e template dela
+  assert.deepEqual(t.linhas(), [{ hora: '08:00', qtd: '2', template_id: '2' }, { hora: '08:40', qtd: '2', template_id: '2' }, { hora: '08:30', qtd: '5', template_id: '' }]);
+  assert.equal(t.doc.activeElement, t.$$('#gh-lista > li')[1].querySelector('.gh-h'));
+  assert.deepEqual([t.$$('#gh-lista > li')[0], t.$$('#gh-lista > li')[2]], [nOriginal, nSeguinte], 'as outras linhas são as mesmas');
+  // levar o foco para fora da lista ordena (movendo os nós) e avisa em texto visível
+  await foraDaLista(t);
+  assert.deepEqual(t.horas(), ['08:00', '08:30', '08:40']);
+  assert.equal(t.texto('#gh-mov'), 'Horário 08:40 movido para a posição 3.');
+  assert.equal(t.$$('#gh-lista > li')[1], nSeguinte);
+  // + Adicionar: 1 h depois da última, copiando ofertas e template dela; entra no fim, com foco e aviso
   await t.clicar('#gh-add');
   assert.deepEqual(t.linhas().at(-1), { hora: '09:40', qtd: '2', template_id: '2' });
   assert.equal(t.doc.activeElement, t.$$('#gh-lista > li').at(-1).querySelector('.gh-h'));
   assert.equal(t.texto('#gh-cont'), '(4 de 48 horários)');
-  // Remover 08:30: foco no horário da linha anterior
+  assert.equal(t.texto('#gh-mov'), 'Horário 09:40 adicionado na posição 4.');
+  // Remover 08:30: foco no horário da linha anterior e o aviso com "Desfazer"
   await t.clicar(t.$$('#gh-lista > li')[1].querySelector('[data-gh="remover"]'));
   assert.deepEqual(t.horas(), ['08:00', '08:40', '09:40']);
   assert.equal(t.doc.activeElement, t.$$('#gh-lista > li')[0].querySelector('.gh-h'));
-  // Limpar tudo pede confirmação; cancelada, nada muda
-  t.confirmar = () => false;
+  assert.equal(t.texto('.gh-desf-txt'), 'Horário 08:30 removido.');
+  assert.equal(t.$('#gh-desfazer').hidden, false);
+  // Desfazer devolve o mesmo nó, na mesma posição, com os valores
+  await t.clicar('#gh-desfazer');
+  assert.deepEqual(t.horas(), ['08:00', '08:30', '08:40', '09:40']);
+  assert.equal(t.$$('#gh-lista > li')[1], nSeguinte);
+  assert.equal(t.$$('#gh-lista > li')[1].querySelector('.gh-q').value, '5');
+  assert.equal(t.$('#gh-desfazer').hidden, true);
+  assert.equal(t.texto('.gh-desf-txt'), 'Horário 08:30 de volta.');
+  // Limpar tudo não pede confirmação (nada é gravado antes do Salvar) e também tem Desfazer
+  const todas = t.$$('#gh-lista > li');
   await t.clicar('#gh-limpar');
-  assert.equal(t.horas().length, 3);
-  t.confirmar = () => true;
-  await t.clicar('#gh-limpar');
+  assert.deepEqual(t.confirmacoes, [], 'sem confirm');
   assert.deepEqual(t.horas(), []);
   assert.equal(t.$('#gh-vazio').hidden, false);
   assert.equal(t.doc.activeElement, t.$('#gh-add'), 'sem linhas, o foco vai para "+ Adicionar horário"');
-  // + Adicionar numa grade vazia começa às 08:00 com as ofertas do intervalo
+  assert.equal(t.texto('.gh-desf-txt'), '4 horários removidos.');
+  await t.clicar('#gh-desfazer');
+  assert.deepEqual(t.$$('#gh-lista > li'), todas, 'os mesmos nós, na mesma ordem');
+  assert.equal(t.texto('.gh-desf-txt'), '4 horários de volta.');
+  await t.clicar('#gh-limpar');
+  // + Adicionar numa grade vazia começa às 08:00 com as ofertas do intervalo (e tira o Desfazer)
   await t.clicar('#gh-add');
   assert.deepEqual(t.linhas(), [{ hora: '08:00', qtd: '3', template_id: '' }]);
+  assert.equal(t.texto('.gh-desf-txt'), '');
+  assert.equal(t.$('#gh-desfazer').hidden, true);
 });
 
-test('linhas: mudar o horário não reordena enquanto digita; ao sair do campo a linha vai para o lugar certo e o status avisa', async () => {
+test('linhas: o Desfazer some ao alterar a lista; Remover ignora o 2º clique do clique duplo e vale pelo teclado', async () => {
+  const t = tela({ rules: [regra({ grade: { dias: [1], horarios: [linha('08:00'), linha('09:00'), linha('10:00'), linha('11:00')] } })] });
+  await t.abrir();
+  const remover = (i) => t.$$('#gh-lista > li')[i].querySelector('[data-gh="remover"]');
+  await disparar(remover(1), 'click', { detail: 1 }); await assentar();
+  await disparar(remover(1), 'click', { detail: 2 }); await assentar(); // o 2º clique do duplo cairia na linha que subiu
+  assert.deepEqual(t.horas(), ['08:00', '10:00', '11:00']);
+  await disparar(remover(1), 'click', { detail: 0 }); await assentar(); // teclado
+  assert.deepEqual(t.horas(), ['08:00', '11:00']);
+  // editar uma linha tira o Desfazer; o botão escondido não faz nada
+  assert.equal(t.$('#gh-desfazer').hidden, false);
+  await t.mudar(t.$$('#gh-lista > li')[0].querySelector('.gh-q'), '4');
+  assert.equal(t.$('#gh-desfazer').hidden, true);
+  assert.equal(t.texto('.gh-desf-txt'), '');
+  await disparar(t.$('#gh-desfazer'), 'click'); await assentar();
+  assert.deepEqual(t.horas(), ['08:00', '11:00'], 'nada a desfazer');
+  // outro Remover, e a mensagem não é reescrita (o leitor de tela não anuncia duas vezes) ao ir e vir fora da lista
+  await t.clicar(remover(0));
+  const el = t.$('.gh-desf-txt'); const antes = el.childNodes[0];
+  await foraDaLista(t, '[name=name]'); await foraDaLista(t);
+  assert.equal(el.childNodes[0], antes, 'o texto do aviso não foi reescrito');
+  assert.equal(t.$('#gh-desfazer').hidden, false);
+});
+
+test('linhas: mudar o horário não reordena enquanto digita nem ao sair do campo; só ao levar o foco para FORA da lista (aviso e destaque visíveis)', async () => {
   const t = tela({ rules: [regra({ grade: { dias: [0, 1, 2, 3, 4, 5, 6], horarios: [linha('08:00', 1), linha('12:00', 2), linha('18:00', 3)] } })] });
   await t.abrir();
   const h = t.$$('#gh-lista > li')[0].querySelector('.gh-h');
@@ -593,13 +643,65 @@ test('linhas: mudar o horário não reordena enquanto digita; ao sair do campo a
   await t.mudar(h, '20:00');
   assert.deepEqual(t.horas(), ['20:00', '12:00', '18:00'], 'change sozinho não move a linha');
   const qtdDaMesma = t.$$('#gh-lista > li')[0].querySelector('.gh-q');
+  // o focusout do horário (que acontece no mousedown do próximo clique) já não move nada: era o bug Q1
   await disparar(h, 'focusout', { relatedTarget: qtdDaMesma }); await assentar();
+  assert.deepEqual(t.horas(), ['20:00', '12:00', '18:00']);
+  // foco dentro da lista (outro campo, outro botão): continua pendente
+  await foraDaLista(t, t.$$('#gh-lista > li')[1].querySelector('.gh-t')); await foraDaLista(t, t.$$('#gh-lista > li')[2].querySelector('[data-gh="copiar"]'));
+  assert.deepEqual(t.horas(), ['20:00', '12:00', '18:00']);
+  assert.equal(t.texto('#gh-mov'), '');
+  // fora da lista: a linha é movida (não recriada), com aviso e destaque
+  await foraDaLista(t, '[name=name]');
   assert.deepEqual(t.linhas().map((l) => [l.hora, l.qtd]), [['12:00', '2'], ['18:00', '3'], ['20:00', '1']]);
-  assert.equal(t.texto('#gh-mov'), 'Horário movido para a posição 3.');
+  assert.equal(t.texto('#gh-mov'), 'Horário 20:00 movido para a posição 3.');
+  assert.equal(t.$('#gh-mov').getAttribute('role'), 'status');
   assert.deepEqual(t.$$('#gh-lista > li').map((li) => li.getAttribute('aria-label')), ['Horário 1', 'Horário 2', 'Horário 3']);
   assert.equal(t.$$('#gh-lista > li')[2].querySelector('[data-gh="copiar"]').getAttribute('aria-label'), 'Copiar horário 20:00');
   assert.equal(t.$$('#gh-lista > li')[2].querySelector('.gh-h'), h, 'a linha é movida, não recriada (o que foi digitado continua)');
+  assert.ok(t.$$('#gh-lista > li')[2].classList.contains('gh-movida'));
+  assert.equal(t.$$('#gh-lista > li').filter((li) => li.classList.contains('gh-movida')).length, 1);
   assert.equal(t.texto('#gh-resumo'), '3 horários por dia, das 12:00 às 20:00. 6 ofertas por dia em 1 grupo (6 mensagens).');
+  // a próxima ação (mousedown ou tecla) tira o destaque e o aviso
+  await disparar(t.$('#f'), 'mousedown'); await assentar();
+  assert.equal(t.texto('#gh-mov'), '');
+  assert.ok(!t.$$('#gh-lista > li')[2].classList.contains('gh-movida'));
+});
+
+test('linhas: sem hora válida ("15:--" lê como vazio) a linha fica onde está ao ordenar e nada é recriado por Copiar, Remover e Adicionar', async () => {
+  const t = tela({ rules: [regra({ grade: { dias: [1], horarios: [linha('08:00'), linha('09:00'), linha('12:00'), linha('14:00')] } })] });
+  await t.abrir();
+  const meio = t.$$('#gh-lista > li')[1]; const h = meio.querySelector('.gh-h');
+  h.value = ''; await disparar(h, 'input'); await assentar(); // 15:-- no navegador
+  await t.clicar(t.$$('#gh-lista > li')[2].querySelector('[data-gh="copiar"]'));
+  await t.clicar(t.$$('#gh-lista > li')[0].querySelector('[data-gh="remover"]'));
+  await t.clicar('#gh-add');
+  assert.ok(t.$$('#gh-lista > li').includes(meio), 'a linha da hora pela metade continua na lista, sem ter sido recriada');
+  assert.equal(h.value, '');
+  // ordena as outras e deixa a sem hora no mesmo lugar
+  const antes = t.$$('#gh-lista > li').indexOf(meio);
+  await foraDaLista(t, '[name=name]');
+  assert.equal(t.$$('#gh-lista > li').indexOf(meio), antes, 'não vai para o fim');
+});
+
+test('linhas: Enter no horário, nas ofertas e no gerador não envia o formulário; no horário aplica a ordem e mantém o foco', async () => {
+  const t = tela({ rules: [regra({ grade: { dias: [0, 1, 2, 3, 4, 5, 6], horarios: [linha('08:00', 1), linha('12:00', 2), linha('18:00', 3)] } })] });
+  await t.abrir();
+  const h = t.$$('#gh-lista > li')[0].querySelector('.gh-h');
+  h.focus(); await t.mudar(h, '20:00');
+  let ev = await disparar(h, 'keydown', { key: 'Enter' }); await assentar();
+  assert.equal(ev.defaultPrevented, true, 'o Enter não envia o formulário');
+  assert.deepEqual(t.horas(), ['12:00', '18:00', '20:00'], 'a ordem pendente vale no Enter');
+  assert.equal(t.doc.activeElement, h, 'o foco continua no campo');
+  assert.equal(t.texto('#gh-mov'), 'Horário 20:00 movido para a posição 3.');
+  for (const el of [t.$$('#gh-lista > li')[0].querySelector('.gh-q'), t.$('#gh-ger-de'), t.$('#gh-ger-ate'), t.$('#gh-ger-qtd')]) {
+    ev = await disparar(el, 'keydown', { key: 'Enter' });
+    assert.equal(ev.defaultPrevented, true, el.className || el.id);
+  }
+  ev = await disparar(t.$('[name=name]'), 'keydown', { key: 'Enter' });
+  assert.equal(ev.defaultPrevented, false, 'nos outros campos o Enter segue como sempre');
+  ev = await disparar(h, 'keydown', { key: 'a' });
+  assert.equal(ev.defaultPrevented, false);
+  assert.deepEqual(t.salvos(), [], 'nada foi gravado');
 });
 
 // =====================================================================================================================
@@ -763,6 +865,8 @@ test('R4/S2: na virada do dia, a última linha contra a primeira também precisa
   const t2 = tela({ rules: [regra({ grade: { dias: [1], horarios: [linha('00:00'), linha('22:55')] } })] });
   await t2.abrir();
   await t2.clicar('#gh-add');
+  assert.deepEqual(t2.horas(), ['00:00', '22:55', '00:15'], 'a linha nova entra no fim; a ordem vale ao sair da lista');
+  await disparar(t2.$('[name=name]'), 'focusin'); await assentar();
   assert.deepEqual(t2.horas(), ['00:00', '00:15', '22:55']);
   await t2.enviar();
   assert.deepEqual(t2.erros(), []);
@@ -934,4 +1038,61 @@ test('CA9: cartão de regra sem grade fica como hoje (sem chip "Grade", resumo d
   assert.ok(html.includes(`<p class="res">3 ofertas a cada 60 min, das 08:00 às 22:00, para 2 grupos.
       Fonte: 1 links na lista. Template: Padrão.</p>`), html);
   assert.ok(html.includes('<div class="prox">Começa no próximo ciclo (até 15 s)</div>'), html);
+});
+
+// =====================================================================================================================
+// U4: Cancelar e Esc descartam alterações só depois de perguntar
+// =====================================================================================================================
+
+test('U4: Cancelar e Esc (o evento `cancel` do <dialog>, e o keydown) sem alteração fecham direto; com alteração perguntam "Descartar as alterações?"', async () => {
+  const t = tela({ rules: [regra({ grade: { dias: [1], horarios: [linha('08:00'), linha('12:00')] } })] });
+  await t.abrir();
+  // sem alteração: fecha direto
+  await t.clicar('#cancelar');
+  assert.equal(t.dlg.open, false); assert.deepEqual(t.confirmacoes, []);
+  await t.abrir(); t.dlg.open = true;
+  let ev = await disparar(t.dlg, 'cancel'); assert.equal(ev.defaultPrevented, false, 'cancel sem alteração segue');
+  assert.deepEqual(t.confirmacoes, []);
+  // com alteração (uma linha da grade): recusar mantém aberto e os dados, aceitar fecha
+  await t.mudar(t.$$('#gh-lista > li')[0].querySelector('.gh-q'), '9');
+  t.confirmar = () => false;
+  await t.clicar('#cancelar');
+  assert.deepEqual(t.confirmacoes, ['Descartar as alterações?']);
+  assert.equal(t.dlg.open, true); assert.equal(t.$$('#gh-lista > li')[0].querySelector('.gh-q').value, '9');
+  ev = await disparar(t.dlg, 'cancel'); assert.equal(ev.defaultPrevented, true, 'Esc recusado: o <dialog> não fecha');
+  ev = await disparar(t.dlg, 'keydown', { key: 'Escape' }); assert.equal(ev.defaultPrevented, true, 'o keydown do Esc também pergunta (o 2º Esc seguido não fecha sozinho)');
+  assert.equal(t.confirmacoes.length, 3); assert.equal(t.dlg.open, true);
+  t.confirmar = () => true;
+  ev = await disparar(t.dlg, 'cancel'); assert.equal(ev.defaultPrevented, false, 'aceitar deixa o <dialog> fechar');
+  await t.clicar('#cancelar'); assert.equal(t.dlg.open, false);
+  assert.deepEqual(t.salvos(), [], 'nada foi gravado');
+});
+
+test('U4: o estado inicial considera o modo e o bloco de horários; voltar ao original não é alteração; Salvar não pergunta; o ouvinte sai ao fechar', async () => {
+  const t = tela({ rules: [regra({ grade: { dias: [1], horarios: [linha('08:00'), linha('12:00')] } }), regra({ id: 6, grade: null })] });
+  t.confirmar = () => false;
+  await t.abrir();
+  await t.modo('intervalo');
+  await t.clicar('#cancelar'); assert.equal(t.dlg.open, true, 'trocar o modo é alteração'); assert.equal(t.confirmacoes.length, 1);
+  await t.modo('grade');
+  await t.clicar('#cancelar'); assert.equal(t.dlg.open, false, 'modo de volta ao original: fecha direto'); assert.equal(t.confirmacoes.length, 1);
+  // regra sem grade: trocar para a grade monta as linhas (alteração); voltar ao intervalo desfaz
+  await t.abrir(1);
+  await t.modo('grade');
+  await t.clicar('#cancelar'); assert.equal(t.dlg.open, true); assert.equal(t.confirmacoes.length, 2);
+  await t.modo('intervalo');
+  await t.clicar('#cancelar'); assert.equal(t.dlg.open, false, 'voltou ao intervalo original'); assert.equal(t.confirmacoes.length, 2);
+  // campo comum (nome) também conta
+  await t.abrir(1);
+  t.$('[name=name]').value = 'Outro nome';
+  await t.clicar('#cancelar'); assert.equal(t.dlg.open, true); assert.equal(t.confirmacoes.length, 3);
+  // Salvar não pergunta
+  await t.enviar();
+  assert.equal(t.confirmacoes.length, 3, 'Salvar não pergunta');
+  assert.equal(t.salvos().length, 1); assert.equal(t.dlg.open, false);
+  // depois de fechado, o ouvinte do formulário saiu: outro conteúdo no mesmo <dialog> fecha com Esc sem perguntar
+  await disparar(t.dlg, 'close');
+  t.dlg.open = true;
+  const ev = await disparar(t.dlg, 'cancel');
+  assert.equal(ev.defaultPrevented, false); assert.equal(t.confirmacoes.length, 3);
 });

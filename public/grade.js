@@ -16,10 +16,13 @@ const TEXTOS_GRADE = {
   padrao: (nome) => `Padrão do disparo (${nome})`, apagado: '(template apagado)',
   linha: (n) => `Horário ${n}`, copiar: 'Copiar', remover: 'Remover',
   copiarRot: (h) => `Copiar horário ${h}`, removerRot: (h) => `Remover horário ${h}`, semHora: 'sem hora',
-  adicionar: '+ Adicionar horário', limpar: 'Limpar tudo', limparConfirma: 'Apagar todos os horários desta grade?',
+  adicionar: '+ Adicionar horário', limpar: 'Limpar tudo', desfazer: 'Desfazer',
   contador: (n, max) => `(${n} de ${max} horários)`,
   vazio: 'Nenhum horário ainda. Comece por um modelo ou adicione um horário.',
-  movido: (n) => `Horário movido para a posição ${n}.`,
+  // avisos visíveis da lista (os dois são role=status): onde a linha foi parar e o que foi tirado (com Desfazer)
+  movido: (h, n) => `Horário ${h} movido para a posição ${n}.`, adicionado: (h, n) => `Horário ${h} adicionado na posição ${n}.`,
+  removido: (h) => `Horário ${h} removido.`, removidos: (n) => `${n === 1 ? '1 horário removido' : `${n} horários removidos`}.`,
+  devolvido: (h) => `Horário ${h} de volta.`, devolvidos: (n) => (n === 1 ? '1 horário de volta.' : `${n} horários de volta.`),
   pausas: 'As pausas entre mensagens são as de',
   confirmaTroca: (n) => `Isso troca os horários atuais por ${n} novos. Continuar?`,
   geradorMax: (n, max) => `Isso daria ${n} horários, e o máximo é ${max}. Aumente o intervalo ou encurte o período.`,
@@ -270,12 +273,13 @@ function gradeHtml(r) {
           <label class="campo">${T.ofertasEm}<input type="number" id="gh-ger-qtd" min="1" max="${gradeLimites().max_qtd}" step="1" inputmode="numeric" value="${qtd}"></label>
           <label class="campo gh-tpl">${T.template}<select id="gh-ger-tpl">${gradeOpcoesTemplate(null, padraoNome)}</select></label></div>
         <div class="linha"><button type="button" data-gh="substituir">${T.substituir}</button><button type="button" data-gh="acrescentar">${T.acrescentar}</button><small id="gh-ger-st" class="dica" role="status"></small></div></div></div>
-    <div class="gh-bloco"><span id="gh-lista-h" class="gh-tit">${T.horarios} ${REQ} ${q('regras.grade_horarios')}</span>
+    <div class="gh-bloco"><div class="gh-tit-linha"><span id="gh-lista-h" class="gh-tit">${T.horarios} ${REQ} ${q('regras.grade_horarios')}</span><span class="dica" id="gh-cont" aria-live="polite"></span></div>
+      <div class="gh-barra">
+        <div class="linha"><button type="button" id="gh-add">${T.adicionar}</button><button type="button" class="leve" id="gh-limpar">${T.limpar}</button></div>
+        <div class="gh-estado"><span class="gh-desf" id="gh-desf" role="status"><span class="gh-desf-txt"></span><button type="button" class="leve" id="gh-desfazer" hidden>${T.desfazer}</button></span><span class="gh-mov" id="gh-mov" role="status"></span></div></div>
       <div class="gh-cab" aria-hidden="true"><span>${T.horario}</span><span>${T.ofertas}</span><span>${T.template}</span><span></span></div>
       <ol class="gh-lista" id="gh-lista" aria-labelledby="gh-lista-h"></ol>
-      <div class="vazio gh-vazio" id="gh-vazio" hidden>${T.vazio}</div>
-      <div class="linha"><button type="button" id="gh-add">${T.adicionar}</button><button type="button" class="leve" id="gh-limpar">${T.limpar}</button><span class="dica" id="gh-cont" aria-live="polite"></span></div>
-      <span class="sr-only" id="gh-mov" role="status"></span></div>
+      <div class="vazio gh-vazio" id="gh-vazio" hidden>${T.vazio}</div></div>
     <p class="dica gh-resumo" id="gh-resumo" role="status" aria-live="polite"></p>
     <p class="nivel-aviso gh-aviso" id="gh-aviso" role="status" hidden></p>
     <p class="dica" style="margin:0">${T.pausas} <a href="#ajustes">Ajustes</a>.</p></div>`;
@@ -294,20 +298,86 @@ function gradeLigar(raiz, { regra = {}, nGrupos = () => 0, lerIntervalo = () => 
   let modo = regra.grade ? 'grade' : 'intervalo';
   let iniciada = !!regra.grade; // regra sem grade: a lista nasce da conversão na primeira vez em "Em horários marcados"
   let rotinas = null; let pediuRotinas = false; let chave = 0;
+  // Princípio: as linhas só mudam de lugar quando o dono não está interagindo com a lista (ao levar o foco para fora dela
+  // ou no Enter). Copiar, Remover e Adicionar mexem só na própria <li>; nenhuma linha é recriada, então o que está sendo
+  // digitado (até uma hora pela metade, "15:--", que o navegador lê como '') nunca se perde.
+  const form = $('#f', raiz) || raiz; // os ouvintes ficam no formulário: somem com ele quando o diálogo é refeito
+  const editadas = new Set(); // linhas cuja hora mudou (ou nasceram) desde a última ordenação, da mais antiga à mais recente
+  let marcada = null; // a linha destacada depois de mudar de lugar
+  let desfazer = null; // { itens: [{ li, depois, indice }] } da última remoção (ou do Limpar tudo)
   const padraoNome = () => gradeNomeTemplate(gradeInteiro(tplRegra?.value)) ?? '—';
   const qtdPadrao = () => { const n = gradeInteiro(lerIntervalo().per_run); return n >= 1 && n <= gradeLimites().max_qtd ? n : 3; };
 
-  const lerLinhas = () => $$('#gh-lista > li', raiz).map((li) => ({ hora: $('.gh-h', li).value.trim(), qtd: $('.gh-q', li).value.trim(), template_id: $('.gh-t', li).value || null, li }));
-  const pintar = (linhas, focoK) => {
+  const lis = () => $$('#gh-lista > li', raiz);
+  const lerLinhas = () => lis().map((li) => ({ hora: $('.gh-h', li).value.trim(), qtd: $('.gh-q', li).value.trim(), template_id: $('.gh-t', li).value || null, li }));
+  const horaDe = (li) => gradeMin($('.gh-h', li).value);
+  const rotuloDe = (li) => (Number.isFinite(horaDe(li)) ? gradeHora(horaDe(li)) : T.semHora);
+  /** Pintura completa (carga inicial, modelos e gerador): recria as linhas. Copiar, Remover e Adicionar não passam por aqui. */
+  const pintar = (linhas) => {
     const nome = padraoNome();
     lista.innerHTML = gradeOrdenarEstavel(linhas).map((l, i) => gradeLinhaHtml(l, i, l.k ?? ++chave, nome)).join('');
-    if (focoK != null) $(`#gh-lista > li[data-k="${focoK}"] .gh-h`, raiz)?.focus();
+    editadas.clear(); marcada = null; desfazer = null; avisoMov(''); avisoDesfazer('');
     atualizar();
+  };
+  /** Uma <li> nova (fora da lista ainda) com os valores de `l`. */
+  const criarLinha = (l) => {
+    const tmp = document.createElement('ol'); tmp.innerHTML = gradeLinhaHtml(l, 0, ++chave, padraoNome());
+    return tmp.firstElementChild;
   };
   const pintarDias = (dias) => $$('button', diasEl).forEach((b) => b.setAttribute('aria-pressed', String(dias.includes(Number(b.dataset.d)))));
   const diasMarcados = () => $$('button[aria-pressed="true"]', diasEl).map((b) => Number(b.dataset.d));
   /** Linhas para uma nova pintura: a chave estável de cada uma e os valores como estão na tela. */
   const atuais = () => lerLinhas().map((l) => ({ hora: l.hora, qtd: l.qtd, template_id: l.template_id, k: Number(l.li.dataset.k) }));
+  const avisoMov = (t) => { const el = $('#gh-mov', raiz); if (el.textContent !== t) el.textContent = t; };
+  const avisoDesfazer = (t, comBotao = false) => {
+    const el = $('.gh-desf-txt', raiz); if (el.textContent !== t) el.textContent = t;
+    $('#gh-desfazer', raiz).hidden = !comBotao;
+  };
+  /** O destaque e o aviso de "movido" duram até a próxima ação do dono. */
+  const limparMovida = () => { marcada?.classList.remove('gh-movida'); marcada = null; avisoMov(''); };
+  /** Qualquer alteração na lista tira o "Desfazer" (e a mensagem da devolução). */
+  const esquecerDesfazer = () => { desfazer = null; avisoDesfazer(''); };
+  /** A barra da lista está grudada no topo do diálogo (a lista passou por cima dela)? Então rolar não a tira de baixo do cursor. */
+  const barraPresa = () => {
+    const d = raiz.getBoundingClientRect(); const add = $('#gh-add', raiz).getBoundingClientRect(); const barra = $('.gh-barra', raiz);
+    if (add.bottom <= d.top) return true; // o botão já saiu da tela por cima: não há cursor sobre ele
+    if (typeof getComputedStyle !== 'function') return false;
+    const c = getComputedStyle(barra); // em tela estreita a barra some do layout (display: contents) e só a linha de avisos gruda
+    return c.display !== 'contents' && c.position === 'sticky' && barra.getBoundingClientRect().top <= d.top + 3;
+  };
+  /**
+   * Ordem em que as linhas ficariam: as de hora válida em ordem crescente (estável), cada uma nos lugares das de hora
+   * válida; a linha sem hora válida (ex.: "15:--" ainda sendo digitada) fica onde está.
+   */
+  const ordemAlvo = () => {
+    const atual = lis(); const certas = atual.filter((li) => Number.isFinite(horaDe(li))).sort((a, b) => horaDe(a) - horaDe(b));
+    let k = 0; return atual.map((li) => (Number.isFinite(horaDe(li)) ? certas[k++] : li));
+  };
+  /**
+   * Aplica a ordem pendente movendo os nós (nunca recriando) e diz, em texto visível, onde a linha editada foi parar.
+   * Só é chamada quando o foco está fora da lista (ou no Enter): fora dela a altura da lista não muda, então nada salta
+   * sob o cursor. `manterFoco`: o campo em foco é devolvido ao foco se o navegador o soltar ao mover a linha.
+   */
+  const ordenar = ({ manterFoco = false, rolar = false } = {}) => {
+    const antes = lis(); const alvo = ordemAlvo();
+    if (alvo.every((li, i) => li === antes[i])) return false;
+    const ativo = document.activeElement;
+    alvo.forEach((li, i) => {
+      const atual = lista.children[i]; if (atual === li) return;
+      try { if (lista.moveBefore) lista.moveBefore(li, atual); else lista.insertBefore(li, atual); } catch { lista.insertBefore(li, atual); }
+    });
+    if (manterFoco && ativo && ativo !== document.activeElement && ativo.isConnected) ativo.focus({ preventScroll: true });
+    // a linha editada mais recente que de fato mudou de posição
+    const movida = [...editadas].reverse().find((li) => antes.indexOf(li) !== alvo.indexOf(li));
+    editadas.clear();
+    atualizar();
+    if (movida) {
+      limparMovida(); marcada = movida; movida.classList.add('gh-movida');
+      avisoMov(T.movido(rotuloDe(movida), alvo.indexOf(movida) + 1));
+      if (rolar) movida.scrollIntoView({ block: 'nearest' });
+    }
+    return true;
+  };
   const minutosUsados = () => lerLinhas().map((l) => gradeMin(l.hora)).filter(Number.isFinite);
   /** Primeiro minuto a partir de `ini` (de 10 em 10, dando a volta no dia) com 10 min de folga para todos os outros, contando a virada do dia. */
   const livre = (ini) => {
@@ -362,15 +432,21 @@ function gradeLigar(raiz, { regra = {}, nGrupos = () => 0, lerIntervalo = () => 
     const st = $('#gh-ger-st', raiz); const L = gradeLimites();
     if (!novas.length) { st.textContent = T.geradorVazio; return; }
     const atuaisL = atuais();
-    let final;
     if (acrescentar) {
       const tem = new Set(atuaisL.map((l) => gradeMin(l.hora)));
-      final = [...atuaisL, ...novas.filter((l) => !tem.has(gradeMin(l.hora)))];
-    } else final = novas;
-    if (final.length > L.max_horarios) { st.textContent = T.geradorMax(final.length, L.max_horarios); return; }
-    if (!acrescentar && atuaisL.length && !confirm(T.confirmaTroca(novas.length))) return;
+      const novasLi = novas.filter((l) => !tem.has(gradeMin(l.hora)));
+      if (atuaisL.length + novasLi.length > L.max_horarios) { st.textContent = T.geradorMax(atuaisL.length + novasLi.length, L.max_horarios); return; }
+      st.textContent = '';
+      // as linhas de agora ficam como estão (inclusive uma hora pela metade); as novas entram no fim e a lista é ordenada,
+      // o que é seguro: o foco está no botão "Acrescentar", fora da lista
+      for (const l of novasLi) lista.appendChild(criarLinha(l));
+      esquecerDesfazer(); atualizar(); ordenar();
+      return;
+    }
+    if (novas.length > L.max_horarios) { st.textContent = T.geradorMax(novas.length, L.max_horarios); return; }
+    if (atuaisL.length && !confirm(T.confirmaTroca(novas.length))) return;
     st.textContent = '';
-    pintar(final);
+    pintar(novas);
   };
   const doGerador = (extra = {}) => {
     const qtd = gradeInteiro($('#gh-ger-qtd', raiz).value);
@@ -396,50 +472,82 @@ function gradeLigar(raiz, { regra = {}, nGrupos = () => 0, lerIntervalo = () => 
   });
   $('[data-gh="substituir"]', raiz).onclick = () => aplicar(doGerador(), false);
   $('[data-gh="acrescentar"]', raiz).onclick = () => aplicar(doGerador(), true);
-  $('#gh-add', raiz).onclick = () => {
-    const ls = atuais(); const ult = gradeOrdenar(ls.filter((l) => Number.isFinite(gradeMin(l.hora)))).at(-1);
+  $('#gh-add', raiz).onclick = (e) => {
+    const ls = lerLinhas(); const ult = gradeOrdenar(ls.filter((l) => Number.isFinite(gradeMin(l.hora)))).at(-1);
     const nova = ult ? { hora: gradeHora(livre(gradeMin(ult.hora) + 60)), qtd: ult.qtd, template_id: ult.template_id } : { hora: '08:00', qtd: qtdPadrao(), template_id: null };
-    nova.k = ++chave; pintar([...ls, nova], nova.k);
+    const li = criarLinha(nova); lista.appendChild(li); editadas.add(li);
+    esquecerDesfazer(); atualizar();
+    // A linha nasce no fim. Rolar até ela com o mouse tira o botão de baixo do cursor (o clique seguinte cairia noutro
+    // controle), então só se rola pelo teclado (detail 0) ou com a barra já grudada no topo (rolar não a move). Nos
+    // outros casos o foco vai para a linha sem rolar e o aviso visível diz onde ela está.
+    // (o Chrome ignora preventScroll em <input type="time">: a rolagem é devolvida à mão)
+    const rolagem = raiz.scrollTop; $('.gh-h', li).focus({ preventScroll: true }); raiz.scrollTop = rolagem;
+    if (e.detail === 0 || barraPresa()) li.scrollIntoView({ block: 'nearest' });
+    limparMovida(); marcada = li; li.classList.add('gh-movida');
+    avisoMov(T.adicionado(rotuloDe(li), lis().indexOf(li) + 1));
   };
+  // sem confirm: nada é gravado antes do Salvar e o "Desfazer" devolve as linhas, com o que estava digitado
   $('#gh-limpar', raiz).onclick = () => {
-    if (!lerLinhas().length || !confirm(T.limparConfirma)) return;
-    pintar([]); $('#gh-add', raiz).focus();
+    const todas = lis(); if (!todas.length) return;
+    desfazer = { itens: todas.map((li, indice) => ({ li, depois: null, indice })) };
+    for (const li of todas) { editadas.delete(li); li.remove(); }
+    limparMovida(); atualizar();
+    avisoDesfazer(T.removidos(todas.length), true);
+    $('#gh-add', raiz).focus();
+  };
+  $('#gh-desfazer', raiz).onclick = () => {
+    if (!desfazer) return;
+    const itens = desfazer.itens;
+    for (const { li, depois, indice } of itens) {
+      const ref = depois && depois.parentNode === lista ? depois : (lis()[indice] ?? null);
+      lista.insertBefore(li, ref);
+    }
+    desfazer = null; limparMovida(); atualizar();
+    avisoDesfazer(itens.length === 1 ? T.devolvido(rotuloDe(itens[0].li)) : T.devolvidos(itens.length));
+    $('.gh-h', itens[0].li).focus();
   };
   lista.addEventListener('click', (e) => {
     const b = e.target.closest('button[data-gh]'); if (!b) return;
-    const li = b.closest('li'); const k = Number(li.dataset.k); const ls = atuais(); const i = ls.findIndex((l) => l.k === k);
+    const li = b.closest('li');
     if (b.dataset.gh === 'copiar') {
-      const o = ls[i]; const m = gradeMin(o.hora);
-      const nova = { hora: Number.isFinite(m) ? gradeHora(livre(m + 30)) : '', qtd: o.qtd, template_id: o.template_id, k: ++chave };
-      pintar([...ls, nova], nova.k);
+      const m = horaDe(li);
+      const nova = criarLinha({ hora: Number.isFinite(m) ? gradeHora(livre(m + 30)) : '', qtd: $('.gh-q', li).value.trim(), template_id: $('.gh-t', li).value || null });
+      lista.insertBefore(nova, li.nextElementSibling); editadas.add(nova); // logo abaixo da original; as outras linhas não se movem
+      esquecerDesfazer(); atualizar(); $('.gh-h', nova).focus();
     } else if (b.dataset.gh === 'remover') {
-      ls.splice(i, 1);
-      const foco = ls[Math.max(0, i - 1)]?.k;
-      pintar(ls, foco);
-      if (foco == null) $('#gh-add', raiz).focus();
+      // o 2º clique de um clique duplo cairia na linha que subiu para o lugar desta: só vale o 1º (teclado: detail 0)
+      if (e.detail > 1) return;
+      const todas = lis(); const i = todas.indexOf(li); const rot = rotuloDe(li);
+      desfazer = { itens: [{ li, depois: li.nextElementSibling, indice: i }] };
+      editadas.delete(li); li.remove(); limparMovida(); atualizar();
+      avisoDesfazer(T.removido(rot), true);
+      const foco = lis()[Math.max(0, i - 1)];
+      if (foco) $('.gh-h', foco).focus(); else $('#gh-add', raiz).focus();
     }
   });
-  // reordenar só ao sair do campo de horário (nunca enquanto digita): a linha é movida, não recriada
-  lista.addEventListener('focusout', (e) => {
-    const h = e.target; if (!h?.classList?.contains('gh-h')) return;
-    const li = h.closest('li'); const m = gradeMin(h.value); if (!Number.isFinite(m)) return;
-    const irmaos = $$('#gh-lista > li', raiz).filter((x) => x !== li);
-    const depois = irmaos.find((x) => { const n = gradeMin($('.gh-h', x).value); return Number.isFinite(n) && n > m; });
-    const antes = $$('#gh-lista > li', raiz);
-    const posAntes = antes.indexOf(li);
-    if (depois) { if (li.nextElementSibling !== depois) lista.insertBefore(li, depois); } else if (antes.at(-1) !== li) lista.appendChild(li);
-    const pos = $$('#gh-lista > li', raiz).indexOf(li);
-    if (pos !== posAntes) {
-      $('#gh-mov', raiz).textContent = T.movido(pos + 1);
-      const destino = e.relatedTarget;
-      if (destino && li.contains(destino)) setTimeout(() => { if (destino.isConnected && document.activeElement !== destino) destino.focus(); }, 0);
-    }
-    atualizar();
+  // Nada de mover linha no focusout do horário: o focusout acontece no mousedown do próximo clique e a lista saltaria
+  // antes do mouseup, perdendo o clique (Q1). A ordem fica pendente e vale quando o foco vai para FORA da lista.
+  form.addEventListener('focusin', (e) => { if (!lista.contains(e.target)) ordenar(); });
+  lista.addEventListener('input', (e) => {
+    const el = e.target;
+    if (!el?.matches?.('.gh-h, .gh-q, .gh-t')) return;
+    esquecerDesfazer();
+    if (el.matches('.gh-h')) { const li = el.closest('li'); editadas.delete(li); editadas.add(li); }
+  });
+  // a próxima ação do dono tira o destaque e o aviso de "movido"
+  form.addEventListener('mousedown', limparMovida, true);
+  form.addEventListener('keydown', (e) => {
+    limparMovida();
+    if (e.key !== 'Enter' || e.isComposing) return;
+    const alvo = e.target; if (!alvo?.matches?.('.gh-h, .gh-q, #gh-ger-de, #gh-ger-ate, #gh-ger-qtd')) return;
+    // Enter nos campos da grade não salva o formulário (o dono só quer confirmar o valor): aplica a ordem pendente e fica
+    e.preventDefault();
+    if (alvo.matches('.gh-h, .gh-q')) { ordenar({ manterFoco: true, rolar: true }); alvo.closest('li').scrollIntoView({ block: 'nearest' }); }
   });
   // D8: o campo mexido perde a marca de inválido na hora; os outros ficam marcados até o próximo Salvar
   bloco.addEventListener('change', (e) => {
     const el = e.target;
-    if (el?.matches?.('.gh-h, .gh-q, .gh-t')) { el.removeAttribute('aria-invalid'); el.classList.remove('invalido'); }
+    if (el?.matches?.('.gh-h, .gh-q, .gh-t')) { el.removeAttribute('aria-invalid'); el.classList.remove('invalido'); esquecerDesfazer(); }
     atualizar();
   });
   tplRegra?.addEventListener('change', () => {

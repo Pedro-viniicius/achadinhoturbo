@@ -1274,3 +1274,19 @@ test('Grade e Grupo vivo: o README tem a linha de resumo, o menu, a seção, os 
   assert.match(txt, /A regra "[^"]+" usa este template no horário/);
   assert.match(txt, /Grupo vivo: nome da rotina/);
 });
+
+test('Grade: os Docs, o README e a ajuda descrevem a lista de horários (ordem ao sair, Enter, Desfazer, sem confirm no Limpar tudo, Descartar) com as frases do painel', () => {
+  const docs = secaoTxt('disparo-automatico', 'mexer-nos-horarios'); const readme = readmeSecao('Horários marcados e Grupo vivo');
+  const grade = lerRaiz('public/grade.js'); const app = lerRaiz('public/app.js'); const ajuda = lerRaiz('public/ajuda.js');
+  for (const [onde, txt] of [['Docs', docs], ['README', readme]]) {
+    for (const r of [/Horário 21:00 movido para a posição 27\./, /Enter/, /Desfazer/, /Limpar tudo/, /sem pedir confirmação|não pedem confirmação/, /clique duplo/, /Descartar as alterações\?/, /acima da lista/])
+      assert.match(txt, r, `${onde}: ${r}`);
+  }
+  assert.ok(docs.includes('Horário 12:00 removido.'));
+  // o painel diz o mesmo
+  assert.ok(grade.includes('movido: (h, n) => `Horário ${h} movido para a posição ${n}.`'));
+  assert.ok(grade.includes('removido: (h) => `Horário ${h} removido.`'));
+  assert.ok(app.includes("confirm('Descartar as alterações?')"));
+  assert.ok(!grade.includes('limparConfirma') && !/confirm\(T\.limpar/.test(grade), 'Limpar tudo não usa confirm');
+  assert.match(ajuda, /regras\.grade_horarios'[^\n]*sai dela \(ou aperta Enter, que não salva\)[^\n]*Desfazer/);
+});

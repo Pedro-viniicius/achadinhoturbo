@@ -792,8 +792,22 @@ nav a[href="#ganhos"] { --ic:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3
 .gh-linha select { min-width:0; text-overflow:ellipsis; }
 /* no desktop o rótulo de cada campo fica só para o leitor de tela (o cabeçalho único fica à vista) */
 .gh-rot { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); white-space:nowrap; }
-.gh-acoes { display:flex; gap:4px; }
+.gh-acoes { display:flex; gap:16px; } /* Copiar e Remover bem separados: errar o alvo apaga uma linha */
 .gh-acoes button { padding:6px 10px; min-height:24px; }
+/* Barra da lista: fica acima das linhas e GRUDA no topo do diálogo enquanto a lista está à vista. Assim "+ Adicionar
+   horário" não foge do cursor quando a lista cresce, e o aviso de linha movida / "Desfazer" está sempre visível. A linha
+   de avisos tem altura mínima fixa: nada abaixo da barra salta quando um aviso aparece. Em telas estreitas só a linha
+   de avisos gruda (a barra inteira ocuparia boa parte da tela). */
+.gh-tit-linha { display:flex; flex-wrap:wrap; align-items:baseline; justify-content:space-between; gap:0 12px; }
+.gh-barra { position:sticky; top:0; z-index:3; display:grid; gap:4px; padding:6px 0 4px; background:var(--surface); }
+.gh-estado { display:flex; flex-wrap:wrap; align-items:center; gap:2px 0; min-height:34px; font-size:14px; }
+.gh-desf { display:inline-flex; align-items:center; gap:8px; margin-right:16px; }
+.gh-desf:not(:has(.gh-desf-txt:not(:empty))), .gh-mov:empty { margin-right:0; }
+.gh-mov { margin-right:16px; }
+.gh-desf button { min-height:28px; padding:2px 12px; }
+/* linha que acabou de mudar de lugar: contorno (não só cor) até a próxima ação do dono; sem animação */
+.gh-linha.gh-movida { outline:2px solid var(--primary-text); outline-offset:3px; background:var(--primary-tint); border-radius:10px; }
+#dlg:has(#r-grade) { scroll-padding-top:96px; scroll-padding-bottom:80px; }
 .gh-vazio { padding:20px 16px; }
 .gh-resumo, .gh-aviso { margin:0; }
 .gh-gerador .gh-tpl { grid-column:1 / -1; }
@@ -807,6 +821,10 @@ nav a[href="#ganhos"] { --ic:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3
   .gh-linha .gh-tpl, .gh-acoes { grid-column:1 / -1; }
   .gh-acoes button { flex:1 1 0; min-height:44px; }
   .gh-modelos button.chip, #gh-add, #gh-limpar, .gh-gerador .linha button { min-height:44px; }
+  .gh-barra { display:contents; }
+  .gh-estado { position:sticky; top:0; z-index:3; min-height:56px; padding:4px 0; background:var(--surface); }
+  .gh-desf button { min-height:44px; }
+  #dlg:has(#r-grade) { scroll-padding-top:70px; }
 }
 
 /* Grupo vivo (public/grupovivo.js; spec grade-de-disparos, "Layout: Grupo vivo", "Formulário" e "Galeria") */

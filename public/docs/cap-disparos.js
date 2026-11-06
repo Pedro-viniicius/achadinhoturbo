@@ -309,6 +309,15 @@ docsCapitulo({
       ],
     },
     {
+      id: 'mexer-nos-horarios', titulo: 'Mexer na lista de horários',
+      onde: '[[Disparo automático → Novo disparo automático → Ritmo de envio → Horários]]',
+      blocos: [
+        { p: '**Mexer na lista.** A lista só põe as linhas em ordem quando você sai dela: digite o horário, vá para outro campo fora da lista (ou aperte Enter) e a linha vai para o lugar certo, com o aviso “Horário 21:00 movido para a posição 27.” e um contorno até a sua próxima ação. Enquanto você está dentro da lista, nada muda de lugar. “Copiar” cria a linha logo abaixo da original; “+ Adicionar horário” põe a nova no fim. Esse botão, o “Limpar tudo” e o contador ficam acima da lista e acompanham a rolagem. Enter no “Horário” ou nas “Ofertas” não salva o disparo: salve pelo botão “Salvar”.' },
+        { p: '**Remover e “Limpar tudo”.** Os dois apagam sem pedir confirmação, porque nada vale até o “Salvar”. Logo acima da lista aparece, por exemplo, “Horário 12:00 removido.” com o botão “Desfazer”, que devolve as linhas, com o que estava digitado, até você mexer na lista de novo. Um clique duplo em “Remover” apaga só uma linha.' },
+        { p: '**Cancelar com alterações.** “Cancelar” e a tecla Esc perguntam “Descartar as alterações?” quando há algo não salvo no formulário; sem alterações, fecham direto.' },
+      ],
+    },
+    {
       id: 'pausas', titulo: 'Pausas entre mensagens',
       onde: '[[Ajustes → Pausas entre mensagens]]',
       leia: 'manutencao/ajustes',
