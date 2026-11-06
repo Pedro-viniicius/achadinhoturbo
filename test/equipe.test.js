@@ -9,7 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import crypto from 'node:crypto';
-import { execFile } from 'node:child_process';
+import { execFile, spawnSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { openDb, getSetting, setSetting } from '../src/db.js';
@@ -487,4 +487,20 @@ test('npm run senha: troca a senha do Dono (cria o Dono sem e-mail se não há n
     assert.equal((await entrar(s, { email: 'ivo@exemplo.com', senha: ivo.senha })).status, 200, 'o outro Dono mantém a senha');
     assert.ok(await verifyPassword('senha-nova-do-dono', getSetting(s.db, 'panel_password_hash')));
   } finally { await s.fechar(); }
+});
+
+test('npm run senha sem terminal (stdin fechado): avisa, sai com código 1, sem o aviso do Node, e não mexe na senha', () => {
+  const dir = tmp();
+  const db = openDb(dir);
+  setPassword(db, 'primeira-senha-1');
+  const antes = getSetting(db, 'panel_password_hash');
+  db.close();
+  // input: '' fecha o stdin do filho; sem isso o pipe fica aberto e o readline espera para sempre
+  const r = spawnSync(process.execPath, ['--disable-warning=ExperimentalWarning', 'scripts/senha.js'], { cwd: ROOT, env: { ...process.env, DATA_DIR: dir }, input: '', encoding: 'utf8', timeout: 20000 });
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /Nenhuma senha informada/);
+  assert.ok(!(r.stderr + r.stdout).includes('unsettled'), 'a promessa da pergunta precisa terminar quando a entrada acaba');
+  const db2 = openDb(dir);
+  assert.equal(getSetting(db2, 'panel_password_hash'), antes, 'a senha não muda');
+  db2.close();
 });
