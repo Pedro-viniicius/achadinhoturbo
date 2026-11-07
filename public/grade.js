@@ -282,7 +282,7 @@ function gradeHtml(r) {
       <div class="vazio gh-vazio" id="gh-vazio" hidden>${T.vazio}</div></div>
     <p class="dica gh-resumo" id="gh-resumo" role="status" aria-live="polite"></p>
     <p class="nivel-aviso gh-aviso" id="gh-aviso" role="status" hidden></p>
-    <p class="dica" style="margin:0">${T.pausas} <a href="#ajustes">Ajustes</a>.</p></div>`;
+    <p class="dica" style="margin:0">${T.pausas} <a href="#ajustes" target="_blank" rel="noopener">Ajustes</a>.</p></div>`;
 }
 
 /**
@@ -304,7 +304,8 @@ function gradeLigar(raiz, { regra = {}, nGrupos = () => 0, lerIntervalo = () => 
   const form = $('#f', raiz) || raiz; // os ouvintes ficam no formulário: somem com ele quando o diálogo é refeito
   const editadas = new Set(); // linhas cuja hora mudou (ou nasceram) desde a última ordenação, da mais antiga à mais recente
   let marcada = null; // a linha destacada depois de mudar de lugar
-  let desfazer = null; // { itens: [{ li, depois, indice, editada }] } da última remoção (ou do Limpar tudo); `editada` (só no Remover): a hora estava pendente de ordem
+  let desfazer = null; // { itens: [{ li, depois, indice, editada, ordens }] } da última remoção (ou do Limpar tudo); `editada` e `ordens` (só no Remover): a hora estava pendente de ordem e quantas ordenações já tinham ocorrido
+  let ordens = 0; // quantas vezes a ordem pendente foi aplicada (move nós): invalida o nó de referência do Desfazer
   const padraoNome = () => gradeNomeTemplate(gradeInteiro(tplRegra?.value)) ?? '—';
   const qtdPadrao = () => { const n = gradeInteiro(lerIntervalo().per_run); return n >= 1 && n <= gradeLimites().max_qtd ? n : 3; };
 
@@ -369,7 +370,7 @@ function gradeLigar(raiz, { regra = {}, nGrupos = () => 0, lerIntervalo = () => 
     if (manterFoco && ativo && ativo !== document.activeElement && ativo.isConnected) ativo.focus({ preventScroll: true });
     // a linha editada mais recente que de fato mudou de posição
     const movida = [...editadas].reverse().find((li) => antes.indexOf(li) !== alvo.indexOf(li));
-    editadas.clear();
+    editadas.clear(); ordens++;
     atualizar();
     if (movida) {
       limparMovida(); marcada = movida; movida.classList.add('gh-movida');
@@ -489,7 +490,9 @@ function gradeLigar(raiz, { regra = {}, nGrupos = () => 0, lerIntervalo = () => 
   // sem confirm: nada é gravado antes do Salvar e o "Desfazer" devolve as linhas, com o que estava digitado
   $('#gh-limpar', raiz).onclick = () => {
     const todas = lis(); if (!todas.length) return;
-    desfazer = { itens: todas.map((li, indice) => ({ li, depois: null, indice })) }; // o botão está fora da lista: a ordem pendente já foi aplicada
+    // o botão está fora da lista: a ordem pendente já foi aplicada; `ordens` explícito para que o Limpar tudo de uma linha só
+    // nunca caia no caminho "volta pela hora" do Desfazer
+    desfazer = { itens: todas.map((li, indice) => ({ li, depois: null, indice, ordens })) };
     for (const li of todas) { editadas.delete(li); li.remove(); }
     limparMovida(); atualizar();
     avisoDesfazer(T.removidos(todas.length), true);
@@ -498,8 +501,14 @@ function gradeLigar(raiz, { regra = {}, nGrupos = () => 0, lerIntervalo = () => 
   $('#gh-desfazer', raiz).onclick = () => {
     if (!desfazer) return;
     const itens = desfazer.itens;
-    for (const { li, depois, indice, editada } of itens) {
-      const ref = depois && depois.parentNode === lista ? depois : (lis()[indice] ?? null);
+    for (const { li, depois, indice, editada, ordens: quando } of itens) {
+      let ref = depois && depois.parentNode === lista ? depois : (lis()[indice] ?? null);
+      // Se a ordem pendente foi aplicada depois do Remover (o foco saiu da lista), `depois` já mudou de lugar e a lista está
+      // em ordem: a linha cuja hora estava em ordem volta direto ao lugar pela hora (antes da primeira de hora maior), sem
+      // se mover calada na próxima saída da lista. Linha que estava pendente fica como antes: volta pendente e a ordem a leva.
+      if (itens.length === 1 && !editada && quando != null && quando !== ordens && Number.isFinite(horaDe(li))) {
+        ref = lis().find((x) => Number.isFinite(horaDe(x)) && horaDe(x) > horaDe(li)) ?? null;
+      }
       lista.insertBefore(li, ref);
       if (editada) editadas.add(li); // a hora ainda espera a ordem: ao sair da lista a linha vai para o lugar certo, com aviso e contorno
     }
@@ -519,7 +528,7 @@ function gradeLigar(raiz, { regra = {}, nGrupos = () => 0, lerIntervalo = () => 
       // o 2º clique de um clique duplo cairia na linha que subiu para o lugar desta: só vale o 1º (teclado: detail 0)
       if (e.detail > 1) return;
       const todas = lis(); const i = todas.indexOf(li); const rot = rotuloDe(li);
-      desfazer = { itens: [{ li, depois: li.nextElementSibling, indice: i, editada: editadas.has(li) }] };
+      desfazer = { itens: [{ li, depois: li.nextElementSibling, indice: i, editada: editadas.has(li), ordens }] };
       editadas.delete(li); li.remove(); limparMovida(); atualizar();
       avisoDesfazer(T.removido(rot), true);
       const foco = lis()[Math.max(0, i - 1)];

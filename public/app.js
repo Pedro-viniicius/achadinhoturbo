@@ -130,7 +130,7 @@ const TEXTOS_REGRA_CATALOGO = {
   ordemOutras: 'Cada envio pega as melhores que ainda não foram enviadas dentro do prazo de repetição.',
   etiquetaComum: 'Etiqueta ML desta fonte', etiquetaFonte: 'Etiqueta ML desta fonte',
   etiquetaNaoSeAplica: 'Não se aplica: os links da Amazon e da Shopee já vêm prontos do catálogo.',
-  conexao: 'O catálogo ainda não está conectado. Conecte em <a href="#conexoes" style="text-decoration:underline">Conexões</a> e use “Testar” para ver as categorias.',
+  conexao: 'O catálogo ainda não está conectado. Conecte em <a href="#conexoes" target="_blank" rel="noopener" style="text-decoration:underline">Conexões</a> e use “Testar” para ver as categorias.',
   conexaoIndisp: (selo) => `O catálogo está indisponível agora (${selo}). Você pode salvar esta fonte; ela volta a enviar quando o Etiqueta responder.`,
   selos: { indisponivel: 'Indisponível', token_recusado: 'Token recusado' },
   semML: 'Esta fonte não precisa de etiqueta do Mercado Livre. Se todas as fontes do disparo forem assim, a etiqueta ML padrão fica opcional.',
@@ -138,7 +138,7 @@ const TEXTOS_REGRA_CATALOGO = {
   comML: 'Os links do Mercado Livre são gerados de novo, com a etiqueta escolhida acima, pela extensão do Chrome. Com a extensão desligada, essas ofertas esperam e saem sozinhas quando ela voltar; não vão para a revisão.',
   revisao: 'Ofertas com 100% de desconto, com preço antigo 10 vezes maior que o preço ou cujo link falhe ao ser gerado também esperam a sua revisão. Nada disso sai sozinho.',
   amazonTag: 'Amazon: o link é montado com a sua tag de Conexões.',
-  amazonSemTag: 'Falta a tag da Amazon. Salve em <a href="#conexoes" style="text-decoration:underline">Conexões &gt; Amazon</a>; sem ela, as ofertas da Amazon esperam.',
+  amazonSemTag: 'Falta a tag da Amazon. Salve em <a href="#conexoes" target="_blank" rel="noopener" style="text-decoration:underline">Conexões &gt; Amazon</a>; sem ela, as ofertas da Amazon esperam.',
   padraoObrigatoria: 'Etiqueta ML padrão', padraoOpcional: 'Etiqueta ML padrão', padraoNaoPrecisa: 'Não precisa: as fontes deste disparo só trazem Amazon e Shopee.',
   reler: 'Reler do começo', relerTitulo: 'Reler o catálogo desde o começo no próximo envio',
   relerDica: 'Use para mandar o que já estava no catálogo antes de você salvar a regra, ou depois de reorganizar as categorias no Etiqueta.',
@@ -346,7 +346,7 @@ function seletorGrupos(opts = {}) {
   const sel = new Set(opts.selecionados || []);
   const P = opts.prefixo || ''; const rotuloBusca = opts.rotuloBusca || 'Buscar grupo';
   const html = !S.groups.length
-    ? '<div class="dica">Nenhum grupo carregado. Conecte o WhatsApp em <a href="#numeros">Números de WhatsApp</a>.</div>'
+    ? '<div class="dica">Nenhum grupo carregado. Conecte o WhatsApp em <a href="#numeros" target="_blank" rel="noopener">Números de WhatsApp</a>.</div>'
     : `<div class="linha">${opts.blocos && S.blocks?.length ? `<select id="${P}bloco-atalho" style="width:auto" aria-label="Marcar os grupos de um bloco"><option value="">Marcar um bloco…</option>${S.blocks.map((b) => `<option value="${b.id}">${esc(b.name)} (${b.group_jids.length})</option>`).join('')}</select>` : ''}<input id="${P}busca" placeholder="Buscar grupo…" aria-label="${esc(rotuloBusca)}" style="flex:1 1 180px;min-width:160px"><button type="button" id="${P}so-marcados" class="alt" aria-pressed="false" title="Mostrar só os grupos marcados, para conferir e desmarcar">Só marcados</button>${opts.marcarVisiveis === false ? '' : `<button type="button" id="${P}todos">Marcar visíveis</button>`}<button type="button" id="${P}nenhum">Limpar</button></div>
       <div class="grupos" id="${P}gr">${S.groups.map((g) => `<label data-n="${esc(g.name.toLowerCase())}"><input type="checkbox" value="${esc(g.jid)}" ${sel.has(g.jid) ? 'checked' : ''}>${esc(g.name)}<small>${g.size ?? ''}</small></label>`).join('')}</div>`;
   const marcados = (raiz) => $$(`#${P}gr input:checked`, raiz).map((i) => i.value);
@@ -417,7 +417,7 @@ function formRegra(r) {
     <div class="grade">
       <label class="campo"><span>Nome ${REQ}</span><input name="name" value="${esc(r.name)}" placeholder="Ex.: Tecnologia" required></label>
       <label class="campo"><span><span id="tag-obr">${TEXTOS_REGRA_CATALOGO.padraoObrigatoria} ${REQ}</span><span id="tag-opc" hidden>${TEXTOS_REGRA_CATALOGO.padraoOpcional}</span> ${q('regras.etiqueta')}</span><select name="tag_id" aria-describedby="tag-opc-dica">${opcoes(S.tags, r.tag_id, 'Escolha…')}</select>
-        ${S.tags.length ? '' : '<small>Cadastre uma etiqueta em <a href="#conexoes">Conexões</a> (Mercado Livre).</small>'}<small id="tag-opc-dica" hidden>${TEXTOS_REGRA_CATALOGO.padraoNaoPrecisa}</small></label>
+        ${S.tags.length ? '' : '<small>Cadastre uma etiqueta em <a href="#conexoes" target="_blank" rel="noopener">Conexões</a> (Mercado Livre).</small>'}<small id="tag-opc-dica" hidden>${TEXTOS_REGRA_CATALOGO.padraoNaoPrecisa}</small></label>
       <label class="campo"><span>Template ${REQ} ${q('regras.template')}</span><select name="template_id">${opcoes(S.templates, r.template_id)}</select></label></div>
     <fieldset><legend>De onde vêm as ofertas ${REQ} ${q('regras.fontes')} <span class="dica" id="f-cont"></span></legend>
       <div id="fontes"></div>

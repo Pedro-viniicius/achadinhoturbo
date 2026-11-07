@@ -925,3 +925,95 @@ test('D1: 320 px: nenhum elemento do bloco da grade passa da borda do bloco (sem
     await a.clicar('#cancelar');
   }
 });
+
+// =====================================================================================================================
+// R8 (revisão, rodada 3) — o nó de referência do Desfazer pode mudar de lugar por OUTRO caminho (o foco em campo fora da
+// lista aplica a ordem pendente); a linha devolvida tem de voltar no lugar certo pela hora, direto, sem se mover calada depois
+// =====================================================================================================================
+
+test('R8: trocar 10:00 por 16:30, remover 09:00, levar o foco para fora da lista e Desfazer: a 09:00 volta direto à 2ª posição e nada se move calado depois', NAV, async (t) => {
+  const a = await abrirFormulario(t, { restaurar: true });
+  await a.digitarHora(`${NA_LISTA}:nth-child(3) .gh-h`, '1630'); // 10:00 -> 16:30; a linha espera na 3ª posição
+  assert.equal((await a.estado()).foco, '16:30', 'pré-condição: a hora foi trocada e o foco continua na lista');
+  const k09 = await a.chaveDe('09:00');
+  await a.clicar(`${NA_LISTA}[data-k="${k09}"] [data-gh=remover]`); // o "depois" da 09:00 é a linha pendente (16:30)
+  assert.deepEqual((await a.estado()).horas, ['08:00', '16:30', '11:00', '12:00', '13:00', '14:00', '15:00', '16:00', '17:00'], 'pré-condição: 09:00 saiu e a 16:30 ainda espera a ordem');
+  await a.clicar('[name=dedupe_days]'); // foco fora da lista: a ordem pendente vale e a 16:30 vai para a 8ª posição
+  assert.deepEqual((await a.estado()).horas, ['08:00', '11:00', '12:00', '13:00', '14:00', '15:00', '16:00', '16:30', '17:00'], 'pré-condição: a 16:30 já está no lugar certo');
+  await a.clicar('#gh-desfazer', { rolar: false });
+  const e = await a.estado();
+  assert.deepEqual(e.horas, ['08:00', '09:00', '11:00', '12:00', '13:00', '14:00', '15:00', '16:00', '16:30', '17:00'],
+    `a 09:00 devia voltar direto à 2ª posição (pela hora), mas ficou: ${e.horas.join(', ')}`);
+  assert.equal(e.chaves[1], k09, 'é o mesmo nó');
+  assert.equal(await a.js("document.querySelector('#gh-mov').textContent"), '', 'nenhum aviso de "movido" logo depois do Desfazer');
+  // sair da lista de novo: nada pode se mover calado
+  await a.clicar('[name=name]');
+  const f = await a.estado();
+  assert.deepEqual(f.horas, e.horas, `ao sair da lista a ordem mudou sem aviso: ${f.horas.join(', ')}`);
+  assert.equal(await a.js("document.querySelector('#gh-mov').textContent"), '', 'e nenhum aviso de movido apareceu');
+  assert.equal(await a.js("document.querySelectorAll('#gh-lista > li.gh-movida').length"), 0, 'nem contorno em linha alguma');
+});
+
+// =====================================================================================================================
+// R6 (revisão, pré-existente) — link de rota interna dentro do formulário do <dialog> navega na mesma aba: a troca de rota
+// fecha o diálogo sem perguntar e o que foi digitado se perde. Decisão: abrem em outra aba (target=_blank, rel=noopener),
+// como a dica "Ler mais" do ajuda.js já faz dentro de diálogo.
+// =====================================================================================================================
+
+/** Todo `<a href^="#">` do formulário aberto no #dlg, com o que importa para abrir em outra aba. */
+const LINKS_INTERNOS = `[...document.querySelectorAll('#dlg #f a[href^="#"]')].map((l) => ({ href: l.getAttribute('href'), target: l.target, rel: l.rel, texto: l.textContent.trim().slice(0, 40) }))`;
+/** Os que não abririam em outra aba, descritos para a mensagem de falha. */
+const linksRuins = (links) => links.filter((l) => l.target !== '_blank' || !l.rel.split(/\s+/).includes('noopener')).map((l) => `${l.href} ("${l.texto}", target="${l.target}", rel="${l.rel}")`);
+/** Refaz o formulário com o estado `estado` (JS avaliado na página antes de `formRegra`) e o regra `regra` (JSON ou null = disparo novo). */
+const refazerFormulario = (a, estado, regra = null) => a.js(`(() => { ${estado}; formRegra(${regra ? JSON.stringify(regra) : ''}); return document.querySelectorAll('#dlg #f').length; })()`);
+const REGRA_CATALOGO_AMAZON = { name: 'Cat', enabled: true, tag_id: 1, template_id: 1, group_jids: ['111@g.us'], per_run: 3, interval_min: 60, window_start: '08:00', window_end: '22:00', dedupe_days: 7, send_image: true,
+  sources: [{ type: 'catalogo', config: { categorias: [], lojas: ['amazon'], ordem: 'atualizacao' } }] };
+
+test('R6: o link "Ajustes" do bloco da grade (sempre presente no formulário aberto) abre em outra aba, com rel noopener', NAV, async (t) => {
+  const a = await abrirFormulario(t);
+  const links = await a.js(LINKS_INTERNOS);
+  assert.ok(links.some((l) => l.href === '#ajustes'), `pré-condição: o formulário tem o link "Ajustes" (links: ${links.map((l) => l.href).join(', ')})`);
+  assert.deepEqual(linksRuins(links), [], 'links de rota interna dentro do formulário precisam abrir em outra aba');
+});
+
+test('R6: clicar em "Ajustes" com o mouse não fecha o diálogo nem perde o que foi digitado', NAV, async (t) => {
+  const a = await abrirFormulario(t);
+  await seta(a, '[name=name]', 'Digitado e não salvo');
+  const abas = async () => (await (await fetch(`http://127.0.0.1:${chrome.porta}/json/list`)).json()).filter((x) => x.type === 'page').map((x) => x.id);
+  const antes = new Set(await abas());
+  try {
+    await a.clicar('#r-grade a[href="#ajustes"]');
+    await dorme(300); // a aba nova (se abrir) carrega à parte: esta página não pode mudar
+    assert.equal(await a.js('document.querySelector("#dlg").open'), true, 'o clique no link fechou o diálogo (a troca de rota fecha o #dlg sem perguntar)');
+    assert.equal(await a.js('document.querySelector("[name=name]").value'), 'Digitado e não salvo', 'o que foi digitado continua no campo');
+    assert.equal(await a.js('location.hash'), '#disparo-automatico', 'esta aba continua na mesma rota');
+    assert.deepEqual(await a.js('window.__conf'), [], 'e nada perguntou nem descartou');
+  } finally { // a aba que o link abriu não pode sobrar no Chrome de teste
+    for (const id of await abas()) if (!antes.has(id)) await fetch(`http://127.0.0.1:${chrome.porta}/json/close/${id}`).catch(() => {});
+  }
+});
+
+test('R6: sem etiqueta cadastrada e sem grupos carregados, os links "Conexões" e "Números de WhatsApp" do formulário abrem em outra aba', NAV, async (t) => {
+  const a = await abrirFormulario(t);
+  assert.equal(await refazerFormulario(a, 'S.tags = []; S.groups = []'), 1, 'o formulário foi refeito');
+  const links = await a.js(LINKS_INTERNOS);
+  const hrefs = links.map((l) => l.href);
+  assert.ok(hrefs.includes('#conexoes') && hrefs.includes('#numeros'), `pré-condição: sem etiqueta e sem grupos o formulário mostra os dois links (achou: ${hrefs.join(', ')})`);
+  assert.deepEqual(linksRuins(links), []);
+});
+
+test('R6: fonte Catálogo com o catálogo desconectado e a tag da Amazon ausente: os links "Conexões" dos avisos abrem em outra aba (e continuam assim depois de repintar)', NAV, async (t) => {
+  const a = await abrirFormulario(t);
+  await refazerFormulario(a, "S.st.catalogo = { estado: 'nao_configurada', tag_amazon: false }", REGRA_CATALOGO_AMAZON);
+  await a.esperar("document.querySelectorAll('#dlg .fc-conexao a[href=\"#conexoes\"]').length === 1 && document.querySelectorAll('#dlg .fc-avisos a[href=\"#conexoes\"]').length === 1");
+  let links = await a.js(LINKS_INTERNOS);
+  assert.ok(links.filter((l) => l.href === '#conexoes').length >= 2, 'pré-condição: aviso de catálogo desconectado e aviso de tag da Amazon, com um link cada');
+  assert.deepEqual(linksRuins(links), [], 'logo depois de abrir');
+  // os avisos são repintados a cada mudança de loja (fcatAtualizar): o atributo tem de sair junto do HTML novo
+  await a.js("window.__velho = document.querySelector('#dlg .fc-avisos a')");
+  await a.js("document.querySelector('#dlg .fc-lojas input[value=shopee]').click(); document.querySelector('#dlg .fc-lojas input[value=shopee]').click()");
+  assert.equal(await a.js('window.__velho.isConnected'), false, 'pré-condição: o clique nas lojas repintou os avisos (o link antigo saiu do DOM)');
+  links = await a.js(LINKS_INTERNOS);
+  assert.ok(links.filter((l) => l.href === '#conexoes').length >= 2, 'pré-condição: os avisos foram repintados e os links continuam lá');
+  assert.deepEqual(linksRuins(links), [], 'depois de repintar os avisos');
+});
