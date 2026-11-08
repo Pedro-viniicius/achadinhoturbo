@@ -351,3 +351,56 @@ test('R3/S2: vagasShopee() diz quantos pedidos link_shopee ainda cabem na janela
   // limite inválido vale o padrão (60)
   assert.equal(createLinkService({ getMode: () => 'extension', limiteShopeeHora: 0 }).vagasShopee(), 60);
 });
+
+// R2 (Q1, rodada 2): a extensão desiste de um pedido em até 80 s (a lista, em 55 s), mais que os 45 s de ONLINE_MS. Com um
+// pedido entregue e sem resposta, ela está trabalhando: o painel não pode mostrá-la "desconectada" nesse meio-tempo.
+test('links: com um pedido entregue e sem resposta, a extensão continua on-line por até 90 s desde a entrega', async (t) => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 1_786_000_000_000 });
+  const links = createLinkService({ getMode: () => 'extension' });
+  const prox = links.poll(20000);
+  // timeoutMs acima de 90 s: o que tira a extensão de on-line é o prazo desde a entrega, não o fim do pedido
+  const r = resultado(links.requestLink({ url: 'https://www.mercadolivre.com.br/p/MLB1', tag: 'etq', timeoutMs: 120_000 }));
+  const job = await prox; // entregue em t = 0
+  assert.ok(job);
+  t.mock.timers.tick(46_000);
+  assert.equal(links.status().online, true, 'aos 46 s, com o pedido em andamento');
+  t.mock.timers.tick(43_000);
+  assert.equal(links.status().online, true, 'aos 89 s');
+  t.mock.timers.tick(2_000);
+  assert.equal(links.status().online, false, 'aos 91 s da entrega, sem poll nem resposta');
+  t.mock.timers.tick(30_000); // o pedido vence aos 120 s
+  assert.match((await r).erro.message, /não respondeu a tempo/);
+});
+
+test('links: pedido ainda na fila (não entregue) não deixa a extensão on-line; sem pedido, valem os 45 s do poll', async (t) => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 1_786_000_000_000 });
+  const links = createLinkService({ getMode: () => 'extension' });
+  const vazio = links.poll(1000);
+  assert.equal(links.status().online, true);
+  t.mock.timers.tick(1000);
+  assert.equal(await vazio, null); // o poll vazio volta (e conta como contato)
+  t.mock.timers.tick(30_000);
+  const r = resultado(links.requestLink({ url: 'https://www.mercadolivre.com.br/p/MLB1', tag: 'etq', timeoutMs: 120_000 })); // fica na fila
+  assert.equal(links.status().pending, 1);
+  t.mock.timers.tick(14_000); // 44 s depois do último contato
+  assert.equal(links.status().online, true);
+  t.mock.timers.tick(2_000); // 46 s
+  assert.equal(links.status().online, false, 'pedido só na fila não conta');
+  t.mock.timers.tick(120_000);
+  assert.ok((await r).erro);
+});
+
+test('links: a resposta da extensão (submit) conta como contato: mais 45 s on-line a partir dela', async (t) => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 1_786_000_000_000 });
+  const links = createLinkService({ getMode: () => 'extension' });
+  const prox = links.poll(20000);
+  const r = resultado(links.requestLink({ url: 'https://www.mercadolivre.com.br/p/MLB1', tag: 'etq' }));
+  const job = await prox;
+  t.mock.timers.tick(80_000); // a extensão responde perto do teto dela
+  assert.equal(links.submit(job.id, { ok: false, error: 'a Central de Afiliados do Mercado Livre não respondeu a tempo' }), true);
+  assert.ok((await r).erro);
+  t.mock.timers.tick(44_000);
+  assert.equal(links.status().online, true, '44 s depois da resposta');
+  t.mock.timers.tick(2_000);
+  assert.equal(links.status().online, false, '46 s depois da resposta');
+});

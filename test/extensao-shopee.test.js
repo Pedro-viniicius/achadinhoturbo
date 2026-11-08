@@ -474,8 +474,8 @@ test('extensão: falha com Sub_id (failCode) volta como erro, sem sub_id_aplicad
   assert.deepEqual(r.resultados, [{ id: 40, ok: false, error: 'a Shopee recusou o link (código 5)' }]);
 });
 
-test('manifest: permissão nova só para affiliate.shopee.com.br e versão 1.4.1 (Sub_id ligado), sem permissão a mais', () => {
-  assert.equal(MANIFEST.version, '1.4.1');
+test('manifest: permissão nova só para affiliate.shopee.com.br e versão 1.4.2 (Sub_id ligado; sem travar quando a Central não responde), sem permissão a mais', () => {
+  assert.equal(MANIFEST.version, '1.4.2');
   assert.deepEqual(MANIFEST.permissions, ['storage', 'alarms', 'scripting']);
   assert.deepEqual(MANIFEST.host_permissions, ['https://*.mercadolivre.com.br/*', 'https://affiliate.shopee.com.br/*', 'http://127.0.0.1/*', 'http://localhost/*']);
   assert.deepEqual(MANIFEST.optional_host_permissions, ['https://*/*']);

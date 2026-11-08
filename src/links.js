@@ -36,6 +36,9 @@ function longoDaShopee(v) {
 }
 
 const ONLINE_MS = 45000;
+// Pedido entregue à extensão e ainda sem resposta: ela está trabalhando nele (desiste em até 80 s, a lista em 55 s;
+// extension/background.js). Enquanto isso, e por até ENTREGUE_MS desde a entrega, ela conta como on-line.
+const ENTREGUE_MS = 90000;
 // Teto de pedidos de link da Shopee à extensão (S2): o portal de afiliados não é feito para geração em massa.
 const JANELA_SHOPEE_MS = 3600 * 1000;
 const LIMITE_SHOPEE_HORA = 60;
@@ -57,7 +60,17 @@ export function createLinkService({ getMode, limiteShopeeHora = LIMITE_SHOPEE_HO
   const tetoShopee = Number.isInteger(limiteShopeeHora) && limiteShopeeHora > 0 ? limiteShopeeHora : LIMITE_SHOPEE_HORA;
   const pedidosShopee = []; // instantes dos pedidos link_shopee entregues à fila na última hora
 
-  const online = () => Date.now() - lastPollAt < ONLINE_MS;
+  const online = () => {
+    const t = Date.now();
+    if (t - lastPollAt < ONLINE_MS) return true;
+    for (const e of jobs.values()) if (e.entregueEm && t - e.entregueEm < ENTREGUE_MS) return true;
+    return false;
+  };
+  /** Marca o pedido como entregue à extensão (conta para online()). */
+  const entregar = (job) => {
+    const e = jobs.get(job.id); if (e) e.entregueEm = Date.now();
+    return job;
+  };
   const status = () => ({ online: online(), lastPollAt, lastOkAt, lastOffersAt, lastError, shopeeLastOkAt, shopeeLastError, pending: queue.length });
 
   /**
@@ -73,7 +86,7 @@ export function createLinkService({ getMode, limiteShopeeHora = LIMITE_SHOPEE_HO
 
   function flush() {
     while (waiters.length && queue.length) {
-      const w = waiters.shift(); clearTimeout(w.t); w.res(queue.shift());
+      const w = waiters.shift(); clearTimeout(w.t); w.res(entregar(queue.shift()));
     }
   }
 
@@ -133,7 +146,7 @@ export function createLinkService({ getMode, limiteShopeeHora = LIMITE_SHOPEE_HO
 
   function poll(waitMs = 20000) {
     lastPollAt = Date.now();
-    if (queue.length) return Promise.resolve(queue.shift());
+    if (queue.length) return Promise.resolve(entregar(queue.shift()));
     return new Promise((res) => {
       const w = { res };
       w.t = setTimeout(() => {
@@ -160,6 +173,7 @@ export function createLinkService({ getMode, limiteShopeeHora = LIMITE_SHOPEE_HO
   }
 
   function submit(id, { ok, link, longo, data, error, sub_id_aplicado }) {
+    lastPollAt = Date.now(); // a extensão acabou de falar com o painel
     const e = jobs.get(id); if (!e) return false;
     clearTimeout(e.timer); jobs.delete(id);
     if (e.type === 'link_shopee') return respostaShopee(e, { ok, link, longo, error, sub_id_aplicado });

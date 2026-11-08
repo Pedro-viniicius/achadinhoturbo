@@ -9,7 +9,19 @@ const ML = 'https://www.mercadolivre.com.br';
 const CENTRAL = `${ML}/afiliados/hub?is_affiliate=true`;
 const API_LINK = '/affiliate-program/api/v2/affiliates/createLink';
 const API_LISTA = '/affiliate-program/api/hub/search?is_affiliate=true&device=desktop';
+// Tempos limite. Dentro da aba, cada chamada à Central ou ao portal da Shopee tem 20 s (fixo em chamarCentral e em
+// chamarPortalShopee, que são injetadas e não enxergam as constantes daqui). ESPERA_ABA é quanto a aba da Central tem
+// para devolver o resultado (acima dos 20 s do fetch). O teto vale para o pedido inteiro e fica abaixo do prazo do
+// servidor (src/links.js): 90 s para os links (requestLink, requestLinkShopee) e 60 s para a lista de ofertas
+// (requestOffers). Com a aba presa, o laço responde ao painel e volta ao poll em vez de travar.
+const ESPERA_ABA = 30000;
+const TETO_PEDIDO = 80000;
+const TETO_OFERTAS = 55000; // abaixo dos 60 s de requestOffers em src/links.js
+const CENTRAL_SEM_RESPOSTA = 'a Central de Afiliados do Mercado Livre não respondeu a tempo. A extensão recarrega a aba e tenta de novo no próximo pedido';
+const SHOPEE_SEM_RESPOSTA = 'o portal de afiliados da Shopee não respondeu a tempo. A extensão recarrega a aba e tenta de novo no próximo pedido';
 let rodando = false;
+let centralTravada = false; // uma chamada à Central ficou sem resposta: recarrega a aba antes da próxima
+let shopeeTravada = false; // o mesmo para a aba do portal da Shopee
 
 async function cfg() {
   const { conf } = await chrome.storage.local.get('conf');
@@ -20,16 +32,36 @@ async function status(p) {
   await chrome.storage.local.set({ st: { ...st, ...p } });
 }
 
-/** Roda DENTRO da aba da Central (mesma origem, com a sessão e o token anti-CSRF da página). */
+/**
+ * Roda DENTRO da aba da Central (mesma origem, com a sessão e o token anti-CSRF da página). Por ser injetada, não enxerga
+ * nada de fora. Devolve { semSessao } | { status, texto } | { status: 0, tempoEsgotado? } (sem resposta em 20 s ou
+ * falha de rede); nunca lança, e o token não sai daqui. Fora da origem de CENTRAL (a aba foi para outra página),
+ * devolve { semSessao } sem chamar nada: naCentral recarrega a aba na Central e tenta de novo.
+ */
 async function chamarCentral(caminho, corpo) {
+  if (location.origin !== 'https://www.mercadolivre.com.br') return { status: 0, semSessao: true }; // a origem de ML/CENTRAL
   const csrf = document.querySelector('meta[name="csrf-token"]')?.content;
   if (!csrf) return { status: 0, semSessao: true };
-  const r = await fetch(location.origin + caminho, {
-    method: 'POST', credentials: 'include',
-    headers: { accept: 'application/json, text/plain, */*', 'content-type': 'application/json', 'x-csrf-token': csrf, 'x-custom-origin': location.origin },
-    body: JSON.stringify(corpo),
-  });
-  return { status: r.status, texto: await r.text() };
+  try {
+    const r = await fetch(location.origin + caminho, {
+      method: 'POST', credentials: 'include',
+      headers: { accept: 'application/json, text/plain, */*', 'content-type': 'application/json', 'x-csrf-token': csrf, 'x-custom-origin': location.origin },
+      body: JSON.stringify(corpo), signal: AbortSignal.timeout(20000),
+    });
+    return { status: r.status, texto: await r.text() };
+  } catch (e) {
+    return { status: 0, tempoEsgotado: e?.name === 'TimeoutError' || e?.name === 'AbortError' };
+  }
+}
+
+/**
+ * A promessa ou, passados `ms`, a rejeição com `erro`. A promessa original segue sozinha (não dá para cancelar um
+ * executeScript); o que ela der depois é ignorado.
+ */
+function comPrazo(promessa, ms, erro) {
+  let t;
+  const prazo = new Promise((_, falha) => { t = setTimeout(() => falha(erro), ms); });
+  return Promise.race([promessa, prazo]).finally(() => clearTimeout(t));
 }
 
 function esperarCarregar(tabId) {
@@ -55,20 +87,51 @@ async function recarregar(tabId) {
   await esperarCarregar(tabId);
 }
 
-/** Faz a chamada na aba; se a sessão/token da página venceu, recarrega a aba e tenta mais uma vez. */
-async function naCentral(caminho, corpo) {
+/** Recarrega a aba da Central depois de uma chamada sem resposta; se ela foi fechada, usa ou abre outra. */
+async function recarregarCentral(tabId) {
+  centralTravada = false;
+  try {
+    await recarregar(tabId);
+    return tabId;
+  } catch {
+    return abaDaCentral();
+  }
+}
+
+/**
+ * Faz a chamada na aba; se a sessão/token da página venceu ou a Central não respondeu, recarrega a aba e tenta mais
+ * uma vez. `pedido.encerrado` (o laço desistiu do pedido por tempo): para antes de chamar ou recarregar de novo.
+ */
+async function naCentral(caminho, corpo, pedido = {}) {
+  if (pedido.encerrado) throw new Error(CENTRAL_SEM_RESPOSTA);
   let tabId = await abaDaCentral();
+  if (centralTravada) tabId = await recarregarCentral(tabId);
   for (let tentativa = 0; tentativa < 2; tentativa++) {
+    if (pedido.encerrado) throw new Error(CENTRAL_SEM_RESPOSTA);
     let res;
+    const parada = new Error(CENTRAL_SEM_RESPOSTA);
     try {
-      [{ result: res } = {}] = await chrome.scripting.executeScript({ target: { tabId }, world: 'MAIN', func: chamarCentral, args: [caminho, corpo] });
+      [{ result: res } = {}] = await comPrazo(
+        chrome.scripting.executeScript({ target: { tabId }, world: 'MAIN', func: chamarCentral, args: [caminho, corpo] }),
+        ESPERA_ABA, parada,
+      );
     } catch (e) {
-      // aba fechada ou navegando: abre outra
-      tabId = await abaDaCentral();
-      continue;
+      if (e !== parada) {
+        // aba fechada ou navegando: abre outra
+        tabId = await abaDaCentral();
+        continue;
+      }
+      res = { status: 0, tempoEsgotado: true }; // a aba não devolveu nada (página congelada)
     }
+    if (pedido.encerrado) throw new Error(CENTRAL_SEM_RESPOSTA);
     if (res && !res.semSessao && res.status !== 401 && res.status !== 403) {
-      if (!res.status || res.status >= 400) throw new Error(`a Central de Afiliados respondeu HTTP ${res.status}`);
+      if (!res.status) {
+        // sem resposta: a aba é recarregada antes da segunda tentativa ou, depois dela, antes do próximo pedido
+        centralTravada = true;
+        if (tentativa === 0) { tabId = await recarregarCentral(tabId); continue; }
+        throw new Error(res.tempoEsgotado ? CENTRAL_SEM_RESPOSTA : 'não consegui falar com a Central de Afiliados');
+      }
+      if (res.status >= 400) throw new Error(`a Central de Afiliados respondeu HTTP ${res.status}`);
       try { return JSON.parse(res.texto); } catch { throw new Error('a Central de Afiliados respondeu algo que não é JSON'); }
     }
     if (tentativa === 0) { await recarregar(tabId); continue; }
@@ -77,8 +140,8 @@ async function naCentral(caminho, corpo) {
   throw new Error('não consegui abrir a Central de Afiliados');
 }
 
-async function gerarLink(job) {
-  const j = await naCentral(API_LINK, { urls: [job.url], tag: job.tag });
+async function gerarLink(job, pedido) {
+  const j = await naCentral(API_LINK, { urls: [job.url], tag: job.tag }, pedido);
   const u = j?.urls?.[0] || {};
   if (/^https:\/\/meli\.la\//.test(u.short_url || '')) return u.short_url;
   const motivo = u.error?.message || u.message || j?.message || (j?.total_error ? 'o Mercado Livre recusou o link' : 'resposta sem link');
@@ -213,8 +276,9 @@ async function chamarPortalShopee(corpo, tipoPrograma) {
     });
     if (naoLogado(r)) return { semSessao: true };
     return { status: r.status, texto: await r.text() };
-  } catch {
-    return { status: 0 };
+  } catch (e) {
+    // tempo esgotado (20 s) separado da queda de rede: os dois recarregam a aba, só a mensagem final muda
+    return e?.name === 'TimeoutError' ? { status: 0, tempoEsgotado: true } : { status: 0 };
   }
 }
 // ---- Shopee: funções puras (fim) ----
@@ -252,19 +316,29 @@ async function recarregarShopee(tabId) {
  * sub_id_aplicado: o Sub_id do pedido foi no corpo (só com SHOPEE_SUBID_CAMPO preenchido) e a Shopee devolveu o
  * link sem failCode (com failCode, o pedido volta como erro, sem o campo).
  */
-async function gerarLinkShopee(job) {
+async function gerarLinkShopee(job, pedido = {}) {
   const url = urlProdutoShopee(job.url);
   if (!url) throw new Error('endereço de produto da Shopee recusado pela extensão');
   const corpo = corpoLinkShopee(url, job.subId);
   if (!corpo) throw new Error(SHOPEE_SUBID_RECUSADO);
   const subIdAplicado = !semSubId(job.subId) && !!SHOPEE_SUBID_CAMPO;
   let tabId = await abaDaShopee();
+  if (shopeeTravada) { shopeeTravada = false; tabId = await recarregarShopee(tabId); }
   for (let tentativa = 0; tentativa < 2; tentativa++) {
+    if (pedido.encerrado) throw new Error(SHOPEE_SEM_RESPOSTA);
     let res = null;
     try {
       [{ result: res } = {}] = await chrome.scripting.executeScript({ target: { tabId }, world: 'MAIN', func: chamarPortalShopee, args: [corpo, SHOPEE_TIPO_PROGRAMA] });
     } catch {
       res = { semSessao: true }; // aba fechada ou fora do portal (a Shopee leva ao login, onde a extensão não entra)
+    }
+    if (pedido.encerrado) throw new Error(SHOPEE_SEM_RESPOSTA); // resposta tardia de um pedido abandonado: não recarrega
+    if (res && typeof res === 'object' && !res.semSessao && !res.status) {
+      // o portal não respondeu (tempo esgotado ou rede): recarrega a aba e tenta de novo; na segunda, o próximo pedido
+      // da Shopee começa recarregando a aba
+      if (tentativa === 0) { tabId = await recarregarShopee(tabId); continue; }
+      shopeeTravada = true;
+      if (res.tempoEsgotado) throw new Error(SHOPEE_SEM_RESPOSTA);
     }
     const v = interpretarShopee(res);
     if (v.erro) throw new Error(v.erro);
@@ -274,16 +348,23 @@ async function gerarLinkShopee(job) {
   throw new Error(SHOPEE_SEM_SESSAO);
 }
 
-async function buscarOfertas(job) {
+async function buscarOfertas(job, pedido) {
   const paginas = [];
   for (const corpo of job.paginas || []) {
-    const j = await naCentral(API_LISTA, corpo);
+    const j = await naCentral(API_LISTA, corpo, pedido);
     const model = j?.polycard_client_model;
     if (!model) throw new Error('a Central de Afiliados mudou o formato da lista');
     // devolve uma entrada por pedido, na mesma ordem (o servidor intercala as categorias)
     paginas.push({ polycard_client_model: { polycard_context: { url_prefix: model.polycard_context?.url_prefix }, polycards: model.polycards || [] } });
   }
   return paginas;
+}
+
+/** O trabalho de um pedido, já no formato da resposta (sem id e ok). */
+async function executar(job, pedido) {
+  if (job.type === 'ofertas') return { data: await buscarOfertas(job, pedido) };
+  if (job.type === 'link_shopee') return gerarLinkShopee(job, pedido);
+  return { link: await gerarLink(job, pedido) };
 }
 
 async function laco() {
@@ -294,7 +375,8 @@ async function laco() {
       if (!c.token) { await status({ ok: false, erro: 'Cole o token do painel no ícone da extensão.' }); return; }
       let resp;
       try {
-        resp = await fetch(`${c.servidor}/api/ext/poll`, { headers: { 'x-token': c.token } });
+        // o painel segura o poll por 20 s; sem resposta em 30 s, o laço para e o alarme o religa
+        resp = await fetch(`${c.servidor}/api/ext/poll`, { headers: { 'x-token': c.token }, signal: AbortSignal.timeout(30000) });
       } catch { await status({ ok: false, erro: 'Painel fechado ou endereço errado.' }); return; }
       if (resp.status === 401) { await status({ ok: false, erro: 'Token recusado. Copie de novo em Conexões → Mercado Livre, no painel.' }); return; }
       await status({ ok: true, erro: null, em: Date.now() });
@@ -302,17 +384,24 @@ async function laco() {
       try { ({ job } = await resp.json()); } catch { continue; }
       if (!job) continue; // long-poll voltou vazio: pergunta de novo
       let corpo;
+      // Um resultado por pedido: passado o teto, responde o erro e segue; o que o trabalho der depois é ignorado.
+      const pedido = { encerrado: false };
+      const estouro = new Error(job.type === 'link_shopee' ? SHOPEE_SEM_RESPOSTA : CENTRAL_SEM_RESPOSTA);
+      const teto = job.type === 'ofertas' ? TETO_OFERTAS : TETO_PEDIDO;
       try {
-        if (job.type === 'ofertas') corpo = { id: job.id, ok: true, data: await buscarOfertas(job) };
-        else if (job.type === 'link_shopee') corpo = { id: job.id, ok: true, ...(await gerarLinkShopee(job)) };
-        else corpo = { id: job.id, ok: true, link: await gerarLink(job) };
+        corpo = { id: job.id, ok: true, ...(await comPrazo(executar(job, pedido), teto, estouro)) };
         await status({ ultimoErro: null });
       } catch (e) {
+        if (e === estouro) {
+          pedido.encerrado = true; // o trabalho abandonado para na próxima etapa, sem chamar nem recarregar de novo
+          if (job.type === 'link_shopee') shopeeTravada = true; else centralTravada = true;
+        }
         corpo = { id: job.id, ok: false, error: String(e.message || e) };
         await status({ ultimoErro: corpo.error });
       }
       await fetch(`${c.servidor}/api/ext/result`, {
         method: 'POST', headers: { 'x-token': c.token, 'content-type': 'application/json' }, body: JSON.stringify(corpo),
+        signal: AbortSignal.timeout(10000),
       }).catch(() => {});
     }
   } finally { rodando = false; }
