@@ -46,6 +46,7 @@ const TEXTOS_RELATORIOS = {
   semBlocos: 'Para separar o resumo por nicho, crie blocos em <a href="#blocos">Blocos de análise</a>.',
   avisosLegenda: 'Avisos', ativo: 'Ativo', ativoDica: 'Desligado, o número não recebe nada até você ligar de novo.',
   ativoSoDono: 'Só o Dono desliga um número que recebe “Erro de disparo”.',
+  ativoSoDonoLista: 'Números com “Erro de disparo” ligado só o Dono desliga.',
   salvar: 'Salvar número', salvando: 'Salvando…', cancelar: 'Cancelar',
   faltaNome: 'Dê um nome ao número.', faltaNumero: 'Número inválido. Use DDD e número, ex.: 35 99999-1234.',
   faltaBloco: 'Marque ao menos um bloco ou escolha “Todos os grupos”.',
@@ -96,6 +97,7 @@ function pintarRelatorios(d) {
     <p class="dica" id="rel-estado" role="status" style="margin:-8px 0 12px"></p>
     <section class="card" aria-labelledby="rel-num-h"><h2 id="rel-num-h">${t.numeros}</h2>
       <p class="dica" style="margin:0 0 12px">${t.privacidade}</p>
+      ${d.destinos.some(ativoTravado) ? `<p class="dica" style="margin:0 0 12px">${t.ativoSoDonoLista}</p>` : ''}
       ${d.destinos.length ? tabelaDestinosAviso(d) : `<div class="vazio">${t.vazio}</div>`}</section>
     <section class="card" aria-labelledby="rel-prev-h">
       <div class="linha" style="justify-content:space-between"><h2 id="rel-prev-h" style="margin:0">${t.previa}</h2>${seletor}</div>
