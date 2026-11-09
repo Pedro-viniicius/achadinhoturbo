@@ -31,6 +31,14 @@
 // https://www.magazinevoce.com.br/<loja>/… é montado no preparar, sem rede, com a loja de parceiro salva em Conexões
 // NA HORA DO ENVIO (como a tag da Amazon). A loja do link colado nunca segue: vira só o aviso `outra_loja` do Identificar.
 // Sem rastreio por grupo (rastreio.LOJAS não tem a Magalu).
+// Verificador (plano verificador-preco-estoque, D1, D7, D8 e D11; ADR-010): com `verificador` (src/verificador.js), o
+// preparar('oferta') relê preço e estoque na loja depois das checagens sem rede e antes de gerar o link. A referência é
+// `payload.preco_loja` (o preço da loja lido ao criar, antes dos ajustes e do texto; sem ele, `offer.price`) e a idade dos
+// dados é `envios.created_at`. A oferta barrada (OfertaDescartada) não pede link nem manda nada: uma linha `aviso` no
+// Histórico, o motivo em cada grupo e `resultado.descartado`; o envio termina em `erro` (sem status novo) e nada vai ao
+// log com o nível `erro` (que vira aviso por WhatsApp). A que sai leva o preço conferido e o `vistoEm` ({HORA_PRECO}), e
+// o sufixo do verificador (" · preço não conferido (…)", " · preço atualizado de …") vai na linha `ok` de cada grupo.
+// Sem `verificador` (null), nada disso acontece: a oferta sai como foi gravada.
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -48,6 +56,10 @@ import { hostPermitido } from './ml.js';
 import { montarEnquete } from './whatsapp.js';
 import { renderTemplate, discountPct } from './template.js';
 import { sleep, jitter } from './util.js';
+import { OfertaDescartada, MOTIVOS_VERIFICADOR, FRESCOR_MIN, MARGEM_AGENDADO_MIN } from './verificador.js';
+
+/** Disparo manual agendado para longe, de uma loja que o verificador não consegue conferir (ela sairia sem preço novo ou nunca). */
+export const SEM_CONFERENCIA_AGENDADO = `Esta loja não tem conferência de preço: agende para até ${FRESCOR_MIN - MARGEM_AGENDADO_MIN} min ou envie agora.`;
 
 const { PLATAFORMAS, LojaNaoConectada, SubIdIndisponivel } = lojasPadrao;
 
@@ -127,6 +139,24 @@ const mascararTag = (link) => String(link).replace(/([?&]tag=)[^&#]*/, '$1••
 const pad = (n) => String(n).padStart(2, '0');
 const hora = (ts) => { const d = new Date(ts); return `${pad(d.getDate())}/${pad(d.getMonth() + 1)} ${pad(d.getHours())}:${pad(d.getMinutes())}`; };
 const lerJson = (txt, padrao) => { try { return JSON.parse(txt) ?? padrao; } catch { return padrao; } };
+/**
+ * Quando os dados da oferta foram lidos, em ms, para a regra do frescor do verificador: `envios.created_at` (ms, como
+ * todo INSERT grava; o texto 'AAAA-MM-DD HH:MM:SS' do SQLite é lido em UTC). Outro valor → null (idade desconhecida).
+ */
+function lidoEmDe(v) {
+  if (typeof v === 'number') return Number.isFinite(v) && v > 0 ? v : null;
+  if (typeof v !== 'string') return null;
+  if (/^\d{1,15}$/.test(v)) return Number(v) > 0 ? Number(v) : null;
+  if (!/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(:\d{2})?$/.test(v)) return null;
+  const ms = Date.parse(`${v.replace(' ', 'T')}Z`);
+  return Number.isFinite(ms) ? ms : null;
+}
+/** Motivo do verificador da linha do histórico: só no grupo que ficou sem a oferta com o texto do descarte. → chave ou null */
+function descartadoDe(resultado, erro) {
+  const r = lerJson(resultado, null);
+  const d = r && typeof r === 'object' ? r.descartado : null;
+  return typeof d === 'string' && Object.hasOwn(MOTIVOS_VERIFICADOR, d) && r.motivo === erro ? d : null;
+}
 const tplOpts = (db) => ({ tituloMax: Number(getSetting(db, 'titulo_max', 60)) });
 
 const MAX_ERRO_BRUTO = 500; // corta antes das regex: texto enorme de uma biblioteca não trava o servidor
@@ -429,14 +459,22 @@ function origemDoLog(tipo, p) {
  * src/shopee.js (createShopee); sem ele, oferta da Shopee é recusada. `magalu`: cliente de src/magalu.js (createMagalu),
  * só para resolver link curto; sem ele, o link curto da Magalu vira 'invalido' (o de produto não precisa dele).
  * `lojas`: o módulo src/lojas.js (injetável nos testes). O Identificar do Disparo manual (identificar) usa os mesmos
- * ml/amazon/shopee/magalu/lojas do envio.
+ * ml/amazon/shopee/magalu/lojas do envio. `verificador`: createVerificador de src/verificador.js; sem ele (null), a
+ * oferta sai sem a conferência de preço e estoque (ver o topo).
  */
-export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acordar = null, amazon = null, shopee = null, magalu = null, lojas = lojasPadrao } = {}) {
+export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acordar = null, amazon = null, shopee = null, magalu = null, lojas = lojasPadrao, verificador = null } = {}) {
   const pastaFotos = dir ? path.join(dir, 'uploads') : null;
   const pausaEntreGrupos = () => (fast ? 0 : Number(getSetting(db, 'delay_group_s', 6)));
   // o modo em que o serviço de links vai gerar o link (src/links.js): simulação = links falsos, sem extensão
   const modoLink = () => links?.modo?.();
   let ultimaMensagem = 0; // quando este módulo mandou a última mensagem: o envio seguinte espera a pausa
+  /**
+   * Preço da loja lido ao criar, para o payload (`preco_loja`, a referência do verificador): só número > 0 e só com o
+   * verificador (D9: sem ele, o payload é o de antes); senão, nada.
+   */
+  const precoDaLoja = (v) => (verificador && typeof v === 'number' && Number.isFinite(v) && v > 0 ? { preco_loja: v } : {});
+  /** Com o verificador ligado, esta loja não tem como ser conferida (Magalu; Amazon ou Shopee sem a API)? */
+  const semConferencia = (lojaId) => !!verificador && verificador.ativo?.() !== false && verificador.podeConferir?.(lojaId) === false;
   const lerEnvio = (id) => db.prepare('SELECT * FROM envios WHERE id = ?').get(id);
   const estadoDe = (id) => db.prepare('SELECT status, next_run_at FROM envios WHERE id = ?').get(id);
   const nomeDoGrupo = (jid) => db.prepare('SELECT name FROM groups WHERE jid = ?').get(jid)?.name ?? null;
@@ -574,7 +612,7 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
     if (exigirPreco && offer.price == null) throw semDados(SEM_PRECO);
     return {
       asin, fonte_dados: fonteDosDados({ produto, dados, offer, ajustes, causa, fonte, complemento }),
-      ...(ajustes.upload ? { upload: ajustes.upload } : {}), offer,
+      ...(ajustes.upload ? { upload: ajustes.upload } : {}), ...precoDaLoja(produto.price), offer,
     };
   }
 
@@ -784,7 +822,7 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
     return {
       url: ids.urlProduto, shop_id: ids.shopId, item_id: ids.itemId, link_afiliado: link,
       fonte_dados: fonteDosDados({ produto, dados, offer, ajustes, causa, fonte, complemento }),
-      ...(ajustes.upload ? { upload: ajustes.upload } : {}), offer,
+      ...(ajustes.upload ? { upload: ajustes.upload } : {}), ...precoDaLoja(produto.price), offer,
     };
   }
 
@@ -810,7 +848,7 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
     const offer = chave ? { ...dados, key: chave } : dados;
     if (exigirPreco && !offer.title) throw semDados(SEM_TITULO_ML);
     if (exigirPreco && offer.price == null) throw semDados(SEM_PRECO);
-    return { url: urlProduto, ...(complemento ? { fonte_dados: fonte } : {}), offer };
+    return { url: urlProduto, ...(complemento ? { fonte_dados: fonte } : {}), ...precoDaLoja(lida.offer?.price), offer };
   }
 
   /**
@@ -842,7 +880,9 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
 
   /**
    * O que depende de rede, depois das checagens de conteudoDaOferta: o produto (Mercado Livre, ou link resolvido e API
-   * da Amazon ou da Shopee, ou o produto do link da Magalu) e o link de afiliado da Shopee. Não grava nada. → payload da oferta
+   * da Amazon ou da Shopee, ou o produto do link da Magalu) e o link de afiliado da Shopee. Não grava nada. → payload da
+   * oferta, com `preco_loja` (o preço que a loja devolveu, antes dos ajustes do painel e do texto do remetente) quando
+   * há verificador e a loja trouxe preço: é a referência dele no envio (a Magalu nunca traz).
    */
   async function payloadDaOferta({ url, loja, etiqueta, template, ajustes }, { origem, complemento = null, exigirPreco = false }) {
     const base = {
@@ -922,7 +962,7 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
     return {
       ...base, produto, extra, causa, link_via: linkVia, causa_link: causaLink,
       pode_disparar: !causaLink, // `nao_encontrado` (fora do programa) não bloqueia: sem aviso, os dados vão à mão
-      texto: renderTemplate(template.body, { ...produto, link: LINK_EXEMPLO_SHOPEE }, tplOpts(db)),
+      texto: renderTemplate(template.body, { ...produto, link: LINK_EXEMPLO_SHOPEE, vistoEm: Date.now() }, tplOpts(db)),
     };
   }
 
@@ -955,19 +995,26 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
         return { ...base, causa: 'invalido' };
       }
       if (typeof link !== 'string' || !LINK_MAGALU.test(link)) return { ...base, causa: 'invalido' };
-      texto = renderTemplate(template.body, { ...dados.produto, link }, tplOpts(db));
+      texto = renderTemplate(template.body, { ...dados.produto, link, vistoEm: Date.now() }, tplOpts(db));
     }
     return { ...base, produto: dados.produto, outra_loja: outraLoja, pode_disparar: !!salva, texto };
   }
 
   /**
    * POST /api/disparo/identificar: loja do link e, se integrada, o produto e o texto com o template.
+   * O texto é a prévia: {HORA_PRECO} sai com a hora de agora (a prévia não confere; no envio é a hora da conferência).
    * Amazon: { loja, motivo:null, editavel:true, produto, causa, texto (tag mascarada), template_id, etiqueta:null,
    * tag_salva }. Sem tag → causa 'sem_tag' sem acessar a rede; link que não chega a um produto → 'invalido' ou
    * 'nao_produto' (produto null); API fora → produto com os campos nulos e a causa. Shopee: identificarShopee. Magalu:
-   * identificarMagalu.
+   * identificarMagalu. Com o verificador ligado e a loja sem conferência de preço, a resposta ganha
+   * `sem_conferencia: true` (o agendar de mais de 25 min é recusado no criar; a chave só existe nesse caso).
    */
   async function identificarLink(corpo) {
+    const r = await identificarLinkBruto(corpo);
+    // verificador (R1): o painel troca a dica do agendar pela explicação quando a loja não tem conferência de preço
+    return r?.loja?.implementada && semConferencia(r.loja.id) ? { ...r, sem_conferencia: true } : r;
+  }
+  async function identificarLinkBruto(corpo) {
     const url = typeof corpo?.url === 'string' ? corpo.url.trim() : '';
     if (!url) throw new Error('Cole o link do produto.');
     const loja = url.length <= MAX_URL ? lojas.identificar(url) : null;
@@ -986,13 +1033,13 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
       try { asin = await asinDoLink(url); } catch (e) { return { ...base, causa: e.causa }; }
       const { produto, causa } = await produtoAmazon(asin);
       const link = mascararTag(amazon.montarLink(asin));
-      return { ...base, produto, causa, texto: renderTemplate(template.body, { ...produto, link }, tplOpts(db)) };
+      return { ...base, produto, causa, texto: renderTemplate(template.body, { ...produto, link, vistoEm: Date.now() }, tplOpts(db)) };
     }
     const etiqueta = etiquetaDe(db, corpo.tag_id, { exigir: false });
     const produto = await lerOferta(loja.id, url, { ml, amazon, lojas });
     return {
       loja, motivo: null, editavel: false, causa: null, produto,
-      texto: renderTemplate(template.body, { ...produto, link: LINK_EXEMPLO }, tplOpts(db)),
+      texto: renderTemplate(template.body, { ...produto, link: LINK_EXEMPLO, vistoEm: Date.now() }, tplOpts(db)),
       template_id: template.id, etiqueta,
     };
   }
@@ -1023,6 +1070,11 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
       repetir = validarRepetir(b.repetir);
       nextRunAt = proximaOcorrencia(repetir, now);
       if (!nextRunAt) throw new Error('Escolha ao menos um dia e um horário.');
+    }
+    // verificador (R1): oferta de loja sem conferência possível, agendada para depois do frescor de 30 min menos a margem de 5 (25 min), sairia com dados
+    // velhos e seria descartada na hora: recusa já aqui, antes de qualquer rede, em vez de aceitar e nunca enviar
+    if (tipo === 'oferta' && quando === 'agendado' && nextRunAt - now > (FRESCOR_MIN - MARGEM_AGENDADO_MIN) * 60000 && semConferencia(conteudo.loja.id)) {
+      throw new Error(SEM_CONFERENCIA_AGENDADO);
     }
     if (quando === 'agora') {
       if (!wa.isReady()) throw new Error('O WhatsApp está desconectado. Conecte o número antes de disparar.');
@@ -1167,11 +1219,35 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
   }
 
   /**
-   * O que vai a cada grupo, preparado uma vez por ocorrência, para os grupos `jids` que faltam.
+   * Conferência do verificador (D1, D4 e D7), logo antes de gerar o link. A oferta vai com a loja e os ids do payload
+   * (`asin`, `shop_id`/`item_id`, `url`), a referência é `preco_loja` (sem ele, o verificador usa `offer.price`) e
+   * `lidoEm` é a idade dos dados (`envios.created_at`). → { offer: os campos gravados com o preço, o preço antigo e o
+   * desconto conferidos e `vistoEm` só quando conferido; sufixo: '' ou ' · …' para a linha `ok` }. Barrada → lança
+   * OfertaDescartada. Sem verificador: a oferta gravada, sem sufixo. O `vistoEm` gravado no payload nunca vale.
+   */
+  async function conferirOferta(p, lidoEm) {
+    const { vistoEm: _gravado, ...gravada } = p.offer && typeof p.offer === 'object' && !Array.isArray(p.offer) ? p.offer : {};
+    if (!verificador) return { offer: gravada, sufixo: '' };
+    const r = await verificador.conferir(
+      { ...gravada, loja: p.loja, url: p.url, asin: p.asin, shop_id: p.shop_id, item_id: p.item_id },
+      { lidoEm, referencia: p.preco_loja },
+    );
+    if (r?.acao === 'descartar') throw new OfertaDescartada(r.motivo, r.texto);
+    if (r?.acao !== 'enviar') throw new OfertaDescartada('nao_conferido');
+    const offer = { ...gravada };
+    const conferida = r.oferta && typeof r.oferta === 'object' ? r.oferta : {};
+    for (const k of ['price', 'oldPrice', 'discountPct']) if (Object.hasOwn(conferida, k)) offer[k] = conferida[k];
+    if (r.conferido === true && Number.isFinite(conferida.vistoEm)) offer.vistoEm = conferida.vistoEm;
+    return { offer, sufixo: typeof r.sufixo === 'string' ? r.sufixo : '' };
+  }
+
+  /**
+   * O que vai a cada grupo, preparado uma vez por ocorrência, para os grupos `jids` que faltam. `lidoEm` (oferta): a
+   * idade dos dados para o verificador (conferirOferta), que pode lançar OfertaDescartada antes de qualquer link.
    * → { enviar(jid) → texto do log, falha(jid) → motivo do grupo sem link (ou null), rastreio(jid) → linha do rastreio,
    *   avisos (oferta) → frases para o Histórico, nível aviso (ID de rastreamento da Amazon recusado) }
    */
-  async function preparar(tipo, p, jids = []) {
+  async function preparar(tipo, p, jids = [], { lidoEm = null } = {}) {
     if (tipo === 'oferta') {
       const ehAmazon = p.loja === 'amazon';
       const ehShopee = p.loja === 'shopee';
@@ -1185,7 +1261,7 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
       // o template é o mesmo id e a mesma criação (renomear ou editar não muda created_at; apagar e recriar muda)
       const tpl = Number.isInteger(p.template_id) && db.prepare('SELECT body, created_at FROM templates WHERE id = ?').get(p.template_id);
       if (!tpl || (p.template_criado_em != null && tpl.created_at !== p.template_criado_em)) throw new Error('o template foi apagado');
-      let porGrupo; const avisos = [];
+      const semLink = (e) => new Error(`link de afiliado não gerado: ${e?.message || 'erro desconhecido'}`);
       try {
         // Shopee: o link gerado ao criar (API ou extensão), conferido de novo; nada de rede nem de link montado aqui
         if (ehShopee && !(typeof p.link_afiliado === 'string' && LINK_SHOPEE.test(p.link_afiliado))) throw new Error('o link da Shopee guardado no envio não é válido');
@@ -1197,14 +1273,16 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
         if (ehAmazon && !RE_ASIN.test(String(p.asin ?? ''))) throw new Error('o produto da Amazon está sem ASIN');
         // Magalu: só o endereço de produto e o código gravados ao criar valem (o link é refeito deles, nunca o colado)
         if (ehMagalu && (typeof p.codigo !== 'string' || extrairProdutoMagalu(p.url)?.codigo !== p.codigo)) throw new Error('o produto da Magalu está sem código');
-        // Amazon: sempre https://www.amazon.com.br/dp/<ASIN>?tag=<tag>, montado do ASIN (nunca o link que veio)
-        porGrupo = await linksPorGrupo(p, etiqueta, jids, avisos);
-      } catch (e) {
-        throw new Error(`link de afiliado não gerado: ${e?.message || 'erro desconhecido'}`);
-      }
+      } catch (e) { throw semLink(e); }
+      // verificador (D1): depois das checagens sem rede e antes do link, fora do try acima (a descartada não é "link de
+      // afiliado não gerado"); a oferta barrada sai daqui como OfertaDescartada, sem pedir link nenhum
+      const { offer, sufixo } = await conferirOferta(p, lidoEm);
+      let porGrupo; const avisos = [];
+      // Amazon: sempre https://www.amazon.com.br/dp/<ASIN>?tag=<tag>, montado do ASIN (nunca o link que veio)
+      try { porGrupo = await linksPorGrupo(p, etiqueta, jids, avisos); } catch (e) { throw semLink(e); }
       const textos = new Map(); // link → texto: um por código, não por grupo
       const textoDe = (link) => {
-        if (!textos.has(link)) textos.set(link, renderTemplate(tpl.body, { ...p.offer, link }, tplOpts(db)));
+        if (!textos.has(link)) textos.set(link, renderTemplate(tpl.body, { ...offer, link }, tplOpts(db)));
         return textos.get(link);
       };
       // foto: a enviada pelo painel (Buffer) ou a URL que a loja devolveu, só de CDN permitido (o Baileys baixa a URL)
@@ -1231,10 +1309,10 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
           if (!linha?.link) throw new Error('link de afiliado não gerado');
           const texto = textoDe(linha.link); const ok = okDe(linha);
           if (foto) {
-            try { await wa.sendImage(jid, foto, texto, ...(mimetype ? [{ mimetype }] : [])); return ok; } catch { /* cai para o texto, como as regras */ }
-            await wa.sendText(jid, texto); return `${ok} (sem a foto: ela não carregou)`;
+            try { await wa.sendImage(jid, foto, texto, ...(mimetype ? [{ mimetype }] : [])); return `${ok}${sufixo}`; } catch { /* cai para o texto, como as regras */ }
+            await wa.sendText(jid, texto); return `${ok} (sem a foto: ela não carregou)${sufixo}`;
           }
-          await wa.sendText(jid, texto); return ok;
+          await wa.sendText(jid, texto); return `${ok}${sufixo}`;
         },
       };
     }
@@ -1270,11 +1348,14 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
   /**
    * Fecha a rodada: concluido/erro, ou de volta a pendente na próxima ocorrência (repetir). Só mexe no envio se ele
    * ainda está nesta ocorrência: quem pausou e retomou (outro next_run_at) não tem o estado desfeito por esta rodada.
+   * `descartado` (o motivo do verificador) vai em `resultado.descartado` (D11); o envio descartado termina em `erro`.
    */
-  function finalizar(e, ocorrencia, { ok, erro, motivo }) {
+  function finalizar(e, ocorrencia, { ok, erro, motivo, descartado = null }) {
     const fim = Date.now();
+    const resultado = motivo ? { ok, erro, motivo } : { ok, erro };
+    if (descartado) resultado.descartado = descartado;
     db.prepare('UPDATE envios SET last_run_at = ?, resultado = ? WHERE id = ? AND next_run_at = ?')
-      .run(fim, JSON.stringify(motivo ? { ok, erro, motivo } : { ok, erro }), e.id, ocorrencia);
+      .run(fim, JSON.stringify(resultado), e.id, ocorrencia);
     // só mexe no status se ninguém cancelou ou pausou no meio
     if (e.quando === 'repetir') {
       const prox = proximaOcorrencia(lerJson(e.repetir, null), Math.max(fim, ocorrencia));
@@ -1290,6 +1371,8 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
    * retomada que pula os grupos já 'ok' na mesma ocorrência, resultado em `envio_resultados` e linha no `log`.
    * `ocorrencia`: o next_run_at que quem chamou viu vencido (processarPendentes); se ele mudou nesse meio-tempo
    * (pausado e retomado para o próximo horário), não envia. Sem ela, vale o next_run_at atual.
+   * Oferta barrada pelo verificador (OfertaDescartada no preparar): uma linha `aviso` com o motivo, o mesmo texto em cada
+   * grupo que faltava (ok = 0) e `resultado.descartado`; nenhuma linha `erro` no log (D8).
    * → { ok, erro } da ocorrência, ou { pulado: true } se outro já está enviando ou a ocorrência mudou.
    */
   async function runEnvio(id, { ocorrencia: esperada } = {}) {
@@ -1304,7 +1387,7 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
     if (ocorrencia == null) { ocorrencia = Date.now(); db.prepare('UPDATE envios SET next_run_at = ? WHERE id = ?').run(ocorrencia, n); }
     const p = lerJson(e.payload, {});
     const log = logDe(e, p);
-    let ok = 0; let erro = 0; let motivo = null;
+    let ok = 0; let erro = 0; let motivo = null; let descartado = null;
     try {
       const jids = lerJson(e.group_jids, []);
       const feitos = okNaOcorrencia(n, ocorrencia); // retomada: quem já recebeu nesta ocorrência não recebe de novo
@@ -1312,10 +1395,18 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
       ok = jids.length - faltam.length;
       let envio = null;
       if (faltam.length) {
-        try { envio = await preparar(e.tipo, p, faltam); } catch (err) { motivo = limparErro(err?.message); }
+        try { envio = await preparar(e.tipo, p, faltam, { lidoEm: lidoEmDe(e.created_at) }); } catch (err) {
+          motivo = limparErro(err instanceof OfertaDescartada ? err.texto : err?.message);
+          if (err instanceof OfertaDescartada) descartado = err.motivo;
+        }
         for (const aviso of envio?.avisos || []) log({ level: 'aviso', message: aviso });
       }
-      if (faltam.length && !envio) {
+      if (faltam.length && descartado) {
+        // verificador (D8): a oferta não sai para ninguém, sem link pedido; um `aviso` só (nunca `erro`, que vira aviso
+        // por WhatsApp) e o motivo em cada grupo, para o histórico do Disparo manual, do espelho e do catálogo
+        log({ level: 'aviso', message: motivo });
+        for (const jid of faltam) { registrar(n, ocorrencia, jid, nomeDoGrupo(jid), false, motivo); erro++; }
+      } else if (faltam.length && !envio) {
         // nada dá para enviar (link não gerado, foto apagada…): erro em cada grupo, sem tentar
         for (const jid of faltam) {
           const nome = nomeDoGrupo(jid);
@@ -1356,7 +1447,7 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
       motivo = limparErro(err?.message); erro = Math.max(erro, 1);
       log({ level: 'erro', message: `Falha no envio: ${motivo}` });
     } finally {
-      finalizar(e, ocorrencia, { ok, erro, motivo });
+      finalizar(e, ocorrencia, { ok, erro, motivo, descartado });
     }
     return { ok, erro };
   }
@@ -1400,6 +1491,9 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
   /**
    * Dados da tela: tipo 'oferta' (F1) ou 'mensagem' (F2: mensagens e enquetes). Contadores dos últimos 30 dias.
    * As ocorrências das rotinas do Grupo vivo (origem 'rotina') ficam de fora: são da tela delas (plano grade-de-disparos, D7).
+   * A linha do histórico de um grupo que ficou sem a oferta por causa do verificador ganha `descartado` (a chave de
+   * MOTIVOS_VERIFICADOR: 'esgotado', 'preco_subiu' ou 'nao_conferido'), com o texto do descarte em `erro`; as outras
+   * linhas não têm o campo.
    */
   function painel(tipo) {
     const tipos = tipo === 'oferta' ? ['oferta'] : tipo === 'mensagem' ? ['mensagem', 'enquete'] : null;
@@ -1435,9 +1529,12 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
       naFila += faltam.length;
       fila.push({ ...cabecalho(e), quando: e.next_run_at ?? e.created_at, grupo: grupoDe(faltam), grupos: faltam.length, status: e.status, erro: null });
     }
-    const resultados = db.prepare(`SELECT r.ts, r.jid, r.group_name, r.ok, r.erro, e.id, e.tipo, e.payload
+    const resultados = db.prepare(`SELECT r.ts, r.jid, r.group_name, r.ok, r.erro, e.id, e.tipo, e.payload, e.resultado
       FROM envio_resultados r JOIN envios e ON e.id = r.envio_id WHERE ${em} ORDER BY r.ts DESC, r.id DESC LIMIT 20`).all(...tipos)
-      .map((r) => ({ ...cabecalho(r), quando: r.ts, grupo: r.group_name || nomeDe(r.jid), grupos: 1, status: r.ok ? 'enviado' : 'erro', erro: r.ok ? null : r.erro }));
+      .map((r) => {
+        const descartado = r.ok ? null : descartadoDe(r.resultado, r.erro);
+        return { ...cabecalho(r), quando: r.ts, grupo: r.group_name || nomeDe(r.jid), grupos: 1, status: r.ok ? 'enviado' : 'erro', erro: r.ok ? null : r.erro, ...(descartado ? { descartado } : {}) };
+      });
     // erro sem nenhum grupo tentado (perdeu o horário)
     const perdidos = db.prepare(`SELECT * FROM envios e WHERE ${em} AND e.status = 'erro' AND ${semResultado}
       ORDER BY COALESCE(e.last_run_at, e.created_at) DESC LIMIT 20`).all(...tipos).map((e) => {

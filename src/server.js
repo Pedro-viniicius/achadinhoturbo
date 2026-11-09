@@ -21,10 +21,11 @@ import { montarRotas as rotasRotinas, MAX_CONTEUDOS, MAX_HORARIOS_ROTINA } from 
 import { montarRotas as rotasEquipe, montarRotasPublicas as rotasEquipePublicas } from './equipe.js';
 import { createCatalogo, limparFonteCatalogo } from './catalogo.js';
 import { createCatalogoItens, montarRotas as rotasCatalogoItens } from './catalogo-itens.js';
+import { createVerificador, LIMITE_MAX_PCT } from './verificador.js';
 import { montarRotas as rotasRastreio, apagarDoBloco as apagarRastreioDoBloco, blocoTemCodigo, etiquetaEmUso, MENSAGENS_RASTREIO, limpar as limparRastreio } from './rastreio.js';
 import { montarRotas as rotasImportador } from './importador.js';
 import { montarRotas as rotasGanhos, blocoTemGasto, MENSAGENS_GANHOS } from './ganhos.js';
-import { renderTemplate, SAMPLE_OFFER, SAMPLE_OFFER_AMAZON, PLACEHOLDERS } from './template.js';
+import { renderTemplate, SAMPLE_OFFER, SAMPLE_OFFER_AMAZON, PLACEHOLDERS, horaPrecoDerrubaOLink } from './template.js';
 import { CATEGORIAS, ORDENS, POR_PAGINA } from './afiliados.js';
 import { overview, resumo, evasaoDoDia, periodRange, startOfDay, dayOf } from './analytics.js';
 import { MODOS, LIMITE_MAX, LOTACAO_PCT, slugify, parseLink, pickGroup, statusDosGrupos, verificarLotacao, encaixarGrupoNovo } from './rotador.js';
@@ -56,9 +57,13 @@ const CSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inl
  * endereço e o caminho do token a cada chamada (segredosDe; o cartão não tem segredo) e o token do arquivo, nunca
  * guardado. A revisão manda o envio aprovado pela fila de envios do agendador, criado depois dela: `envios` e
  * `acordar` a alcançam na hora da chamada.
+ * Verificador de preço e estoque (plano verificador-preco-estoque, D9; ADR-010): só com `verificar: true` (o main
+ * liga). UM verificador, com o mesmo ml e os mesmos clientes da Amazon e da Shopee, vai ao agendador (regras) e, por
+ * ele, à fila de envios (Disparo manual, espelho, remetente e "Enviar" da revisão do Catálogo). `simulado` (DRY_RUN):
+ * confirma sem rede. Sem `verificar`, `verificador` é null e nada é conferido (como antes).
  * O main abaixo e os testes sobem por aqui. `fetch` só nos testes (padrão: o fetch global).
  */
-export function criarServicos({ db, wa, links, fast = FAST, dir = DATA_DIR, ml = mlPadrao, fetch } = {}) {
+export function criarServicos({ db, wa, links, fast = FAST, dir = DATA_DIR, ml = mlPadrao, fetch, verificar = false, simulado = false } = {}) {
   const amazon = createAmazon({ db, fetch, lerConexao: () => segredosDe(db, 'amazon') });
   const shopee = createShopee({ db, fetch, lerConexao: () => segredosDe(db, 'shopee') });
   const magalu = createMagalu({ fetch }); // só o resolvedor de link curto (sem conexão: a loja de parceiro é lida no envio)
@@ -76,11 +81,23 @@ export function criarServicos({ db, wa, links, fast = FAST, dir = DATA_DIR, ml =
     scheduler?.tick().catch((e) => console.error('[agendador]', e?.name || 'erro'));
   };
   const catalogoItens = createCatalogoItens({ db, wa, links, amazon, envios, acordar });
-  scheduler = createScheduler({ db, wa, links, fast, dir, ml, amazon, shopee, magalu, catalogo, catalogoItens });
+  const verificador = verificar === true ? createVerificador({ db, ml, amazon, shopee, simulado: simulado === true }) : null;
+  scheduler = createScheduler({ db, wa, links, fast, dir, ml, amazon, shopee, magalu, catalogo, catalogoItens, verificador });
   wa.onMensagem((m) => scheduler.espelho.receber(m));
   // Para desligar o envio pelo sócio na hora: desligue os remetentes no painel (ou apague esta linha e reinicie)
   wa.onPrivada((m) => scheduler.remetentes.receber(m));
-  return { amazon, shopee, catalogo, catalogoItens, scheduler };
+  return { amazon, shopee, catalogo, catalogoItens, scheduler, verificador };
+}
+
+/** Linha `aviso` do Histórico quando a conferência de preço e estoque é desligada em Ajustes (D10); com login, "(por <nome>)" no fim. */
+export const AVISO_VERIFICADOR_DESLIGADO = 'Verificador desligado em Ajustes';
+const ERRO_VERIFICADOR_LIMITE = `Informe um número inteiro de 0 a ${LIMITE_MAX_PCT}.`;
+export const ERRO_TEMPLATE_HORA_PRECO = 'Ponha o {HORA_PRECO} em outra linha, ou entre [ ] sem o {LINK}: sem conferência de preço, a linha some e a mensagem sai sem o link de afiliado.';
+const ERRO_VERIFICADOR_ATIVO = 'Conferir preço e estoque: informe ligado ou desligado.';
+/** Limite de alta do verificador vindo do painel: inteiro de 0 a LIMITE_MAX_PCT (número ou só dígitos). Senão, null. */
+function limiteVerificador(v) {
+  const n = typeof v === 'number' ? v : typeof v === 'string' && /^\d{1,3}$/.test(v.trim()) ? Number(v.trim()) : NaN;
+  return Number.isInteger(n) && n >= 0 && n <= LIMITE_MAX_PCT ? n : null;
 }
 
 const ASIN_SONDA = 'B000000000'; // montarLink com um ASIN de sonda diz se há tag da Amazon salva, sem rede
@@ -100,6 +117,8 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
   app.use((req, res, next) => (SEM_JSON_GLOBAL.has(req.path) ? next() : jsonPequeno(req, res, next)));
 
   const auth = createAuth({ db, password: panelPassword });
+  // só lê os Ajustes do verificador (ligado e limite), com as regras e os padrões de src/verificador.js; sem rede
+  const ajustesVerificador = createVerificador({ db });
   const exigeDono = soDono(auth); // Operador recebe 403; sem login no painel, passa
   const loginLimiter = createLimiter({ max: 5, windowMs: 15 * 60 * 1000 });       // por IP (/64 no IPv6)
   const loginGlobal = createLimiter({ max: 50, windowMs: 15 * 60 * 1000 });        // todas as origens juntas
@@ -273,6 +292,7 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
       titulo_max: Number(getSetting(db, 'titulo_max', 60)),
       retencao_dias: Number(getSetting(db, 'retencao_dias', RETENCAO_PADRAO_DIAS)),
       limite_padrao: limitePadrao(db), virada_dia: configAvisos(db).virada_dia, // de Relatórios e avisos
+      verificador_ativo: ajustesVerificador.ativo(), verificador_limite_pct: ajustesVerificador.limitePct(), // conferência de preço e estoque
     },
     ext_token: getSetting(db, 'ext_token'), porta: PORT,
     endereco_publico: enderecoPublico, auth: auth.enabled(),
@@ -292,7 +312,24 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
   })));
 
   app.put('/api/ajustes', wrap((req) => {
-    const { delay_group_s, delay_offer_s, link_mode, titulo_max, retencao_dias } = req.body;
+    const { delay_group_s, delay_offer_s, link_mode, titulo_max, retencao_dias, verificador_ativo, verificador_limite_pct } = req.body ?? {};
+    // Conferência de preço e estoque (D10: sem soDono, como os outros Ajustes). Os dois campos são validados antes de
+    // gravar qualquer um; desligar (de ligado para desligado) deixa uma linha `aviso` no Histórico.
+    if (verificador_ativo != null && typeof verificador_ativo !== 'boolean') throw new Error(ERRO_VERIFICADOR_ATIVO);
+    const limiteVf = verificador_limite_pct != null ? limiteVerificador(verificador_limite_pct) : null;
+    if (verificador_limite_pct != null && limiteVf == null) throw new Error(ERRO_VERIFICADOR_LIMITE);
+    // quem salvou (com login no painel), como o log da Equipe: mexer na proteção de preço deixa rastro de quem foi
+    const porQuem = req.user?.nome ? ` (por ${String(req.user.nome).slice(0, 60)})` : '';
+    if (limiteVf != null) {
+      const antes = ajustesVerificador.limitePct();
+      setSetting(db, 'verificador_limite_pct', limiteVf);
+      if (antes !== limiteVf) addLog(db, { level: 'aviso', message: `Limite do verificador: ${antes}% → ${limiteVf}%${porQuem}` });
+    }
+    if (verificador_ativo != null) {
+      const estava = ajustesVerificador.ativo();
+      setSetting(db, 'verificador_ativo', verificador_ativo ? '1' : '0');
+      if (estava && !verificador_ativo) addLog(db, { level: 'aviso', message: `${AVISO_VERIFICADOR_DESLIGADO}${porQuem}` });
+    }
     if (retencao_dias != null) { const n = Number(retencao_dias); if (!(n >= 0 && n <= 3650)) throw new Error('Retenção: de 0 (para sempre) a 3650 dias.'); setSetting(db, 'retencao_dias', Math.round(n)); }
     if (titulo_max != null) { const n = Number(titulo_max); if (!(n >= 0 && n <= 200)) throw new Error('Tamanho do título: de 0 (inteiro) a 200.'); setSetting(db, 'titulo_max', Math.round(n)); }
     if (delay_group_s != null) setSetting(db, 'delay_group_s', Math.max(2, Number(delay_group_s) || 6));
@@ -513,6 +550,8 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
   const checkTemplate = (b) => {
     if (!String(b.name || '').trim()) throw new Error('Dê um nome ao template.');
     if (!String(b.body || '').includes('{LINK}')) throw new Error('O template precisa ter {LINK}, senão a mensagem sai sem o link de afiliado.');
+    // sem conferência de preço o {HORA_PRECO} fica vazio e a linha (ou o trecho) dele some: com o {LINK} junto, sairia sem link
+    if (horaPrecoDerrubaOLink(b.body)) throw new Error(ERRO_TEMPLATE_HORA_PRECO);
   };
   app.get('/api/templates', wrap(() => all('SELECT * FROM templates ORDER BY id')));
   app.post('/api/templates', wrap((req) => {
@@ -726,7 +765,8 @@ if (import.meta.url === `file://${process.argv[1].replace(/\\/g, '/')}` || proce
   // leitura conta 1× por pessoa por dia de negócio (a virada do dia de Relatórios e avisos), como os relatórios
   const wa = createWhatsApp({ db, dir: DATA_DIR, dryRun: DRY_RUN, pseudo: (id) => pseudonimo(db, id), diaDe: (ts) => dayOf(ts, viradaMin(db)) });
   const links = createLinkService({ getMode: () => (DRY_RUN ? 'fake' : getSetting(db, 'link_mode', 'extension')) });
-  const { amazon, shopee, catalogo, catalogoItens, scheduler } = criarServicos({ db, wa, links, fast: FAST, dir: DATA_DIR, ml: mlPadrao });
+  // verificador de preço e estoque ligado (D9); na simulação, confirma sem acessar a rede
+  const { amazon, shopee, catalogo, catalogoItens, scheduler } = criarServicos({ db, wa, links, fast: FAST, dir: DATA_DIR, ml: mlPadrao, verificar: true, simulado: DRY_RUN });
   let app;
   try { app = buildApp({ db, wa, links, scheduler, amazon, shopee, catalogo, catalogoItens }); } catch (e) { console.error('ERRO:', e.message); process.exit(1); }
   const retencao = () => {

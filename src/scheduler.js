@@ -12,6 +12,7 @@ import { createRemetentes } from './remetentes.js';
 import { createRotinas } from './rotinas.js';
 import { proximoHorario, horarioDe, resolverVencido, proximoEnvio, qtdDaLinha, templateDaLinha } from './grade.js';
 import { sleep, jitter } from './util.js';
+import { PAUSA_DESCARTADA_H, MOTIVOS_VERIFICADOR, CAUSAS } from './verificador.js';
 
 // Pausas entre mensagens: moram em ./util.js (src/envios.js usa o mesmo ritmo anti-bloqueio); reexportadas aqui.
 export { sleep, jitter };
@@ -24,6 +25,7 @@ const LINK_ML_PREVIA = 'https://meli.la/(gerado no envio)';
 const TEXTO_MOTIVO = {
   shopee: 'Shopee, confirme o link', desconto_100: 'desconto de 100%, confira o preço',
   preco_antigo: 'preço antigo muito alto, confira o preço', falha_link: 'não consegui gerar o link',
+  nao_conferido: 'não deu para conferir o preço',
 };
 /** Por que ofertas do catálogo esperam (não vão à revisão nem contam como enviadas): aviso a cada execução. */
 const TEXTO_ESPERA = {
@@ -34,6 +36,8 @@ const TEXTO_ESPERA = {
   revisao_cheia: 'esperando: a revisão desta regra está cheia. Revise ou descarte as ofertas pendentes.',
 };
 const qtdOfertas = (n) => `${n} ${n === 1 ? 'oferta' : 'ofertas'}`;
+// Verificador (plano verificador-preco-estoque, D6): a oferta descartada fica fora da escolha da regra por um tempo
+const PAUSA_DESCARTADA_MS = PAUSA_DESCARTADA_H * 3600000;
 
 const toMin = (hhmm) => { const [h, m] = String(hhmm).split(':').map(Number); return h * 60 + (m || 0); };
 
@@ -91,13 +95,15 @@ export function alignToWindow(ts, start, end) {
  * do espelho, e o que sai vai pela mesma fila de envios.
  * Grupo vivo (src/rotinas.js, plano grade-de-disparos D7): no horário, cada rotina ligada grava uma ocorrência 'agora'
  * na mesma fila de envios e acorda o tick; o passo das rotinas roda antes das regras e depois de cada regra.
+ * `verificador` (src/verificador.js, createVerificador; plano verificador-preco-estoque D1 e D9): confere preço e
+ * estoque de cada oferta da regra logo antes de gerar o link, e vai também à fila de envios. null = nada é conferido.
  */
-export function createScheduler({ db, wa, links, ml = mlDefault, fast = false, dir = null, amazon = null, shopee = null, magalu = null, catalogo = null, catalogoItens = null }) {
+export function createScheduler({ db, wa, links, ml = mlDefault, fast = false, dir = null, amazon = null, shopee = null, magalu = null, catalogo = null, catalogoItens = null, verificador = null }) {
   const running = new Set();
   let timer = null; let primeiro = null; let ticking = false; let recuperacao = null;
   let acordado = false; // um "agora" chegou com o tick em andamento: ele passa nos envios de novo antes de terminar
   // O "agora" não envia por conta própria: grava pendente e acorda o tick, que manda um envio de cada vez (S14)
-  const envios = createEnvios({ db, wa, links, ml, fast, dir, acordar, amazon, shopee, magalu });
+  const envios = createEnvios({ db, wa, links, ml, fast, dir, acordar, amazon, shopee, magalu, verificador });
   const avisos = createAvisos({ db, wa, estadoBackup: dir && path.join(dir, 'backup-estado.json') });
   // receber() (ouvinte do WhatsApp) e cada envio que o espelho cria chamam acordar(): a oferta sai neste tick
   const espelho = createEspelho({ db, wa, amazon, envios, acordar });
@@ -118,6 +124,42 @@ export function createScheduler({ db, wa, links, ml = mlDefault, fast = false, d
     if (!rule.dedupe_days) return false;
     const since = Date.now() - rule.dedupe_days * 86400000;
     return !!db.prepare('SELECT 1 FROM sent_offers WHERE rule_id = ? AND offer_key = ? AND sent_at > ? LIMIT 1').get(rule.id, key, since);
+  }
+
+  // ---------- verificador de preço e estoque (plano verificador-preco-estoque, D1, D3, D6 a D8)
+  // Ofertas descartadas pelo verificador: "regra\0chave" → até quando ficam fora da escolha da regra (só em memória)
+  const descartadas = new Map();
+  const chavePausa = (rule, key) => `${rule.id}\0${key}`;
+  function pausada(rule, key) {
+    const ate = descartadas.get(chavePausa(rule, key));
+    if (ate == null) return false;
+    if (ate > Date.now()) return true;
+    descartadas.delete(chavePausa(rule, key));
+    return false;
+  }
+  function pausar(rule, key) {
+    const agora = Date.now();
+    for (const [k, ate] of descartadas) if (ate <= agora) descartadas.delete(k); // sem crescer para sempre
+    descartadas.set(chavePausa(rule, key), agora + PAUSA_DESCARTADA_MS);
+  }
+
+  /**
+   * Confere a oferta da regra logo antes do link (D1). As fontes antigas são do Mercado Livre; o catálogo manda a
+   * própria loja. Sem verificador → enviar como veio. Nunca lança: um descarte não para as outras ofertas (D6).
+   * → { acao: 'enviar', oferta, sufixo } | { acao: 'descartar', motivo, texto }
+   */
+  async function conferirDaRegra(offer) {
+    if (!verificador) return { acao: 'enviar', oferta: offer, sufixo: null };
+    try {
+      const { lidoEm = null, ...oferta } = offer;
+      const r = await verificador.conferir(offer.catalogo ? oferta : { ...oferta, loja: 'mercadolivre' }, { lidoEm });
+      if (r?.acao === 'enviar' && r.oferta && typeof r.oferta === 'object') return { acao: 'enviar', oferta: r.oferta, sufixo: typeof r.sufixo === 'string' && r.sufixo ? r.sufixo : null };
+      if (r?.acao === 'descartar' && Object.hasOwn(MOTIVOS_VERIFICADOR, r.motivo)) {
+        return { acao: 'descartar', motivo: r.motivo, texto: typeof r.texto === 'string' && r.texto ? r.texto : MOTIVOS_VERIFICADOR[r.motivo] };
+      }
+    } catch (e) { console.error('[agendador] verificador:', e?.name || 'erro'); }
+    // resposta fora do contrato (o conferir nunca lança): sem conferência, não sai (D3)
+    return { acao: 'descartar', motivo: 'nao_conferido', texto: `${MOTIVOS_VERIFICADOR.nao_conferido} (${CAUSAS.loja_fora})` };
   }
 
   // ---------- fonte "catalogo" (D4 a D9 do plano fonte-catalogo-etiqueta)
@@ -306,8 +348,12 @@ export function createScheduler({ db, wa, links, ml = mlDefault, fast = false, d
    * o catálogo leu, as recusadas pelos filtros e as que esperam. Oferta do catálogo: já vem completa (sem
    * resolveOffer) e sem as tratadas, não conta em maxTries; sai com `catalogo: true` e `motivos` de revisão.
    * `previa`: pré-visualização (o catálogo não faz a primeira leitura até o fim nem escreve avisos, S3).
+   * Cada oferta sai com `lidoEm` (D7, a idade dos dados para a regra do frescor do verificador): o instante de antes da
+   * leitura das fontes; null no catálogo e na lista com preço digitado (idade desconhecida). A descartada pelo
+   * verificador há menos de PAUSA_DESCARTADA_H fica fora da escolha (D6).
    */
   async function pickOffers(rule, want, exec = novaExecucao(), { previa = false } = {}) {
+    const lidoEm = Date.now();
     const cands = await ml.candidates(rule, {
       links, onWarn: (m) => log(rule, { level: 'aviso', message: m }),
       catalogo: fonteCatalogo, quer: want, paginas: exec.paginas, vistas: exec.vistas, previa,
@@ -324,11 +370,12 @@ export function createScheduler({ db, wa, links, ml = mlDefault, fast = false, d
         if (espera) { esperar(exec, espera); continue; }
         const motivos = motivosDeRevisao(c);
         if (motivos.length && catalogoItens.revisaoCheia(rule.id)) { esperar(exec, 'revisao_cheia'); continue; }
-        picked.push({ ...c, catalogo: true, motivos });
+        picked.push({ ...c, catalogo: true, motivos, lidoEm: null });
         continue;
       }
       if (tried >= maxTries) continue;
       if (wasSent(rule, c.key)) continue;
+      if (pausada(rule, c.key)) continue;
       tried++;
       let offer;
       try { offer = await ml.resolveOffer(c); } catch (e) {
@@ -337,7 +384,7 @@ export function createScheduler({ db, wa, links, ml = mlDefault, fast = false, d
       }
       const why = ml.rejectReason(offer, rule);
       if (why) continue;
-      picked.push(offer);
+      picked.push({ ...offer, lidoEm: offer.digitado === true ? null : lidoEm });
     }
     return picked;
   }
@@ -383,7 +430,7 @@ export function createScheduler({ db, wa, links, ml = mlDefault, fast = false, d
     const prefixo = horario != null ? `Horário ${horaDe(horario)}: `
       : linha ? `Enviar agora (como no horário das ${linha.hora}): ` : '';
     running.add(id);
-    const summary = { offers: 0, messages: 0, errors: 0, revisao: 0 };
+    const summary = { offers: 0, messages: 0, errors: 0, revisao: 0, descartadas: 0 };
     const exec = novaExecucao();
     let retrySoon = false;
     try {
@@ -413,12 +460,33 @@ export function createScheduler({ db, wa, links, ml = mlDefault, fast = false, d
       const d = delays();
       const tagDaFonte = (o) => (o.tag_id && db.prepare('SELECT * FROM tags WHERE id = ?').get(o.tag_id)) || tag;
       const jids = groups.map((g) => g.jid);
+      // descarte do verificador (D8): uma linha 'aviso' por oferta, nunca 'erro'; a oferta não é reposta (D6)
+      const descartar = (o, c) => { summary.descartadas++; log(rule, { level: 'aviso', offer_title: o.title, message: c.texto }); };
       for (let i = 0; i < picked.length; i++) {
-        const offer = picked[i]; const etq = tagDaFonte(offer);
+        let offer = picked[i]; const etq = tagDaFonte(offer);
         let gerados; // um link por código de rastreio distinto (linksPorCodigo)
+        let sufixo = ''; // do verificador, na linha 'ok' de cada grupo (D8)
         if (offer.catalogo) {
           // revisão em vez de envio (D5): Shopee, preço suspeito ou falha do link deste item (nenhum grupo com link)
           let motivos = offer.motivos; let detalhe = '';
+          if (!motivos.length) {
+            // conferência antes do link (D1): sem conferência vai à revisão; esgotada ou mais cara, descartada (D6)
+            const c = await conferirDaRegra(offer);
+            if (c.acao === 'enviar') {
+              offer = c.oferta; sufixo = c.sufixo ?? '';
+              // o preço conferido pode ter saído dos filtros da regra (Q4): como no pickOffers, é só "fora dos filtros". Nada é
+              // registrado no Catálogo (sem aviso de descarte, sem link): em `exec.recusadas` o cursor das Novidades avança
+              // por ela e não fica preso, e em outras ordens ela pode voltar a valer se o preço cair
+              if (ml.rejectReason(offer, rule)) { exec.recusadas.add(picked[i].key); continue; }
+            } else if (c.motivo === 'nao_conferido') {
+              motivos = ['nao_conferido'];
+              detalhe = c.texto.startsWith(MOTIVOS_VERIFICADOR.nao_conferido) ? c.texto.slice(MOTIVOS_VERIFICADOR.nao_conferido.length) : '';
+            } else {
+              if (!regraExiste(rule.id)) continue;
+              catalogoItens.registrar(rule, offer, 'descartado', [], { descartadoPor: c.motivo });
+              descartar(offer, c); continue;
+            }
+          }
           if (!motivos.length) {
             const r = await linksPorCodigo(offer, etq, jids);
             if (r.espera) { esperar(exec, r.espera); continue; }
@@ -434,6 +502,13 @@ export function createScheduler({ db, wa, links, ml = mlDefault, fast = false, d
             continue;
           }
         } else {
+          // conferência antes do link (D1): a descartada fica PAUSA_DESCARTADA_H fora da escolha desta regra (D6)
+          const c = await conferirDaRegra(offer);
+          if (c.acao === 'descartar') { pausar(rule, offer.key); descartar(offer, c); continue; }
+          offer = c.oferta; sufixo = c.sufixo ?? '';
+          // o preço conferido pode ter saído dos filtros da regra (preço máximo, desconto mínimo): como no pickOffers, é só
+          // "fora dos filtros", sem aviso de descarte e sem link (não é reposta nesta execução)
+          if (verificador && ml.rejectReason(offer, rule)) continue;
           gerados = await linksPorCodigo(offer, etq, jids);
           if (!gerados.algum) {
             log(rule, { level: 'erro', offer_title: offer.title, message: 'Link de afiliado não gerado: ' + gerados.falha });
@@ -464,7 +539,7 @@ export function createScheduler({ db, wa, links, ml = mlDefault, fast = false, d
               try { await wa.sendImage(groups[g].jid, offer.image, text); } catch { await wa.sendText(groups[g].jid, text); }
             } else await wa.sendText(groups[g].jid, text);
             okCount++; summary.messages++;
-            log(rule, { level: 'ok', group_name: groups[g].name, offer_title: offer.title, message: `${comoSaiu(offer, destino)}${daFonte}` });
+            log(rule, { level: 'ok', group_name: groups[g].name, offer_title: offer.title, message: `${comoSaiu(offer, destino)}${daFonte}${sufixo}` });
             registrarEnvio(rule, offer, groups[g].jid, destino);
           } catch (e) {
             summary.errors++;
@@ -478,9 +553,12 @@ export function createScheduler({ db, wa, links, ml = mlDefault, fast = false, d
         }
         if (i < picked.length - 1) await sleep(jitter(d.offer));
       }
-      // faltaram ofertas no horário da grade (CA7): sai o que houver, sem acumular para o próximo
-      if (rule.grade && picked.length < want) {
-        const frase = `aíram ${summary.offers} de ${want} ofertas; não havia mais ofertas novas dentro dos filtros.`;
+      // faltaram ofertas no horário da grade (CA7): sai o que houver, sem acumular para o próximo; as descartadas pelo
+      // verificador não são repostas (D6) e entram na frase
+      if (rule.grade && (picked.length < want || summary.descartadas)) {
+        const n = summary.descartadas;
+        const frase = !n ? `aíram ${summary.offers} de ${want} ofertas; não havia mais ofertas novas dentro dos filtros.`
+          : `aíram ${summary.offers} de ${want} ofertas; ${n} ${n === 1 ? 'descartada' : 'descartadas'} na conferência de preço e estoque${picked.length < want ? ' e não havia mais ofertas novas dentro dos filtros' : ''}.`;
         log(rule, { level: 'aviso', message: prefixo ? `${prefixo}s${frase}` : `S${frase}` });
       }
       return summary;
@@ -557,7 +635,8 @@ export function createScheduler({ db, wa, links, ml = mlDefault, fast = false, d
       const motivos = o.catalogo ? o.motivos : [];
       const etiqueta = o.catalogo && o.loja !== 'ml' ? null : nome(o.tag_id) || nome(rule.tag_id) || null;
       // revisao/motivos: a oferta iria à revisão em vez de sair (o painel mostra "Esperaria revisão" e o motivo)
-      return { ...o, etiqueta, fonte: (o.source_index ?? 0) + 1, revisao: motivos.length > 0, motivos, text: tpl ? renderTemplate(tpl.body, { ...o, link: linkPrevia(o) }, tplOpts()) : '' };
+      // a prévia não confere na loja: {HORA_PRECO} sai com a hora de agora (no envio, a da conferência), como nas outras prévias
+      return { ...o, etiqueta, fonte: (o.source_index ?? 0) + 1, revisao: motivos.length > 0, motivos, text: tpl ? renderTemplate(tpl.body, { ...o, link: linkPrevia(o), vistoEm: Date.now() }, tplOpts()) : '' };
     });
   }
 

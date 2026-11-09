@@ -652,6 +652,83 @@ test('S3: os saltos do resolvedor de link curto contam no mesmo teto; barrado vi
   }
 });
 
+// ------------------------------------------------- leitura fresca (plano verificador-preco-estoque, etapa 2; CA1, CA6)
+test('shopee: fresco: com cache válido lerItem vai à API e regrava o cache (inclusive o null)', async () => {
+  const rel = relogio();
+  const estado = { preco: '100.00', nos: null };
+  const f = fetchFalso((url, init) => apiOk({ nos: estado.nos ?? [noApi({ priceMin: estado.preco })] })(url, init));
+  const shopee = createShopee({ fetch: f, agora: rel.agora, lerConexao: () => conexao() });
+  assert.equal((await shopee.lerItem(SHOP, ITEM)).price, 100);
+  estado.preco = '129.90';
+  assert.equal((await shopee.lerItem(SHOP, ITEM)).price, 100, 'sem fresco, o cache de 15 min vale');
+  assert.equal(f.chamadas.length, 1);
+  const fresca = await shopee.lerItem(SHOP, ITEM, { fresco: true });
+  assert.equal(f.chamadas.length, 2, 'fresco foi à API com o cache ainda válido');
+  assert.equal(fresca.price, 129.9);
+  fresca.price = 1; fresca.extra.loja_nome = 'mexida';
+  const depois = await shopee.lerItem(SHOP, ITEM);
+  assert.equal(f.chamadas.length, 2, 'a leitura seguinte sem fresco sai do cache');
+  assert.deepEqual([depois.price, depois.extra.loja_nome], [129.9, 'Loja Oficial'], 'cache regravado; cópia por chamador');
+  // o item some da API: a leitura fresca devolve null e o null passa a valer no cache
+  estado.nos = [];
+  assert.equal(await shopee.lerItem(SHOP, ITEM, { fresco: true }), null);
+  assert.equal(await shopee.lerItem(SHOP, ITEM), null);
+  assert.equal(f.chamadas.length, 3);
+  // e o null em cache também é relido
+  estado.nos = null;
+  assert.equal((await shopee.lerItem(SHOP, ITEM, { fresco: true })).price, 129.9);
+  assert.equal(f.chamadas.length, 4);
+});
+
+test('shopee: fresco: conta no teto da hora; passado o teto é cota sem rede, sem nova tentativa e sem apagar o cache', async () => {
+  const rel = relogio();
+  const f = fetchFalso(apiOk());
+  const shopee = createShopee({ fetch: f, agora: rel.agora, lerConexao: () => conexao(), limiteHora: 3 });
+  await shopee.lerItem(SHOP, ITEM);
+  await shopee.lerItem(SHOP, ITEM, { fresco: true });
+  await shopee.lerItem(SHOP, ITEM, { fresco: true });
+  assert.equal(f.chamadas.length, 3, 'cada leitura fresca é um acesso');
+  const e = await capturarErro(() => shopee.lerItem(SHOP, ITEM, { fresco: true }));
+  assert.ok(e instanceof ErroShopee); assert.equal(e.tipo, 'cota'); assert.equal(e.message, MENSAGENS_SHOPEE.cota);
+  assert.equal(f.chamadas.length, 3, 'passado o teto, nada vai à rede');
+  assert.equal(shopee.situacao().acesso, 'ok', 'o teto é do programa: a situação da conta não muda');
+  assert.equal((await shopee.lerItem(SHOP, ITEM)).itemId, ITEM, 'sem fresco, o cache continua servindo');
+  assert.equal((await capturarErro(() => shopee.gerarLink(URL_PRODUTO))).tipo, 'cota', 'a leitura fresca gastou vagas do mesmo teto');
+  rel.t += 60 * 60 * 1000;
+  assert.equal((await shopee.lerItem(SHOP, ITEM, { fresco: true })).itemId, ITEM);
+  assert.equal(f.chamadas.length, 4);
+  // falha da API: sobe sem repetir, e o cache de antes segue valendo para quem não pede fresco
+  let falhar = true;
+  const g = fetchFalso((url, init) => (falhar ? json(500, {}) : apiOk()(url, init)));
+  const d = createShopee({ fetch: g, agora: rel.agora, lerConexao: () => conexao() });
+  falhar = false;
+  await d.lerItem(SHOP, ITEM);
+  falhar = true;
+  assert.equal((await capturarErro(() => d.lerItem(SHOP, ITEM, { fresco: true }))).tipo, 'indisponivel');
+  assert.equal(g.chamadas.length, 2);
+  assert.equal((await d.lerItem(SHOP, ITEM)).itemId, ITEM);
+  assert.equal(g.chamadas.length, 2);
+});
+
+test('shopee: fresco: junta-se à chamada em voo do mesmo item; só true liga', async () => {
+  const rel = relogio();
+  let liberar;
+  const portao = new Promise((ok) => { liberar = ok; });
+  const f = fetchFalso(async (url, init) => { await portao; return apiOk()(url, init); });
+  const shopee = createShopee({ fetch: f, agora: rel.agora, lerConexao: () => conexao() });
+  const pedidos = [shopee.lerItem(SHOP, ITEM), shopee.lerItem(SHOP, ITEM, { fresco: true }), shopee.lerItem(SHOP, ITEM, { fresco: true })];
+  liberar();
+  const r = await Promise.all(pedidos);
+  assert.equal(f.chamadas.length, 1);
+  assert.notEqual(r[1], r[2], 'cada chamador recebe a própria cópia');
+  for (const opcoes of [undefined, null, {}, { fresco: false }, { fresco: 1 }, { fresco: 'true' }, 0, 'fresco']) {
+    assert.equal((await shopee.lerItem(SHOP, ITEM, opcoes)).itemId, ITEM, JSON.stringify(opcoes));
+  }
+  assert.equal(f.chamadas.length, 1, 'sem fresco: true, tudo saiu do cache');
+  assert.equal(await shopee.lerItem('x', ITEM, { fresco: true }), null, 'ids inválidos continuam null sem rede');
+  assert.equal(f.chamadas.length, 1);
+});
+
 // ----------------------------------------------------------------------------- links guardados (S2)
 test('S2: linkGuardado/guardarLink: por produto e ID de afiliado, 7 dias, só s.shopee.com.br; invalidar esquece', () => {
   const rel = relogio();

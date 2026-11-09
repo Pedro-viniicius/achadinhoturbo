@@ -48,7 +48,9 @@ export function parseListLines(text) {
     const key = offerKey(url);
     if (seen.has(key)) continue;
     seen.add(key);
-    out.push({ key, url, title: title || null, price: num(price), oldPrice: num(oldPrice), coupon: coupon || null });
+    const preco = num(price);
+    // digitado: o preço veio da linha (escrito à mão), não da loja
+    out.push({ key, url, title: title || null, price: preco, oldPrice: num(oldPrice), coupon: coupon || null, ...(preco != null ? { digitado: true } : {}) });
   }
   return out;
 }
@@ -168,28 +170,106 @@ function parseSocialHtml(html) {
   };
 }
 
-/** Lê o JSON-LD (schema.org Product) que as páginas de produto costumam trazer; sem ele, tenta a página social do afiliado. */
-export function parseProductHtml(html) {
-  html = String(html ?? '');
-  const blocks = [...html.matchAll(/<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)];
-  for (const b of blocks) {
-    let data; try { data = JSON.parse(b[1]); } catch { continue; }
+/**
+ * Conteúdo de cada `<script type="application/ld+json">…</script>` da página, na ordem. Varredura linear (sem regex
+ * com `[\s\S]*?` sobre a página toda, que é quadrática com milhares de `<script ` sem fechamento): a tag de abertura
+ * tem de caber em MAX_TAG_LD caracteres e não tem `<` nem `>` dentro; se não há `</script>` depois, não há mais bloco.
+ * No máximo MAX_BLOCOS_LD blocos (uma página real tem poucos; milhares de blocos vazios só gastariam JSON.parse).
+ */
+const MAX_TAG_LD = 512;
+const MAX_BLOCOS_LD = 50;
+function* blocosJsonLd(html) {
+  const abre = new RegExp(`<script[^<>]{0,${MAX_TAG_LD}}>`, 'gi');
+  const tipo = /^<script[^>]+type=["']application\/ld\+json["'][^>]*>$/i;
+  const fecha = /<\/script>/gi;
+  let pos = 0;
+  for (let n = 0; n < MAX_BLOCOS_LD;) {
+    abre.lastIndex = pos;
+    const tag = abre.exec(html);
+    if (!tag) return;
+    pos = tag.index + tag[0].length;
+    if (!tipo.test(tag[0])) continue;
+    fecha.lastIndex = pos;
+    const fim = fecha.exec(html);
+    if (!fim) return;
+    yield html.slice(pos, fim.index);
+    n++;
+    pos = fim.index + fim[0].length;
+  }
+}
+
+/** O primeiro nó schema.org Product de cada bloco JSON-LD da página, na ordem (bloco que não é JSON é pulado). */
+function* produtosJsonLd(html) {
+  for (const bloco of blocosJsonLd(html)) {
+    let data; try { data = JSON.parse(bloco); } catch { continue; }
     const nodes = [].concat(data, data?.['@graph'] || []).flat();
     const prod = nodes.find((n) => n && [].concat(n['@type']).includes('Product'));
-    if (!prod) continue;
-    const off = [].concat(prod.offers || [])[0] || {};
-    const price = num(off.price ?? off.lowPrice);
-    if (!prod.name || !price) continue;
-    const img = [].concat(prod.image || [])[0];
-    const old = num((html.match(/"original_price"\s*:\s*([\d.]+)/) || [])[1]);
-    const imagem = typeof img === 'string' ? img : img?.url || null;
-    return {
-      title: prod.name, price,
-      oldPrice: old && old > price ? old : null,
-      image: IMAGEM_PERMITIDA.test(imagem || '') ? imagem : null, // imagem só do CDN do Mercado Livre
-    };
+    if (prod) yield prod;
   }
-  return parseSocialHtml(html);
+}
+
+/** Primeira oferta (schema.org Offer) do produto, ou {}. */
+function ofertaDoProduto(prod) {
+  const off = [].concat(prod.offers || [])[0];
+  return off && typeof off === 'object' ? off : {};
+}
+
+// schema.org ItemAvailability: só estes valores contam. Esgotado só com sinal explícito; qualquer outro valor
+// (PreOrder, BackOrder, texto livre…) fica sem resposta (null), nunca vira "esgotado".
+const ESGOTADO_LD = new Set(['outofstock', 'soldout', 'discontinued']);
+const DISPONIVEL_LD = new Set(['instock', 'limitedavailability', 'onlineonly']);
+
+/** `offers.availability` do JSON-LD → true (à venda), false (esgotado) ou null (ausente ou fora da lista). */
+function disponivelJsonLd(valor) {
+  if (typeof valor !== 'string') return null;
+  const m = valor.trim().match(/^(?:https?:\/\/(?:www\.)?schema\.org\/)?([a-z]{1,40})$/i);
+  if (!m) return null;
+  const v = m[1].toLowerCase();
+  if (ESGOTADO_LD.has(v)) return false;
+  return DISPONIVEL_LD.has(v) ? true : null;
+}
+
+/**
+ * Uma passada só pela página: o produto (JSON-LD, ou a página social do afiliado) e o estoque informado.
+ * → { produto: { title, price, oldPrice, image, disponivel? } | null, disponivel: true|false|null }
+ * `produto.disponivel` (true/false) só vem quando a oferta do produto lido informa `availability` (ver
+ * disponivelJsonLd); a página social não informa estoque. `disponivel` do resultado é o do produto ou, sem ele, o
+ * primeiro JSON-LD da página que responder (anúncio esgotado costuma vir sem preço).
+ */
+function lerHtmlProduto(html) {
+  html = String(html ?? '');
+  let produto = null; let disponivel = null; // `disponivel`: o primeiro availability válido da página, de qualquer produto
+  for (const prod of produtosJsonLd(html)) {
+    const off = ofertaDoProduto(prod);
+    const daOferta = disponivelJsonLd(off.availability);
+    if (disponivel == null) disponivel = daOferta;
+    if (!produto) {
+      const price = num(off.price ?? off.lowPrice);
+      if (prod.name && price) {
+        const img = [].concat(prod.image || [])[0];
+        const old = num((html.match(/"original_price"\s*:\s*([\d.]+)/) || [])[1]);
+        const imagem = typeof img === 'string' ? img : img?.url || null;
+        produto = {
+          title: prod.name, price,
+          oldPrice: old && old > price ? old : null,
+          image: IMAGEM_PERMITIDA.test(imagem || '') ? imagem : null, // imagem só do CDN do Mercado Livre
+          ...(daOferta != null ? { disponivel: daOferta } : {}),
+        };
+      }
+    }
+    if (produto && (produto.disponivel != null || disponivel != null)) break; // já tem o que precisa: não lê mais blocos
+  }
+  if (produto) return { produto, disponivel: produto.disponivel ?? disponivel };
+  return { produto: parseSocialHtml(html), disponivel };
+}
+
+/**
+ * Lê o JSON-LD (schema.org Product) que as páginas de produto costumam trazer; sem ele, tenta a página social do afiliado.
+ * Com JSON-LD, `disponivel` (true/false) só vem quando a oferta informa `availability` (ver disponivelJsonLd); a página
+ * social não informa estoque.
+ */
+export function parseProductHtml(html) {
+  return lerHtmlProduto(html).produto;
 }
 
 /** Maior página de produto lida (a social tem ~1 MB): acima disso, a leitura é cortada e dá erro. */
@@ -219,10 +299,34 @@ async function lerPagina(r) {
   return Buffer.concat(partes).toString('utf8');
 }
 
+// API pública: sem redirecionamento (quem responde por ela não manda a gente para outro lugar) e com o mesmo teto de
+// bytes das páginas
 async function getJson(url) {
-  const r = await fetch(url, { headers: { 'user-agent': UA, accept: 'application/json' }, signal: AbortSignal.timeout(15000) });
+  const r = await fetch(url, { headers: { 'user-agent': UA, accept: 'application/json' }, redirect: 'error', signal: AbortSignal.timeout(15000) });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
-  return r.json();
+  return JSON.parse(await lerPagina(r));
+}
+
+/**
+ * Endereço de página do Mercado Livre que dá para pedir: http vira https (a Lista de links aceita os dois; o Mercado
+ * Livre redireciona de qualquer jeito), e só vale https sem porta e sem usuário/senha. Outro → null.
+ */
+function enderecoSeguro(url) {
+  let u;
+  try { u = new URL(String(url ?? '')); } catch { return null; }
+  if (u.protocol === 'http:') u.protocol = 'https:';
+  if (u.protocol !== 'https:' || u.port !== '' || u.username || u.password) return null;
+  return hostPermitido(u.href) ? u.href : null;
+}
+
+/**
+ * Estoque do anúncio pela API: false com sinal explícito (`available_quantity` 0 ou `status` diferente de "active",
+ * como paused e closed), true se "active", null sem `status`.
+ */
+function disponivelDaApi(it) {
+  if (it.available_quantity === 0) return false;
+  if (typeof it.status !== 'string') return null;
+  return it.status === 'active';
 }
 
 function fromApiItem(it) {
@@ -234,22 +338,32 @@ function fromApiItem(it) {
     sold: it.sold_quantity || 0,
     freeShipping: !!it.shipping?.free_shipping,
     image: (it.pictures?.[0]?.secure_url) || (it.thumbnail || '').replace('http://', 'https://').replace(/-I\.jpg$/, '-O.jpg') || null,
+    disponivel: disponivelDaApi(it),
   };
+}
+
+/** A oferta sem `disponivel`: o estoque é só do verificador (conferirProduto); resolveOffer e a busca seguem como antes. */
+function semDisponivel(o) {
+  const { disponivel: _estoque, ...resto } = o;
+  return resto;
+}
+
+/** Texto de uma página do Mercado Livre: segue no máximo 3 redirecionamentos, e só para hosts do Mercado Livre. */
+async function getPagina(u) {
+  for (let salto = 0; salto < 4; salto++) {
+    u = enderecoSeguro(u); // cada salto: https, sem porta, do Mercado Livre
+    if (!u) throw new Error('endereço fora do Mercado Livre');
+    const r = await fetch(u, { headers: { 'user-agent': UA, 'accept-language': 'pt-BR,pt;q=0.9' }, redirect: 'manual', signal: AbortSignal.timeout(15000) });
+    if (r.status >= 300 && r.status < 400 && r.headers.get('location')) { u = new URL(r.headers.get('location'), u).toString(); continue; }
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    return lerPagina(r);
+  }
+  throw new Error('redirecionamentos demais');
 }
 
 /** Completa os dados de um candidato da lista (API pública -> HTML da página). */
 export async function resolveOffer(cand, { fetchJson = getJson, fetchText } = {}) {
-  const getText = fetchText || (async (u) => {
-    // segue no máximo 3 redirecionamentos, e só para hosts do Mercado Livre
-    for (let salto = 0; salto < 4; salto++) {
-      if (!hostPermitido(u)) throw new Error('endereço fora do Mercado Livre');
-      const r = await fetch(u, { headers: { 'user-agent': UA, 'accept-language': 'pt-BR,pt;q=0.9' }, redirect: 'manual', signal: AbortSignal.timeout(15000) });
-      if (r.status >= 300 && r.status < 400 && r.headers.get('location')) { u = new URL(r.headers.get('location'), u).toString(); continue; }
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      return lerPagina(r);
-    }
-    throw new Error('redirecionamentos demais');
-  });
+  const getText = fetchText || getPagina;
   // já veio completo (busca) ou com dados digitados à mão
   if (cand.title && cand.price) {
     return { sold: 0, freeShipping: false, image: null, ...cand, discountPct: discountPct(cand.price, cand.oldPrice) };
@@ -257,12 +371,12 @@ export async function resolveOffer(cand, { fetchJson = getJson, fetchText } = {}
   let data = null; let why = ''; let urlProduto = null;
   const id = extractItemId(cand.url);
   if (id && !isCatalogUrl(cand.url)) {
-    try { data = fromApiItem(await fetchJson(`https://api.mercadolibre.com/items/${id}`)); } catch (e) { why = `API ${e.message}`; }
+    try { data = semDisponivel(fromApiItem(await fetchJson(`https://api.mercadolibre.com/items/${id}`))); } catch (e) { why = `API ${e.message}`; }
   }
   if (!data) {
     try {
       const p = parseProductHtml(await getText(cand.url));
-      if (p) { const { url: urlDaPagina, ...resto } = p; data = { sold: 0, freeShipping: false, ...resto }; urlProduto = urlDaPagina || null; }
+      if (p) { const { url: urlDaPagina, ...resto } = semDisponivel(p); data = { sold: 0, freeShipping: false, ...resto }; urlProduto = urlDaPagina || null; }
       else why = (why ? why + '; ' : '') + 'página sem dados de produto';
     } catch (e) { why = (why ? why + '; ' : '') + `página ${e.message}`; }
   }
@@ -274,9 +388,37 @@ export async function resolveOffer(cand, { fetchJson = getJson, fetchText } = {}
     ...data, key: cand.key, url: urlProduto || cand.url,
     title: cand.title || data.title, price: cand.price ?? data.price,
     oldPrice: cand.oldPrice ?? data.oldPrice, coupon: cand.coupon || null,
+    ...(cand.digitado ? { digitado: true } : {}), // preço da lista de links, escrito à mão
   };
   merged.discountPct = discountPct(merged.price, merged.oldPrice);
   return merged;
+}
+
+/**
+ * Preço e estoque de agora, para o verificador (logo antes do envio). Ao contrário do resolveOffer, sempre lê a loja
+ * (não há atalho para dados já conhecidos): API do anúncio e, sem preço nela, a página (JSON-LD ou social).
+ * O endereço tem de ser http(s) do Mercado Livre (hostPermitido), conferido antes de qualquer leitura; a página só
+ * segue redirecionamentos para o Mercado Livre e tem o teto MAX_PAGINA.
+ *
+ * Devolve { price, disponivel }: `price` > 0 ou null (a leitura não trouxe preço); `disponivel` false só com sinal
+ * explícito da loja (API: available_quantity 0 ou status ≠ active; JSON-LD: OutOfStock, SoldOut, Discontinued),
+ * true se a loja diz que está à venda, null se não diz. Lança se o endereço não for do Mercado Livre ou se a página
+ * não puder ser lida (a mensagem nunca traz o endereço nem o conteúdo da loja).
+ */
+export async function conferirProduto(url, { fetchJson = getJson, fetchText = getPagina } = {}) {
+  const alvo = enderecoSeguro(url);
+  if (!alvo) throw new Error('endereço fora do Mercado Livre');
+  const precoValido = (v) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : null);
+  let daApi = null;
+  const id = extractItemId(alvo);
+  if (id && !isCatalogUrl(alvo)) {
+    try { daApi = fromApiItem(await fetchJson(`https://api.mercadolibre.com/items/${id}`)); } catch { daApi = null; }
+    // esgotado pela API, ou preço lido: não precisa da página
+    if (daApi && (daApi.disponivel === false || precoValido(daApi.price))) return { price: precoValido(daApi.price), disponivel: daApi.disponivel };
+  }
+  const html = await fetchText(alvo);
+  const { produto: p, disponivel: daPagina } = lerHtmlProduto(html);
+  return { price: precoValido(p?.price), disponivel: daPagina ?? daApi?.disponivel ?? null };
 }
 
 /** Busca na API pública do Mercado Livre (experimental: pode exigir login/token). */
@@ -289,7 +431,7 @@ export async function searchOffers({ query, sort = 'relevance', limit = 50 }, { 
     throw new Error(`a busca do Mercado Livre recusou o acesso (${e.message}). Use a fonte "Lista de links" por enquanto.`);
   }
   return (j.results || []).map((it) => {
-    const o = fromApiItem(it);
+    const o = semDisponivel(fromApiItem(it));
     return { ...o, discountPct: discountPct(o.price, o.oldPrice) };
   });
 }

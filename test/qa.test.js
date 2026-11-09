@@ -1134,7 +1134,9 @@ test('Ler mais (etapa 11): toda chave de LEIA_MAIS existe em TIPS e todo destino
     rastreio: 'grupos/rastreio', 'rastreio.etiqueta': 'grupos/rastreio', 'rastreio.amazon': 'grupos/rastreio',
     'rastreio.shopee': 'grupos/rastreio', 'rastreio.grupo': 'grupos/rastreio', 'blocos.etiqueta': 'grupos/rastreio', 'remetente': 'disparo-automatico/remetentes',
     'regras.modo_grade': 'disparo-automatico/horarios-marcados', 'regras.grade_horarios': 'disparo-automatico/horarios-marcados', 'regras.grade_modelos': 'disparo-automatico/horarios-marcados',
-    grupovivo: 'mensagens/grupo-vivo', 'grupovivo.rodizio': 'mensagens/grupo-vivo' };
+    grupovivo: 'mensagens/grupo-vivo', 'grupovivo.rodizio': 'mensagens/grupo-vivo',
+    // conferência de preço e estoque (plano verificador-preco-estoque, etapa 9)
+    'ajustes.verificador': 'manutencao/verificador', 'ajustes.verificador.limite': 'manutencao/verificador' };
   assert.deepEqual(LEIA, SPEC);
   // todo ícone q('chave') de uma tela com destino sai com data-docs; os demais seguem sem
   for (const chave of Object.keys(TIPS)) {

@@ -9,6 +9,20 @@ let ultimoQr = null; let editando = null;
 // Ações que só o Dono faz (o servidor responde 403 com este texto ao Operador). No lugar do botão escondido, uma dica.
 const SO_DONO = 'Só o Dono pode fazer isso.';
 const SO_DONO_DICA = { desconectar: 'Só o Dono pode desconectar o WhatsApp.', limpar: 'Só o Dono pode apagar agora o que passou do prazo.' };
+// Conferência de preço e estoque antes do envio (spec docs/produto/specs/verificador-preco-estoque.md; plano
+// verificador-preco-estoque, etapa 8): cartão de Ajustes e dica de {HORA_PRECO} em Templates. Os textos do Disparo
+// manual ficam em TEXTOS_DISPAROS (disparos.js): o mesmo nome de const em dois scripts derrubaria o painel.
+const TEXTOS_VERIFICADOR = {
+  titulo: 'Conferir preço e estoque antes de enviar',
+  chave: 'Conferir antes de cada envio',
+  sub: 'Logo antes de enviar, o programa lê o preço e o estoque na loja. Esgotado ou preço mais caro que o limite: a oferta não sai e o motivo aparece no Histórico. Se a loja não responder, a oferta só sai se os dados forem de até 30 min.',
+  desligado: 'Desligado: as ofertas saem sem conferir preço nem estoque.',
+  limite: 'Aceitar alta de preço até (%)',
+  limiteDica: '0 = qualquer alta descarta a oferta. Preço que caiu sempre pode sair.',
+  salvar: 'Salvar conferência', salvando: 'Salvando…', salvo: 'Conferência salva',
+  erroLimite: 'Informe um número inteiro de 0 a 50.',
+  horaPreco: '{HORA_PRECO}: a hora em que o preço foi conferido na loja, como 14h32. Use dentro de [ ] para a frase sumir quando não houver hora, e não na linha do {LINK}. Ex.: [🕒 Preço visto às {HORA_PRECO}]',
+};
 async function api(path, method = 'GET', body) {
   const r = await fetch('/api' + path, { method, headers: body ? { 'content-type': 'application/json' } : {}, body: body ? JSON.stringify(body) : undefined });
   const j = await r.json().catch(() => ({}));
@@ -593,6 +607,7 @@ function paginaTemplates(id) {
       <label class="campo"><span>Nome ${REQ}</span><input id="tn" value="${esc(t.name)}"></label>
       <label class="campo"><span>Mensagem ${REQ} <small class="dica">(precisa ter {LINK})</small></span><textarea id="tb" class="mono" rows="12">${esc(t.body)}</textarea></label>
       <div class="linha" id="chips">${S.st.placeholders.map((p) => `<button type="button" class="chip mono" data-p="${p}">{${p}}</button>`).join('')}</div>
+      <small class="dica">${esc(TEXTOS_VERIFICADOR.horaPreco)}</small>
       <small class="dica">Dica do WhatsApp: *negrito*, _itálico_, ~riscado~.</small>
       <div class="linha"><button class="pri" id="sv">Salvar template</button><button class="perigo leve" id="dl">Excluir</button></div></div>
       <div><h2>Como vai aparecer</h2><div class="chat"><div class="balao" id="pv"></div></div></div></div>`;
@@ -690,6 +705,7 @@ function paginaAjustes() {
     <div class="card" style="display:grid;gap:14px"><div><h2>Título do produto na mensagem ${q('ajustes.titulo')}</h2><p class="sub">Os títulos do Mercado Livre vêm cheios de palavras-chave. {TITULO_PRODUTO} sai abreviado: só o que identifica o produto, sem “Compatível com…”, “Premium”, “Alta Qualidade”. Para o nome inteiro, use {TITULO_COMPLETO} no template.</p></div>
       <div class="grade"><label class="campo">Tamanho máximo (caracteres)<input id="tm" type="number" min="0" max="200" value="${a.titulo_max ?? 60}"><small>0 = não abreviar. Sugestão: 50 a 70.</small></label></div>
       <div class="linha"><button class="pri" id="st">Salvar</button><small class="dica" id="tm-ex"></small></div></div>
+    ${cartaoVerificador(a)}
     <div class="card" style="display:grid;gap:14px"><div><h2>Como gerar o link de afiliado ${q('ajustes.modo_link')}</h2></div>
       <label class="campo"><select id="lm"><option value="extension">Pela extensão do Chrome (com a etiqueta, gera comissão)</option>
         <option value="direct" ${a.link_mode === 'direct' ? 'selected' : ''}>Link direto, sem etiqueta (só para testar, não gera comissão)</option></select></label>
@@ -706,6 +722,47 @@ function paginaAjustes() {
   exemploTitulo();
   $('#st').onclick = tentar(async () => { await api('/ajustes', 'PUT', { titulo_max: $('#tm').value }); await atualizarEstado(); aviso('Salvo'); exemploTitulo(); });
   $('#sl').onclick = tentar(async () => { await api('/ajustes', 'PUT', { link_mode: $('#lm').value }); await atualizarEstado(); aviso('Modo salvo'); });
+  ligarCartaoVerificador();
+}
+
+/**
+ * Cartão "Conferir preço e estoque antes de enviar" (a = S.st.ajustes): chave (ausente = ligada) e limite de alta, de
+ * 0 a 50 (ausente = 5). Desligada, o limite fica desabilitado (não escondido) e a dica diz o que muda. Quem salva os
+ * outros Ajustes salva este (o servidor não exige o Dono, plano D10).
+ */
+function cartaoVerificador(a = {}) {
+  const V = TEXTOS_VERIFICADOR; const ligado = a.verificador_ativo !== false;
+  const limite = Number.isInteger(a.verificador_limite_pct) ? a.verificador_limite_pct : 5;
+  return `<div class="card" style="display:grid;gap:14px" id="vf-card"><div><h2>${V.titulo} ${q('ajustes.verificador')}</h2><p class="sub">${V.sub}</p></div>
+      <div style="display:grid;gap:6px"><div class="linha"><label class="chave"><input type="checkbox" id="vf-ativo" aria-describedby="vf-desligado"${ligado ? ' checked' : ''}><span></span></label>
+        <label for="vf-ativo" style="font-weight:600;font-size:14px">${V.chave}</label></div>
+        <small class="dica" id="vf-desligado"${ligado ? ' hidden' : ''}>${V.desligado}</small></div>
+      <div class="grade"><label class="campo"><span>${V.limite} ${q('ajustes.verificador.limite')}</span><input id="vf-limite" type="number" inputmode="numeric" min="0" max="50" step="1" value="${limite}" aria-describedby="vf-limite-dica vf-limite-erro"${ligado ? '' : ' disabled'}>
+        <small id="vf-limite-dica">${V.limiteDica}</small><small class="nivel-erro" id="vf-limite-erro" role="alert" hidden></small></label></div>
+      <div class="linha"><button class="pri" id="vf-salvar">${V.salvar}</button></div></div>`;
+}
+/** Comportamento do cartão do verificador: a chave liga e desliga o limite; Salvar valida (inteiro de 0 a 50) e grava. */
+function ligarCartaoVerificador() {
+  const V = TEXTOS_VERIFICADOR;
+  const chk = $('#vf-ativo'); const inp = $('#vf-limite'); const erroEl = $('#vf-limite-erro'); const btn = $('#vf-salvar');
+  if (!chk || !inp || !btn) return;
+  const limparErro = () => { erroEl.hidden = true; erroEl.textContent = ''; inp.removeAttribute('aria-invalid'); inp.classList.remove('invalido'); };
+  chk.onchange = () => { inp.disabled = !chk.checked; $('#vf-desligado').hidden = chk.checked; if (!chk.checked) limparErro(); };
+  inp.oninput = limparErro;
+  btn.onclick = async () => {
+    const ligado = chk.checked; const txt = String(inp.value ?? '').trim();
+    const corpo = { verificador_ativo: ligado };
+    if (ligado) {
+      // o input number devolve '' para texto que não é número; decimal e negativo chegam como texto e não passam
+      if (!/^\d{1,2}$/.test(txt) || Number(txt) > 50) {
+        erroEl.textContent = V.erroLimite; erroEl.hidden = false; inp.setAttribute('aria-invalid', 'true'); inp.classList.add('invalido'); inp.focus();
+        return;
+      }
+      corpo.verificador_limite_pct = Number(txt);
+    }
+    btn.disabled = true; btn.textContent = V.salvando;
+    try { await api('/ajustes', 'PUT', corpo); await atualizarEstado(); aviso(V.salvo); } catch (e) { aviso(e.message, true); } finally { btn.disabled = false; btn.textContent = V.salvar; btn.focus(); }
+  };
 }
 
 // ---------- navegação e atualização ----------

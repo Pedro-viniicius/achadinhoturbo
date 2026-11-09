@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  renderTemplate, offerValues, brl, PLACEHOLDERS, TEMPLATE_AMAZON, SAMPLE_OFFER, SAMPLE_OFFER_AMAZON,
+  renderTemplate, offerValues, brl, PLACEHOLDERS, TEMPLATE_AMAZON, SAMPLE_OFFER, SAMPLE_OFFER_AMAZON, horaPrecoDerrubaOLink,
 } from '../src/template.js';
 
 // Oferta mínima: tem título, preço e link; não tem preço antigo, desconto, vendas, frete nem cupom.
@@ -121,4 +121,48 @@ test('R6/Q3: linha formada só por pedaço opcional vazio some (não vira linha 
 test('R5: brl troca o NBSP do Intl por espaço comum (sem caractere invisível no fonte)', () => {
   assert.equal(brl(1310.05), 'R$ 1.310,05');
   assert.ok(!brl(10).includes(' '));
+});
+
+// ---- {HORA_PRECO} (verificador de preço, CA5) ----
+const em = (h, m) => new Date(2026, 5, 3, h, m, 7).getTime(); // hora local, o mesmo critério do código
+
+test('CA5: {HORA_PRECO} está em PLACEHOLDERS e mostra a hora local da conferência em HHhMM', () => {
+  assert.ok(PLACEHOLDERS.includes('HORA_PRECO'));
+  assert.equal(offerValues({ ...minima, vistoEm: em(14, 5) }).HORA_PRECO, '14h05');
+  assert.equal(offerValues({ ...minima, vistoEm: em(0, 0) }).HORA_PRECO, '00h00');
+  assert.equal(offerValues({ ...minima, vistoEm: em(23, 59) }).HORA_PRECO, '23h59');
+  assert.equal(renderTemplate('🕒 Preço de {HORA_PRECO}\n{LINK}', { ...minima, vistoEm: em(14, 5) }),
+    '🕒 Preço de 14h05\nhttps://meli.la/a');
+});
+
+test('CA5: sem `vistoEm` (ou inválido) {HORA_PRECO} fica vazio e a linha some', () => {
+  for (const vistoEm of [undefined, null, '', 'ontem', NaN, Infinity, 1e20]) {
+    const o = { ...minima, vistoEm };
+    assert.equal(offerValues(o).HORA_PRECO, '', String(vistoEm));
+    assert.equal(renderTemplate('A\n🕒 Preço de {HORA_PRECO}\n{LINK}', o), 'A\nhttps://meli.la/a', String(vistoEm));
+  }
+});
+
+test('CA5: {HORA_PRECO} dentro de [ ] some só o trecho; a linha continua', () => {
+  const tpl = '🔥 Por *{PRECO_PRODUTO}*[ (visto às {HORA_PRECO})]\n{LINK}';
+  assert.equal(renderTemplate(tpl, { ...minima, vistoEm: em(9, 3) }), '🔥 Por *R$ 80,00* (visto às 09h03)\nhttps://meli.la/a');
+  assert.equal(renderTemplate(tpl, minima), '🔥 Por *R$ 80,00*\nhttps://meli.la/a');
+});
+
+test('CA5: as duas amostras trazem `vistoEm` às 14h32', () => {
+  assert.equal(offerValues(SAMPLE_OFFER).HORA_PRECO, '14h32');
+  assert.equal(offerValues(SAMPLE_OFFER_AMAZON).HORA_PRECO, '14h32');
+  assert.ok(renderTemplate('{HORA_PRECO}\n{LINK}', SAMPLE_OFFER).startsWith('14h32\n'));
+});
+
+test('Q2: horaPrecoDerrubaOLink acusa o {HORA_PRECO} que, sem conferência, levaria o {LINK} junto; e só ele', () => {
+  const some = (tpl) => !renderTemplate(tpl, { ...minima, vistoEm: null }).includes('https://meli.la/a');
+  for (const tpl of ['Preço visto às {HORA_PRECO}: {LINK}', '[Visto às {HORA_PRECO}: {LINK}]', '[{LINK}] às {HORA_PRECO}', '{LINK} {HORA_PRECO}', 'a\n{HORA_PRECO}[ x {CUPOM}] {LINK}']) {
+    assert.equal(horaPrecoDerrubaOLink(tpl), true, tpl);
+    assert.ok(some(tpl), `o renderizador confirma que o link some: ${tpl}`);
+  }
+  for (const tpl of ['{LINK}\n[🕒 Preço visto às {HORA_PRECO}]', '[🕒 {HORA_PRECO}] {LINK}', '{HORA_PRECO}\n{LINK}', '[a {HORA_PRECO}][ b {CUPOM}] {LINK}', '{LINK}', '', undefined]) {
+    assert.equal(horaPrecoDerrubaOLink(tpl), false, String(tpl));
+  }
+  assert.ok(!some('[🕒 {HORA_PRECO}] {LINK}'), 'e o formato seguro mantém o link');
 });

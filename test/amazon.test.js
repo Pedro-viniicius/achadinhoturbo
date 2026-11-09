@@ -939,6 +939,111 @@ test('amazon: lerItem simultâneos do mesmo ASIN dividem um só GetItems, inclus
   assert.equal(getItems(h).length, 2);
 });
 
+// ------------------------------------------------- leitura fresca (plano verificador-preco-estoque, etapa 2; CA1, CA6)
+/** Handler com preço e disponibilidade mutáveis (estado.preco, estado.tipo, estado.ausente, estado.falhar). */
+function apiMutavel(estado) {
+  return (url, init) => {
+    if (url === URL_GET_ITEMS && estado.falhar) return json(500, {});
+    if (url !== URL_GET_ITEMS) return apiOk()(url, init);
+    const { itemIds } = JSON.parse(init.body);
+    const items = itemIds.filter((a) => !estado.ausente).map((a) => itemApi(a, { offersV2: { listings: [
+      { isBuyBoxWinner: true, availability: { type: estado.tipo ?? 'IN_STOCK' }, price: { money: { amount: estado.preco, currency: 'BRL' } } },
+    ] } }));
+    return json(200, { itemsResult: { items } });
+  };
+}
+
+test('amazon: fresco: com cache válido, lerItem e lerItens vão à API e regravam o cache (preço e estoque novos)', async () => {
+  const rel = relogio();
+  const estado = { preco: 100 };
+  const f = fetchFalso(apiMutavel(estado));
+  const amazon = createAmazon({ db: completo(), fetch: f, agora: rel.agora, esperar: rel.esperar });
+  const gets = () => f.chamadas.filter((c) => c.url === URL_GET_ITEMS).length;
+  assert.equal((await amazon.lerItem(ASIN)).price, 100);
+  estado.preco = 130; estado.tipo = 'OUT_OF_STOCK';
+  assert.equal((await amazon.lerItem(ASIN)).price, 100, 'sem fresco, o cache de 15 min vale');
+  assert.equal(gets(), 1);
+  const fresca = await amazon.lerItem(ASIN, { fresco: true });
+  assert.equal(gets(), 2, 'fresco foi à API com o cache ainda válido');
+  assert.deepEqual([fresca.price, fresca.disponivel], [130, false]);
+  const depois = await amazon.lerItem(ASIN);
+  assert.equal(gets(), 2, 'a leitura seguinte sem fresco sai do cache');
+  assert.deepEqual([depois.price, depois.disponivel], [130, false], 'o cache foi regravado com a leitura fresca');
+  fresca.price = 1;
+  assert.equal((await amazon.lerItem(ASIN)).price, 130, 'cópia, não o objeto do cache');
+
+  // lerItens com fresco: um GetItems só com todos os ASINs, mesmo os que estavam em cache
+  estado.preco = 90; estado.tipo = 'IN_STOCK';
+  const res = await amazon.lerItens([ASIN, 'B000000001'], { fresco: true });
+  assert.deepEqual(f.chamadas.filter((c) => c.url === URL_GET_ITEMS).slice(-1).map((c) => JSON.parse(c.init.body).itemIds), [[ASIN, 'B000000001']]);
+  assert.deepEqual([res[ASIN].price, res.B000000001.price], [90, 90]);
+
+  // o null (produto ausente) em cache também é relido
+  estado.ausente = true;
+  assert.equal(await amazon.lerItem('B000000002'), null);
+  estado.ausente = false;
+  assert.equal(await amazon.lerItem('B000000002'), null, 'sem fresco, o null em cache vale');
+  assert.equal((await amazon.lerItem('B000000002', { fresco: true })).price, 90);
+  assert.equal((await amazon.lerItem('B000000002')).price, 90);
+});
+
+test('amazon: fresco: passa pela mesma fila de 1 chamada/s, inclusive misturado com leituras comuns', async () => {
+  const rel = relogio();
+  const f = fetchFalso(apiMutavel({ preco: 50 }));
+  const amazon = createAmazon({ db: completo(), fetch: f, agora: rel.agora, esperar: rel.esperar });
+  await amazon.lerItem(ASIN); // 1º GetItems, sem espera
+  await amazon.lerItem(ASIN, { fresco: true });
+  await amazon.lerItem(ASIN, { fresco: true });
+  assert.deepEqual(rel.esperas, [1000, 1000], 'cada leitura fresca seguida espera 1 s');
+  await Promise.all([amazon.lerItem('B000000001', { fresco: true }), amazon.lerItem('B000000002'), amazon.lerItem(ASIN, { fresco: true })]);
+  assert.deepEqual(rel.esperas, [1000, 1000, 1000, 1000, 1000]);
+  assert.equal(f.chamadas.filter((c) => c.url === URL_GET_ITEMS).length, 6);
+});
+
+test('amazon: fresco: junta-se ao GetItems já em voo do mesmo ASIN (não gasta outra chamada)', async () => {
+  const rel = relogio();
+  const f = fetchFalso(apiMutavel({ preco: 70 }));
+  const amazon = createAmazon({ db: completo(), fetch: f, agora: rel.agora, esperar: rel.esperar });
+  const [a, b, c] = await Promise.all([amazon.lerItem(ASIN), amazon.lerItem(ASIN, { fresco: true }), amazon.lerItem(ASIN, { fresco: true })]);
+  assert.equal(f.chamadas.filter((x) => x.url === URL_GET_ITEMS).length, 1);
+  assert.deepEqual([a.price, b.price, c.price], [70, 70, 70]);
+  assert.notEqual(b, c, 'cada chamador recebe a própria cópia');
+});
+
+test('amazon: fresco: falha da API sobe sem nova tentativa e não apaga o cache que já existia', async () => {
+  const rel = relogio();
+  const estado = { preco: 100 };
+  const f = fetchFalso(apiMutavel(estado));
+  const amazon = createAmazon({ db: completo(), fetch: f, agora: rel.agora, esperar: rel.esperar });
+  const gets = () => f.chamadas.filter((c) => c.url === URL_GET_ITEMS).length;
+  await amazon.lerItem(ASIN);
+  estado.falhar = true;
+  const e = await capturarErro(() => amazon.lerItem(ASIN, { fresco: true }));
+  assert.ok(e instanceof ErroAmazon); assert.equal(e.codigo, 'indisponivel');
+  assert.equal(gets(), 2, 'uma chamada só, sem repetir');
+  assert.equal((await amazon.lerItem(ASIN)).price, 100, 'sem fresco, segue o cache de antes');
+  assert.equal(gets(), 2);
+  // sem credencial: falha antes da rede, como sem fresco
+  const g = fetchFalso(apiOk());
+  const semApi = createAmazon({ db: bancoCom({ config: { tag: TAG } }), fetch: g, agora: rel.agora, esperar: rel.esperar });
+  assert.equal((await capturarErro(() => semApi.lerItem(ASIN, { fresco: true }))).codigo, 'sem_credenciais');
+  assert.equal(g.chamadas.length, 0);
+});
+
+test('amazon: fresco: só true liga; sem a opção ou com outro valor o cache vale como sempre', async () => {
+  const rel = relogio();
+  const f = fetchFalso(apiMutavel({ preco: 100 }));
+  const amazon = createAmazon({ db: completo(), fetch: f, agora: rel.agora, esperar: rel.esperar });
+  await amazon.lerItem(ASIN);
+  for (const opcoes of [undefined, null, {}, { fresco: false }, { fresco: 1 }, { fresco: 'true' }, 0, 'fresco']) {
+    assert.equal((await amazon.lerItem(ASIN, opcoes)).price, 100, JSON.stringify(opcoes));
+    assert.equal((await amazon.lerItens([ASIN], opcoes))[ASIN].price, 100, JSON.stringify(opcoes));
+  }
+  assert.equal(f.chamadas.filter((c) => c.url === URL_GET_ITEMS).length, 1);
+  assert.equal(await amazon.lerItem('invalido', { fresco: true }), null, 'ASIN inválido continua null sem rede');
+  assert.equal(f.chamadas.filter((c) => c.url === URL_GET_ITEMS).length, 1);
+});
+
 test('amazon: resolverLink guarda "invalido" por 10 min e junta pedidos simultâneos da mesma URL (S6)', async () => {
   const cache = new Map(); const rel = relogio();
   const f = fetchFalso(() => new Response('nada', { status: 404 }));

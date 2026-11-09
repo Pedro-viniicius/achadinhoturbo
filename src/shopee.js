@@ -12,8 +12,9 @@
 //   RE_ID_AFILIADO (o ID de afiliado salvo em Conexões: só dígitos, de 5 a 20; a fonte única do formato).
 // - ofertaDoNo(no, { shopId, itemId }) → oferta (parser tolerante do nó de productOfferV2; nunca lança).
 // - createShopee({ db, fetch, agora, lerConexao, cacheLinks = new Map(), limiteHora = 300 }) →
-//   { resolver(url), lerItem(shopId, itemId), gerarLink(urlProduto), testar(), situacao(), configurado(), apiUtil(),
-//     invalidar(), linkGuardado(urlProduto, idAfiliado, subId = ''), guardarLink(urlProduto, idAfiliado, link, subId = '') }
+//   { resolver(url), lerItem(shopId, itemId, { fresco }?), gerarLink(urlProduto), testar(), situacao(), configurado(),
+//     apiUtil(), invalidar(), linkGuardado(urlProduto, idAfiliado, subId = ''),
+//     guardarLink(urlProduto, idAfiliado, link, subId = '') }
 //   - Teto de rede (S3): no máximo `limiteHora` acessos à Shopee por hora, somando cada chamada à Open API e cada
 //     salto do resolvedor de link curto (o que vem do cache não conta). Passou do teto → ErroShopee('cota'), sem
 //     rede; esse erro é do próprio programa e não muda situacao().
@@ -25,6 +26,10 @@
 //     Falha → LinkShopeeNaoResolvido { causa: 'invalido' | 'nao_produto' }.
 //   - lerItem(shopId, itemId) → oferta | null (a API não devolveu o nó desse item). Cache de 15 min por item
 //     (inclusive o null); pedidos simultâneos do mesmo item dividem uma chamada. Falha → ErroShopee { tipo }.
+//     `fresco: true` (o verificador de preço, plano verificador-preco-estoque D2): ignora o cache na leitura e vai à
+//     API (ou junta-se a uma chamada em voo do mesmo item); o resultado regrava o cache. Conta no teto da hora como
+//     qualquer chamada: teto atingido → ErroShopee('cota'), sem rede e sem nova tentativa. Sem a opção (ou com
+//     qualquer valor que não seja true), o comportamento é o de sempre.
 //   - gerarLink(urlProduto, { subId }?) → shortLink (generateShortLink). Com subId (RE_SUB_ID: alfanumérico, 1 a 30) a
 //     mutation leva subIds:["<subId>"]; sem subId o corpo é idêntico ao de antes. subId que não serve →
 //     ErroShopee('link_falhou'), sem rede e sem mudar situacao(). Fora de LINK_SHOPEE → ErroShopee('indisponivel').
@@ -390,13 +395,16 @@ export function createShopee({ db, fetch: f, agora = Date.now, lerConexao, cache
     }
   }
 
-  /** Dados de um produto (cache de 15 min). → oferta | null (a API não devolveu esse item). */
-  async function lerItem(shopId, itemId) {
+  /**
+   * Dados de um produto (cache de 15 min). → oferta | null (a API não devolveu esse item).
+   * opcoes.fresco === true: não lê o cache (vai à API ou junta-se à chamada em voo); grava o cache como qualquer leitura.
+   */
+  async function lerItem(shopId, itemId, opcoes) {
     const s = idCanonico(shopId);
     const i = idCanonico(itemId);
     if (!s || !i) return null;
     const chave = `${s}.${i}`;
-    const salvo = itens.get(chave);
+    const salvo = opcoes?.fresco === true ? null : itens.get(chave);
     if (salvo && salvo.ate > agora()) return copiaOferta(salvo.oferta);
     let p = emVoo.get(chave);
     if (!p) {

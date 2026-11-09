@@ -140,7 +140,7 @@ docsCapitulo({
       onde: '[[Histórico → Catálogo]]',
       leia: 'disparo-automatico/catalogo',
       blocos: [
-        { p: 'Nenhuma oferta suspeita do Catálogo sai sozinha. Quatro motivos mandam a oferta para a revisão:' },
+        { p: 'Nenhuma oferta suspeita do Catálogo sai sozinha. Cinco motivos mandam a oferta para a revisão:' },
         { tabela: {
           colunas: ['Como aparece no Histórico', 'Por que espera', 'O que conferir'],
           linhas: [
@@ -148,8 +148,10 @@ docsCapitulo({
             ['Desconto de 100%: confira o preço', 'A oferta aparece com 100% de desconto.', 'O preço. Costuma ser erro no catálogo.'],
             ['Preço antigo muito alto: confira o preço', 'O preço antigo é 10 vezes maior que o preço, ou mais.', 'Os dois preços.'],
             ['Não consegui gerar o link: confira a oferta', 'O link de afiliado daquele item não saiu.', 'A oferta. Ao enviar, o painel tenta de novo.'],
+            ['Não deu para conferir o preço: confira na loja', 'Antes de enviar, o programa não conseguiu ler o preço na loja (as ofertas do Catálogo não têm idade conhecida: qualquer falha de leitura vai para a revisão).', 'O preço e o estoque na loja. Ao enviar, o programa tenta conferir de novo.'],
           ],
         } },
+        { p: 'No Histórico, o aviso do motivo de conferência diz a causa entre parênteses: “Separada para revisão: não deu para conferir o preço (a loja não respondeu).” Oferta esgotada ou mais cara que o limite não vai à revisão: é descartada. Veja [Conferir preço e estoque antes de enviar](#docs/manutencao/verificador).' },
         { p: 'Uma oferta pode ter mais de um motivo: eles aparecem juntos, ligados por “e”. As ofertas na revisão contam nas “ofertas por envio” do disparo.' },
         { p: 'Cada disparo guarda no máximo 50 ofertas esperando. Acima disso, as novas esperam sem entrar na fila. O cartão mostra “Revisão cheia (50)” e o Histórico avisa a cada execução, até você revisar ou descartar algumas.' },
         { p: 'O número de ofertas para revisar aparece no cartão do disparo (“N para revisar”), no Histórico e no menu, só para o Dono.' },

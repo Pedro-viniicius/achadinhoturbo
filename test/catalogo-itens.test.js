@@ -110,7 +110,7 @@ test('CA7 precoSuspeito: desconto ≥ 100% ou preço antigo ≥ 10× o preço', 
   assert.equal(precoSuspeito({ price: 10, oldPrice: null, discountPct: 100 }), true);
   assert.equal(precoSuspeito({ price: 10, oldPrice: null, discountPct: 99 }), false);
   assert.equal(precoSuspeito({ price: 10, oldPrice: null, discountPct: null }), false);
-  assert.deepEqual([...MOTIVOS], ['shopee', 'desconto_100', 'preco_antigo', 'falha_link'], 'os nomes da spec');
+  assert.deepEqual([...MOTIVOS], ['shopee', 'desconto_100', 'preco_antigo', 'falha_link', 'nao_conferido'], 'os nomes da spec e do plano do verificador');
 });
 
 // ------------------------------------------------------------------------------------------------ tratada (D6)
@@ -214,6 +214,32 @@ test('registrar: o que não fecha não grava; revisão exige motivo da lista; it
   assert.equal(s.itens.registrar(regra, ML(1), 'enviado'), false, 'quem decide o item em revisão é o Dono');
   assert.equal(s.itens.registrar(regra, ML(1), 'revisao', ['falha_link']), false);
   assert.deepEqual([s.item(id).status, s.item(id).motivos], ['revisao', ['desconto_100', 'preco_antigo']]);
+});
+
+test('CA4 verificador: o motivo nao_conferido é aceito, vai à revisão e volta na listagem com o motivo', () => {
+  const s = montar();
+  const regra = s.regra();
+  assert.equal(s.itens.registrar(regra, ML(7), 'revisao', ['nao_conferido']), true);
+  const id = s.revisao(regra, ML(8), ['nao_conferido', 'desconto_100']);
+  assert.deepEqual([s.item(id).status, s.item(id).motivos], ['revisao', ['nao_conferido', 'desconto_100']]);
+  const l = s.itens.listar({ status: 'revisao' });
+  assert.equal(l.itens.length, 2);
+  assert.ok(l.itens.every((i) => i.motivos.includes('nao_conferido')), JSON.stringify(l.itens.map((i) => i.motivos)));
+});
+
+test('R2 verificador: o descarte do verificador guarda o motivo e a listagem o devolve; o descarte comum e o da revisão, não', () => {
+  const s = montar();
+  const regra = s.regra();
+  assert.equal(s.itens.registrar(regra, ML(1), 'descartado', [], { descartadoPor: 'esgotado' }), true);
+  assert.equal(s.itens.registrar(regra, ML(2), 'descartado', [], { descartadoPor: 'preco_subiu' }), true);
+  assert.equal(s.itens.registrar(regra, ML(3), 'descartado'), true);
+  assert.equal(s.itens.registrar(regra, ML(4), 'descartado', [], { descartadoPor: 'nao_conferido' }), true, 'nao_conferido vai à revisão, nunca descarta: não vale como motivo');
+  assert.equal(s.itens.registrar(regra, ML(5), 'descartado', [], { descartadoPor: 'constructor' }), true);
+  assert.equal(s.itens.registrar(regra, ML(6), 'enviado', [], { descartadoPor: 'esgotado' }), true, 'só o descarte leva o motivo');
+  const idRev = s.revisao(regra, ML(7), ['shopee']);
+  s.itens.descartar(idRev, {});
+  const porChave = Object.fromEntries(s.itens.listar().itens.map((i) => [i.oferta.link.match(/MLB-(\d+)/)[1], i.descartado_por]));
+  assert.deepEqual(porChave, { 1: 'esgotado', 2: 'preco_subiu', 3: undefined, 4: undefined, 5: undefined, 6: undefined, 7: undefined });
 });
 
 test('P5: teto de 50 pendentes por regra; a 51ª não entra; contar e listar dizem quantas e se a fila está cheia', () => {

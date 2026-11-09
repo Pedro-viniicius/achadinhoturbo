@@ -568,8 +568,11 @@ const TEXTOS_REVISAO_CATALOGO = {
   motivos: {
     shopee: 'Shopee: confirme o link', desconto_100: 'Desconto de 100%: confira o preço',
     preco_antigo: 'Preço antigo muito alto: confira o preço', falha_link: 'Não consegui gerar o link: confira a oferta',
+    nao_conferido: 'Não deu para conferir o preço: confira na loja',
   },
   enviada: 'Enviada', paraRevisarPre: 'Para revisar', descartada: 'Descartada: na revisão',
+  // descartada pelo verificador de preço e estoque (chaves de `descartado_por` de GET /api/catalogo/itens; MOTIVOS_VERIFICADOR)
+  descartadaPor: { esgotado: 'Descartada: esgotado na loja', preco_subiu: 'Descartada: preço subiu' },
   dicaAmazon: 'link da Amazon com a sua tag', dicaML: 'link do Mercado Livre gerado com a sua etiqueta', revisada: 'revisada e enviada', enviando: 'enviando…',
   erroGrupos: (n) => `Erro ao enviar para ${espN(n, 'grupo', 'grupos')}`,
   revisar: 'Revisar', revisarAria: (titulo, loja) => `Revisar oferta ${titulo}, da ${loja}`, soDono: 'Só o Dono revisa.',
@@ -628,7 +631,10 @@ function hcatPrecoSuspeito(v) {
 function hcatResultado(it) {
   const R = TEXTOS_REVISAO_CATALOGO;
   if (it.status === 'revisao') return { cls: 'nivel-aviso', texto: `${R.paraRevisarPre}: ${hcatMotivos(it.motivos) || '—'}`, detalhe: '', extra: [] };
-  if (it.status === 'descartado') return { cls: 'nivel-aviso', texto: R.descartada, detalhe: '', extra: [] };
+  if (it.status === 'descartado') {
+    const porque = typeof it.descartado_por === 'string' && Object.hasOwn(R.descartadaPor, it.descartado_por) ? R.descartadaPor[it.descartado_por] : R.descartada;
+    return { cls: 'nivel-aviso', texto: porque, detalhe: '', extra: [] };
+  }
   const grupos = Array.isArray(it.grupos) ? it.grupos : [];
   const falhas = grupos.filter((g) => g.ok === false);
   if (falhas.length) return { cls: 'nivel-erro', texto: R.erroGrupos(falhas.length), detalhe: '', extra: falhas.map((g) => `${g.nome}${g.erro ? ': ' + g.erro : ''}`) };

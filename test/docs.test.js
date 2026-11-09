@@ -8,6 +8,8 @@ import path from 'node:path';
 import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 import { MOTIVOS } from '../src/catalogo-itens.js';
+import { MOTIVOS_VERIFICADOR, CAUSAS } from '../src/verificador.js';
+import { PLACEHOLDERS } from '../src/template.js';
 import { pastaDeDados } from '../src/config.js';
 import { REMOTO_PADRAO } from '../scripts/backup.js';
 import { spawnSync } from 'node:child_process';
@@ -34,7 +36,7 @@ const SPEC = {
   resultados: ['visao', 'historico', 'avisos'],
   equipe: ['papeis', 'convidar', 'gerir'],
   privacidade: ['dados', 'segredos', 'retencao', 'membros'],
-  manutencao: ['painel', 'backup', 'backup-auto', 'reconectar', 'log', 'ajustes'],
+  manutencao: ['painel', 'backup', 'backup-auto', 'reconectar', 'log', 'ajustes', 'verificador'],
   perguntas: ['tag-amazon', 'meli-la', 'precisa-api', 'id-shopee', 'catalogo', 'etiqueta-desta-fonte', 'so-catalogo', 'catalogo-links', 'limpar-log', 'painel-local'],
   referencia: ['glossario', 'estados', 'motivos', 'limites'],
 };
@@ -790,6 +792,13 @@ const FATOS = [
   // o teto da hora conta envios (cliques), não números: o resumo para todos conta 1
   { nome: 'envios manuais por hora (cada teste ou resumo conta 1)', valor: 5, texto: (v) => new RegExp(`\\b(?:${numero(v)}) envios manuais por hora`), codigo: [['src/avisos.js', /export const MANUAL_MAX_HORA = (\d+);/]] },
   { nome: 'mensagens por dia que ativam o aviso', valor: 400, texto: (v) => new RegExp(`mais de ${milhar(v)} mensagens por dia`), codigo: [['public/grade.js', /const AVISO_MENSAGENS_DIA = (\d+);/]] },
+  // Conferência de preço e estoque antes do envio (plano verificador-preco-estoque, etapa 9, CA6)
+  { nome: 'limite padrão da alta de preço do verificador (%)', valor: 5, texto: (v) => new RegExp(`limite padrão de ${v}%`), codigo: [['src/verificador.js', /export const LIMITE_PADRAO_PCT = (\d+);/]] },
+  { nome: 'limite máximo da alta de preço do verificador (%)', valor: 50, texto: (v) => new RegExp(`de 0 a ${v}%`), codigo: [['src/verificador.js', /export const LIMITE_MAX_PCT = (\d+);/]] },
+  { nome: 'margem do agendado sem conferência (min): recusa acima de FRESCOR_MIN − margem', valor: 5, texto: (v) => new RegExp(`mais de ${30 - v} min`), codigo: [['src/verificador.js', /export const MARGEM_AGENDADO_MIN = (\d+);/]] },
+  { nome: 'idade máxima dos dados para enviar sem conferir (min)', valor: 30, texto: (v) => new RegExp(`dados[^.]{0,60}de até ${v} min`), codigo: [['src/verificador.js', /export const FRESCOR_MIN = (\d+);/]] },
+  { nome: 'segundos de espera de cada conferência', valor: 20, texto: (v) => new RegExp(`espera até ${v} segundos`), codigo: [['src/verificador.js', /export const TEMPO_MAX_MS = (\d+)000;/]] },
+  { nome: 'horas da oferta descartada fora da escolha do disparo automático', valor: 6, texto: (v) => new RegExp(`não volta a ser escolhida por ${v} horas`), codigo: [['src/verificador.js', /export const PAUSA_DESCARTADA_H = (\d+);/]] },
 ];
 
 test('FATOS: cada número aparece nos Docs e no README e bate com a constante do código', () => {
@@ -947,7 +956,7 @@ test('referencia/estados: todo selo citado existe literalmente em public/conexoe
 });
 
 test('referencia/motivos: a primeira tabela cobre exatamente os MOTIVOS de src/catalogo-itens.js, com o rótulo do Histórico', () => {
-  assert.equal(MOTIVOS.length, 4);
+  assert.equal(MOTIVOS.length, 5);
   const bloco = /motivos: \{([^}]*)\}/.exec(fonte('espelhamento.js'));
   assert.ok(bloco, 'não achei o mapa de rótulos dos motivos em public/espelhamento.js');
   const rotulos = MOTIVOS.map((m) => { const r = new RegExp(`\\b${m}: '([^']+)'`).exec(bloco[1]); assert.ok(r, `motivo ${m} sem rótulo em public/espelhamento.js`); return r[1]; });
@@ -1353,6 +1362,7 @@ test('Grade: as frases do Histórico citadas nos Docs e no README são as que o 
     assert.match(txt, new RegExp(`\\d+ horários pulados \\(\\d\\d:\\d\\d a \\d\\d:\\d\\d\\): ${escRe(motivo)}`), `${onde}: vários pulados`);
     assert.match(txt, new RegExp(`\\d+ horários pulados \\(\\d\\d:\\d\\d de \\d\\d/\\d\\d a \\d\\d:\\d\\d\\): ${escRe(motivo)}`), `${onde}: vários pulados desde outro dia`);
     assert.match(txt, /Horário 10:00: saíram 5 de 8 ofertas; não havia mais ofertas novas dentro dos filtros\./, `${onde}: saíram N de M`);
+    assert.match(txt, /Horário 10:00: saíram 4 de 5 ofertas; 1 descartada na conferência de preço e estoque\./, `${onde}: saíram N de M com descartadas do verificador`);
     assert.match(txt, /Horário 10:00: o template escolhido para este horário não existe mais\. As ofertas saíram com o template da regra\./, `${onde}: template apagado`);
     assert.match(txt, /A regra "[^"]+" usa este template no horário \d\d:\d\d\./, `${onde}: template em uso`);
   }
@@ -1360,6 +1370,7 @@ test('Grade: as frases do Histórico citadas nos Docs e no README são as que o 
   assert.ok(sched.includes('Horário ${quandoDe(pulados[0], agora)} pulado')); assert.ok(sched.includes('${pulados.length} horários pulados ('));
   assert.ok(sched.includes('${quandoDe(pulados[0], agora)} a ${quandoDe(pulados.at(-1), agora)})')); assert.ok(sched.includes('return `${horaDe(ts)} de ${pad2(d.getDate())}/${pad2(d.getMonth() + 1)}`;'), 'outro dia: "10:00 de 03/11"');
   assert.ok(sched.includes('aíram ${summary.offers} de ${want} ofertas; não havia mais ofertas novas dentro dos filtros.'));
+  assert.ok(sched.includes("${n} ${n === 1 ? 'descartada' : 'descartadas'} na conferência de preço e estoque"), 'a frase com as descartadas do verificador');
   assert.ok(sched.includes('o template escolhido para este horário não existe mais. As ofertas saíram com o template da regra.'));
   assert.ok(server.includes('A regra "${naGrade.regra}" usa este template no horário ${naGrade.hora}.'));
 });
@@ -1439,4 +1450,119 @@ test('Grade: os Docs, o README e a ajuda descrevem a lista de horários (ordem a
   assert.ok(app.includes("confirm('Descartar as alterações?')"));
   assert.ok(!grade.includes('limparConfirma') && !/confirm\(T\.limpar/.test(grade), 'Limpar tudo não usa confirm');
   assert.match(ajuda, /regras\.grade_horarios'[^\n]*sai dela \(ou aperta Enter, que não salva\)[^\n]*Desfazer/);
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// Conferência de preço e estoque antes do envio (plano verificador-preco-estoque, etapa 9; CA2, CA5, CA6): os Docs e o
+// README citam as frases que o código escreve, todos os motivos e todas as causas, e o campo {HORA_PRECO}.
+// ---------------------------------------------------------------------------------------------------------------
+test('Verificador (rodada 1): as frases de R1, Q2 e S2 e a regra do descarte no Catálogo estão nos Docs e no README como o código as escreve', () => {
+  const env = lerRaiz('src/envios.js'); const server = lerRaiz('src/server.js');
+  // R1: a recusa do agendado distante, com o frescor do código
+  assert.ok(env.includes('`Esta loja não tem conferência de preço: agende para até ${FRESCOR_MIN - MARGEM_AGENDADO_MIN} min ou envie agora.`'));
+  const r1 = 'Esta loja não tem conferência de preço: agende para até 25 min ou envie agora.';
+  assert.ok(README.includes(r1) && TEXTO_DOCS.includes(r1), 'R1: frase da recusa');
+  assert.match(secaoTxt('manutencao', 'verificador'), /Magalu[^.]*recusa agendar|recusa agendar[^.]*Magalu/);
+  assert.match(secaoTxt('disparo-manual', 'agendar'), /recusa agendar para daqui a mais de 25 minutos/);
+  // Q2: o servidor recusa o template com a hora na linha do link
+  assert.ok(server.includes("'Ponha o {HORA_PRECO} em outra linha, ou entre [ ] sem o {LINK}: sem conferência de preço, a linha some e a mensagem sai sem o link de afiliado.'"));
+  const q2 = 'Ponha o {HORA_PRECO} em outra linha, ou entre [ ] sem o {LINK}: sem conferência de preço, a linha some e a mensagem sai sem o link de afiliado.';
+  assert.ok(README.includes(q2), 'Q2: frase no README');
+  assert.match(secaoTxt('templates', 'opcional'), /não deixa salvar um template com \{HORA_PRECO\} na mesma linha do \{LINK\}/);
+  // S2: o rastro de quem mexeu
+  assert.ok(server.includes('`Limite do verificador: ${antes}% → ${limiteVf}%${porQuem}`'));
+  assert.ok(README.includes('Limite do verificador: 5% → 50%') && TEXTO_DOCS.includes('Limite do verificador: 5% → 50%'));
+  // R3: a pausa de 6 h é das fontes antigas; no Catálogo o descarte é definitivo, e a falha do Catálogo não tem idade
+  assert.match(README, /nas fontes antigas[^.]*6 horas[\s\S]*No \*?Catálogo\*? o descarte é definitivo/);
+  assert.match(TEXTO_DOCS, /nas fontes antigas, a oferta que o Disparo automático descartou não volta a ser escolhida por 6 horas \(no Catálogo o descarte é definitivo\)/);
+  assert.match(TEXTO_DOCS, /No Catálogo o descarte é definitivo/);
+  assert.ok((TEXTO_DOCS.match(/não t[eê]m idade conhecida[^.]{0,40}qualquer falha de leitura/g) || []).length >= 2, 'R3b: Referência e Amazon na revisão dizem que o motivo do Catálogo é qualquer falha de leitura');
+});
+
+test('Verificador: a 3ª tabela de "motivos" de Referência cobre MOTIVOS_VERIFICADOR, com o texto do Histórico', () => {
+  assert.deepEqual(Object.keys(MOTIVOS_VERIFICADOR).sort(), ['esgotado', 'nao_conferido', 'preco_subiu']);
+  const tabelas = blocosDe('referencia', 'motivos').filter((b) => b.tabela).map((b) => b.tabela);
+  assert.equal(tabelas.length, 3, 'Catálogo, Espelhamento e Verificador');
+  assert.deepEqual(tabelas[2].colunas, ['Resultado', 'Quando acontece', 'O que fazer']);
+  const primeira = tabelas[2].linhas.map((l) => l[0]);
+  for (const [chave, texto] of Object.entries(MOTIVOS_VERIFICADOR)) {
+    assert.equal(primeira.filter((c) => c.startsWith(texto)).length, 1, `${chave}: uma linha que começa com “${texto}”`);
+  }
+  for (const l of tabelas[2].linhas) assert.ok(l.every((c) => typeof c === 'string' && c.trim() !== ''), `linha sem coluna: ${l[0]}`);
+  assert.match(CAPS.referencia.secoes.find((x) => x.id === 'motivos').onde, /\[\[Histórico\]\]/);
+  // o motivo do Catálogo que nasce do verificador está na 1ª tabela (ver o teste dos MOTIVOS) e a seção da revisão conta os cinco
+  assert.ok(MOTIVOS.includes('nao_conferido'));
+  assert.match(secaoTxt('revisao', 'motivos'), /Cinco motivos mandam a oferta para a revisão/);
+  assert.equal(blocosDe('revisao', 'motivos').find((b) => b.tabela).tabela.linhas.length, 5);
+  assert.doesNotMatch(TEXTO_DOCS, /\b(?:Quatro|quatro|4) motivos\b/);
+});
+
+test('Verificador: toda causa de CAUSAS e as frases fixas do código aparecem nos Docs e no README', () => {
+  const ver = lerRaiz('src/verificador.js'); const server = lerRaiz('src/server.js'); const sched = lerRaiz('src/scheduler.js');
+  assert.equal(Object.keys(CAUSAS).length, 7);
+  for (const causa of Object.values(CAUSAS)) {
+    assert.ok(TEXTO_DOCS.includes(causa), `Docs: causa “${causa}”`);
+    assert.ok(README.includes(causa), `README: causa “${causa}”`);
+  }
+  // sufixos da linha do envio e o aviso de desligar: o código escreve exatamente isso
+  for (const trecho of ['· preço não conferido (', '· preço atualizado de ']) {
+    assert.ok(ver.includes(trecho), `src/verificador.js: ${trecho}`);
+    assert.ok(TEXTO_DOCS.includes(trecho), `Docs: ${trecho}`);
+    assert.ok(README.includes(trecho), `README: ${trecho}`);
+  }
+  assert.ok(server.includes("export const AVISO_VERIFICADOR_DESLIGADO = 'Verificador desligado em Ajustes';"));
+  assert.ok(TEXTO_DOCS.includes('Verificador desligado em Ajustes') && README.includes('Verificador desligado em Ajustes'));
+  // revisão do Catálogo: "Separada para revisão: <motivo> (<causa>)."
+  assert.ok(sched.includes('Separada para revisão: ${motivos.map((m) => TEXTO_MOTIVO[m] || m).join(\' e \')}${detalhe}.'));
+  assert.ok(sched.includes("nao_conferido: 'não deu para conferir o preço'"));
+  const frase = /Separada para revisão: não deu para conferir o preço \(a loja não respondeu\)\./;
+  assert.match(secaoTxt('revisao', 'motivos'), frase, 'Docs: frase da revisão'); assert.match(README, frase, 'README: frase da revisão');
+  // texto do descarte com preço: "Descartada: preço subiu de R$ X para R$ Y (+N%, o limite é L%)"
+  assert.ok(ver.includes('${MOTIVOS_VERIFICADOR.preco_subiu} de ${brl(ref)} para ${brl(atual)} (+${alta}%, o limite é ${limite}%)'));
+  const subiu = /Descartada: preço subiu de R\$ 89,90 para R\$ 99,90 \(\+11%, o limite é 5%\)/;
+  assert.match(TEXTO_DOCS, subiu); assert.match(README, subiu);
+});
+
+test('Verificador: o que os Docs e o README dizem da conferência não promete "Enviar mesmo assim" nem o campo de falha (D3, D12)', () => {
+  const trechos = [
+    ['Docs: manutencao/verificador', secaoTxt('manutencao', 'verificador')],
+    ['Docs: disparo-manual/mercado-livre', secaoTxt('disparo-manual', 'mercado-livre')],
+    ['Docs: disparo-manual/agendar', secaoTxt('disparo-manual', 'agendar')],
+    ['Docs: referencia/motivos', secaoTxt('referencia', 'motivos')],
+    ['README', limpo(readmeSecao('Conferência de preço e estoque antes do envio'))],
+  ];
+  for (const [onde, txt] of trechos) {
+    for (const m of txt.matchAll(/.{0,14}Enviar mesmo assim/g)) assert.match(m[0], /Não existe “?"?Enviar mesmo assim/, `${onde}: “${m[0]}”`);
+    assert.doesNotMatch(txt, /Se a loja não responder”|Tentar de novo|Usar R\$ \d/, `${onde}: texto de um recurso que não existe`);
+  }
+  assert.match(trechos[0][1], /Não existe “Enviar mesmo assim”/); assert.match(trechos[4][1], /Não existe "Enviar mesmo assim"/);
+});
+
+test('Verificador: {HORA_PRECO} está na tabela de campos dos Docs, com o exemplo entre colchetes, e no README', () => {
+  assert.ok(PLACEHOLDERS.includes('HORA_PRECO'));
+  const campos = blocosDe('templates', 'campos').find((b) => b.tabela).tabela.linhas.map((l) => l[0]);
+  for (const k of PLACEHOLDERS) assert.ok(campos.includes('`{' + k + '}`'), `templates/campos sem {${k}}`);
+  const opcional = textoDe('templates', 'opcional');
+  assert.match(opcional, /\[🕒 Preço visto às \{HORA_PRECO\}\]/); assert.match(opcional, /14h32/);
+  assert.match(README, /\[🕒 Preço visto às \{HORA_PRECO\}\]/);
+  assert.match(lerRaiz('public/ajuda.js'), /HORA_PRECO: 'Hora em que o preço foi conferido na loja, como 14h32\./);
+  // as TIPS do cartão de Ajustes levam ao capítulo
+  const ajuda = lerRaiz('public/ajuda.js');
+  assert.match(ajuda, /'ajustes\.verificador': 'manutencao\/verificador'/); assert.match(ajuda, /'ajustes\.verificador\.limite': 'manutencao\/verificador'/);
+  assert.ok(CAPS.manutencao.secoes.some((x) => x.id === 'verificador'));
+});
+
+test('Verificador: a seção de Manutenção usa os rótulos do cartão de Ajustes e o limite do código, e a tabela de Ajustes ganha as duas linhas', () => {
+  const app = fonte('app.js');
+  for (const rotulo of ['Conferir preço e estoque antes de enviar', 'Conferir antes de cada envio', 'Aceitar alta de preço até (%)', 'Salvar conferência']) {
+    assert.ok(app.includes(rotulo), `app.js: ${rotulo}`);
+    assert.ok(secaoTxt('manutencao', 'verificador').includes(rotulo) || textoDe('manutencao', 'ajustes').includes(rotulo), `Docs: ${rotulo}`);
+  }
+  const ajustes = primeiraColuna('manutencao', 'ajustes');
+  assert.ok(ajustes.includes('Conferir antes de cada envio') && ajustes.includes('Aceitar alta de preço até (%)'));
+  assert.match(textoDe('manutencao', 'ajustes'), /conferência de preço e estoque/);
+  // as quatro lojas, com o que cada uma confere
+  const lojas = blocosDe('manutencao', 'verificador').find((b) => b.tabela).tabela.linhas.map((l) => l[0]);
+  assert.deepEqual(lojas, ['Mercado Livre', 'Amazon', 'Shopee', 'Magalu']);
+  assert.match(secaoTxt('manutencao', 'verificador'), /a Magalu nunca|O programa não lê a página da Magalu/);
 });

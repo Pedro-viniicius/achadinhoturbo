@@ -156,6 +156,11 @@ test('resultado de cada item: para revisar (motivos do servidor), enviada sozinh
   assert.deepEqual(r(item({ status: 'enviado', envio_id: 9, grupos: [{ nome: 'A', ok: true }, { nome: 'B', ok: false, erro: 'o WhatsApp recusou' }] })),
     { cls: 'nivel-erro', texto: 'Erro ao enviar para 1 grupo', detalhe: '', extra: ['B: o WhatsApp recusou'] });
   assert.deepEqual([r(item({ status: 'descartado' })).cls, r(item({ status: 'descartado' })).texto], ['nivel-aviso', 'Descartada: na revisão']);
+  // descartada pelo verificador (R2): o motivo da loja; nao_conferido, valor desconhecido ou de outro status não valem
+  assert.equal(r(item({ status: 'descartado', descartado_por: 'esgotado' })).texto, 'Descartada: esgotado na loja');
+  assert.equal(r(item({ status: 'descartado', descartado_por: 'preco_subiu' })).texto, 'Descartada: preço subiu');
+  for (const x of ['nao_conferido', 'constructor', 7, null]) assert.equal(r(item({ status: 'descartado', descartado_por: x })).texto, 'Descartada: na revisão', String(x));
+  assert.equal(r(item({ status: 'enviado', descartado_por: 'esgotado', grupos: [] })).texto, 'Enviada');
 });
 
 test('o link da revisão só é aceito no formato exato da loja (https, host esperado, sem truques)', () => {

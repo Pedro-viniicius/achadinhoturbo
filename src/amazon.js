@@ -22,8 +22,8 @@
 //   o status e o Location, nunca o corpo. Antes de chamar a rede, a etapa 11 deve tentar o ASIN em
 //   canonicalUrl/matchedText da prévia do WhatsApp (extrairAsin), e só resolver se não houver.
 // - createAmazon({ db, fetch, agora, esperar, lerConexao, cacheLinks = new Map() }) →
-//   { lerItem(asin), lerItens(asins), montarLink(asin, { tag }?), resolver(url), testar(), situacao(), configurado(),
-//     invalidarToken() }
+//   { lerItem(asin, { fresco }?), lerItens(asins, { fresco }?), montarLink(asin, { tag }?), resolver(url), testar(),
+//     situacao(), configurado(), invalidarToken() }
 //   - Credenciais lidas a cada chamada: por padrão da linha 'amazon' de `conexoes` (config.tag,
 //     config.credencial_versao, segredos.credencial_id, segredos.credencial_secret). A etapa 7 pode injetar
 //     `lerConexao` (ex.: segredosDe de conexoes.js). Nada disso fica em variável de módulo.
@@ -34,6 +34,10 @@
 //     faltar), não "sem desconto"/"sem frete grátis". Na fusão campo a campo da etapa 11 (API × texto da
 //     mensagem), use `||` para esses dois (`api.discountPct || doTexto.discountPct`), não `??`.
 //     Pedidos simultâneos do mesmo ASIN dividem um só GetItems (promessa em voo por ASIN).
+//     `fresco: true` (o verificador de preço e estoque, plano verificador-preco-estoque D2): ignora o cache de 15 min
+//     na leitura e vai à API; o resultado regrava o cache. Passa pela mesma fila de 1 chamada/s, sem nova tentativa
+//     além da do token vencido, e junta-se a um GetItems já em voo do mesmo ASIN (esse já é leitura de rede).
+//     Sem a opção (ou com qualquer valor que não seja true), o comportamento é o de sempre.
 //   - montarLink(asin, { tag }?) → 'https://www.amazon.com.br/dp/<ASIN>?tag=<tag>'; sem tag → ErroAmazon('sem_tag');
 //     ASIN inválido → LinkNaoResolvido('invalido'). `tag` opcional = ID de rastreamento do grupo/bloco: se vier
 //     (≠ undefined/null) vale no lugar da tag de Conexões e precisa casar com RE_TAG, senão ErroAmazon('sem_tag')
@@ -399,15 +403,20 @@ export function createAmazon({ db, fetch: f, agora = Date.now, esperar, lerConex
     if (!c.tag) throw new ErroAmazon('sem_tag');
   }
 
-  /** Dados de vários ASINs (lotes de 10, cache de 15 min). → { ASIN: oferta | null } */
-  async function lerItens(asins) {
+  /**
+   * Dados de vários ASINs (lotes de 10, cache de 15 min). → { ASIN: oferta | null }
+   * opcoes.fresco === true: não lê o cache (vai à API pela fila de 1/s ou junta-se a um GetItems em voo); grava o
+   * cache como qualquer leitura.
+   */
+  async function lerItens(asins, opcoes) {
+    const fresco = opcoes?.fresco === true;
     const pedidos = [...new Set((Array.isArray(asins) ? asins : [])
       .map((a) => (typeof a === 'string' ? a.trim().toUpperCase() : '')).filter((a) => RE_ASIN.test(a)))];
     const saida = {};
     const faltam = [];
     const esperando = new Map(); // ASIN → promessa já em voo (de outro chamador)
     for (const a of pedidos) {
-      const s = itens.get(a);
+      const s = fresco ? null : itens.get(a);
       if (s && s.ate > agora()) saida[a] = s.oferta ? { ...s.oferta } : null;
       else if (itensEmVoo.has(a)) esperando.set(a, itensEmVoo.get(a));
       else faltam.push(a);
@@ -455,10 +464,11 @@ export function createAmazon({ db, fetch: f, agora = Date.now, esperar, lerConex
     return res;
   }
 
-  async function lerItem(asin) {
+  /** Um ASIN (lerItens). opcoes.fresco === true: lê na API mesmo com cache válido. */
+  async function lerItem(asin, opcoes) {
     const a = typeof asin === 'string' ? asin.trim().toUpperCase() : '';
     if (!RE_ASIN.test(a)) return null;
-    return (await lerItens([a]))[a] ?? null;
+    return (await lerItens([a], opcoes))[a] ?? null;
   }
 
   function montarLink(asin, opcoes) {

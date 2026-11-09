@@ -29,6 +29,8 @@ O Disparo manual da Amazon segue o mesmo caminho do espelhamento, só que a ofer
 
 Nenhum cookie do Mercado Livre sai do seu Chrome: a extensão devolve só a lista de produtos e o link pronto.
 
+Antes de gerar o link e enviar, o programa confere o preço e o estoque da oferta na loja; veja [Conferência de preço e estoque antes do envio](#conferência-de-preço-e-estoque-antes-do-envio).
+
 ## Instalar
 
 1. Instale o **Node.js 22.13 ou mais novo** (versão LTS em nodejs.org).
@@ -289,6 +291,27 @@ Em *Disparos → Disparar mensagem* você envia texto livre ou uma enquete para 
 - Todo envio, inclusive o **"agora"**, sai pela **mesma fila** das regras automáticas, com a pausa entre mensagens de *Ajustes*. Por isso pode haver atraso de alguns minutos enquanto uma regra está enviando; os envios entram entre as regras.
 - Repetições e enquetes aumentam o volume de envio e o risco de restrição do número: use com moderação.
 
+## Conferência de preço e estoque antes do envio
+
+Logo antes de gerar o link e mandar, o programa lê de novo o preço e o estoque da oferta na loja. Oferta **esgotada** ou **mais cara do que o limite** não sai, e o *Histórico* diz o motivo. Vale para todo envio de oferta: Disparo automático (todas as fontes, inclusive o Catálogo), Disparo manual (agora e agendado), espelhamento, remetente e o "Enviar" da revisão do Catálogo. A prévia não confere.
+
+- **Mercado Livre**: preço e estoque, lendo a página do produto pelo próprio programa (sem a extensão).
+- **Amazon**: preço e estoque, só com a API da Amazon ligada (*Conexões → Amazon*). Sem ela, não há conferência.
+- **Shopee**: só o preço (a API não informa estoque), só com a API da Shopee ligada. Cada conferência conta nas 300 consultas por hora.
+- **Magalu**: nunca é conferida (o programa não lê a página da Magalu).
+
+O que acontece:
+
+- **Preço igual ou mais barato**, ou **mais caro dentro do limite**: a mensagem sai com o preço lido na loja e o desconto recalculado. Preço digitado à mão e diferente do da loja é mantido. Se o preço mudou, a linha do envio no *Histórico* termina em `· preço atualizado de R$ 89,90 para R$ 91,00`.
+- **Esgotado**: não sai. `Descartada: esgotado na loja`.
+- **Mais caro que o limite**: não sai. `Descartada: preço subiu de R$ 89,90 para R$ 99,90 (+11%, o limite é 5%)`. O **limite padrão de 5%** muda em *Ajustes → Conferir preço e estoque antes de enviar*, com um número inteiro **de 0 a 50%** (0 barra qualquer alta; preço que caiu sempre pode sair).
+- **A loja não respondeu**: se os dados da oferta são de até 30 min, ela sai, sem a hora do preço, e a linha do envio termina em `· preço não conferido (a loja não respondeu)`. Se são mais velhos, **não sai**: `Descartada: não deu para conferir o preço (a loja não respondeu)`. Os dados do Disparo automático pela Central são lidos na hora da escolha; os de um envio agendado, do espelhamento ou de um remetente, na criação do envio; uma lista de links com preço digitado e o Catálogo não têm idade conhecida (a da lista não sai; a do Catálogo vai para a revisão: `Separada para revisão: não deu para conferir o preço (a loja não respondeu).`).
+- **Causas** que aparecem entre parênteses: a loja não respondeu; a API da Amazon não está ligada; a API da Shopee não está ligada; a Magalu não deixa ler a página; a Shopee não devolveu o produto; a página não trouxe o preço; a loja demorou demais. Cada conferência espera até 20 segundos.
+- **Descartada no Disparo automático**: nas fontes antigas (Central de Afiliados, lista de links e busca), a oferta não volta a ser escolhida por 6 horas (a lista é zerada se o programa reiniciar) e não é reposta no mesmo envio. No **Catálogo** o descarte é definitivo: a oferta fica registrada como descartada e não volta, e o *Histórico* do catálogo mostra `Descartada: esgotado na loja` ou `Descartada: preço subiu`. Nada do verificador entra no Histórico como erro, então nenhum aviso de erro vai por WhatsApp.
+- **Disparo manual**: o "agora" vai para a fila e a conferência acontece no momento do envio; a linha do *Histórico* ganha o selo *Descartado* com o motivo. Não existe "Enviar mesmo assim": para mandar um produto cujo preço subiu, dispare de novo (o programa lê a loja outra vez e usa o preço novo como referência). No agendamento, a conferência é na hora do envio; por isso, numa loja que o programa **não consegue conferir** (a Magalu, e a Amazon ou a Shopee sem a API ligada), agendar para daqui a **mais de 25 min** é recusado (`Esta loja não tem conferência de preço: agende para até 25 min ou envie agora.`): a oferta sairia com dados de mais de 30 min e seria descartada (a diferença de 5 min é a folga do tick e da fila). Ao clicar em *Identificar*, a dica do agendar já avisa quando a loja é assim.
+- **Desligar**: a chave "Conferir antes de cada envio" desliga tudo isso; as ofertas saem sem conferir, e o *Histórico* registra `Verificador desligado em Ajustes`. Mudar o limite também deixa uma linha (`Limite do verificador: 5% → 50%`). Com login no painel, as duas linhas terminam com quem salvou: `(por Ana)`.
+- **`{HORA_PRECO}`**: campo de template com a hora em que o preço foi conferido, como `14h32`. Vazio quando a oferta não foi conferida; use entre colchetes, como `[🕒 Preço visto às {HORA_PRECO}]`, para o trecho sumir (veja [Template com trecho opcional](#template-com-trecho-opcional)). O programa **não deixa salvar** um template com `{HORA_PRECO}` na mesma linha do `{LINK}` fora de um trecho entre colchetes só dele (sem conferência a linha some e a mensagem sairia sem o link): `Ponha o {HORA_PRECO} em outra linha, ou entre [ ] sem o {LINK}: sem conferência de preço, a linha some e a mensagem sai sem o link de afiliado.`
+
 ## Horários marcados e Grupo vivo
 
 Duas formas de ritmo que não mudam nada do que já existe: um disparo sem horários marcados e os envios de *Disparar mensagem* continuam como antes.
@@ -308,6 +331,7 @@ Em *Disparo automático → Novo disparo automático → Ritmo de envio*, o **Co
   - `3 horários pulados (10:00 a 12:00): o programa estava desligado, o WhatsApp desconectado ou outro envio demorou. Próximo: 13:00.`
   - `8 horários pulados (09:00 de 03/11 a 13:00): o programa estava desligado, o WhatsApp desconectado ou outro envio demorou. Próximo: 21:00.` (o programa ficou dias desligado: o Histórico traz um aviso só, com o primeiro e o último horário pulados, em vez de um por horário; o de outro dia vem com a data. Depois de muitos dias, o número pode ficar abaixo do total, porque o programa não confere um por um os horários do meio)
   - `Horário 10:00: saíram 5 de 8 ofertas; não havia mais ofertas novas dentro dos filtros.` (faltou oferta: sai o que houver, sem acumular para o horário seguinte)
+  - `Horário 10:00: saíram 4 de 5 ofertas; 1 descartada na conferência de preço e estoque.` (uma oferta esgotada ou mais cara que o limite não saiu e não é reposta; se faltarem ofertas além disso, a frase termina com "e não havia mais ofertas novas dentro dos filtros")
   - `Horário 10:00: o template escolhido para este horário não existe mais. As ofertas saíram com o template da regra.`
 - **Enviar agora e Ver ofertas**: usam a quantidade e o template do próximo horário. *Enviar agora* envia de verdade, mas não pula esse horário.
 - **Template em uso**: um template usado numa grade não pode ser apagado: `A regra "Promoções" usa este template no horário 10:00.`
@@ -451,6 +475,7 @@ Um trecho entre colchetes com campo dentro, como `[ ({DESCONTO_PRODUTO} OFF)]`, 
 - O template **Amazon** é criado uma única vez (em instalação nova ou antiga) e já usa o trecho opcional no desconto: sem desconto, só o "(NN% OFF)" some e a linha do preço fica. Se você apagar ou renomear esse template, ele **não** volta.
 - Os templates novos já nascem assim. O template **Padrão** que já existe no seu banco **não** muda sozinho: para ter o mesmo efeito, troque o trecho do desconto por `[ ({DESCONTO_PRODUTO} OFF)]` na tela *Templates*.
 - O template do espelhamento precisa do campo `{LINK}`.
+- `{HORA_PRECO}` (a hora em que o preço foi conferido na loja, como `14h32`) fica vazio sem conferência: ponha-o sempre entre colchetes, como `[🕒 Preço visto às {HORA_PRECO}]`. Sem colchetes, a linha inteira some quando não há conferência, como qualquer campo vazio; por isso ele não pode ficar na mesma linha do `{LINK}` (o programa recusa salvar assim).
 
 ### Formato de mensagem de origem que funciona
 
@@ -554,7 +579,8 @@ Nenhuma oferta suspeita sai sozinha. Vão para a revisão, em vez de ser enviada
 - toda oferta da **Shopee**;
 - oferta com **desconto de 100%**;
 - oferta com **preço antigo 10 vezes maior** que o preço (ou mais), provável erro de preço no catálogo;
-- oferta cujo **link não pôde ser gerado** (falha daquele item; o painel tenta de novo na hora de enviar e, se falhar de novo, o motivo aparece na linha da oferta no *Histórico*).
+- oferta cujo **link não pôde ser gerado** (falha daquele item; o painel tenta de novo na hora de enviar e, se falhar de novo, o motivo aparece na linha da oferta no *Histórico*);
+- oferta cujo **preço não deu para conferir** na loja (o Catálogo não tem idade conhecida: qualquer falha de leitura vai à revisão; o aviso diz `Separada para revisão: não deu para conferir o preço (a loja não respondeu).`; esgotada ou mais cara que o limite não vai à revisão, é descartada: veja [Conferência de preço e estoque antes do envio](#conferência-de-preço-e-estoque-antes-do-envio)).
 
 Elas contam nas "ofertas por envio" da regra. Cada regra guarda **no máximo 50** ofertas esperando: acima disso, as novas esperam sem entrar na fila (chip "Revisão cheia (50)" e aviso no *Histórico* a cada execução) até você revisar ou descartar algumas.
 

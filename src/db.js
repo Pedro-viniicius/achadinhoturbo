@@ -96,7 +96,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_esp_msg ON espelho_itens (espelho_id, orig
 CREATE INDEX IF NOT EXISTS idx_esp_dedupe ON espelho_itens (espelho_id, asin, status, decidido_em);
 CREATE INDEX IF NOT EXISTS idx_esp_status ON espelho_itens (status, espera_ate, ts);
 -- Fonte "catalogo" (API de ofertas do Etiqueta). Uma linha por oferta já tratada numa regra; chave: MLB<n>|ASIN:<asin>|SHOPEE:<shop>.<item>.
--- loja: ml|amazon|shopee. motivos: lista JSON (shopee|desconto_100|preco_antigo|falha_link). oferta: JSON da oferta, sem dado pessoal.
+-- loja: ml|amazon|shopee. motivos: lista JSON (shopee|desconto_100|preco_antigo|falha_link|nao_conferido). oferta: JSON da oferta, sem dado pessoal.
 CREATE TABLE IF NOT EXISTS catalogo_itens (
   id INTEGER PRIMARY KEY, rule_id INTEGER NOT NULL, chave TEXT NOT NULL, loja TEXT NOT NULL,
   status TEXT NOT NULL CHECK (status IN ('revisao','enviado','descartado')), motivos TEXT NOT NULL DEFAULT '[]',

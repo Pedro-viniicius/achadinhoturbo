@@ -56,6 +56,7 @@ docsCapitulo({
           ['Horários marcados', 'Forma de ritmo do [[Disparo automático]] (também chamada grade): em vez de “A cada X minutos”, você lista as horas do dia, cada uma com a sua quantidade de ofertas e o seu template. Veja [Horários marcados](#docs/disparo-automatico/horarios-marcados).'],
           ['Grupo vivo', 'Tela do menu Disparos com rotinas que mandam sozinhas mensagens e enquetes para os grupos, para mostrar que há gente por trás. Não é oferta. Veja [Grupo vivo](#docs/mensagens/grupo-vivo).'],
           ['Rotina', 'Cada item do [[Grupo vivo]]: um nome, um ou mais textos ou enquetes em rodízio ou sorteio, os grupos, os dias e os horários.'],
+          ['Verificador', 'Conferência de preço e estoque feita logo antes do envio. Oferta esgotada ou mais cara que o limite não sai. Veja [Conferir preço e estoque antes de enviar](#docs/manutencao/verificador).'],
         ], titulo: 'Disparos' },
         { termos: [
           ['Código de rastreio', 'Código que sai no link de um grupo ou bloco e diz de onde veio a venda: uma etiqueta no Mercado Livre, um ID de rastreamento na Amazon, um Sub_id na Shopee. Opcional; sem ele o link sai como sempre. Configura-se em [[Blocos de análise]] ou, para uma exceção, em [[Grupos]]. Só o Dono muda.'],
@@ -80,7 +81,7 @@ docsCapitulo({
           ['Na fila', 'Oferta espelhada à qual falta o título ou o preço. Espera no Histórico até você completar ou descartar (se a regra for “esperar eu completar”).'],
           ['Palavra bloqueada', 'Palavra que, se aparecer no título ou no texto da oferta, impede o envio. Não diferencia maiúscula, minúscula nem acento.'],
           ['Repetida', 'Mesmo produto da Amazon já enviado pelo mesmo espelhamento nas últimas horas definidas (padrão 168). Não é reenviado.'],
-          ['Para revisar', 'Oferta do catálogo que não sai sozinha: a da Shopee (o link não prova de quem é a conta), a com 100% de desconto, a com preço antigo 10 vezes maior que o preço (provável erro de preço) e a que falhou ao gerar o link. Você confere em [[Histórico → Catálogo]] e envia ou descarta.'],
+          ['Para revisar', 'Oferta do catálogo que não sai sozinha: a da Shopee (o link não prova de quem é a conta), a com 100% de desconto, a com preço antigo 10 vezes maior que o preço (provável erro de preço), a que falhou ao gerar o link e a que o programa não conseguiu conferir na loja. Você confere em [[Histórico → Catálogo]] e envia ou descarta.'],
         ], titulo: 'Espelhamento e revisão' },
         { termos: [
           ['Bloco', 'Conjunto de grupos de um nicho, para análise, para relatórios e para marcar disparos de uma vez.'],
@@ -162,7 +163,7 @@ docsCapitulo({
     },
     {
       id: 'motivos', titulo: 'Motivos de revisão e de descarte',
-      onde: '[[Histórico → Catálogo]] e [[Histórico → Espelhamento]]',
+      onde: '[[Histórico → Catálogo]], [[Histórico → Espelhamento]] e [[Histórico]]',
       blocos: [
         { p: '**Ofertas do Catálogo que esperam a sua revisão.** Nenhuma oferta suspeita sai sozinha. Só o Dono revisa. Cada disparo guarda até 50 ofertas esperando; acima disso, as novas esperam sem entrar na lista.' },
         { tabela: {
@@ -172,9 +173,10 @@ docsCapitulo({
             ['Desconto de 100%: confira o preço', 'O catálogo informou 100% de desconto.', 'Confira o preço e envie. O “100%” nunca vai na mensagem: ela sai sem desconto, ou com o desconto calculado dos dois preços, se houver preço antigo.'],
             ['Preço antigo muito alto: confira o preço', 'O preço antigo é 10 vezes o preço atual, ou mais. Costuma ser erro no catálogo.', 'Corrija o preço ou apague o preço antigo. Não existe “enviar mesmo assim” para esse caso.'],
             ['Não consegui gerar o link: confira a oferta', 'O link de afiliado desta oferta não pôde ser gerado (por exemplo, extensão desconectada).', 'Resolva a causa e envie: o painel tenta de novo na hora. Se falhar, o motivo aparece na linha da oferta no Histórico.'],
+            ['Não deu para conferir o preço: confira na loja', 'Antes de enviar, o verificador não conseguiu ler o preço atual na loja (loja fora do ar, sem a API da loja ou tempo esgotado). A oferta do Catálogo não tem idade conhecida, então qualquer falha de leitura leva à revisão.', 'Abra a oferta na loja, confira o preço e o estoque e envie ou descarte. Não existe “enviar mesmo assim” automático: a oferta espera na revisão.'],
           ],
         } },
-        { p: 'Depois da revisão, a oferta aparece no Histórico como **Enviada** ou **Descartada: na revisão**. Se o envio não chegar a nenhum grupo, a linha mostra o erro e o botão **Enviar de novo**.' },
+        { p: 'Depois da revisão, a oferta aparece no Histórico como **Enviada** ou **Descartada: na revisão**. A que o verificador barrou sozinho aparece como **Descartada: esgotado na loja** ou **Descartada: preço subiu**. Se o envio não chegar a nenhum grupo, a linha mostra o erro e o botão **Enviar de novo**.' },
         { p: '**Resultados do Histórico do Espelhamento.** A coluna Resultado diz o que aconteceu com cada link da Amazon que apareceu nos grupos de origem.' },
         { tabela: {
           colunas: ['Resultado', 'Quando acontece', 'O que fazer'],
@@ -189,6 +191,17 @@ docsCapitulo({
             ['Descartada: descartada à mão', 'Alguém clicou em Descartar na fila.', 'Nada.'],
             ['Descartada: ficou parada mais de 2 h (programa desligado ou fora do ar)', 'O item chegou, mas o programa ficou desligado por mais de 2 horas antes de processá-lo.', 'Nada. Mantenha o programa ligado.'],
             ['Não espelhada: falta a tag de associado da Amazon em Conexões', 'Não há tag da Amazon salva, então nenhum link pode sair com a sua comissão.', 'Salve a tag em [[Conexões → Amazon]]. Os próximos links saem normalmente.'],
+          ],
+        } },
+        { p: '**Resultados da conferência de preço e estoque.** Antes de gerar o link, o programa lê o preço e o estoque na loja ([Conferir preço e estoque antes de enviar](#docs/manutencao/verificador)). Quando a oferta não sai, o Histórico diz por quê. Os valores de R$ e de % dos exemplos mudam a cada oferta.' },
+        { tabela: {
+          colunas: ['Resultado', 'Quando acontece', 'O que fazer'],
+          linhas: [
+            ['Descartada: esgotado na loja', 'A loja diz que o produto não tem estoque (Mercado Livre e Amazon; a Shopee não informa estoque).', 'Confira o produto na loja. Se voltou a ter estoque, use o [[Disparo manual]].'],
+            ['Descartada: preço subiu de R$ 89,90 para R$ 99,90 (+11%, o limite é 5%)', 'O preço na loja está acima do preço da oferta mais o limite de [[Ajustes → Conferir preço e estoque antes de enviar]].', 'Se o novo preço ainda vale, suba o limite em Ajustes ou dispare de novo pelo [[Disparo manual]], que lê o preço da loja outra vez.'],
+            ['Descartada: não deu para conferir o preço (a loja não respondeu)', 'A leitura na loja falhou e os dados da oferta têm mais de 30 minutos ou idade desconhecida (por exemplo, uma lista de links com o preço digitado). Entre parênteses vai a causa: a loja não respondeu, a API da Amazon não está ligada, a API da Shopee não está ligada, a Magalu não deixa ler a página, a Shopee não devolveu o produto, a página não trouxe o preço ou a loja demorou demais.', 'Nada; se acontece sempre, confira a conexão com a loja em [[Conexões]]. No Catálogo, a oferta vai para a revisão em vez de ser descartada.'],
+            ['Linha do envio terminada em “· preço não conferido (a loja não respondeu)”', 'A leitura falhou, mas os dados da oferta eram de até 30 minutos: a oferta saiu, sem a hora do preço.', 'Nada. Se acontece sempre, confira a conexão com a loja em [[Conexões]].'],
+            ['Linha do envio terminada em “· preço atualizado de R$ 89,90 para R$ 91,00”', 'O preço na loja mudou, dentro do limite: a mensagem saiu com o preço lido na loja e o desconto recalculado.', 'Nada.'],
           ],
         } },
       ],
@@ -211,6 +224,7 @@ docsCapitulo({
             ['Grupo vivo', 'até 5 textos ou enquetes e até 6 horários por rotina; até 50 rotinas; sem foto; o horário sai se atrasou até 30 min, senão é pulado; um “Enviar agora” por minuto em cada rotina', 'Fixo'],
             ['Aviso de volume', 'o painel avisa com mais de 400 mensagens por dia (disparos e rotinas ligados); é só um aviso, nunca bloqueia', 'Fixo'],
             ['Agendamento', 'um agendado que perde o horário por mais de 2 h não sai', 'Fixo'],
+            ['Conferência de preço e estoque', 'aceita alta de preço até o limite padrão de 5%, de 0 a 50%; se a loja não responder, a oferta só sai se os dados dela forem de até 30 min; cada conferência espera até 20 segundos; nas fontes antigas, a oferta que o Disparo automático descartou não volta a ser escolhida por 6 horas (no Catálogo o descarte é definitivo); o Disparo manual recusa agendar para daqui a mais de 25 min uma loja que não se confere', '[[Ajustes → Conferir preço e estoque antes de enviar]]'],
             ['Não repetir a mesma oferta (espelhamento)', '168 h por padrão, de 0 a 8760 (0 = pode repetir)', 'Campo “Não repetir a mesma oferta por (horas)” no espelhamento'],
             ['Máximo por hora (espelhamento)', '10 por hora por padrão, de 0 a 60 (0 = sem limite)', 'Campo “Máximo por hora” no espelhamento'],
             ['Links lidos no espelhamento', 'até 5 links por mensagem; até 60 links por hora por grupo de origem', 'Fixo'],
@@ -220,7 +234,7 @@ docsCapitulo({
             ['Revisão do Catálogo', 'até 50 ofertas esperando por disparo; o Histórico mostra as 200 mais recentes', 'Fixo'],
             ['Catálogo', 'leitura de 200 ofertas por página; até 20 categorias e 10 palavras de busca por fonte; desconto mínimo de 0 a 99', 'Na fonte Catálogo do disparo automático'],
             ['API da Amazon', 'exige pelo menos 10 vendas qualificadas nos últimos 30 dias; o acesso volta em até 2 dias depois de novas vendas; os dados de um produto ficam em memória por até 15 minutos', 'Regras da Amazon'],
-            ['Shopee', 'até 60 links por hora pela extensão e 300 consultas por hora no total; um link gerado é reaproveitado por até 7 dias; a Shopee libera a API em até 3 dias úteis', 'Fixo (a liberação é da Shopee)'],
+            ['Shopee', 'até 60 links por hora pela extensão e 300 consultas por hora no total (a conferência de preço também conta); um link gerado é reaproveitado por até 7 dias; a Shopee libera a API em até 3 dias úteis', 'Fixo (a liberação é da Shopee)'],
             ['Rotacionador', 'limite de até 1.024 pessoas por grupo; aviso de grupo lotando aos 95%; o modo alternar usa até 3 grupos com vaga', 'Campo de limite do link, em [[Rotacionador de Links]]'],
             ['Avisos', 'aviso de erro de disparo no máximo 1 a cada 30 minutos; no máximo 10 cadastros de número a cada 10 minutos; “Enviar teste” e “Enviar resumo agora” somados: no máximo 1 mensagem manual por número a cada 60 s, 1 resumo para todos os números a cada 60 s e 5 envios manuais por hora (cada teste ou resumo conta 1, mesmo o resumo para todos)', 'Fixo'],
             ['Rastreio por grupo', 'um Sub_id da Shopee tem até 30 caracteres, só letras e números; até 10 Sub_ids por envio; o histórico do rastreio fica 400 dias', 'Fixo (os códigos em [[Blocos de análise]])'],

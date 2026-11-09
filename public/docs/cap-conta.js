@@ -155,7 +155,7 @@ docsCapitulo({
     'Abrir o painel e atualizar a tela.',
     'Fazer backup, ligar a cópia automática no Google Drive e restaurar.',
     'Reconectar o WhatsApp e limpar o log antigo.',
-    'Ajustar pausas e limites.',
+    'Ajustar pausas e limites e a conferência de preço e estoque.',
   ],
   abrir: [{ rota: '#ajustes', tela: 'Ajustes' }, { rota: '#numeros', tela: 'Números de WhatsApp' }],
   secoes: [
@@ -310,13 +310,15 @@ docsCapitulo({
       id: 'ajustes', titulo: 'Ajustes: pausas e limites',
       onde: '[[Ajustes]]',
       blocos: [
-        { p: 'Os cartões são: pausas entre mensagens, tamanho do título, modo de link e privacidade dos grupos. A extensão do Chrome agora fica em [[Conexões → Mercado Livre]]; o cartão dela em Ajustes só leva para lá.' },
+        { p: 'Os cartões são: pausas entre mensagens, tamanho do título, conferência de preço e estoque, modo de link e privacidade dos grupos. A extensão do Chrome agora fica em [[Conexões → Mercado Livre]]; o cartão dela em Ajustes só leva para lá.' },
         { tabela: {
           colunas: ['Campo', 'Padrão', 'Para que serve'],
           linhas: [
             ['Entre um grupo e outro (segundos)', '6 (mínimo 2)', 'Espera entre os grupos de um mesmo envio.'],
             ['Entre uma oferta e a próxima (segundos)', '30 (mínimo 5)', 'Espera entre duas ofertas de um mesmo disparo.'],
             ['Tamanho máximo (caracteres)', '60', 'Abrevia `{TITULO_PRODUTO}`. 0 = não abreviar. Sugestão: 50 a 70.'],
+            ['Conferir antes de cada envio', 'Ligada', 'Liga e desliga a conferência de preço e estoque. Veja [Conferir preço e estoque antes de enviar](#docs/manutencao/verificador).'],
+            ['Aceitar alta de preço até (%)', '5 (de 0 a 50)', 'Quanto o preço na loja pode ter subido desde a oferta. Acima disso a oferta não sai.'],
             ['Guardar por (dias)', '90', 'Prazo de guarda dos dados dos grupos. Veja [Prazo de guarda e apagar](#docs/privacidade/retencao).'],
           ],
         } },
@@ -326,6 +328,43 @@ docsCapitulo({
           '**Pela extensão do Chrome (com a etiqueta, gera comissão)**: o modo de verdade.',
           '**Link direto, sem etiqueta (só para testar, não gera comissão)**: só para testar o fluxo. Nesse modo, as ofertas do Mercado Livre que vêm do Catálogo ou de um remetente não saem.',
         ] },
+      ],
+    },
+    {
+      id: 'verificador', titulo: 'Conferir preço e estoque antes de enviar',
+      onde: '[[Ajustes → Conferir preço e estoque antes de enviar]]',
+      blocos: [
+        { p: 'Antes de gerar o link e mandar, o programa lê de novo o preço e o estoque da oferta na loja. Oferta esgotada, ou mais cara do que o limite, não sai, e o [[Histórico]] diz o motivo. A conferência vale para todo envio de oferta: Disparo automático (inclusive o Catálogo), Disparo manual (agora ou agendado), Espelhamento, Remetente e o “Enviar” da revisão do Catálogo. A prévia não confere.' },
+        { tabela: {
+          colunas: ['Loja', 'O que é conferido', 'Como'],
+          linhas: [
+            ['Mercado Livre', 'Preço e estoque', 'O programa lê a página do produto, sem usar a extensão.'],
+            ['Amazon', 'Preço e estoque', 'Só com a API da Amazon ligada em [[Conexões → Amazon]]. Sem ela, não há conferência.'],
+            ['Shopee', 'Só o preço (a API não informa estoque)', 'Só com a API da Shopee ligada em [[Conexões → Shopee]]. Cada conferência conta nas 300 consultas por hora.'],
+            ['Magalu', 'Nada', 'O programa não lê a página da Magalu: a oferta sai sem conferência. Por isso o Disparo manual recusa agendar uma oferta da Magalu para daqui a mais de 25 min: “Esta loja não tem conferência de preço: agende para até 25 min ou envie agora.”'],
+          ],
+        } },
+        { p: 'O que acontece em cada caso:' },
+        { tabela: {
+          colunas: ['Caso', 'O que o programa faz', 'O que aparece no Histórico'],
+          linhas: [
+            ['Preço igual, ou mais barato', 'Envia com o preço lido na loja e o desconto recalculado. Preço que você digitou à mão e é diferente do da loja é mantido.', 'Sem aviso. Se o preço mudou, a linha do envio termina em “· preço atualizado de R$ 89,90 para R$ 91,00”.'],
+            ['Mais caro, dentro do limite', 'Envia com o preço novo.', 'A mesma linha “· preço atualizado de …”.'],
+            ['Esgotado', 'Não envia.', 'Descartada: esgotado na loja'],
+            ['Mais caro que o limite', 'Não envia.', 'Descartada: preço subiu de R$ 89,90 para R$ 99,90 (+11%, o limite é 5%)'],
+            ['A loja não respondeu, dados de até 30 min', 'Envia, sem a hora do preço.', 'A linha do envio termina em “· preço não conferido (a loja não respondeu)”.'],
+            ['A loja não respondeu, dados mais velhos', 'Não envia. No Catálogo, a oferta vai para a revisão.', 'Descartada: não deu para conferir o preço (a loja não respondeu)'],
+          ],
+        } },
+        { p: 'Os dados de uma oferta do Disparo automático (Central de Afiliados) são lidos na hora da escolha, então são novos. Os de um envio agendado, do Espelhamento ou de um remetente são do momento em que o envio foi criado. Uma lista de links com preço digitado e as ofertas do Catálogo não têm idade conhecida: se a loja não responder, a da lista não sai e a do Catálogo vai para a revisão. Entre parênteses, a causa pode ser: a loja não respondeu; a API da Amazon não está ligada; a API da Shopee não está ligada; a Magalu não deixa ler a página; a Shopee não devolveu o produto; a página não trouxe o preço; a loja demorou demais. Cada conferência espera até 20 segundos. A mesma recusa vale para a Amazon e a Shopee sem a API ligada: sem conferência possível, o Disparo manual só agenda para daqui a até 25 min (os 5 min de diferença para os 30 dos dados são a folga do tick e da fila).' },
+        { p: 'Para ajustar, abra [[Ajustes → Conferir preço e estoque antes de enviar]]:' },
+        { passos: [
+          'Deixe ligada a chave “Conferir antes de cada envio”. Desligada, as ofertas saem sem conferir preço nem estoque, e o Histórico registra “Verificador desligado em Ajustes”. Com login no painel, a linha termina com quem salvou, como “(por Ana)”.',
+          'Em “Aceitar alta de preço até (%)”, escreva um número inteiro de 0 a 50. O limite padrão de 5% deixa passar uma alta de até 5%; 0 barra qualquer alta. Preço que caiu sempre pode sair. Ao mudar o limite, o Histórico registra “Limite do verificador: 5% → 50%”, com quem salvou.',
+          'Clique em “Salvar conferência”.',
+        ] },
+        { nota: 'dica', texto: 'Quer mandar uma oferta que foi descartada? Esgotada: confira o produto na loja e, se voltou a ter estoque, use o [[Disparo manual]]. Preço que subiu: se o novo preço ainda vale, suba o limite ou dispare de novo pelo Disparo manual, que lê o preço da loja outra vez e o usa como referência. Não existe “Enviar mesmo assim”.' },
+        { nota: 'aviso', texto: 'A oferta que o Disparo automático descartou, nas fontes antigas (Central, lista de links e busca), não volta a ser escolhida por 6 horas (a lista é zerada se o programa reiniciar). No Catálogo o descarte é definitivo: a oferta não volta, e o Histórico do catálogo mostra “Descartada: esgotado na loja” ou “Descartada: preço subiu”. O desconto e o preço que vão na mensagem são os da conferência. Para pôr a hora na mensagem, use o campo `{HORA_PRECO}` no [template](#docs/templates/opcional).' },
       ],
     },
   ],

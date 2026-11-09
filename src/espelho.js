@@ -922,7 +922,8 @@ export function createEspelho({ db, wa = null, amazon = null, envios = null, aco
     if (d.asin && d.oferta) {
       const tpl = templateDoEnvio(regra.template_id).tpl;
       const tituloMax = Number(getSetting(db, 'titulo_max', 60));
-      if (tpl) texto = renderTemplate(tpl.body, { ...d.oferta, link: mascararTag(`${urlDoAsin(d.asin)}?tag=x`) }, { tituloMax });
+      // a prévia não confere na loja: {HORA_PRECO} sai com a hora de agora (no envio, a da conferência)
+      if (tpl) texto = renderTemplate(tpl.body, { ...d.oferta, link: mascararTag(`${urlDoAsin(d.asin)}?tag=x`), vistoEm: agora() }, { tituloMax });
     }
     return { links, asin: d.asin ?? null, fonte_dados: d.fonte ?? null, oferta: d.oferta ? soCampos(d.oferta) : null, texto, decisao, motivo };
   }

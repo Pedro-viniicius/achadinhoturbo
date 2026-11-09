@@ -40,8 +40,10 @@ import { validarAjustesOferta } from './espelho.js';
 
 const DIA = 86400000;
 export const TETO_REVISAO = 50;             // pendentes por regra (P5): acima, as novas esperam sem entrar
-export const MOTIVOS = Object.freeze(['shopee', 'desconto_100', 'preco_antigo', 'falha_link']);
+export const MOTIVOS = Object.freeze(['shopee', 'desconto_100', 'preco_antigo', 'falha_link', 'nao_conferido']);
 const STATUS = ['revisao', 'enviado', 'descartado'];
+// motivos do verificador que descartam a oferta do catálogo (o `nao_conferido` vai à revisão, nunca descarta)
+const DESCARTE_VERIFICADOR = ['esgotado', 'preco_subiu'];
 const ORDEM_NOVIDADES = 'atualizacao';      // a ordem "Novidades" do contrato: oferta tratada nunca sai de novo
 const LIMITE_PADRAO = 100;
 const LIMITE_MAX = 200;
@@ -216,16 +218,19 @@ export function createCatalogoItens({ db, wa = null, links = null, amazon = null
    * Grava (upsert por regra e chave) o que a regra fez com a oferta: 'revisao' (com ao menos um motivo de MOTIVOS),
    * 'enviado' ou 'descartado'. Não mexe em `sent_offers` (o envio da regra já grava lá).
    * Nunca sobrescreve um item que ainda espera revisão (quem decide é o Dono) e não passa do teto de revisão.
+   * `descartadoPor` (só com 'descartado'): 'esgotado' ou 'preco_subiu' (de MOTIVOS_VERIFICADOR) quando foi o
+   * verificador que barrou a oferta; fica em `oferta.descartado_por` e volta em `listar` (a tela diz o porquê).
    * → true se gravou; false se a entrada não fecha (regra, chave, título, preço, status, motivos), se a revisão da
    * regra está cheia ou se o item está em revisão.
    */
-  function registrar(rule, c, status, motivos = []) {
+  function registrar(rule, c, status, motivos = [], { descartadoPor = null } = {}) {
     const info = lerChave(c?.key);
     if (!Number.isInteger(rule?.id) || rule.id <= 0 || !info || !STATUS.includes(status)) return false;
     const lista = [...new Set(Array.isArray(motivos) ? motivos.filter((m) => MOTIVOS.includes(m)) : [])];
     if (status === 'revisao' && !lista.length) return false;
     const oferta = ofertaParaGuardar(c, info);
     if (!oferta.title || oferta.price == null) return false;
+    if (status === 'descartado' && DESCARTE_VERIFICADOR.includes(descartadoPor)) oferta.descartado_por = descartadoPor;
     if (status === 'revisao' && revisaoCheia(rule.id)) return false;
     const now = agora();
     const r = db.prepare(`INSERT INTO catalogo_itens (rule_id, chave, loja, status, motivos, oferta, envio_id, criado_em, decidido_em)
@@ -340,6 +345,8 @@ export function createCatalogoItens({ db, wa = null, links = null, amazon = null
       return {
         id: l.id, rule_id: l.rule_id, regra: l.regra ?? null, loja: l.loja, status: l.status,
         motivos: listaDeTexto(l.motivos).filter((m) => MOTIVOS.includes(m)),
+        // só o item que o verificador barrou (esgotado ou preço subiu): a tela diz o porquê em vez de "na revisão"
+        ...(l.status === 'descartado' && DESCARTE_VERIFICADOR.includes(o.descartado_por) ? { descartado_por: o.descartado_por } : {}),
         oferta: {
           title: o.title ?? null, price: o.price ?? null, oldPrice: o.oldPrice ?? null, discountPct: o.discountPct ?? null,
           sold: o.sold ?? null, freeShipping: o.freeShipping === true, coupon: o.coupon ?? null,

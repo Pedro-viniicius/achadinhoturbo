@@ -48,6 +48,13 @@ const TEXTOS_DISPAROS = {
   agendarRotulo: 'Agendar horário',
   agendarDica: 'Desligado, dispara na hora. Ligado, dispara no horário de hoje que você escolher.',
   horaHoje: 'Horário de hoje',
+  // conferência de preço e estoque (plano verificador-preco-estoque, etapa 8): a dica do agendar só com o verificador ligado
+  agendarConfere: 'O preço e o estoque são conferidos na hora do envio, não agora.',
+  // loja sem conferência de preço (Magalu; Amazon ou Shopee sem a API): no lugar da dica acima, quando o Identificar a indica
+  agendarSemConferencia: 'Esta loja não tem conferência de preço: agende para até 25 min ou envie agora.',
+  descartado: 'Descartado',
+  // motivo do selo quando a linha não traz o texto (chaves de MOTIVOS_VERIFICADOR, src/verificador.js)
+  motivosDescarte: { esgotado: 'esgotado na loja', preco_subiu: 'preço subiu', nao_conferido: 'não deu para conferir o preço' },
   disparar: 'Disparar', agendarEnvio: 'Agendar envio', enviando: 'Enviando…', salvando: 'Salvando…',
   motivoWhats: 'Conecte o WhatsApp em Números de WhatsApp para disparar agora.',
   motivoExtensao: 'A extensão do Chrome está desconectada: abra a Central de Afiliados no Chrome, ou agende o envio.',
@@ -309,8 +316,15 @@ function dispLigarSeg(el, aoMudar) {
   };
 }
 /** Selo de status de uma linha do histórico: sempre com palavra, nunca só cor. */
-function dispPill(status, ts, erro) {
+// `descartado` (chave de GET /api/envios, só nas linhas que o verificador barrou; o status delas é 'erro'): selo
+// "Descartado" e o motivo, o trecho depois de "Descartada:" do texto gravado.
+function dispPill(status, ts, erro, descartado) {
   const s = String(status || '').toLowerCase();
+  if (typeof descartado === 'string' && descartado) {
+    const M = TEXTOS_DISPAROS.motivosDescarte;
+    const motivo = String(erro || '').replace(/^Descartada:\s*/, '') || (Object.hasOwn(M, descartado) ? M[descartado] : '');
+    return `<span class="estado-pill pausado">${TEXTOS_DISPAROS.descartado}</span>${motivo ? `<span class="dica-celula trunca" title="${esc(motivo)}">${esc(motivo)}</span>` : ''}`;
+  }
   if (['enviado', 'ok', 'concluido'].includes(s)) return `<span class="estado-pill enviado">Enviado${S.st?.simulacao ? ' · simulado' : ''}</span>`;
   if (s === 'erro') return `<span class="estado-pill erro">Erro</span>${erro ? `<span class="dica-celula trunca" title="${esc(erro)}">${esc(erro)}</span>` : ''}`;
   if (s === 'pendente' || s === 'agendado') return `<span class="estado-pill pendente">Pendente${ts ? ' · ' + dispHHMM(ts) : ''}</span>`;
@@ -334,7 +348,7 @@ function dispTabela(linhas, colTitulo, sub) {
     ${linhas.slice(0, 20).map((l) => `<tr><td style="white-space:nowrap">${dispQuando(l.quando)}</td>
       <td><span class="trunca" title="${esc(l.titulo || '')}">${esc(l.titulo || '—')}</span>${sub(l) ? `<span class="dica-celula">${esc(sub(l))}</span>` : ''}</td>
       <td><span class="trunca" title="${esc(l.grupo || '')}">${esc(l.grupo || '—')}</span></td>
-      <td>${dispPill(l.status, l.quando, l.erro)}</td></tr>`).join('')}</tbody></table></div>`;
+      <td>${dispPill(l.status, l.quando, l.erro, l.descartado)}</td></tr>`).join('')}</tbody></table></div>`;
 }
 /**
  * Um item de "Agendadas e repetidas" (ou dos disparos agendados do F1), de `agendadas` em GET /api/envios.
@@ -685,6 +699,7 @@ function dispMagaluVeredito(r) {
 // ================= Disparo manual (F1) =================
 function paginaDisparoManual() {
   const T = TEXTOS_DISPAROS; const t = T.manual;
+  const confere = S.st?.ajustes?.verificador_ativo !== false; // verificador ligado (ausente = ligado): dica no agendar
   const grupos = seletorGrupos({ blocos: true });
   const modoExt = () => !S.st.simulacao && S.st.ajustes?.link_mode === 'extension';
   $('#pagina').innerHTML = `<div class="topo"><div><h1>${t.titulo} ${q(t.ajuda)}</h1><p class="sub">${t.sub}</p></div></div>
@@ -715,7 +730,7 @@ function paginaDisparoManual() {
           <div class="linha"><label class="chave"><input type="checkbox" id="dm-agendar" aria-describedby="dm-agendar-dica"><span></span></label>
             <label for="dm-agendar" style="font-weight:600;font-size:14px">${T.agendarRotulo}</label>${q('manual.agendar')}</div>
           <small class="dica" id="dm-agendar-dica">${T.agendarDica}</small>
-          <label class="campo" id="dm-hora-campo" hidden><span>${T.horaHoje} ${REQ}</span><input type="time" id="dm-hora" style="width:auto;justify-self:start"></label>
+          <label class="campo" id="dm-hora-campo" hidden><span>${T.horaHoje} ${REQ}</span><input type="time" id="dm-hora" style="width:auto;justify-self:start"${confere ? ' aria-describedby="dm-hora-confere"' : ''}>${confere ? `<small class="dica" id="dm-hora-confere">${T.agendarConfere}</small>` : ''}</label>
         </div>
         <div class="rodape-card"><button type="button" class="pri" id="dm-disparar" aria-describedby="dm-motivo">${T.disparar}</button><span class="dica" id="dm-motivo" aria-live="polite"></span></div>
       </form>
@@ -737,7 +752,7 @@ function paginaDisparoManual() {
   // sem caminho para o link); asin só serve à prévia da Amazon; editou = o dono mexeu nos dados (a prévia deixa de ser a do servidor);
   // via = "Vai sair pela …" (Shopee); seqEtq descarta a leitura do ID de afiliado que chegou depois de o link mudar;
   // lojaParceiro e linkMagalu (Magalu) = o nome salvo e o link de afiliado do `texto` do servidor, para a etiqueta e a prévia.
-  const st = { url: '', loja: null, produto: null, texto: '', textoTpl: '', dados: null, bloqueio: '', asin: '', via: '', seqEtq: 0, lojaParceiro: '', linkMagalu: '', editou: false, identificando: false, enviando: false, ok: '' };
+  const st = { url: '', loja: null, produto: null, texto: '', textoTpl: '', dados: null, bloqueio: '', asin: '', via: '', seqEtq: 0, lojaParceiro: '', linkMagalu: '', semConferencia: false, editou: false, identificando: false, enviando: false, ok: '' };
   const ehShopee = () => st.loja?.id === 'shopee';
   const ehMagalu = () => st.loja?.id === 'magalu';
   form.onsubmit = (e) => e.preventDefault(); // Enter num campo nunca dispara
@@ -810,10 +825,15 @@ function paginaDisparoManual() {
       }).catch(() => {});
     }
   };
+  /** A dica do agendar: a explicação da loja sem conferência de preço, ou a de sempre (só existe com o verificador ligado). */
+  function dicaConfere() {
+    const el = $('#dm-hora-confere');
+    if (el) el.textContent = st.semConferencia ? T.agendarSemConferencia : T.agendarConfere;
+  }
   const limparProduto = () => {
     st.url = ''; st.loja = null; st.produto = null; st.texto = ''; st.textoTpl = '';
     clearTimeout(st.tPrever); st.dados = null; st.bloqueio = ''; st.asin = ''; st.via = ''; st.seqEtq++; st.editou = false;
-    st.lojaParceiro = ''; st.linkMagalu = '';
+    st.lojaParceiro = ''; st.linkMagalu = ''; st.semConferencia = false; dicaConfere();
     prodEl.innerHTML = ''; prodEl.removeAttribute('style'); dadosEl.innerHTML = ''; mostrarEtiqueta();
     inUrl.classList.remove('invalido'); inUrl.removeAttribute('aria-invalid');
   };
@@ -929,7 +949,7 @@ function paginaDisparoManual() {
       const r = await dispApi('/disparo/identificar', { method: 'POST', body: { url, template_id: Number(tplId) || null, tag_id: Number(selTag.value) || null } });
       if (inUrl.value.trim() !== url) { limparProduto(); return; } // o link mudou enquanto identificava
       if (!r || !r.loja) { pintarFalha(T.linkInvalido); return; }
-      st.url = url; st.loja = r.loja;
+      st.url = url; st.loja = r.loja; st.semConferencia = r.sem_conferencia === true; dicaConfere();
       st.produto = r.loja.implementada ? r.produto || null : null;
       st.texto = st.produto ? r.texto || '' : ''; st.textoTpl = tplId;
       pintarProduto(r);
