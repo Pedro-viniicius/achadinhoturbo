@@ -726,7 +726,8 @@ const ALIASES = { regras: 'disparo-automatico', whatsapp: 'numeros', etiquetas: 
 // Telas de duas colunas (formulário à esquerda, acompanhamento à direita) usam main.larga.
 const ROTAS_LARGAS = new Set(['disparo-manual', 'disparar-mensagem']);
 // Equipe e Ganhos são só do Dono. Sem login (auth desligada) usuario é null e o painel se comporta como Dono.
-// O mesmo critério esconde do Operador: Desconectar (Números), Apagar agora (Ajustes) e Gerar novo token (Conexões).
+// O mesmo critério esconde do Operador: Desconectar (Números), Apagar agora (Ajustes), Gerar novo token (Conexões) e,
+// em Relatórios e avisos, Enviar teste, Adicionar número, Remover e a troca do número.
 // Sem o estado carregado (S.st ainda vazio) não se sabe o papel: devolve false, para o painel nunca chamar rota do Dono
 // (o Operador levaria 403). `#equipe` e `#ganhos` abertos de cara são retomados por `ir()` quando o estado chega.
 const ROTAS_DO_DONO = new Set(['equipe', 'ganhos']);

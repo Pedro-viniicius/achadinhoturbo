@@ -34,6 +34,19 @@ export const MOTIVOS_BACKUP = {
   banco: 'não consegui copiar o banco', cifrar: 'não consegui criptografar o pacote', verificacao: 'o pacote criptografado não passou na conferência',
   envio: 'o envio ao Google Drive falhou', limpeza_drive: 'não consegui apagar as cópias antigas do Drive',
 };
+// Mensagens manuais de Relatórios e avisos ("Enviar teste" e "Enviar resumo agora"): saem na hora pelo número do dono;
+// repetir demais pode marcar o número como robô, então os dois dividem um freio só (em memória: some ao reiniciar).
+// O teto da hora conta ENVIOS (cliques), não números: um resumo para todos conta 1, com 6 ou com 20 números. O que
+// segura o volume por número é o intervalo; o resumo diário do horário (tick) não passa por este freio.
+export const MANUAL_INTERVALO_S = 60;        // no máximo 1 mensagem manual por número a cada 60 s…
+export const MANUAL_TODOS_INTERVALO_S = 60;  // …1 resumo manual para todos os números a cada 60 s…
+export const MANUAL_MAX_HORA = 5;            // …e no máximo 5 envios manuais por hora: cada teste ou resumo conta 1
+const HORA_MS = 3600000;
+export const TEXTO_TESTE = [
+  '🔔 *Teste* do aviso de erro do Achadinho Turbo.',
+  'Se esta mensagem chegou, o WhatsApp consegue entregar os avisos a este número.',
+  'Nada falhou de verdade.',
+].join('\n');
 const MAX_ERRO_BRUTO = 500;             // corta antes das regex: texto enorme de uma biblioteca não trava o servidor
 const MSG_NUMERO = 'Número inválido. Use DDD e número, ex.: 35 99999-1234.';
 const ORIGEM = { id: null, name: 'Avisos' }; // coluna "Regra" do Histórico
@@ -129,6 +142,23 @@ class MuitasConsultas extends Error {
 }
 
 /**
+ * Recusa com 429: o freio das mensagens manuais. `segundos` = quanto falta para poder mandar de novo; `limite` diz qual
+ * dos três manda ('numero', 'todos' ou 'hora'); `numeros` = para quantos números ia o envio (o resumo pode ir para vários).
+ */
+class MuitasManuais extends Error {
+  constructor(segundos, limite, numeros = 1) {
+    const s = Math.max(1, Math.ceil(segundos));
+    const espera = s < 120 ? `${s} s` : `${Math.ceil(s / 60)} min`;
+    super(limite === 'numero'
+      ? (numeros === 1 ? `Espere ${s} s para mandar outro teste ou resumo a este número.`
+        : `Espere ${s} s: um dos números recebeu um teste ou resumo há menos de ${MANUAL_INTERVALO_S} s.`)
+      : limite === 'todos' ? `O resumo para todos os números acabou de sair. Espere ${s} s para mandar de novo.`
+        : `O limite é de ${MANUAL_MAX_HORA} envios manuais por hora (cada teste ou resumo conta 1, mesmo o resumo para todos). Tente de novo em ${espera}.`);
+    this.status = 429; this.segundos = s; this.limite = limite;
+  }
+}
+
+/**
  * Número digitado → JID canônico (resolve o 9º dígito). Nenhuma mensagem repete o número.
  * `antesDeConsultar()` roda logo antes de perguntar ao WhatsApp (o freio de consultas: pode lançar MuitasConsultas).
  */
@@ -167,7 +197,8 @@ async function destinoDoCorpo({ db, wa }, corpo, atual = null, antesDeConsultar 
   if (!nome) throw new Error('Dê um nome ao número.');
   if (nome.length > MAX_NOME) throw new Error(`O nome pode ter até ${MAX_NOME} letras.`);
   // o nome aparece no Histórico e nos logs: não pode carregar o telefone
-  if (novoNome && (nome.match(/\d/g) || []).length > MAX_DIGITOS_NOME) {
+  // \p{Nd}: qualquer algarismo Unicode (o "１２３" de largura total também é telefone)
+  if (novoNome && (nome.match(/\p{Nd}/gu) || []).length > MAX_DIGITOS_NOME) {
     throw new Error(`Não ponha o número no nome (ele aparece no Histórico): use até ${MAX_DIGITOS_NOME} algarismos.`);
   }
   const numero = tem('numero') ? String(b.numero ?? '').trim() : '';
@@ -238,10 +269,40 @@ export function createAvisos({ db, wa, estadoBackup = null, inicio = Date.now(),
     return linhas.join('\n');
   }
 
-  /** "Enviar resumo agora": para um destino (destinoId) ou para todos os ativos que recebem o resumo. → { enviados, falhas } */
+  // Freio das mensagens manuais, pelo relógio monotônico: acertar a hora do PC não destrava nem trava o freio. O
+  // `performance.now()` do Linux não anda com o PC suspenso: depois de uma suspensão, a espera pode durar mais que a dita.
+  const manuaisPorNumero = new Map(); // jid → quando saiu a última mensagem manual para ele (só em memória; nunca vai a log)
+  const manuaisNaHora = [];           // quando saiu cada envio manual da última hora (1 por teste ou resumo, não por número)
+  let ultimoTodos = null;             // quando saiu o último resumo manual para todos os números
+
+  /**
+   * Reserva um envio manual: uma vaga por JID (todas ou nenhuma), uma vaga na hora e, se `todos`, a do resumo para
+   * todos. Sem await: dois pedidos juntos não passam os dois. Sem vaga, lança MuitasManuais com a MAIOR espera entre
+   * as três (é a que manda de fato; no empate, a da hora, depois a de todos).
+   */
+  function reservarManuais(jids, { todos = false } = {}) {
+    const agora = monotonico(); const intervalo = MANUAL_INTERVALO_S * 1000;
+    while (manuaisNaHora.length && agora - manuaisNaHora[0] >= HORA_MS) manuaisNaHora.shift();
+    for (const [jid, ts] of manuaisPorNumero) if (agora - ts >= intervalo) manuaisPorNumero.delete(jid);
+    const porNumero = Math.max(0, ...jids.map((j) => (manuaisPorNumero.has(j) ? manuaisPorNumero.get(j) + intervalo - agora : 0)));
+    // a fila nunca passa do teto: cheia, a próxima vaga abre quando o envio mais antigo fizer uma hora
+    const porHora = manuaisNaHora.length >= MANUAL_MAX_HORA ? manuaisNaHora[manuaisNaHora.length - MANUAL_MAX_HORA] + HORA_MS - agora : 0;
+    const porTodos = todos && ultimoTodos != null ? Math.max(0, ultimoTodos + MANUAL_TODOS_INTERVALO_S * 1000 - agora) : 0;
+    const [limite, ms] = [['hora', porHora], ['todos', porTodos], ['numero', porNumero]].reduce((a, b) => (b[1] > a[1] ? b : a));
+    if (ms > 0) throw new MuitasManuais(ms / 1000, limite, jids.length);
+    for (const j of jids) manuaisPorNumero.set(j, agora);
+    manuaisNaHora.push(agora);
+    if (todos) ultimoTodos = agora;
+  }
+
+  /**
+   * "Enviar resumo agora": para um destino (destinoId) ou para todos os ativos que recebem o resumo. Divide o freio com
+   * o "Enviar teste" (reservarManuais): conta 1 envio na hora, para um número ou para todos; para todos, reserva a vaga
+   * de cada número antes do primeiro envio; sem vaga, 429 e nada sai. → { enviados, falhas }
+   */
   async function enviarResumo({ destinoId, now = Date.now() } = {}) {
-    let alvo;
-    if (destinoId != null && destinoId !== '') {
+    let alvo; const paraTodos = destinoId == null || destinoId === '';
+    if (!paraTodos) {
       const id = idValido(destinoId); const d = destinos((x) => x.id === id)[0];
       if (!d) throw new Error('Número não encontrado.');
       if (!d.ativo) throw new Error('Este número está desligado. Ligue-o para enviar o resumo.');
@@ -252,9 +313,26 @@ export function createAvisos({ db, wa, estadoBackup = null, inicio = Date.now(),
       if (!alvo.length) throw new Error('Cadastre um número ativo para enviar o resumo.');
     }
     if (!wa.isReady()) throw new Error('Conecte o WhatsApp em Números de WhatsApp para enviar o resumo.');
+    reservarManuais(alvo.map((d) => d.jid), { todos: paraTodos });
     let enviados = 0;
     for (const d of alvo) if (await entregar(d, montarResumo(d.resumo_blocos, now), 'o resumo')) enviados++;
     return { enviados, falhas: alvo.length - enviados };
+  }
+
+  /**
+   * "Enviar teste": manda o TEXTO_TESTE a um destino pelo mesmo caminho dos avisos (entregar: a linha do Histórico
+   * leva só o nome). Vale para destino desligado e para o que não marcou "Erro de disparo": a resposta diz os dois.
+   * Freio: o das mensagens manuais (reservarManuais), dividido com o "Enviar resumo agora"; a vaga é reservada antes do
+   * envio, então um clique duplo não manda duas mensagens. Um envio que falha gasta a vaga.
+   * → { enviado: true, ativo, recebe_erro }
+   */
+  async function enviarTeste({ destinoId } = {}) {
+    const id = idValido(destinoId); const d = destinos((x) => x.id === id)[0];
+    if (!d) throw new Error('Número não encontrado.');
+    if (!wa.isReady()) throw new Error('Conecte o WhatsApp em Números de WhatsApp para enviar o teste.');
+    reservarManuais([d.jid]);
+    if (!await entregar(d, TEXTO_TESTE, 'o teste do aviso de erro')) throw new Error('Não consegui enviar o teste. Veja o motivo no Histórico.');
+    return { enviado: true, ativo: d.ativo, recebe_erro: d.avisos.includes('erro') };
   }
 
   /**
@@ -445,6 +523,7 @@ export function createAvisos({ db, wa, estadoBackup = null, inicio = Date.now(),
     },
     montarResumo,
     enviarResumo,
+    enviarTeste,
   };
 }
 
@@ -454,6 +533,8 @@ export function createAvisos({ db, wa, estadoBackup = null, inicio = Date.now(),
  */
 export function montarRotas(app, ctx) {
   const { db, wrap } = ctx;
+  // sem ctx.soDono (servidor montado sem ele), ninguém faz o que é só do Dono: falha fechada
+  const soDono = typeof ctx.soDono === 'function' ? ctx.soDono : (_req, res) => res.status(403).json({ erro: 'Só o Dono pode fazer isso.' });
   let proprio = null; // só se o agendador não trouxer os avisos
   // Freio do cadastro: cada consulta de número ao WhatsApp (onWhatsApp) conta, por IP. Varrer números com a sessão
   // do painel poderia marcar o número do dono como robô.
@@ -462,6 +543,27 @@ export function montarRotas(app, ctx) {
     const ip = chaveIp(req.ip);
     if (consultas.blocked(ip)) throw new MuitasConsultas(consultas.retryAfterS(ip));
     consultas.fail(ip);
+  };
+  /** Como o wrap do servidor, mas o 429 do freio de mensagens manuais chega como 429, com os segundos e o Retry-After. */
+  const comLimite = (fn) => async (req, res) => {
+    try { res.json(await fn(req) ?? { ok: true }); } catch (e) {
+      if (e instanceof MuitasManuais) { res.set('Retry-After', String(e.segundos)); return res.status(429).json({ erro: e.message, segundos: e.segundos }); }
+      res.status(400).json({ erro: e.message });
+    }
+  };
+  /**
+   * S1: no PUT, trocar o número (qualquer número digitado), tirar "Erro de disparo" ou desligar um número ativo que
+   * recebe "Erro de disparo" é só do Dono: desligado, ele deixa de receber os avisos de erro e de backup atrasado. O
+   * Operador liga qualquer número, desliga os que não recebem "Erro de disparo", troca o nome e mexe nos blocos do
+   * resumo. Corpo que não é objeto não muda nada disso (o PUT o recusa). O `!b.ativo` é o mesmo `!!b.ativo` do
+   * destinoDoCorpo: o que aqui conta como desligar é o que lá desliga.
+   */
+  const pedeDono = (b, atual) => {
+    if (!b || typeof b !== 'object') return false;
+    if (Object.hasOwn(b, 'numero') && String(b.numero ?? '').trim()) return true;
+    const recebeErro = atual.avisos.includes('erro');
+    if (Object.hasOwn(b, 'ativo') && !b.ativo && atual.ativo && recebeErro) return true;
+    return Object.hasOwn(b, 'avisos') && recebeErro && !(Array.isArray(b.avisos) && b.avisos.includes('erro'));
   };
   /** Como o wrap do servidor, mas o 429 do freio chega como 429. */
   const comFreio = (fn) => async (req, res) => {
@@ -478,19 +580,24 @@ export function montarRotas(app, ctx) {
 
   app.get('/api/avisos', wrap(() => ({ destinos: listar(), config: lerConfig(db), blocos: blocos() })));
   app.get('/api/avisos/destinos', wrap(() => listar()));
-  app.post('/api/avisos/destinos', comFreio(async (req) => {
+  // cadastrar e apagar número: só o Dono (S1: um número novo é mais um destino para mensagens pelo número do dono)
+  app.post('/api/avisos/destinos', soDono, comFreio(async (req) => {
     const d = await destinoDoCorpo(ctx, req.body, null, freioDe(req));
     const id = db.prepare('INSERT INTO aviso_destinos (nome, jid, resumo_blocos, avisos, ativo, created_at) VALUES (?,?,?,?,?,?)')
       .run(d.nome, d.jid, d.resumo_blocos, d.avisos, d.ativo, Date.now()).lastInsertRowid;
     return { id: Number(id) };
   }));
-  app.put('/api/avisos/destinos/:id', comFreio(async (req) => {
+  app.put('/api/avisos/destinos/:id', (req, res, next) => {
+    let atual;
+    try { atual = destinoPorId(req.params.id); } catch (e) { return res.status(400).json({ erro: e.message }); }
+    return pedeDono(req.body, atual) ? soDono(req, res, next) : next();
+  }, comFreio(async (req) => {
     const atual = destinoPorId(req.params.id);
     const d = await destinoDoCorpo(ctx, req.body, atual, freioDe(req));
     db.prepare('UPDATE aviso_destinos SET nome = ?, jid = ?, resumo_blocos = ?, avisos = ?, ativo = ? WHERE id = ?')
       .run(d.nome, d.jid, d.resumo_blocos, d.avisos, d.ativo, atual.id);
   }));
-  app.delete('/api/avisos/destinos/:id', wrap((req) => {
+  app.delete('/api/avisos/destinos/:id', soDono, wrap((req) => {
     if (!db.prepare('DELETE FROM aviso_destinos WHERE id = ?').run(idValido(req.params.id)).changes) throw new Error('Número não encontrado.');
   }));
   app.put('/api/avisos/config', wrap((req) => salvarConfig(db, req.body || {})));
@@ -500,5 +607,8 @@ export function montarRotas(app, ctx) {
     const d = destinoPorId(id);
     return d.resumo_blocos == null ? { texto: '', recebe: false } : { texto: avisos().montarResumo(d.resumo_blocos), recebe: true };
   }));
-  app.post('/api/avisos/resumo-agora', wrap((req) => avisos().enviarResumo({ destinoId: req.body?.destino_id })));
+  // resumo agora e "Enviar teste" dividem o freio das mensagens manuais (429 com os segundos que faltam)
+  app.post('/api/avisos/resumo-agora', comLimite((req) => avisos().enviarResumo({ destinoId: req.body?.destino_id })));
+  // "Enviar teste": manda uma mensagem pelo número do dono, então só o Dono (o Operador recebe 403)
+  app.post('/api/avisos/destinos/:id/teste', soDono, comLimite((req) => avisos().enviarTeste({ destinoId: req.params.id })));
 }

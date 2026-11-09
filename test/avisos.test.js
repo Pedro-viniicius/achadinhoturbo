@@ -9,12 +9,13 @@ import { execFileSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
+import vm from 'node:vm';
 import { openDb, getSetting, setSetting } from '../src/db.js';
 import { buildApp } from '../src/server.js';
 import { createWhatsApp } from '../src/whatsapp.js';
 import { createLinkService } from '../src/links.js';
 import { createScheduler } from '../src/scheduler.js';
-import { createAvisos, mascararNumero, semNumero } from '../src/avisos.js';
+import { createAvisos, mascararNumero, semNumero, montarRotas as montarRotasAvisos, TEXTO_TESTE, MANUAL_INTERVALO_S, MANUAL_MAX_HORA } from '../src/avisos.js';
 import { startOfDay } from '../src/analytics.js';
 
 let acessosRede = 0;
@@ -168,6 +169,7 @@ test('resumo agora: chega ao JID do destino com os blocos marcados; todos os ati
       assert.equal(r.status, 200, r.txt); ids[nome] = r.json.id;
     }
 
+    const relogio = relogioManual(s); // freio das mensagens manuais (S1) com o relógio do teste
     const um = await api('/api/avisos/resumo-agora', 'POST', { destino_id: ids.Pedro });
     assert.deepEqual(um.json, { enviados: 1, falhas: 0 });
     const msg = paraJid(s.wa, JID);
@@ -178,6 +180,9 @@ test('resumo agora: chega ao JID do destino com os blocos marcados; todos os ati
     }
     assert.ok(!msg[0].text.includes('Beleza'), 'só os blocos marcados');
 
+    const cedo = await api('/api/avisos/resumo-agora', 'POST', {});
+    assert.equal(cedo.status, 429, 'Pedro recebeu há menos de 60 s: nada sai'); assert.equal(paraJid(s.wa, JID2).length, 0);
+    relogio.agora += MANUAL_INTERVALO_S * 1000;
     const todos = await api('/api/avisos/resumo-agora', 'POST', {});
     assert.deepEqual(todos.json, { enviados: 2, falhas: 0 }, 'Pedro e Ana; "Só avisos" não recebe o resumo');
     assert.equal(paraJid(s.wa, JID).length, 2); assert.equal(paraJid(s.wa, JID3).length, 0);
@@ -802,6 +807,705 @@ test('backup atrasado: se a entrega do aviso falha, vira "aviso" no Histórico (
   assert.equal(b.db.prepare("SELECT COUNT(*) AS n FROM log WHERE level = 'erro'").get().n, 0);
   assert.equal(b.msgs().length, 0, 'a falha de entrega não gerou "disparos falharam" para ninguém');
   assert.ok(b.db.prepare("SELECT 1 FROM log WHERE level = 'aviso' AND message LIKE 'Não consegui enviar o aviso de backup atrasado%'").get());
+});
+
+// ---------- "Enviar teste" (só o Dono; freio: 1 por número a cada 60 s e 5 por hora no total) ----------
+const linhasDoLog = (db) => db.prepare('SELECT rule_name, level, message FROM log ORDER BY id').all().map((l) => ({ ...l }));
+const testar = (api, id) => api(`/api/avisos/destinos/${id}/teste`, 'POST');
+
+test('enviar teste: 1 mensagem com o texto fixo ao JID do destino; desligado ou sem "Erro de disparo" também recebe e a resposta diz; Histórico com o nome', async () => {
+  const s = await subir();
+  try {
+    const api = await cliente(s);
+    const pedro = destino(s.db, { avisos: ['erro', 'lotacao'] });
+    const ana = destino(s.db, { nome: 'Ana', jid: JID2, avisos: ['lotacao'], ativo: 0 });
+    const bia = destino(s.db, { nome: 'Bia', jid: JID3, avisos: ['erro'], ativo: 0 });
+
+    const r = await testar(api, pedro);
+    assert.equal(r.status, 200, r.txt);
+    assert.deepEqual(r.json, { enviado: true, ativo: true, recebe_erro: true });
+    assert.deepEqual(s.wa.simulated, [{ tipo: 'text', jid: JID, text: TEXTO_TESTE }], 'uma mensagem só, ao JID do destino');
+    assert.doesNotMatch(r.txt, VAZAMENTO, 'a resposta não traz o número');
+
+    const desligada = await testar(api, ana);
+    assert.equal(desligada.status, 200, desligada.txt);
+    assert.deepEqual(desligada.json, { enviado: true, ativo: false, recebe_erro: false }, 'desligado e sem "Erro de disparo": recebe e a resposta diz');
+    assert.deepEqual(paraJid(s.wa, JID2).map((m) => m.text), [TEXTO_TESTE]);
+    assert.deepEqual((await testar(api, bia)).json, { enviado: true, ativo: false, recebe_erro: true });
+    assert.equal(s.wa.simulated.length, 3);
+
+    // o texto é fixo, marcado como teste, e não leva número, caminho nem segredo
+    assert.equal(TEXTO_TESTE, '🔔 *Teste* do aviso de erro do Achadinho Turbo.\nSe esta mensagem chegou, o WhatsApp consegue entregar os avisos a este número.\nNada falhou de verdade.');
+    assert.match(TEXTO_TESTE, /Nada falhou de verdade\.$/);
+    assert.doesNotMatch(TEXTO_TESTE, /\d|\/|@|token|senha/i);
+
+    // Histórico: uma linha por teste, origem Avisos, nível ok, só o nome
+    assert.deepEqual(linhasDoLog(s.db), [
+      { rule_name: 'Avisos', level: 'ok', message: 'Enviei o teste do aviso de erro para “Pedro”.' },
+      { rule_name: 'Avisos', level: 'ok', message: 'Enviei o teste do aviso de erro para “Ana”.' },
+      { rule_name: 'Avisos', level: 'ok', message: 'Enviei o teste do aviso de erro para “Bia”.' },
+    ]);
+
+    // destino que não existe (ou id torto): "Número não encontrado.", sem envio nem linha no Histórico
+    s.db.prepare('DELETE FROM aviso_destinos WHERE id = ?').run(bia);
+    for (const id of [bia, 999, 0, 'abc', '1.5']) {
+      const x = await testar(api, id);
+      assert.equal(x.status, 400, String(id)); assert.equal(x.json.erro, 'Número não encontrado.', String(id));
+    }
+    assert.equal(s.wa.simulated.length, 3); assert.equal(linhasDoLog(s.db).length, 3);
+    semNumeroNoLog(s.db);
+    assert.equal(acessosRede, 0);
+  } finally { await s.fechar(); }
+});
+
+test('enviar teste: só o Dono (Operador recebe 403, sem login 401) e nada é enviado', async () => {
+  const s = await subir();
+  try {
+    const api = await cliente(s);
+    const id = destino(s.db, { avisos: ['erro'] });
+    s.db.prepare("UPDATE users SET papel = 'operador'").run(); // o papel é relido a cada requisição
+    const op = await testar(api, id);
+    assert.equal(op.status, 403); assert.equal(op.json.erro, 'Só o Dono pode fazer isso.');
+    const anonimo = await req(s.port, `/api/avisos/destinos/${id}/teste`, { method: 'POST', headers: { origin: `http://127.0.0.1:${s.port}` }, body: {} });
+    assert.equal(anonimo.status, 401);
+    assert.equal(s.wa.simulated.length, 0); assert.equal(linhasDoLog(s.db).length, 0);
+
+    // a recusa do Operador não gasta o freio: o Dono manda logo depois
+    s.db.prepare("UPDATE users SET papel = 'dono'").run();
+    assert.equal((await testar(api, id)).status, 200);
+    assert.equal(s.wa.simulated.length, 1);
+  } finally { await s.fechar(); }
+});
+
+test('enviar teste: sem ctx.soDono (servidor montado sem ele) ninguém manda: falha fechada', async () => {
+  const m = montar(); const id = destino(m.db, { avisos: ['erro'] });
+  const rotas = [];
+  const app = { get() {}, put() {}, delete() {}, post: (caminho, ...fns) => rotas.push({ caminho, fns }) };
+  montarRotasAvisos(app, { db: m.db, wa: m.wa, scheduler: m.scheduler, wrap: (fn) => fn });
+  const rota = rotas.find((r) => r.caminho === '/api/avisos/destinos/:id/teste');
+  assert.ok(rota, 'a rota existe');
+  let status = 0; let corpo = null; let seguiu = false;
+  const res = { status(n) { status = n; return this; }, json(j) { corpo = j; return this; }, set() { return this; } };
+  await rota.fns[0]({ params: { id: String(id) }, user: null }, res, () => { seguiu = true; });
+  assert.equal(seguiu, false); assert.equal(status, 403); assert.deepEqual(corpo, { erro: 'Só o Dono pode fazer isso.' });
+  assert.equal(m.wa.simulated.length, 0);
+  m.db.close();
+});
+
+test('enviar teste: WhatsApp fora dá erro claro e não envia nem gasta o freio', async () => {
+  const s = await subir();
+  try {
+    const api = await cliente(s);
+    const id = destino(s.db, { avisos: ['erro'] });
+    s.wa.isReady = () => false;
+    let enviou = 0; const sendText = s.wa.sendText; s.wa.sendText = async (...a) => { enviou++; return sendText(...a); };
+    const fora = await testar(api, id);
+    assert.equal(fora.status, 400); assert.equal(fora.json.erro, 'Conecte o WhatsApp em Números de WhatsApp para enviar o teste.');
+    assert.equal(enviou, 0); assert.equal(s.wa.simulated.length, 0); assert.equal(linhasDoLog(s.db).length, 0);
+    s.wa.isReady = () => true;
+    assert.equal((await testar(api, id)).status, 200, 'o freio não contou a tentativa com o WhatsApp fora');
+    assert.equal(enviou, 1);
+  } finally { await s.fechar(); }
+});
+
+test('enviar teste: dois cliques em menos de 60 s mandam uma mensagem só; o segundo recebe 429 com os segundos que faltam', async () => {
+  const s = await subir();
+  try {
+    const api = await cliente(s);
+    const id = destino(s.db, { avisos: ['erro'] });
+    // clique duplo: o 2º pedido chega enquanto o 1º ainda está no WhatsApp (envio lento de propósito)
+    const sendText = s.wa.sendText;
+    s.wa.sendText = async (...x) => { await new Promise((r) => setTimeout(r, 150)); return sendText(...x); };
+    const [a, b] = await Promise.all([testar(api, id), testar(api, id)]);
+    assert.deepEqual([a.status, b.status].sort(), [200, 429]);
+    const recusa = a.status === 429 ? a : b;
+    assert.equal(recusa.json.segundos, MANUAL_INTERVALO_S);
+    assert.equal(recusa.headers['retry-after'], String(MANUAL_INTERVALO_S));
+    assert.equal(recusa.json.erro, `Espere ${MANUAL_INTERVALO_S} s para mandar outro teste ou resumo a este número.`);
+    assert.equal(s.wa.simulated.length, 1);
+    // de novo, logo depois: continua recusando
+    const outra = await testar(api, id);
+    assert.equal(outra.status, 429); assert.ok(outra.json.segundos >= 1 && outra.json.segundos <= MANUAL_INTERVALO_S, outra.txt);
+    assert.equal(s.wa.simulated.length, 1);
+    assert.equal(linhasDoLog(s.db).length, 1, 'recusa não vira linha no Histórico');
+  } finally { await s.fechar(); }
+});
+
+test('enviar teste: no máximo 5 por hora somando todos os números; o 6º recebe 429 e não sai', async () => {
+  const s = await subir();
+  try {
+    const api = await cliente(s);
+    const ids = Array.from({ length: MANUAL_MAX_HORA + 1 }, (_, i) => destino(s.db, { nome: `Pessoa ${i + 1}`, jid: `55119000000${i}@s.whatsapp.net`, avisos: ['erro'] }));
+    for (const id of ids.slice(0, MANUAL_MAX_HORA)) assert.equal((await testar(api, id)).status, 200);
+    const sexto = await testar(api, ids[MANUAL_MAX_HORA]);
+    assert.equal(sexto.status, 429, sexto.txt);
+    assert.ok(sexto.json.segundos > 3500 && sexto.json.segundos <= 3600, `segundos: ${sexto.json.segundos}`);
+    assert.equal(sexto.headers['retry-after'], String(sexto.json.segundos));
+    assert.equal(sexto.json.erro, `O limite é de ${MANUAL_MAX_HORA} envios manuais por hora (cada teste ou resumo conta 1, mesmo o resumo para todos). Tente de novo em 60 min.`);
+    assert.equal(s.wa.simulated.length, MANUAL_MAX_HORA);
+    assert.equal(paraJid(s.wa, `55119000000${MANUAL_MAX_HORA}@s.whatsapp.net`).length, 0);
+  } finally { await s.fechar(); }
+});
+
+test('enviar teste (relógio controlado): 60 s depois o mesmo número pode de novo; a janela de 1 h anda; falha de entrega vira "aviso" sem número e gasta a vaga', async () => {
+  const { db } = montar();
+  let relogio = 1000; const enviados = [];
+  const wa = { isReady: () => true, sendText: async (jid, text) => { enviados.push({ jid, text }); } };
+  const avisos = createAvisos({ db, wa, monotonico: () => relogio });
+  const pedro = destino(db, { avisos: ['erro'] });
+  const outros = [JID2, JID3, '5511900000001@s.whatsapp.net', '5511900000002@s.whatsapp.net', '5511900000003@s.whatsapp.net']
+    .map((jid, i) => destino(db, { nome: `N${i}`, jid }));
+  const espera = async (id) => { try { await avisos.enviarTeste({ destinoId: id }); return 0; } catch (e) { assert.equal(e.status, 429, e.message); return e.segundos; } };
+
+  assert.deepEqual(await avisos.enviarTeste({ destinoId: pedro }), { enviado: true, ativo: true, recebe_erro: true });
+  relogio += 59_000; assert.equal(await espera(pedro), 1, '59 s depois: falta 1 s');
+  relogio += 1_000; assert.equal(await espera(pedro), 0, '60 s depois: sai');
+  assert.equal(enviados.length, 2);
+
+  // já foram 2 nesta hora; mais 3 completam 5
+  for (const id of outros.slice(0, 3)) assert.equal(await espera(id), 0);
+  assert.equal(await espera(outros[3]), 3600 - 60, 'o mais antigo saiu há 60 s');
+  relogio = 1000 + 3600_000; assert.equal(await espera(outros[3]), 0, 'uma hora depois do 1º, abre uma vaga');
+  assert.ok(await espera(outros[4]) > 0, 'a segunda vaga só abre quando o 2º fizer uma hora');
+  relogio = 1000 + 3600_000 + 60_000; assert.equal(await espera(outros[4]), 0);
+  assert.equal(enviados.length, 7);
+
+  // falha de entrega: 400 com frase fixa, linha "aviso" no Histórico sem o número, e a vaga fica gasta
+  relogio += 3 * 3600_000;
+  wa.sendText = async (jid) => { throw new Error(`não entregue para ${jid} (+55 11 98765-4321)`); };
+  await assert.rejects(avisos.enviarTeste({ destinoId: pedro }), (e) => e.message === 'Não consegui enviar o teste. Veja o motivo no Histórico.' && e.status == null);
+  const falha = db.prepare("SELECT rule_name, level, message FROM log ORDER BY id DESC LIMIT 1").get();
+  assert.deepEqual({ ...falha }, { rule_name: 'Avisos', level: 'aviso', message: 'Não consegui enviar o teste do aviso de erro para “Pedro”: não entregue para … (…)' });
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM log WHERE level = 'erro'").get().n, 0, 'a falha do teste nunca vira "erro" (não gera aviso de erro)');
+  assert.equal(await espera(pedro), MANUAL_INTERVALO_S, 'a tentativa que falhou conta no freio');
+  semNumeroNoLog(db);
+  db.close();
+});
+
+// ---------- Rodada 1 de correção: S1 (papéis e freio dividido com o resumo), R1 (a espera maior manda), S2 ----------
+/** Troca os avisos do servidor por uns com relógio monotônico do teste (a rota lê ctx.scheduler.avisos a cada pedido). */
+function relogioManual(s) {
+  const r = { agora: 0 };
+  s.scheduler.avisos = createAvisos({ db: s.db, wa: s.wa, monotonico: () => r.agora });
+  return r;
+}
+const linhaDestino = (db, id) => ({ ...db.prepare('SELECT nome, jid, resumo_blocos, avisos, ativo FROM aviso_destinos WHERE id = ?').get(id) });
+
+test('S1: o Operador recebe 403 ao cadastrar, apagar, trocar o número e tirar "Erro de disparo"; liga, desliga, renomeia e mexe nos blocos', async () => {
+  const s = await subir();
+  try {
+    const api = await cliente(s);
+    let consultas = 0; const resolver = s.wa.resolverNumero;
+    s.wa.resolverNumero = async (d) => { consultas++; return resolver(d); };
+    const pedro = destino(s.db, { avisos: ['erro', 'lotacao'], blocos: [s.casa] });
+    const ana = destino(s.db, { nome: 'Ana', jid: JID2, avisos: ['lotacao'] });
+    s.db.prepare("UPDATE users SET papel = 'operador'").run(); // o papel é relido a cada requisição
+    const antes = [linhaDestino(s.db, pedro), linhaDestino(s.db, ana)];
+
+    const recusas = [
+      ['POST', '/api/avisos/destinos', { nome: 'Novo', numero: NUM3, avisos: ['erro'] }],
+      ['DELETE', `/api/avisos/destinos/${pedro}`],
+      ['PUT', `/api/avisos/destinos/${pedro}`, { numero: NUM3 }],
+      ['PUT', `/api/avisos/destinos/${pedro}`, { numero: NUM }, 'o mesmo número digitado de novo também é troca'],
+      ['PUT', `/api/avisos/destinos/${pedro}`, { avisos: ['lotacao'] }],
+      ['PUT', `/api/avisos/destinos/${pedro}`, { avisos: [] }],
+      ['PUT', `/api/avisos/destinos/${pedro}`, { avisos: 'erro' }, 'avisos que não é lista vira [] no servidor: tira "erro"'],
+      ['PUT', `/api/avisos/destinos/${pedro}`, { avisos: null }],
+      ['PUT', `/api/avisos/destinos/${pedro}`, { nome: 'Pedro', ativo: false, avisos: ['lotacao'] }, 'misturado com o que pode'],
+      ['PUT', `/api/avisos/destinos/${pedro}`, { ativo: false }, 'rodada 2: desligar quem recebe "Erro de disparo" cala os avisos de erro'],
+    ];
+    for (const [metodo, caminho, corpo, nota] of recusas) {
+      const r = await api(caminho, metodo, corpo);
+      assert.equal(r.status, 403, `${metodo} ${caminho} ${JSON.stringify(corpo)} ${nota || ''}`);
+      assert.equal(r.json.erro, 'Só o Dono pode fazer isso.');
+    }
+    assert.deepEqual([linhaDestino(s.db, pedro), linhaDestino(s.db, ana)], antes, 'nada mudou');
+    assert.equal(s.db.prepare('SELECT COUNT(*) AS n FROM aviso_destinos').get().n, 2);
+    assert.equal(consultas, 0, 'nenhuma consulta de número ao WhatsApp');
+
+    // o que o Operador pode: ligar (e desligar quem não recebe "Erro de disparo"), nome, blocos, manter (ou pôr) "Erro de disparo", número vazio
+    const pode = [
+      [ana, { ativo: false }], [ana, { ativo: true }], [pedro, { ativo: true }],
+      [pedro, { nome: 'Pedro celular', resumo_blocos: [s.beleza], numero: '' }],
+      [pedro, { avisos: ['erro'] }],
+      [ana, { avisos: ['lotacao', 'erro'], resumo_blocos: null }],
+      [ana, { avisos: ['erro'] }, 'tirar "Grupo lotando" pode'],
+    ];
+    for (const [id, corpo] of pode) {
+      const r = await api(`/api/avisos/destinos/${id}`, 'PUT', corpo);
+      assert.equal(r.status, 200, `${JSON.stringify(corpo)}: ${r.txt}`);
+    }
+    assert.deepEqual(linhaDestino(s.db, pedro), { nome: 'Pedro celular', jid: JID, resumo_blocos: `[${s.beleza}]`, avisos: '["erro"]', ativo: 1 });
+    assert.deepEqual(linhaDestino(s.db, ana), { nome: 'Ana', jid: JID2, resumo_blocos: null, avisos: '["erro"]', ativo: 1 });
+    // destino que não existe: o mesmo 400 de antes, para os dois papéis
+    assert.equal((await api('/api/avisos/destinos/999', 'PUT', { ativo: false })).json.erro, 'Número não encontrado.');
+
+    // o Dono faz tudo isso
+    s.db.prepare("UPDATE users SET papel = 'dono'").run();
+    assert.equal((await api(`/api/avisos/destinos/${pedro}`, 'PUT', { avisos: [] })).status, 200);
+    assert.equal((await api(`/api/avisos/destinos/${pedro}`, 'PUT', { numero: NUM3 })).status, 200);
+    assert.equal((await api(`/api/avisos/destinos/${ana}`, 'DELETE')).status, 200);
+    assert.equal((await api('/api/avisos/destinos', 'POST', { nome: 'Novo', numero: NUM2 })).status, 200);
+    assert.equal(s.wa.simulated.length, 0);
+    semNumeroNoLog(s.db);
+  } finally { await s.fechar(); }
+});
+
+test('S1: sem ctx.soDono, cadastrar, apagar, trocar número e desligar quem recebe "Erro de disparo" também são recusados (falha fechada); ligar e desligar os outros segue', async () => {
+  const m = montar(); const id = destino(m.db, { avisos: ['erro'] }); const ana = destino(m.db, { nome: 'Ana', jid: JID2, avisos: ['lotacao'] });
+  const rotas = {};
+  const guardar = (metodo) => (caminho, ...fns) => { rotas[`${metodo} ${caminho}`] = fns; };
+  montarRotasAvisos({ get: guardar('GET'), post: guardar('POST'), put: guardar('PUT'), delete: guardar('DELETE') }, { db: m.db, wa: m.wa, scheduler: m.scheduler, wrap: (fn) => fn });
+  const chamar = async (chave, req) => {
+    let status = 200; let corpo = null; let i = 0; const fns = rotas[chave];
+    const res = { status(n) { status = n; return this; }, json(j) { corpo = j; return this; }, set() { return this; } };
+    const proximo = async () => { const fn = fns[i++]; if (fn) await fn({ params: {}, body: {}, ip: '127.0.0.1', user: null, ...req }, res, proximo); };
+    await proximo();
+    return { status, corpo };
+  };
+  for (const [chave, req] of [['POST /api/avisos/destinos', { body: { nome: 'X', numero: NUM2 } }], ['DELETE /api/avisos/destinos/:id', { params: { id: String(id) } }],
+    ['PUT /api/avisos/destinos/:id', { params: { id: String(id) }, body: { numero: NUM2 } }], ['PUT /api/avisos/destinos/:id', { params: { id: String(id) }, body: { avisos: [] } }],
+    ['PUT /api/avisos/destinos/:id', { params: { id: String(id) }, body: { ativo: false } }]]) {
+    assert.deepEqual(await chamar(chave, req), { status: 403, corpo: { erro: 'Só o Dono pode fazer isso.' } }, `${chave} ${JSON.stringify(req.body)}`);
+  }
+  assert.deepEqual(linhaDestino(m.db, id), { nome: 'Pedro', jid: JID, resumo_blocos: null, avisos: '["erro"]', ativo: 1 }, 'o número com "Erro de disparo" segue ligado');
+  assert.deepEqual(await chamar('PUT /api/avisos/destinos/:id', { params: { id: String(ana) }, body: { ativo: false } }), { status: 200, corpo: { ok: true } });
+  assert.equal(linhaDestino(m.db, ana).ativo, 0);
+  assert.deepEqual(await chamar('PUT /api/avisos/destinos/:id', { params: { id: String(ana) }, body: { ativo: true } }), { status: 200, corpo: { ok: true } });
+  assert.equal(linhaDestino(m.db, ana).ativo, 1);
+  m.db.close();
+});
+
+test('S1: "Enviar resumo agora" e "Enviar teste" dividem o freio; resumo repetido em menos de 60 s dá 429 sem envio; o Operador usa o resumo', async () => {
+  const s = await subir();
+  try {
+    const api = await cliente(s); const relogio = relogioManual(s);
+    const pedro = destino(s.db, { avisos: ['erro'], blocos: [] });
+    const ana = destino(s.db, { nome: 'Ana', jid: JID2, blocos: [] });
+    const resumo = (corpo = {}) => api('/api/avisos/resumo-agora', 'POST', corpo);
+
+    // teste para Pedro e, logo depois, resumo para Pedro: 429, nada sai
+    assert.equal((await testar(api, pedro)).status, 200);
+    const depoisDoTeste = await resumo({ destino_id: pedro });
+    assert.equal(depoisDoTeste.status, 429, depoisDoTeste.txt);
+    assert.deepEqual(depoisDoTeste.json, { erro: `Espere ${MANUAL_INTERVALO_S} s para mandar outro teste ou resumo a este número.`, segundos: MANUAL_INTERVALO_S });
+    assert.equal(depoisDoTeste.headers['retry-after'], String(MANUAL_INTERVALO_S));
+    // para todos: Pedro ainda está no freio, então nem a Ana recebe (todas as vagas ou nenhuma)
+    relogio.agora = 20_000;
+    const todos = await resumo();
+    assert.equal(todos.status, 429);
+    assert.equal(todos.json.erro, `Espere 40 s: um dos números recebeu um teste ou resumo há menos de ${MANUAL_INTERVALO_S} s.`);
+    assert.equal(s.wa.simulated.length, 1, 'só o teste saiu'); assert.equal(paraJid(s.wa, JID2).length, 0);
+
+    // resumo para a Ana, e de novo em menos de 60 s: 429 sem envio
+    assert.deepEqual((await resumo({ destino_id: ana })).json, { enviados: 1, falhas: 0 });
+    relogio.agora = 79_000;
+    const repetido = await resumo({ destino_id: ana });
+    assert.equal(repetido.status, 429); assert.equal(repetido.json.segundos, 1);
+    assert.equal(paraJid(s.wa, JID2).length, 1);
+    // e o teste para a Ana também está no freio que o resumo gastou
+    assert.equal((await testar(api, ana)).status, 429);
+
+    // 60 s depois de cada um: o resumo para todos sai, com as duas vagas
+    relogio.agora = 80_000;
+    assert.deepEqual((await resumo()).json, { enviados: 2, falhas: 0 });
+    // o Operador usa o resumo (mesmo freio), mas não o teste
+    s.db.prepare("UPDATE users SET papel = 'operador'").run();
+    relogio.agora = 200_000;
+    assert.equal((await resumo({ destino_id: pedro })).status, 200);
+    assert.equal((await testar(api, ana)).status, 403);
+    assert.equal(s.wa.simulated.length, 5);
+    semNumeroNoLog(s.db);
+  } finally { await s.fechar(); }
+});
+
+test('rodada 2: o resumo para todos conta 1 envio na hora (não 1 por número), mas confere o freio de cada número: sem vaga em todos, 429 e nada sai', async () => {
+  const { db } = montar();
+  let relogio = 0; const enviados = [];
+  const wa = { isReady: () => true, sendText: async (jid, text) => { enviados.push({ jid, text }); } };
+  const avisos = createAvisos({ db, wa, monotonico: () => relogio });
+  const a = destino(db, { nome: 'A', jid: JID, blocos: [] }); destino(db, { nome: 'B', jid: JID2, blocos: [] });
+  const c = destino(db, { nome: 'C', jid: JID3, avisos: ['erro'] }); const d = destino(db, { nome: 'D', jid: '5511900000004@s.whatsapp.net', avisos: ['erro'] });
+  assert.deepEqual(await avisos.enviarResumo({}), { enviados: 2, falhas: 0 });                 // 1 envio na hora
+  await avisos.enviarTeste({ destinoId: c }); await avisos.enviarTeste({ destinoId: d });      // 3
+  relogio = 61_000;
+  assert.deepEqual(await avisos.enviarResumo({}), { enviados: 2, falhas: 0 }, 'o resumo para 2 números gasta 1 vaga da hora, não 2'); // 4
+  relogio = 122_000;
+  assert.deepEqual(await avisos.enviarResumo({ destinoId: a }), { enviados: 1, falhas: 0 });   // 5
+  assert.equal(enviados.length, 7);
+  relogio = 183_000;
+  await assert.rejects(avisos.enviarResumo({}), (e) => {
+    assert.equal(e.status, 429); assert.equal(e.segundos, 3600 - 183);
+    assert.equal(e.message, `O limite é de ${MANUAL_MAX_HORA} envios manuais por hora (cada teste ou resumo conta 1, mesmo o resumo para todos). Tente de novo em 57 min.`);
+    return true;
+  });
+  assert.equal(enviados.length, 7, 'nada saiu');
+  // tudo ou nada pelo freio de cada número: A recebeu um teste há 10 s, então nem B recebe o resumo
+  relogio = 2 * 3600_000;
+  await avisos.enviarTeste({ destinoId: a });
+  relogio += 10_000;
+  await assert.rejects(avisos.enviarResumo({}), (e) => e.status === 429 && e.segundos === 50 && e.limite === 'numero'
+    && e.message === `Espere 50 s: um dos números recebeu um teste ou resumo há menos de ${MANUAL_INTERVALO_S} s.`);
+  assert.equal(enviados.length, 8); assert.equal(enviados.filter((m) => m.jid === JID2).length, 2);
+  // a recusa não gastou vaga: 50 s depois, sai para os dois
+  relogio += 50_000;
+  assert.deepEqual(await avisos.enviarResumo({}), { enviados: 2, falhas: 0 });
+  db.close();
+});
+
+test('R1: com os dois limites cheios vale a espera maior: 5 testes ao mesmo número (0, 60, 120, 180, 240 s) e, aos 250 s, a espera é a da hora', async () => {
+  const { db } = montar();
+  let relogio = 0;
+  const avisos = createAvisos({ db, wa: { isReady: () => true, sendText: async () => {} }, monotonico: () => relogio });
+  const pedro = destino(db, { avisos: ['erro'] });
+  for (const t of [0, 60, 120, 180, 240]) { relogio = t * 1000; await avisos.enviarTeste({ destinoId: pedro }); }
+  relogio = 250_000;
+  await assert.rejects(avisos.enviarTeste({ destinoId: pedro }), (e) => {
+    assert.equal(e.status, 429); assert.equal(e.segundos, 3600 - 250, 'não os 50 s do número');
+    assert.equal(e.message, `O limite é de ${MANUAL_MAX_HORA} envios manuais por hora (cada teste ou resumo conta 1, mesmo o resumo para todos). Tente de novo em 56 min.`);
+    return true;
+  });
+  // só o número no freio (a hora com folga): a espera e a frase são as do número
+  relogio = 3600_000 + 250_000;
+  await avisos.enviarTeste({ destinoId: pedro });
+  relogio += 10_000;
+  await assert.rejects(avisos.enviarTeste({ destinoId: pedro }), (e) => e.segundos === 50 && e.message === 'Espere 50 s para mandar outro teste ou resumo a este número.');
+  db.close();
+});
+
+for (const n of [6, 20]) {
+  test(`rodada 2: "Enviar resumo agora" com ${n} números manda a todos; clique duplo e 2º clique em menos de 60 s dão 429 sem envio; 5 envios por hora, com a maior espera`, async () => {
+    const s = await subir();
+    try {
+      const api = await cliente(s); const relogio = relogioManual(s);
+      const jids = Array.from({ length: n }, (_, i) => `55119${String(i).padStart(8, '0')}@s.whatsapp.net`);
+      jids.forEach((jid, i) => destino(s.db, { nome: `Pessoa ${i + 1}`, jid, blocos: [] }));
+      const resumo = () => api('/api/avisos/resumo-agora', 'POST', {});
+      const porJid = () => jids.map((j) => paraJid(s.wa, j).length);
+
+      // clique duplo: o 2º chega enquanto o 1º ainda está mandando (envio lento de propósito)
+      const sendText = s.wa.sendText;
+      s.wa.sendText = async (...x) => { await new Promise((r) => setTimeout(r, 20)); return sendText(...x); };
+      const [a, b] = await Promise.all([resumo(), resumo()]);
+      s.wa.sendText = sendText;
+      assert.deepEqual([a.status, b.status].sort(), [200, 429], `${a.txt} | ${b.txt}`);
+      const ok = a.status === 200 ? a : b; const recusa = a.status === 429 ? a : b;
+      assert.deepEqual(ok.json, { enviados: n, falhas: 0 });
+      assert.deepEqual(porJid(), jids.map(() => 1), 'cada número recebeu 1 resumo');
+      assert.deepEqual(recusa.json, { erro: `O resumo para todos os números acabou de sair. Espere ${MANUAL_INTERVALO_S} s para mandar de novo.`, segundos: MANUAL_INTERVALO_S });
+      assert.equal(recusa.headers['retry-after'], String(MANUAL_INTERVALO_S));
+
+      // 2º clique 30 s depois: 429 com 30 s, nada sai
+      relogio.agora = 30_000;
+      const cedo = await resumo();
+      assert.equal(cedo.status, 429); assert.equal(cedo.json.segundos, 30); assert.equal(cedo.headers['retry-after'], '30');
+      assert.match(cedo.json.erro, /^O resumo para todos os números acabou de sair\. Espere 30 s/);
+      assert.equal(s.wa.simulated.length, n);
+
+      // a cada 60 s sai de novo, até 5 envios na hora (o 1º foi em 0 s)
+      for (const t of [60, 120, 180, 240]) {
+        relogio.agora = t * 1000;
+        const r = await resumo(); assert.equal(r.status, 200, `${t} s: ${r.txt}`); assert.deepEqual(r.json, { enviados: n, falhas: 0 });
+      }
+      assert.equal(s.wa.simulated.length, 5 * n);
+      // aos 250 s os três freios estão cheios (todos e número: 50 s; hora: 3350 s): vale a maior espera
+      relogio.agora = 250_000;
+      const hora = await resumo();
+      assert.equal(hora.status, 429); assert.equal(hora.json.segundos, 3600 - 250, 'não os 50 s do clique repetido');
+      assert.equal(hora.headers['retry-after'], String(3600 - 250));
+      assert.equal(hora.json.erro, `O limite é de ${MANUAL_MAX_HORA} envios manuais por hora (cada teste ou resumo conta 1, mesmo o resumo para todos). Tente de novo em 56 min.`);
+      // só a hora cheia: a espera é a da hora; o "Enviar teste" divide o mesmo teto
+      relogio.agora = 300_000;
+      assert.equal((await resumo()).json.segundos, 3300);
+      const teste = await testar(api, Number(s.db.prepare('SELECT id FROM aviso_destinos ORDER BY id LIMIT 1').get().id));
+      assert.equal(teste.status, 429); assert.equal(teste.json.segundos, 3300);
+      assert.equal(s.wa.simulated.length, 5 * n, 'nenhuma recusa mandou nada');
+      // uma hora depois do 1º, abre uma vaga
+      relogio.agora = 3600_000;
+      assert.deepEqual((await resumo()).json, { enviados: n, falhas: 0 });
+      assert.equal(linhasDoLog(s.db).filter((l) => l.level === 'ok').length, 6 * n);
+      semNumeroNoLog(s.db);
+    } finally { await s.fechar(); }
+  });
+}
+
+test('rodada 2: o resumo diário do horário (tick) não passa pelo freio manual: sai para 7 números com o freio cheio e não gasta vaga', async () => {
+  const { db, wa } = montar();
+  let relogio = 0; const avisos = createAvisos({ db, wa, monotonico: () => relogio });
+  const jids = Array.from({ length: MANUAL_MAX_HORA + 2 }, (_, i) => `55219${String(i).padStart(8, '0')}@s.whatsapp.net`);
+  jids.forEach((jid, i) => destino(db, { nome: `Pessoa ${i + 1}`, jid, blocos: [] }));
+  const diarios = () => wa.simulated.filter((m) => /^📊 \*Resumo de 02\/11\*/.test(m.text));
+  // o freio manual cheio: 5 resumos para todos, a cada 60 s
+  for (let i = 0; i < MANUAL_MAX_HORA; i++) { relogio = i * 60_000; await avisos.enviarResumo({ now: at(1, 20, 0) }); } // o manual diz "Resumo de 01/11"
+  relogio = MANUAL_MAX_HORA * 60_000;
+  const espera = async () => { try { await avisos.enviarResumo({}); return 0; } catch (e) { assert.equal(e.status, 429, e.message); return e.segundos; } };
+  assert.equal(await espera(), 3600 - 300, 'o manual está barrado');
+  assert.equal(wa.simulated.length, MANUAL_MAX_HORA * jids.length);
+
+  await avisos.tick(at(2, 21, 0));
+  assert.equal(diarios().length, jids.length, 'o resumo diário saiu para todos, com o freio manual cheio');
+  assert.deepEqual(jids.map((j) => diarios().filter((m) => m.jid === j).length), jids.map(() => 1));
+  assert.equal(await espera(), 3600 - 300, 'o tick não gastou nem devolveu vaga do freio manual');
+
+  // e, com o freio vazio, o tick também não reserva vaga: o manual sai logo depois do diário
+  const { db: db2, wa: wa2 } = montar();
+  const avisos2 = createAvisos({ db: db2, wa: wa2, monotonico: () => 0 });
+  jids.forEach((jid, i) => destino(db2, { nome: `Pessoa ${i + 1}`, jid, blocos: [] }));
+  await avisos2.tick(at(2, 21, 0));
+  assert.equal(wa2.simulated.length, jids.length);
+  assert.deepEqual(await avisos2.enviarResumo({}), { enviados: jids.length, falhas: 0 }, 'nenhum número ficou no freio por causa do diário');
+  semNumeroNoLog(db); db.close(); db2.close();
+});
+
+test('S1 rodada 2: o Operador não desliga um número ligado que recebe "Erro de disparo" (403, banco igual); desliga os outros e liga qualquer um; o Dono faz tudo', async () => {
+  const s = await subir();
+  try {
+    const api = await cliente(s);
+    const pedro = destino(s.db, { avisos: ['erro', 'lotacao'], blocos: [] });            // ligado, com erro
+    const ana = destino(s.db, { nome: 'Ana', jid: JID2, avisos: ['lotacao'] });          // ligado, sem erro
+    const bia = destino(s.db, { nome: 'Bia', jid: JID3, avisos: ['erro'], ativo: 0 });   // desligado, com erro
+    s.db.prepare("UPDATE users SET papel = 'operador'").run(); // sessão de Operador (o papel é relido a cada pedido)
+    const put = (id, corpo) => api(`/api/avisos/destinos/${id}`, 'PUT', corpo);
+    const banco = () => [pedro, ana, bia].map((id) => linhaDestino(s.db, id));
+    const antes = banco();
+
+    for (const corpo of [{ ativo: false }, { ativo: 0 }, { ativo: null }, { ativo: '' },
+      { ativo: false, avisos: [] }, { ativo: false, avisos: ['lotacao'] }, { ativo: false, avisos: ['erro', 'lotacao'] }, { nome: 'Pedro 2', ativo: false }]) {
+      const r = await put(pedro, corpo);
+      assert.equal(r.status, 403, JSON.stringify(corpo)); assert.equal(r.json.erro, 'Só o Dono pode fazer isso.');
+    }
+    assert.deepEqual(banco(), antes, 'nada mudou no banco');
+    assert.equal(linhasDoLog(s.db).length, 0);
+
+    // pode: desligar e ligar quem não recebe "Erro de disparo"
+    assert.equal((await put(ana, { ativo: false })).status, 200); assert.equal(linhaDestino(s.db, ana).ativo, 0);
+    assert.equal((await put(ana, { ativo: true })).status, 200); assert.equal(linhaDestino(s.db, ana).ativo, 1);
+    // pode: "desligar" um número com erro que já está desligado (nada cala) e ligá-lo
+    assert.equal((await put(bia, { ativo: false })).status, 200); assert.equal(linhaDestino(s.db, bia).ativo, 0);
+    assert.equal((await put(bia, { ativo: true })).status, 200); assert.equal(linhaDestino(s.db, bia).ativo, 1);
+    // ligado agora, a Bia também só o Dono desliga
+    assert.equal((await put(bia, { ativo: false })).status, 403); assert.equal(linhaDestino(s.db, bia).ativo, 1);
+    // ligar quem já está ligado e um texto qualquer em `ativo` (que o servidor lê como ligado) passam e não desligam
+    assert.equal((await put(pedro, { ativo: true })).status, 200);
+    assert.equal((await put(pedro, { ativo: 'false' })).status, 200); assert.equal(linhaDestino(s.db, pedro).ativo, 1);
+    // o Operador pode tirar "Erro de disparo"? não (rodada 1); então desligar e tirar juntos continua do Dono
+    assert.equal((await put(pedro, { ativo: false, avisos: [] })).status, 403);
+
+    // o Dono faz tudo
+    s.db.prepare("UPDATE users SET papel = 'dono'").run();
+    assert.equal((await put(pedro, { ativo: false })).status, 200); assert.equal(linhaDestino(s.db, pedro).ativo, 0);
+    assert.equal((await put(pedro, { ativo: true })).status, 200);
+    assert.equal((await put(pedro, { ativo: false, avisos: [] })).status, 200);
+    assert.deepEqual(linhaDestino(s.db, pedro), { nome: 'Pedro', jid: JID, resumo_blocos: '[]', avisos: '[]', ativo: 0 });
+    assert.equal(s.wa.simulated.length, 0);
+    semNumeroNoLog(s.db);
+  } finally { await s.fechar(); }
+});
+
+test('S2: algarismos de largura total (e outros \\p{Nd}) contam no limite de 5 do nome, no cadastro e na edição', async () => {
+  const s = await subir();
+  try {
+    const api = await cliente(s);
+    const msg = 'Não ponha o número no nome (ele aparece no Histórico): use até 5 algarismos.';
+    for (const nome of ['Pedro １１９８７６', 'Pedro ٩٨٧٦٥٤', 'Pedro 12３４５６']) {
+      const r = await api('/api/avisos/destinos', 'POST', { nome, numero: NUM });
+      assert.equal(r.status, 400, nome); assert.equal(r.json.erro, msg, nome);
+    }
+    assert.equal(s.db.prepare('SELECT COUNT(*) AS n FROM aviso_destinos').get().n, 0);
+    assert.equal((await api('/api/avisos/destinos', 'POST', { nome: 'Loja １２３４５', numero: NUM })).status, 200, '5 algarismos ainda podem');
+    const id = s.db.prepare('SELECT id FROM aviso_destinos').get().id;
+    const ed = await api(`/api/avisos/destinos/${id}`, 'PUT', { nome: 'Pedro ９８７６５４' });
+    assert.equal(ed.status, 400); assert.equal(ed.json.erro, msg);
+    assert.equal(linhaDestino(s.db, id).nome, 'Loja １２３４５');
+  } finally { await s.fechar(); }
+});
+
+// Tela (public/relatorios.js num vm, com o `esc` de verdade do app.js e o resto falso): o botão só para o Dono, travado enquanto envia.
+function telaRelatorios({ dono = true } = {}) {
+  const pub = (arq) => fs.readFileSync(new URL(`../public/${arq}`, import.meta.url), 'utf8');
+  const els = new Map(); const avisosTela = []; const pedidos = [];
+  const el = (s) => { if (!els.has(s)) els.set(s, { textContent: '', isConnected: true, attrs: {}, setAttribute(k, v) { this.attrs[k] = String(v); }, removeAttribute(k) { delete this.attrs[k]; } }); return els.get(s); };
+  // #id que só existe se a página o desenhou (como no navegador): devolve null quando não está no HTML de #pagina/#dlg
+  const desenhado = new Set(['#rel-novo', '#f-salvar', '#cancelar', '#f']);
+  const $ = (s) => (desenhado.has(s) && ![el('#pagina'), el('#dlg')].some((e) => String(e.innerHTML || '').includes(`id="${s.slice(1)}"`)) ? null : el(s));
+  const ctx = {
+    $, $$: () => [], q: () => '', podeEquipe: () => dono, REQ: '*', tentar: (fn) => fn, mostrarErros: () => false, zap: (x) => x,
+    aviso: (msg, erro = false) => avisosTela.push({ msg, erro }),
+    api: (caminho, metodo, corpo) => new Promise((ok, falha) => pedidos.push({ caminho, metodo, corpo, ok, falha })),
+  };
+  vm.createContext(ctx);
+  vm.runInContext(/^const esc = .*$/m.exec(pub('app.js'))[0], ctx);
+  vm.runInContext(pub('relatorios.js'), ctx);
+  return { ctx, el, avisosTela, pedidos, rodar: (c) => vm.runInContext(c, ctx) };
+}
+const DADOS_TELA = { blocos: [], destinos: [
+  { id: 4, nome: 'Pedro', numero: '+55 11 •••••-4321', resumo_blocos: null, avisos: ['erro'], ativo: true },
+  { id: 5, nome: '<b>"Zé"</b>', numero: '+55 21 •••••-5678', resumo_blocos: [], avisos: [], ativo: false },
+] };
+const botaoFalso = () => ({ disabled: false, textContent: 'Enviar teste', isConnected: true, focos: 0, attrs: {}, setAttribute(k, v) { this.attrs[k] = String(v); }, removeAttribute(k) { delete this.attrs[k]; }, focus() { this.focos++; } });
+
+test('S1 (tela): o Operador não vê Adicionar número nem Remover; o Dono vê', () => {
+  for (const dono of [true, false]) {
+    const t = telaRelatorios({ dono }); t.ctx.__d = { ...DADOS_TELA, config: { resumo_horario: '21:00', virada_dia: '00:00', limite_padrao: 1000 } };
+    t.el('#dlg').showModal = () => {}; t.el('#pagina').innerHTML = '';
+    t.rodar('pintarRelatorios(__d)');
+    const html = t.el('#pagina').innerHTML;
+    assert.equal(/id="rel-novo"/.test(html), dono, `Adicionar número (dono=${dono})`);
+    assert.equal((html.match(/data-act="remover"/g) || []).length, dono ? 2 : 0, `Remover (dono=${dono})`);
+    assert.equal((html.match(/data-act="editar"/g) || []).length, 2, 'Editar fica para os dois');
+    assert.equal((html.match(/data-act="ativo"/g) || []).length, 2, 'a chave Ativo fica para os dois');
+    assert.match(html, /id="rel-agora"/, 'Enviar resumo agora fica para os dois');
+  }
+});
+
+test('S1 (tela): no Editar do Operador o número fica travado e “Erro de disparo” marcado não se desmarca; no do Dono, nada travado', () => {
+  const abrir = (dono, x) => {
+    const t = telaRelatorios({ dono }); t.ctx.__d = DADOS_TELA; t.ctx.__x = x;
+    t.el('#dlg').showModal = () => {}; t.el('[name=nome]').focus = () => {};
+    t.rodar('formDestinoAviso(__d, __x)');
+    return t.el('#dlg').innerHTML;
+  };
+  const [pedro, ze] = DADOS_TELA.destinos;
+  const op = abrir(false, pedro);
+  assert.match(op, /<input name="numero"[^>]* disabled>/, 'número travado');
+  assert.match(op, /Hoje: \+55 11 •••••-4321\. Só o Dono troca o número\./);
+  assert.match(op, /<input type="checkbox" name="aviso" value="erro" checked disabled/);
+  assert.match(op, /Uma mensagem não saiu\.[^<]*Só o Dono tira este aviso\./);
+  assert.match(op, /<input type="checkbox" name="aviso" value="lotacao"  style/, '“Grupo lotando” continua livre');
+  // sem "Erro de disparo" marcado, o Operador pode marcar
+  assert.match(abrir(false, ze), /<input type="checkbox" name="aviso" value="erro"  style/);
+  const dono = abrir(true, pedro);
+  assert.doesNotMatch(dono, / disabled/); assert.doesNotMatch(dono, /Só o Dono/);
+  assert.match(dono, /Deixe em branco para manter; digite outro para trocar\./);
+});
+
+test('enviar teste (tela): o Dono vê "Enviar teste" em cada número, com type=button e nome acessível; o Operador não vê', () => {
+  const t = telaRelatorios(); t.ctx.__d = DADOS_TELA;
+  const html = t.rodar('tabelaDestinosAviso(__d)');
+  assert.ok(html.includes('<button type="button" data-act="teste" aria-label="Enviar teste do aviso de erro para Pedro">Enviar teste</button>'), html);
+  assert.ok(html.includes('aria-label="Enviar teste do aviso de erro para &lt;b&gt;&quot;Zé&quot;&lt;/b&gt;">Enviar teste</button>'), 'nome escapado');
+  assert.equal(html.match(/data-act="teste"/g).length, 2);
+  // fica ao lado dos botões que já existiam, na mesma célula, antes do Editar
+  assert.match(html, /data-act="teste"[^]*?data-act="editar"[^]*?data-act="remover"/);
+  const op = telaRelatorios({ dono: false }); op.ctx.__d = DADOS_TELA;
+  const htmlOp = op.rodar('tabelaDestinosAviso(__d)');
+  assert.doesNotMatch(htmlOp, /data-act="teste"|Enviar teste/);
+  assert.match(htmlOp, /data-act="editar"/, 'o resto da linha continua');
+});
+
+test('enviar teste (tela): trava o botão com "Enviando…" enquanto envia, um 2º clique não pede de novo, e o resultado vai ao aviso', async () => {
+  const t = telaRelatorios(); const btn = botaoFalso(); t.ctx.__btn = btn;
+  t.ctx.__x = DADOS_TELA.destinos[0];
+  const p = t.rodar('enviarTesteAviso(__btn, __x)');
+  assert.deepEqual([btn.disabled, btn.textContent, btn.attrs['aria-busy']], [true, 'Enviando…', 'true']);
+  await t.rodar('enviarTesteAviso(__btn, __x)'); // clique duplo
+  assert.equal(t.pedidos.length, 1);
+  assert.deepEqual({ caminho: t.pedidos[0].caminho, metodo: t.pedidos[0].metodo }, { caminho: '/avisos/destinos/4/teste', metodo: 'POST' });
+  t.pedidos[0].ok({ enviado: true, ativo: true, recebe_erro: true });
+  await p;
+  assert.deepEqual([btn.disabled, btn.textContent, 'aria-busy' in btn.attrs], [false, 'Enviar teste', false]);
+  assert.equal(btn.focos, 1, 'D2: o foco volta ao botão');
+  const ok = 'Teste enviado para “Pedro”. Confira no WhatsApp. Ele recebe os avisos de erro e de backup atrasado.';
+  assert.deepEqual(t.avisosTela, [{ msg: ok, erro: false }]);
+  assert.equal(t.el('#rel-estado').textContent, ok, 'o resultado fica na tela depois que o aviso some');
+
+  // desligado e sem "Erro de disparo": a resposta diz os dois
+  const p2 = t.rodar('enviarTesteAviso(__btn, __x)');
+  t.pedidos[1].ok({ enviado: true, ativo: false, recebe_erro: false }); await p2;
+  assert.equal(t.avisosTela[1].msg, 'Teste enviado para “Pedro”. Confira no WhatsApp. Este número está desligado: ligue-o para receber os avisos de verdade. Ele não recebe os avisos de erro: marque “Erro de disparo” em Editar.');
+  const p3 = t.rodar('enviarTesteAviso(__btn, __x)');
+  t.pedidos[2].ok({ enviado: true, ativo: false, recebe_erro: true }); await p3;
+  assert.equal(t.avisosTela[2].msg, 'Teste enviado para “Pedro”. Confira no WhatsApp. Este número está desligado: ligue-o para receber os avisos de verdade.');
+
+  // recusa (429 do freio): o botão volta e o erro sobe (o tentar da página o mostra como aviso de erro)
+  const p4 = t.rodar('enviarTesteAviso(__btn, __x)');
+  t.pedidos[3].falha(new Error('Espere 42 s para mandar outro teste ou resumo a este número.'));
+  await assert.rejects(p4, /Espere 42 s/);
+  assert.deepEqual([btn.disabled, btn.textContent], [false, 'Enviar teste']);
+  assert.equal(btn.focos, 4, 'D2: também depois de um erro (o 2º clique travado não conta)');
+  assert.equal(t.avisosTela.length, 3);
+  // botão que saiu do documento (a página foi redesenhada) não recebe o foco
+  const fora = botaoFalso(); t.ctx.__fora = fora; const p5 = t.rodar('enviarTesteAviso(__fora, __x)');
+  fora.isConnected = false; t.pedidos[4].ok({ enviado: true, ativo: true, recebe_erro: true }); await p5;
+  assert.equal(fora.focos, 0);
+});
+
+// Rodada 2 (S1): a chave Ativo travada para o Operador num número ligado que recebe "Erro de disparo"
+const DADOS_CHAVE = { blocos: [], config: { resumo_horario: '21:00', virada_dia: '00:00', limite_padrao: 1000 }, destinos: [
+  { id: 4, nome: 'Pedro', numero: '+55 11 •••••-4321', resumo_blocos: null, avisos: ['erro'], ativo: true },
+  { id: 5, nome: 'Ana', numero: '+55 21 •••••-5678', resumo_blocos: [], avisos: ['lotacao'], ativo: true },
+  { id: 6, nome: 'Bia', numero: '+55 31 •••••-5432', resumo_blocos: [], avisos: ['erro'], ativo: false },
+] };
+const SO_DONO_DESLIGA = 'Só o Dono desliga um número que recebe “Erro de disparo”.';
+const chaveDe = (html, id) => new RegExp(`<tr data-id="${id}">[^]*?(<label class="chave"[^]*?</label><span class="sr-only" id="rel-ativo-d-${id}">[^<]*</span>)`).exec(html)[1];
+
+test('S1 rodada 2 (tela): para o Operador, a chave Ativo de um número ligado com “Erro de disparo” fica travada, com a dica; as outras ficam livres; o Dono não tem trava', () => {
+  const op = telaRelatorios({ dono: false }); op.ctx.__d = DADOS_CHAVE;
+  const html = op.rodar('tabelaDestinosAviso(__d)');
+  const pedro = chaveDe(html, 4);
+  assert.match(pedro, new RegExp(`<label class="chave" title="${SO_DONO_DESLIGA}"`));
+  assert.match(pedro, /<input type="checkbox" data-act="ativo" checked disabled aria-label="Ativo: Pedro" aria-describedby="rel-ativo-d-4">/);
+  assert.ok(pedro.endsWith(`<span class="sr-only" id="rel-ativo-d-4">${SO_DONO_DESLIGA}</span>`), 'a dica chega ao leitor de tela');
+  for (const [id, marcada] of [[5, ' checked'], [6, '']]) {
+    const c = chaveDe(html, id);
+    assert.doesNotMatch(c, /disabled|Só o Dono/, `id ${id}: desligar sem erro e ligar ficam livres`);
+    assert.match(c, new RegExp(`data-act="ativo"${marcada}\\s+aria-label`));
+  }
+  const dono = telaRelatorios(); dono.ctx.__d = DADOS_CHAVE;
+  const htmlDono = dono.rodar('tabelaDestinosAviso(__d)');
+  assert.doesNotMatch(htmlDono, /data-act="ativo"[^>]*disabled|Só o Dono desliga/);
+});
+
+test('S1 rodada 2 (tela): o Operador liga um número com “Erro de disparo” e a chave trava em seguida; falha volta a chave e não trava; desligar a Ana segue livre', async () => {
+  const t = telaRelatorios({ dono: false });
+  const d = JSON.parse(JSON.stringify(DADOS_CHAVE)); t.ctx.__d = d;
+  const rotulos = {}; const chaves = d.destinos.map((x) => {
+    rotulos[x.id] = { title: 'Ativo' };
+    return { checked: x.ativo, disabled: false, closest: (sel) => (sel === '[data-id]' ? { dataset: { id: String(x.id) } } : sel === 'label' ? rotulos[x.id] : null) };
+  });
+  t.ctx.$$ = (sel) => (sel === '[data-act=ativo]' ? chaves : []);
+  t.el('#dlg').showModal = () => {}; t.el('#pagina').innerHTML = '';
+  t.rodar('pintarRelatorios(__d)');
+  const [, ana, bia] = chaves;
+  const mudar = async (inp, valor, resposta) => {
+    inp.checked = valor; const p = inp.onchange(); const pedido = t.pedidos.at(-1);
+    assert.deepEqual({ caminho: pedido.caminho, metodo: pedido.metodo, corpo: JSON.parse(JSON.stringify(pedido.corpo)) }, { caminho: `/avisos/destinos/${d.destinos[chaves.indexOf(inp)].id}`, metodo: 'PUT', corpo: { ativo: valor } });
+    assert.equal(inp.disabled, true, 'travada enquanto pede');
+    if (resposta instanceof Error) { pedido.falha(resposta); await assert.rejects(p); } else { pedido.ok(resposta); await p; }
+  };
+  // ligar a Bia falha: a chave volta a desligada e continua livre
+  await mudar(bia, true, new Error('Só o Dono pode fazer isso.'));
+  assert.deepEqual([bia.checked, bia.disabled, rotulos[6].title], [false, false, 'Ativo']);
+  // ligar a Bia dá certo: agora ela recebe "Erro de disparo" ligada, então a chave trava, com a dica
+  await mudar(bia, true, { ok: true });
+  assert.deepEqual([bia.checked, bia.disabled, rotulos[6].title], [true, true, SO_DONO_DESLIGA]);
+  assert.equal(t.el('#rel-ativo-d-6').textContent, SO_DONO_DESLIGA);
+  assert.equal(d.destinos[2].ativo, true);
+  // a Ana (sem erro) desliga e liga sem trava
+  await mudar(ana, false, { ok: true });
+  assert.deepEqual([ana.checked, ana.disabled, rotulos[5].title], [false, false, 'Ativo']);
+  assert.equal(t.el('#rel-ativo-d-5').textContent, '');
+  assert.deepEqual(t.avisosTela.map((a) => a.msg), ['Número ligado', 'Número desligado']);
+});
+
+test('S1 rodada 2 (tela): no Editar do Operador, “Ativo” de um número ligado com “Erro de disparo” fica travado com a dica; desligado, fica livre para ligar; no Dono, nada travado', () => {
+  const abrir = (dono, x) => {
+    const t = telaRelatorios({ dono }); t.ctx.__d = DADOS_CHAVE; t.ctx.__x = x;
+    t.el('#dlg').showModal = () => {}; t.el('[name=nome]').focus = () => {};
+    t.rodar('formDestinoAviso(__d, __x)');
+    return t.el('#dlg').innerHTML;
+  };
+  const [pedro, ana, bia] = DADOS_CHAVE.destinos;
+  const op = abrir(false, pedro);
+  assert.match(op, /<input type="checkbox" name="ativo" checked disabled style/);
+  assert.ok(op.includes(`Desligado, o número não recebe nada até você ligar de novo. ${SO_DONO_DESLIGA}</small>`));
+  for (const x of [ana, bia]) {
+    const h = abrir(false, x);
+    assert.match(h, /<input type="checkbox" name="ativo" (checked)? style/, x.nome);
+    assert.ok(!h.includes(SO_DONO_DESLIGA), x.nome);
+  }
+  assert.ok(!abrir(true, pedro).includes(SO_DONO_DESLIGA));
+  assert.match(abrir(true, pedro), /<input type="checkbox" name="ativo" checked style/);
 });
 
 test('nada do que este arquivo fez imprimiu número ou JID de destino no console', () => {

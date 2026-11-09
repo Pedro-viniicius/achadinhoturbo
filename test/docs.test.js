@@ -784,6 +784,11 @@ const FATOS = [
   { nome: 'backups locais guardados', valor: 7, texto: (v) => new RegExp(`(?:guarda|mantendo|mantém) os ${v} mais recentes`), codigo: [['scripts/backup.js', /export const MANTER_LOCAL = (\d+);/]] },
   { nome: 'cópias guardadas no Drive', valor: 14, texto: (v) => new RegExp(`as ${v} cópias mais recentes`), codigo: [['scripts/backup.js', /export const MANTER_DRIVE = (\d+);/]] },
   { nome: 'horas sem backup até o aviso de atraso', valor: 26, texto: (v) => new RegExp(`mais de ${v} h\\b`), codigo: [['src/avisos.js', /export const BACKUP_ATRASO_H = (\d+);/]] },
+  // "Enviar teste" e "Enviar resumo agora" (Relatórios e avisos): um freio só, para o número do dono não parecer um robô
+  { nome: 'segundos entre duas mensagens manuais (teste ou resumo) para o mesmo número', valor: 60, texto: (v) => new RegExp(`(?:1|uma) mensagem manual por número a cada ${v} s\\b`), codigo: [['src/avisos.js', /export const MANUAL_INTERVALO_S = (\d+);/]] },
+  { nome: 'segundos entre dois resumos manuais para todos os números', valor: 60, texto: (v) => new RegExp(`(?:1|um) resumo para todos os números a cada ${v} s\\b`), codigo: [['src/avisos.js', /export const MANUAL_TODOS_INTERVALO_S = (\d+);/]] },
+  // o teto da hora conta envios (cliques), não números: o resumo para todos conta 1
+  { nome: 'envios manuais por hora (cada teste ou resumo conta 1)', valor: 5, texto: (v) => new RegExp(`\\b(?:${numero(v)}) envios manuais por hora`), codigo: [['src/avisos.js', /export const MANUAL_MAX_HORA = (\d+);/]] },
   { nome: 'mensagens por dia que ativam o aviso', valor: 400, texto: (v) => new RegExp(`mais de ${milhar(v)} mensagens por dia`), codigo: [['public/grade.js', /const AVISO_MENSAGENS_DIA = (\d+);/]] },
 ];
 
@@ -1070,6 +1075,40 @@ test('backup automático: perder a chave inutiliza as cópias do Drive, o instal
   // a chave nunca é impressa pelo programa: só o comando `cat` do próprio dono a mostra
   assert.match(docs, /O programa nunca a mostra na tela, no log nem no Histórico/);
   assert.match(README, /O programa nunca a mostra na tela, no log, no Histórico nem no estado do backup/);
+});
+
+test('Enviar teste e mensagens manuais (Relatórios e avisos): rótulo, freio dividido com o resumo, frase do teste e papéis batem no TIP, nos Docs e no README', () => {
+  const avisos = lerRaiz('src/avisos.js'); const tela = lerRaiz('public/relatorios.js');
+  const intervalo = Number(/export const MANUAL_INTERVALO_S = (\d+);/.exec(avisos)[1]); const porHora = Number(/export const MANUAL_MAX_HORA = (\d+);/.exec(avisos)[1]);
+  const todos = Number(/export const MANUAL_TODOS_INTERVALO_S = (\d+);/.exec(avisos)[1]);
+  assert.match(tela, /enviarTeste: 'Enviar teste'/, 'o rótulo do botão que os textos citam');
+  assert.match(tela, /enviarAgora: 'Enviar resumo agora'/);
+  const freio = `1 mensagem manual por número a cada ${intervalo} s, 1 resumo para todos os números a cada ${todos} s e ${porHora} envios manuais por hora (cada teste ou resumo conta 1, mesmo o resumo para todos)`;
+  assert.ok(limpo(lerRaiz('public/ajuda.js')).includes(`use “Enviar teste” (só o Dono) na lista de números. “Enviar teste” e “Enviar resumo agora” somados vão até ${freio}.`), 'TIP relatorios.avisos (R8)');
+  const docs = textoDe('resultados', 'avisos');
+  assert.ok(docs.includes('clique em Enviar teste na linha dele'), 'passo a passo');
+  assert.ok(docs.includes(`os dois somados vão no máximo ${freio}`), 'tabela do capítulo');
+  assert.ok(docs.includes('O resumo diário do horário não entra nesses limites.'), 'capítulo: o resumo do tick fica fora do freio');
+  assert.match(docs, /Enviar teste[^]*Só o Dono vê o botão/);
+  assert.match(docs, /Só o Dono cadastra, remove, troca o número, tira “Erro de disparo” e desliga um número que recebe “Erro de disparo” \(desligado, ele não recebe os avisos de erro nem o de backup atrasado\); o Operador liga qualquer número, desliga os que não recebem “Erro de disparo”, muda o nome e os blocos do resumo/);
+  assert.doesNotMatch(TEXTO_DOCS + README, /Operador liga e desliga|ligar e desligar números/, 'S1: o Operador não desliga qualquer número');
+  assert.ok(README.includes(`os dois somados vão no máximo ${freio}`), 'README');
+  assert.ok(README.includes('O resumo diário do horário não entra nesses limites.'), 'README: o resumo do tick fica fora do freio');
+  assert.match(README, /Enviar teste \(só o Dono\)/);
+  assert.match(README, /só o Dono cadastra, remove, troca o número, tira \*Erro de disparo\* de um número e desliga um número que recebe \*Erro de disparo\* \(o servidor responde 403 ao Operador; desligado, ele não recebe os avisos de erro nem o de backup atrasado\)\. O Operador liga qualquer número, desliga os que não recebem \*Erro de disparo\*/);
+  assert.match(README, /cadastrar, remover e trocar números, tirar \*Erro de disparo\*, desligar um número que recebe \*Erro de disparo\* e usar \*Enviar teste\*/, 'README: Papéis');
+  assert.match(README, /linha no Histórico, com \*Avisos\* na coluna \*Origem\* e o nome do número \(nunca o número\)/);
+  // a frase da mensagem citada no README é a do código (R3: não promete inscrição em aviso nenhum)
+  const frase = /export const TEXTO_TESTE = \[\s*'[^']*',\s*'([^']*)',\s*'([^']*)',/.exec(avisos);
+  assert.ok(README.includes(`"${frase[1]} ${frase[2]}"`), 'README cita a mensagem do teste');
+  // tabela de limites (R2) e tabela de papéis (S1)
+  const limites = CAPS.referencia.secoes.find((x) => x.id === 'limites').blocos.find((b) => b.tabela).tabela.linhas;
+  assert.ok(limites.find((l) => l[0] === 'Avisos')[1].includes(`“Enviar teste” e “Enviar resumo agora” somados: no máximo ${freio}`), 'limites: Avisos');
+  const papeis = CAPS.equipe.secoes.find((x) => x.id === 'papeis').blocos.find((b) => b.tabela).tabela.linhas;
+  const linha = (inicio) => papeis.find((l) => l[0].startsWith(inicio));
+  assert.deepEqual(linha('Relatórios e avisos: ligar números, desligar os que não recebem “Erro de disparo”').slice(1), ['Sim', 'Sim']);
+  assert.deepEqual(linha('Relatórios e avisos: cadastrar e remover').slice(1), ['Não', 'Sim']);
+  assert.match(linha('Relatórios e avisos: cadastrar e remover')[0], /trocar o número, tirar “Erro de disparo”, desligar um número que recebe “Erro de disparo” e Enviar teste/);
 });
 
 test('backup automático: "não envie sem criptografia" no lugar de "não envie para a nuvem", e o aviso de atraso vai aos destinos de "Erro de disparo"', () => {

@@ -222,7 +222,7 @@ docsCapitulo({
             ['API da Amazon', 'exige pelo menos 10 vendas qualificadas nos últimos 30 dias; o acesso volta em até 2 dias depois de novas vendas; os dados de um produto ficam em memória por até 15 minutos', 'Regras da Amazon'],
             ['Shopee', 'até 60 links por hora pela extensão e 300 consultas por hora no total; um link gerado é reaproveitado por até 7 dias; a Shopee libera a API em até 3 dias úteis', 'Fixo (a liberação é da Shopee)'],
             ['Rotacionador', 'limite de até 1.024 pessoas por grupo; aviso de grupo lotando aos 95%; o modo alternar usa até 3 grupos com vaga', 'Campo de limite do link, em [[Rotacionador de Links]]'],
-            ['Avisos', 'aviso de erro de disparo no máximo 1 a cada 30 minutos; no máximo 10 cadastros de número a cada 10 minutos', 'Fixo'],
+            ['Avisos', 'aviso de erro de disparo no máximo 1 a cada 30 minutos; no máximo 10 cadastros de número a cada 10 minutos; “Enviar teste” e “Enviar resumo agora” somados: no máximo 1 mensagem manual por número a cada 60 s, 1 resumo para todos os números a cada 60 s e 5 envios manuais por hora (cada teste ou resumo conta 1, mesmo o resumo para todos)', 'Fixo'],
             ['Rastreio por grupo', 'um Sub_id da Shopee tem até 30 caracteres, só letras e números; até 10 Sub_ids por envio; o histórico do rastreio fica 400 dias', 'Fixo (os códigos em [[Blocos de análise]])'],
             ['Importar comissões', 'o arquivo CSV tem até 5 MB e até 100.000 linhas; arquivo do Excel (.xlsx) não vale, salve como CSV', 'Fixo, em [[Ganhos → Importar comissões]]'],
             ['Gasto com anúncios', 'o período do gasto vai até 366 dias; a observação tem até 200 caracteres', 'Fixo, em [[Ganhos → Gasto com anúncios]]'],

@@ -29,6 +29,8 @@ docsCapitulo({
             ['Salvar e testar Conexões, e ver quais segredos estão salvos', 'Não', 'Sim'],
             ['Gerar novo token da extensão', 'Não', 'Sim'],
             ['Desconectar o WhatsApp', 'Não', 'Sim'],
+            ['Relatórios e avisos: ligar números, desligar os que não recebem “Erro de disparo”, mudar o nome e os blocos do resumo, Enviar resumo agora', 'Sim', 'Sim'],
+            ['Relatórios e avisos: cadastrar e remover números, trocar o número, tirar “Erro de disparo”, desligar um número que recebe “Erro de disparo” e Enviar teste', 'Não', 'Sim'],
             ['Apagar dados antigos em Ajustes', 'Não', 'Sim'],
             ['Revisar e enviar ofertas do Catálogo', 'Não (só vê a lista)', 'Sim'],
             ['Ver a página Ganhos e mudar códigos de rastreio de grupos e blocos', 'Não', 'Sim'],
