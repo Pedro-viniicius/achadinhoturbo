@@ -5,6 +5,7 @@
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
@@ -431,6 +432,376 @@ test('S22: /api/simulados mostra o grupo e mascara o número de pessoa (destino 
     assert.deepEqual(sim.json.map((m) => m.jid), ['+55 11 •••••-4321', 'g1@g.us']);
     assert.equal(paraJid(s.wa, JID).length, 1, 'na memória do processo o registro guarda o JID (é por ele que se envia)');
   } finally { await s.fechar(); }
+});
+
+// ---------- backup (plano backup-automatico, etapa 2) ----------
+const H = 3600000;
+const AGORA = at(10, 12, 0);
+/** Estado como o scripts/backup.js grava (versão 1); `extra` troca qualquer campo. */
+const estadoDoBackup = (tentativa, extra = {}) => ({
+  versao: 1, tentativa_em: tentativa,
+  local: { ok: true, em: tentativa, arquivo: 'disparador-2026-11-10-03-00-00.tar.gz', motivo: null },
+  drive: { ok: true, em: tentativa, copias: 3, motivo: null },
+  ultimo_ok_local: tentativa, ultimo_ok_drive: tentativa, ...extra,
+});
+/**
+ * Monta o aviso lendo um backup-estado.json de verdade, numa pasta própria. `inicio` = 2 h antes de AGORA (fora da carência).
+ * Relógio monotônico falso: anda junto com o `now` de cada tick (o PC ficou acordado entre um tick e outro, mesmo com
+ * horas entre eles), menos o que `dormir(ms)` descontar (suspensão).
+ */
+function montarBackup({ inicio = AGORA - 2 * H, destinos = true } = {}) {
+  const m = montar();
+  const arquivo = path.join(m.dir, 'backup-estado.json');
+  let acordado = 0; let dormiu = 0;
+  const avisos = createAvisos({ db: m.db, wa: m.wa, estadoBackup: arquivo, inicio, monotonico: () => acordado });
+  const tickReal = avisos.tick;
+  avisos.tick = (now) => { acordado = now - dormiu; return tickReal(now); };
+  if (destinos) destino(m.db, { avisos: ['erro'] });
+  return {
+    ...m, avisos, arquivo,
+    dormir: (ms) => { dormiu += ms; },
+    gravar: (o) => fs.writeFileSync(arquivo, typeof o === 'string' ? o : JSON.stringify(o)),
+    msgs: () => paraJid(m.wa, JID),
+    linhas: () => m.db.prepare("SELECT level, rule_name, message FROM log WHERE rule_name = 'Backup' ORDER BY id").all().map((l) => ({ ...l })),
+  };
+}
+const velho = (h) => AGORA - h * H;
+
+test('backup: sem arquivo, ou sem estadoBackup, nada acontece', async () => {
+  const b = montarBackup();
+  await b.avisos.tick(AGORA);
+  assert.equal(b.msgs().length, 0); assert.deepEqual(b.linhas(), []);
+  assert.equal(getSetting(b.db, 'backup_visto'), null); assert.equal(getSetting(b.db, 'avisos_backup_ultimo'), null);
+  // sem caminho (agendador sem dir), mesmo havendo um arquivo velho na pasta
+  b.gravar(estadoDoBackup(velho(100), { ultimo_ok_local: velho(100), ultimo_ok_drive: velho(100) }));
+  const sem = createAvisos({ db: b.db, wa: b.wa, inicio: velho(10) });
+  await sem.tick(AGORA);
+  assert.equal(b.msgs().length, 0); assert.deepEqual(b.linhas(), []);
+});
+
+test('backup fresco: cada execução nova vira uma linha "ok" no Histórico, sem repetir, e ninguém é avisado', async () => {
+  const b = montarBackup();
+  b.gravar(estadoDoBackup(velho(3)));
+  await b.avisos.tick(AGORA); await b.avisos.tick(AGORA + 60000);
+  assert.deepEqual(b.linhas(), [{ level: 'ok', rule_name: 'Backup', message: 'Backup automático: cópia no computador ok; cópia no Google Drive ok (3 cópias guardadas).' }]);
+  assert.equal(b.msgs().length, 0, 'em dia: sem aviso');
+  assert.equal(getSetting(b.db, 'avisos_backup_ultimo'), null);
+
+  b.gravar(estadoDoBackup(velho(2)));
+  await b.avisos.tick(AGORA); await b.avisos.tick(AGORA);
+  assert.equal(b.linhas().length, 2, 'execução nova: mais uma linha, uma só');
+  // exatamente 26 h ainda não é atraso
+  b.gravar(estadoDoBackup(velho(26), { tentativa_em: velho(2), ultimo_ok_local: velho(26), ultimo_ok_drive: velho(26) }));
+  await b.avisos.tick(AGORA);
+  assert.equal(b.msgs().length, 0, 'até 26 h: em dia');
+});
+
+test('backup: execução com falha vira "aviso" (nunca "erro"), com a frase fixa da etapa, e não dispara o aviso de erro de disparo', async () => {
+  const b = montarBackup();
+  await b.avisos.tick(AGORA - 3 * H); // primeiro tick do aviso de erro: marca o cursor
+  b.gravar(estadoDoBackup(velho(1), {
+    local: { ok: true, em: velho(1), arquivo: 'x.tar.gz', motivo: null },
+    drive: { ok: false, em: null, copias: null, motivo: 'envio' },
+    ultimo_ok_drive: velho(5),
+  }));
+  await b.avisos.tick(AGORA);
+  b.gravar(estadoDoBackup(velho(0.5), {
+    local: { ok: false, em: null, arquivo: null, motivo: 'banco' },
+    drive: { ok: null, em: null, copias: null, motivo: null },
+    ultimo_ok_local: velho(6), ultimo_ok_drive: velho(6),
+  }));
+  await b.avisos.tick(AGORA);
+  b.gravar(estadoDoBackup(velho(0.2), { drive: { ok: true, em: velho(0.2), copias: 14, motivo: 'limpeza_drive' } }));
+  await b.avisos.tick(AGORA);
+  assert.deepEqual(b.linhas().map((l) => [l.level, l.message]), [
+    ['aviso', 'Backup automático: cópia no computador ok; cópia no Google Drive falhou (o envio ao Google Drive falhou).'],
+    ['aviso', 'Backup automático: cópia no computador falhou (não consegui copiar o banco); cópia no Google Drive não foi tentada.'],
+    ['aviso', 'Backup automático: cópia no computador ok; cópia no Google Drive ok (14 cópias guardadas); atenção: não consegui apagar as cópias antigas do Drive.'],
+  ]);
+  assert.equal(b.db.prepare("SELECT COUNT(*) AS n FROM log WHERE level = 'erro'").get().n, 0);
+  assert.equal(b.msgs().length, 0, 'nenhuma mensagem "disparos falharam"');
+});
+
+test('backup atrasado há 27 h: avisa os destinos com "Erro de disparo", só eles, e deixa uma linha no Histórico', async () => {
+  const b = montarBackup();
+  destino(b.db, { nome: 'Só lotação', jid: JID2, avisos: ['lotacao'] });
+  destino(b.db, { nome: 'Desligado', jid: JID3, avisos: ['erro'], ativo: 0 });
+  b.gravar(estadoDoBackup(velho(1), {
+    local: { ok: true, em: velho(1), arquivo: 'disparador-2026-11-10-03-00-00.tar.gz', motivo: null },
+    drive: { ok: false, em: null, copias: null, motivo: 'envio' },
+    ultimo_ok_drive: velho(27),
+  }));
+  await b.avisos.tick(AGORA);
+  assert.equal(b.msgs().length, 1);
+  assert.equal(b.msgs()[0].text, '⚠️ *O backup está atrasado*\n• Cópia no computador: há 1 h\n• Cópia no Google Drive: há 27 h\n\nVeja o Histórico no painel e confira o backup automático (capítulo Manutenção dos Docs).');
+  assert.equal(paraJid(b.wa, JID2).length, 0); assert.equal(paraJid(b.wa, JID3).length, 0);
+  const atraso = b.linhas().filter((l) => /^Backup atrasado/.test(l.message));
+  assert.deepEqual(atraso, [{ level: 'aviso', rule_name: 'Backup', message: 'Backup atrasado. Cópia no computador: há 1 h; Cópia no Google Drive: há 27 h.' }]);
+  assert.equal(Number(getSetting(b.db, 'avisos_backup_ultimo')), AGORA);
+  assert.doesNotMatch(b.msgs()[0].text, /\/|\\|\.tar|gpg|rclone|chave/i, 'sem caminho, arquivo nem ferramenta');
+  assert.ok(b.db.prepare("SELECT 1 FROM log WHERE level = 'ok' AND message LIKE 'Enviei o aviso de backup atrasado para “Pedro”.'").get());
+  assert.equal(b.db.prepare("SELECT COUNT(*) AS n FROM log WHERE level = 'erro'").get().n, 0);
+  semNumeroNoLog(b.db);
+});
+
+test('backup atrasado: o lado local sozinho basta, e "nunca deu certo" também conta', async () => {
+  const a = montarBackup();
+  a.gravar(estadoDoBackup(velho(1), { ultimo_ok_local: velho(30) }));
+  await a.avisos.tick(AGORA);
+  assert.match(a.msgs()[0].text, /Cópia no computador: há 30 h\n• Cópia no Google Drive: há 1 h/);
+
+  const c = montarBackup();
+  c.gravar(estadoDoBackup(velho(1), { ultimo_ok_drive: null, drive: { ok: false, em: null, copias: null, motivo: 'envio' } }));
+  await c.avisos.tick(AGORA);
+  assert.match(c.msgs()[0].text, /Cópia no Google Drive: nunca deu certo/);
+  assert.ok(c.linhas().some((l) => l.message === 'Backup atrasado. Cópia no computador: há 1 h; Cópia no Google Drive: nunca deu certo.'));
+});
+
+test('backup atrasado: não repete em 23 h, repete em 25 h (a cada 24 h)', async () => {
+  const b = montarBackup();
+  b.gravar(estadoDoBackup(velho(1), { ultimo_ok_local: velho(40), ultimo_ok_drive: velho(40) }));
+  await b.avisos.tick(AGORA); assert.equal(b.msgs().length, 1);
+  await b.avisos.tick(AGORA + 5 * 60000); assert.equal(b.msgs().length, 1, 'cinco minutos depois: não');
+  await b.avisos.tick(AGORA + 23 * H); assert.equal(b.msgs().length, 1, '23 h depois: não');
+  await b.avisos.tick(AGORA + 25 * H); assert.equal(b.msgs().length, 2, '25 h depois: sim');
+  assert.equal(Number(getSetting(b.db, 'avisos_backup_ultimo')), AGORA + 25 * H);
+  assert.match(b.msgs()[1].text, /Cópia no computador: há 65 h/);
+  // voltou ao normal: nada mais
+  b.gravar(estadoDoBackup(AGORA + 26 * H, { tentativa_em: AGORA + 26 * H }));
+  await b.avisos.tick(AGORA + 50 * H); assert.equal(b.msgs().length, 2);
+});
+
+test('backup atrasado: nunca na primeira hora depois de o programa ligar (carência de 60 min)', async () => {
+  const inicio = AGORA - 30 * 60000;
+  const b = montarBackup({ inicio });
+  b.gravar(estadoDoBackup(velho(1), { ultimo_ok_local: velho(40), ultimo_ok_drive: velho(40) }));
+  await b.avisos.tick(inicio); await b.avisos.tick(inicio + 59 * 60000 + 59000);
+  assert.equal(b.msgs().length, 0, 'dentro da hora de carência');
+  assert.equal(getSetting(b.db, 'avisos_backup_ultimo'), null, 'a carência não gasta o intervalo de 24 h');
+  assert.equal(b.linhas().length, 1, 'a linha da execução já vai para o Histórico: só o aviso espera');
+  assert.match(b.linhas()[0].message, /^Backup automático:/);
+  await b.avisos.tick(inicio + 60 * 60000); assert.equal(b.msgs().length, 1, 'passada a hora: avisa');
+});
+
+const MIN = 60000;
+/** Ticks de `passo` em `passo` de `de` (exclusive) até antes de `ate`. */
+async function ticksAte(avisos, de, ate, passo = 5 * MIN) { for (let t = de + passo; t < ate; t += passo) await avisos.tick(t); }
+
+test('backup atrasado: o PC que volta da suspensão ganha nova carência de 60 min (R1: o timer Persistent roda logo ao acordar)', async () => {
+  const b = montarBackup();
+  b.gravar(estadoDoBackup(velho(1))); // em dia quando o PC dormiu
+  await b.avisos.tick(AGORA);
+  assert.equal(b.msgs().length, 0);
+  // 3 dias suspenso: entre os dois ticks o PC ficou acordado só 15 s; o estado agora tem 73 h
+  const VOLTA = AGORA + 72 * H;
+  b.dormir(72 * H - 15000);
+  await b.avisos.tick(VOLTA);
+  assert.equal(b.msgs().length, 0, 'acabou de acordar: espera o backup do timer');
+  await ticksAte(b.avisos, VOLTA, VOLTA + 60 * MIN);
+  assert.equal(b.msgs().length, 0, 'nenhum aviso antes de 60 min acordado');
+  assert.equal(getSetting(b.db, 'avisos_backup_ultimo'), null, 'a carência não gasta o intervalo de 24 h');
+  await b.avisos.tick(VOLTA + 60 * MIN);
+  assert.equal(b.msgs().length, 1, '60 min depois de acordar e o backup não rodou: avisa');
+  assert.match(b.msgs()[0].text, /Cópia no computador: há 74 h/);
+
+  // o timer roda logo depois de acordar: ninguém é avisado
+  const c = montarBackup();
+  c.gravar(estadoDoBackup(velho(1)));
+  await c.avisos.tick(AGORA);
+  c.dormir(72 * H - 15000);
+  await c.avisos.tick(VOLTA);
+  c.gravar(estadoDoBackup(VOLTA + 3 * MIN));
+  await ticksAte(c.avisos, VOLTA, VOLTA + 2 * H);
+  assert.equal(c.msgs().length, 0);
+  assert.deepEqual(c.linhas().map((l) => l.level), ['ok', 'ok'], 'só as duas execuções no Histórico');
+});
+
+test('backup atrasado: um tick demorado (regra disparando por 20 min) não é suspensão e não recomeça a carência', async () => {
+  const b = montarBackup({ inicio: AGORA - 50 * MIN });
+  b.gravar(estadoDoBackup(velho(1), { ultimo_ok_local: velho(40), ultimo_ok_drive: velho(40) }));
+  await b.avisos.tick(AGORA);
+  assert.equal(b.msgs().length, 0, 'ligou há 50 min: carência');
+  await b.avisos.tick(AGORA + 20 * MIN); // o PC ficou acordado os 20 min (o relógio monotônico andou junto)
+  assert.equal(b.msgs().length, 1, '70 min ligado: avisa');
+});
+
+test('backup atrasado: com o relógio padrão (performance.now), dois ticks com 3 dias de diferença contam como suspensão', async () => {
+  const m = montar();
+  destino(m.db, { avisos: ['erro'] });
+  const arquivo = path.join(m.dir, 'backup-estado.json');
+  fs.writeFileSync(arquivo, JSON.stringify(estadoDoBackup(velho(1))));
+  const avisos = createAvisos({ db: m.db, wa: m.wa, estadoBackup: arquivo, inicio: AGORA - 2 * H });
+  await avisos.tick(AGORA);
+  const VOLTA = AGORA + 72 * H;
+  await avisos.tick(VOLTA); // o relógio do teste pulou 3 dias; o monotônico real, alguns milissegundos
+  // passos de 4 min (abaixo dos 5 min de salto): o relógio real quase não anda, mas cada passo não é suspensão
+  await ticksAte(avisos, VOLTA, VOLTA + 60 * MIN, 4 * MIN);
+  assert.equal(paraJid(m.wa, JID).length, 0, 'antes de 60 min: nada');
+  await avisos.tick(VOLTA + 60 * MIN);
+  assert.equal(paraJid(m.wa, JID).length, 1);
+});
+
+test('backup: estado ilegível (JSON quebrado, lixo, arquivo grande demais) conta como atrasado, com o texto fixo', async () => {
+  for (const conteudo of ['{"versao":1,"tentativa_em":', '[1,2]', 'null', '', JSON.stringify({ x: 'a'.repeat(70000) })]) {
+    const b = montarBackup();
+    b.gravar(conteudo);
+    await b.avisos.tick(AGORA);
+    assert.equal(b.msgs().length, 1, `conteúdo ${conteudo.slice(0, 20)}`);
+    assert.equal(b.msgs()[0].text, '⚠️ *O backup está atrasado*\nNão consegui ler o estado do backup.\n\nVeja o Histórico no painel e confira o backup automático (capítulo Manutenção dos Docs).');
+    assert.deepEqual(b.linhas(), [{ level: 'aviso', rule_name: 'Backup', message: 'Backup atrasado. Não consegui ler o estado do backup.' }]);
+    await b.avisos.tick(AGORA + 23 * H); assert.equal(b.msgs().length, 1, 'repete no máximo a cada 24 h');
+  }
+  // o caminho do estado ser uma pasta também é "ilegível", não um erro do tick
+  const d = montarBackup();
+  fs.mkdirSync(d.arquivo);
+  await d.avisos.tick(AGORA);
+  assert.match(d.msgs()[0].text, /Não consegui ler o estado do backup/);
+});
+
+test('backup atrasado: um sendText lento (20 min) antes do passo do backup não é suspensão e não reinicia a carência (R7)', async () => {
+  const m = montar();
+  destino(m.db, { blocos: [], avisos: ['erro'] }); // recebe o resumo diário e o aviso de backup
+  setSetting(m.db, 'resumo_horario', '11:00'); // o resumo de hoje já venceu: sai no 1º tick, antes do passo do backup
+  const arquivo = path.join(m.dir, 'backup-estado.json');
+  // em dia (25 h 50 min) no 1º tick; passa das 26 h no 2º, 21 min depois
+  const ok = AGORA - 26 * H + 10 * MIN;
+  fs.writeFileSync(arquivo, JSON.stringify(estadoDoBackup(ok, { ultimo_ok_local: ok, ultimo_ok_drive: ok })));
+  let mono = 0;
+  const avisos = createAvisos({ db: m.db, wa: m.wa, estadoBackup: arquivo, inicio: AGORA - 2 * H, monotonico: () => mono });
+  const enviar = m.wa.sendText;
+  m.wa.sendText = async (jid, texto) => { if (texto.startsWith('📊')) mono += 20 * MIN; return enviar(jid, texto); }; // o PC segue acordado durante o envio
+  mono = AGORA; await avisos.tick(AGORA);
+  assert.equal(paraJid(m.wa, JID).length, 1, 'só o resumo (backup ainda em dia)');
+  assert.match(paraJid(m.wa, JID)[0].text, /^📊/);
+  mono = AGORA + 21 * MIN; await avisos.tick(AGORA + 21 * MIN);
+  const msgs = paraJid(m.wa, JID);
+  assert.equal(msgs.length, 2, 'fora da carência: o aviso de backup atrasado sai');
+  assert.match(msgs[1].text, /O backup está atrasado/);
+});
+
+/** Estado do backup que NÃO é arquivo comum: o tick não trava e conta como ilegível. */
+async function estadoIlegivelSemTravar(montarEstado) {
+  const b = montarBackup();
+  montarEstado(b.arquivo);
+  const antes = Date.now();
+  await b.avisos.tick(AGORA);
+  assert.ok(Date.now() - antes < 2000, 'o tick não pode esperar o arquivo');
+  assert.equal(b.msgs().length, 1);
+  assert.match(b.msgs()[0].text, /Não consegui ler o estado do backup/);
+  assert.deepEqual(b.linhas(), [{ level: 'aviso', rule_name: 'Backup', message: 'Backup atrasado. Não consegui ler o estado do backup.' }]);
+}
+
+test('backup: estado que é um FIFO conta como ilegível e não trava o tick (S: leitura bloqueante)', async (t) => {
+  try { execFileSync('mkfifo', ['--version'], { stdio: 'ignore' }); } catch (e) { if (e.code === 'ENOENT') return t.skip('mkfifo não existe aqui'); }
+  await estadoIlegivelSemTravar((arq) => execFileSync('mkfifo', [arq]));
+});
+
+test('backup: estado que é link simbólico (para /dev/zero ou para um JSON válido) conta como ilegível', async () => {
+  await estadoIlegivelSemTravar((arq) => fs.symlinkSync('/dev/zero', arq));
+  const alvo = path.join(tmp(), 'estado-real.json');
+  const hoje = estadoDoBackup(AGORA - H);
+  fs.writeFileSync(alvo, JSON.stringify(hoje));
+  await estadoIlegivelSemTravar((arq) => fs.symlinkSync(alvo, arq));
+  await estadoIlegivelSemTravar((arq) => fs.symlinkSync(path.join(path.dirname(arq), 'nao-existe.json'), arq)); // link quebrado
+});
+
+test('backup atrasado sem destinos: só o Histórico, 1× a cada 24 h; destino sem "Erro de disparo" ou desligado não conta', async () => {
+  const b = montarBackup({ destinos: false });
+  destino(b.db, { avisos: ['lotacao'] });
+  destino(b.db, { nome: 'Desligado', jid: JID2, avisos: ['erro'], ativo: 0 });
+  b.gravar(estadoDoBackup(velho(1), { ultimo_ok_local: velho(40), ultimo_ok_drive: velho(40) }));
+  b.wa.isReady = () => false; // sem destinos o WhatsApp fora não pode segurar o registro
+  await b.avisos.tick(AGORA);
+  assert.equal(b.wa.simulated.length, 0);
+  assert.deepEqual(b.linhas().filter((l) => /^Backup atrasado/.test(l.message)).map((l) => [l.level, l.message]),
+    [['aviso', 'Backup atrasado. Cópia no computador: há 40 h; Cópia no Google Drive: há 40 h. Nenhum número recebe o aviso de erro de disparo.']]);
+  await b.avisos.tick(AGORA + 10 * 60000);
+  assert.equal(b.linhas().filter((l) => /^Backup atrasado/.test(l.message)).length, 1, 'não repete a linha a cada tick');
+});
+
+test('backup atrasado com o WhatsApp fora: espera, não gasta o intervalo e avisa quando volta', async () => {
+  const b = montarBackup();
+  b.gravar(estadoDoBackup(velho(1), { ultimo_ok_local: velho(40), ultimo_ok_drive: velho(40) }));
+  b.wa.isReady = () => false;
+  await b.avisos.tick(AGORA); await b.avisos.tick(AGORA + 5 * 60000);
+  assert.equal(b.msgs().length, 0);
+  assert.equal(getSetting(b.db, 'avisos_backup_ultimo'), null);
+  assert.equal(b.linhas().filter((l) => /^Backup atrasado/.test(l.message)).length, 0, 'ainda não aconteceu: nada no Histórico');
+  b.wa.isReady = () => true;
+  await b.avisos.tick(AGORA + 10 * 60000);
+  assert.equal(b.msgs().length, 1);
+});
+
+test('backup: o texto do arquivo nunca vai ao Histórico nem ao WhatsApp (caminho, número, motivo desconhecido)', async () => {
+  const b = montarBackup();
+  b.gravar(estadoDoBackup(velho(1), {
+    local: { ok: false, em: null, arquivo: '/home/ufla/data/backups/x.tar.gz', motivo: '/home/ufla/.config/achadinhoturbo/backup.chave' },
+    drive: { ok: false, em: null, copias: '+55 11 98765-4321', motivo: 'rclone: token 5511987654321@s.whatsapp.net' },
+    ultimo_ok_local: velho(40), ultimo_ok_drive: velho(40),
+  }));
+  await b.avisos.tick(AGORA);
+  const tudo = [...b.linhas().map((l) => l.message), ...b.msgs().map((m) => m.text)].join('\n');
+  assert.doesNotMatch(tudo, /home|backup\.chave|\.tar|rclone|token|98765|5511987/);
+  assert.match(b.linhas()[0].message, /^Backup automático: cópia no computador falhou; cópia no Google Drive falhou\.$/);
+});
+
+test('backup: o agendador passa data/backup-estado.json aos avisos (o nome do arquivo bate nos dois lados)', async () => {
+  const { dir, db, wa, scheduler } = montar();
+  destino(db, { avisos: ['erro'] });
+  const agora = Date.now() + 3 * H; // o programa "ligou" há menos de 1 h: fora da carência só assim
+  fs.writeFileSync(path.join(dir, 'backup-estado.json'), JSON.stringify(estadoDoBackup(agora - H, { ultimo_ok_local: agora - 30 * H, ultimo_ok_drive: agora - 30 * H })));
+  await scheduler.avisos.tick(agora);
+  assert.equal(paraJid(wa, JID).length, 1);
+  assert.match(paraJid(wa, JID)[0].text, /Cópia no computador: há 30 h/);
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM log WHERE rule_name = 'Backup'").get().n, 2);
+});
+
+test('backup: motivo que é nome de propriedade herdada ("constructor", "toString") não vira texto de função no Histórico', async () => {
+  for (const motivo of ['constructor', 'toString', '__proto__', 'hasOwnProperty']) {
+    const b = montarBackup();
+    b.gravar(estadoDoBackup(velho(1), {
+      local: { ok: false, em: null, arquivo: null, motivo },
+      drive: { ok: false, em: null, copias: null, motivo },
+    }));
+    await b.avisos.tick(AGORA);
+    assert.equal(b.linhas()[0].message, 'Backup automático: cópia no computador falhou; cópia no Google Drive falhou.', motivo);
+  }
+});
+
+test('backup: estado com formato torto (local/drive que não são objetos, datas em texto) não derruba o tick nem grava lixo', async () => {
+  const tortos = [
+    { versao: 1, tentativa_em: 5, local: 'x', drive: 7 },
+    { versao: 1, tentativa_em: 5, local: null, drive: [] },
+    { versao: 1, tentativa_em: '5', ultimo_ok_local: '5', ultimo_ok_drive: { a: 1 } },
+    { versao: 1, tentativa_em: -1, local: { ok: 'true' }, drive: { ok: 1, copias: -3 } },
+    { versao: 1, tentativa_em: 5, local: { ok: true, motivo: { x: 1 } }, drive: { ok: true, copias: 1e9 } },
+    {},
+  ];
+  for (const e of tortos) {
+    const b = montarBackup();
+    b.gravar(e);
+    await b.avisos.tick(AGORA); // não pode lançar
+    for (const l of b.linhas()) {
+      assert.match(l.message, /^(Backup automático: cópia no computador (ok|falhou); cópia no Google Drive (ok|falhou|não foi tentada)|Backup atrasado\. )/, JSON.stringify(e));
+      assert.doesNotMatch(l.message, /object|undefined|NaN|null/i, JSON.stringify(e));
+    }
+    for (const m of b.msgs()) assert.doesNotMatch(m.text, /object|undefined|NaN|null/i, JSON.stringify(e));
+    assert.ok(b.linhas().every((l) => l.level !== 'erro'));
+  }
+});
+
+test('backup atrasado: se a entrega do aviso falha, vira "aviso" no Histórico (nunca "erro") e não gera "disparos falharam"', async () => {
+  const b = montarBackup();
+  await b.avisos.tick(AGORA - 3 * H); // marca o cursor do aviso de erro
+  b.gravar(estadoDoBackup(velho(1), { ultimo_ok_local: velho(40), ultimo_ok_drive: velho(40) }));
+  const antes = b.wa.sendText;
+  b.wa.sendText = async () => { throw new Error('rede fora'); };
+  await b.avisos.tick(AGORA);
+  b.wa.sendText = antes;
+  await b.avisos.tick(AGORA + 31 * 60000);
+  assert.equal(b.db.prepare("SELECT COUNT(*) AS n FROM log WHERE level = 'erro'").get().n, 0);
+  assert.equal(b.msgs().length, 0, 'a falha de entrega não gerou "disparos falharam" para ninguém');
+  assert.ok(b.db.prepare("SELECT 1 FROM log WHERE level = 'aviso' AND message LIKE 'Não consegui enviar o aviso de backup atrasado%'").get());
 });
 
 test('nada do que este arquivo fez imprimiu número ou JID de destino no console', () => {

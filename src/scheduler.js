@@ -1,3 +1,4 @@
+import path from 'node:path';
 import { addLog, parseRule, getSetting } from './db.js';
 import { renderTemplate } from './template.js';
 import * as mlDefault from './ml.js';
@@ -97,7 +98,7 @@ export function createScheduler({ db, wa, links, ml = mlDefault, fast = false, d
   let acordado = false; // um "agora" chegou com o tick em andamento: ele passa nos envios de novo antes de terminar
   // O "agora" não envia por conta própria: grava pendente e acorda o tick, que manda um envio de cada vez (S14)
   const envios = createEnvios({ db, wa, links, ml, fast, dir, acordar, amazon, shopee, magalu });
-  const avisos = createAvisos({ db, wa });
+  const avisos = createAvisos({ db, wa, estadoBackup: dir && path.join(dir, 'backup-estado.json') });
   // receber() (ouvinte do WhatsApp) e cada envio que o espelho cria chamam acordar(): a oferta sai neste tick
   const espelho = createEspelho({ db, wa, amazon, envios, acordar });
   // idem para a mensagem privada de um remetente cadastrado (receber) e para cada envio que ela cria

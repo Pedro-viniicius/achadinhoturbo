@@ -9,6 +9,7 @@ import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 import { MOTIVOS } from '../src/catalogo-itens.js';
 import { pastaDeDados } from '../src/config.js';
+import { REMOTO_PADRAO } from '../scripts/backup.js';
 import { spawnSync } from 'node:child_process';
 
 const RAIZ = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -33,7 +34,7 @@ const SPEC = {
   resultados: ['visao', 'historico', 'avisos'],
   equipe: ['papeis', 'convidar', 'gerir'],
   privacidade: ['dados', 'segredos', 'retencao', 'membros'],
-  manutencao: ['painel', 'backup', 'reconectar', 'log', 'ajustes'],
+  manutencao: ['painel', 'backup', 'backup-auto', 'reconectar', 'log', 'ajustes'],
   perguntas: ['tag-amazon', 'meli-la', 'precisa-api', 'id-shopee', 'catalogo', 'etiqueta-desta-fonte', 'so-catalogo', 'catalogo-links', 'limpar-log', 'painel-local'],
   referencia: ['glossario', 'estados', 'motivos', 'limites'],
 };
@@ -779,6 +780,10 @@ const FATOS = [
   { nome: 'rotinas do Grupo vivo', valor: 50, texto: (v) => new RegExp(`até ${v} rotinas`), codigo: [['src/rotinas.js', /export const MAX_ROTINAS = (\d+);/]] },
   { nome: '"Enviar agora" de uma rotina do Grupo vivo (min entre dois)', valor: 1, texto: (v) => new RegExp(`um(?: “Enviar agora”)? a cada ${v} min\\b`), codigo: [['src/rotinas.js', /export const ENVIAR_AGORA_INTERVALO_MIN = (\d+);/]] },
   { nome: 'atualização automática da lista do Grupo vivo (s)', valor: 10, texto: (v) => new RegExp(`se atualiza sozinha a cada ${v} s\\b`), codigo: [['public/app.js', /rotaAtual\(\) === 'grupo-vivo' && !\$\('#dlg'\)\.open\) gvAtualizar\(\)\.catch\(\(\) => \{\}\); \}, (\d+)000\);/]] },
+  // Backup automático e cópia criptografada no Drive (plano backup-automatico, etapa 5, CA9)
+  { nome: 'backups locais guardados', valor: 7, texto: (v) => new RegExp(`(?:guarda|mantendo|mantém) os ${v} mais recentes`), codigo: [['scripts/backup.js', /export const MANTER_LOCAL = (\d+);/]] },
+  { nome: 'cópias guardadas no Drive', valor: 14, texto: (v) => new RegExp(`as ${v} cópias mais recentes`), codigo: [['scripts/backup.js', /export const MANTER_DRIVE = (\d+);/]] },
+  { nome: 'horas sem backup até o aviso de atraso', valor: 26, texto: (v) => new RegExp(`mais de ${v} h\\b`), codigo: [['src/avisos.js', /export const BACKUP_ATRASO_H = (\d+);/]] },
   { nome: 'mensagens por dia que ativam o aviso', valor: 400, texto: (v) => new RegExp(`mais de ${milhar(v)} mensagens por dia`), codigo: [['public/grade.js', /const AVISO_MENSAGENS_DIA = (\d+);/]] },
 ];
 
@@ -886,7 +891,7 @@ test('Remetente: a seção "remetentes" do Disparo automático cobre cadastro, a
   // a Shopee exige também a API ou a extensão, não só o ID (R1)
   assert.match(txt, /ID de afiliado em [\[*]*Conexões → Shopee[\]*]* e a API da Shopee ou a extensão do Chrome conectada/);
   // backups já feitos continuam com o número até saírem do rodízio (S4)
-  assert.match(txt, /backups que você já fez continuam com o número até saírem do rodízio[^.]*7 mais recentes/);
+  assert.match(txt, /backups que você já fez continuam com o número até saírem da rotação \(7 no computador; 14 no Google Drive[^)]*lixeira do Drive\)/);
   // o aviso de tag ou ID só aparece depois que um link foi barrado
   assert.match(txt, /depois que um link foi barrado/);
   // LGPD
@@ -905,7 +910,7 @@ test('Remetente: o README tem a seção, as frases do sócio, os limites e a LGP
   assert.match(limpo(README_BRUTO), /Tudo, Disparo automático, Espelhamento, Catálogo ou Remetente/);
   assert.match(txt, /ID de afiliado em [\[*]*Conexões → Shopee[\]*]* e a API da Shopee ou a extensão do Chrome conectada/);
   assert.match(txt, /não é processado/); assert.match(txt, /precisa mandar de novo/); assert.doesNotMatch(txt, /mais de 2 h é ignorada/);
-  assert.match(txt, /backups que você já fez continuam com o número até saírem do rodízio[^.]*7 mais recentes/);
+  assert.match(txt, /backups que você já fez continuam com o número até saírem da rotação \(7 no computador; 14 no Google Drive[^)]*lixeira do Drive\)/);
   assert.match(txt, /depois que um link do remetente foi barrado/);
   const privacidade = limpo(README_BRUTO.slice(README_BRUTO.search(/^## Privacidade \(LGPD\)/m)));
   assert.match(privacidade, /Remetente/, 'a seção de privacidade cita o Remetente');
@@ -1014,6 +1019,112 @@ test('S2/D15: restaurar extrai fora do projeto, em passos numerados com um coman
   for (const n of [1, 2, 3, 4]) assert.match(txt, new RegExp(`\\*\\*${n}\\. `), `passo ${n} numerado`);
   assert.match(txt, /\*\*Troque pelo nome do seu arquivo\*\*/);
   assert.match(textoDe('manutencao', 'backup'), /apague a pasta data-antiga/);
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// Backup automático (plano backup-automatico, etapa 5, CA4 e CA9): Docs (Manutenção → backup-auto) e README descrevem
+// o automático, a cópia criptografada no Drive, a chave (perdê-la inutiliza as cópias) e a restauração.
+// ---------------------------------------------------------------------------------------------------------------
+test('backup automático: restaurar-drive ../achadinho-restaurado nos Docs e no README, em passos numerados com um comando por bloco', () => {
+  const CMD = 'npm run backup -- restaurar-drive ../achadinho-restaurado';
+  const cmds = comandosDe('manutencao', 'backup-auto');
+  assert.equal(cmds.filter((c) => c === CMD).length, 1, 'o comando de restaurar do Drive, uma vez, num bloco só');
+  assert.ok(README_BRUTO.includes('`' + CMD + '`'), 'README');
+  assert.match(README_BRUTO, /`npm run backup -- restaurar-drive \.\.\/achadinho-restaurado disparador-AAAA-MM-DD-HH-MM-SS\.tar\.gz\.gpg`/, 'README: cópia específica');
+  // instalar → guardar a chave → testar → ver o resultado → parar o serviço → restaurar
+  const ordem = ['npm run backup:instalar', 'less ~/.config/achadinhoturbo/backup.chave', 'systemctl --user start achadinhoturbo-backup.service',
+    'journalctl --user -u achadinhoturbo-backup -n 20 --no-pager', 'systemctl --user list-timers achadinhoturbo-backup.timer', 'systemctl --user stop achadinhoturbo', CMD];
+  const pos = ordem.map((c) => cmds.indexOf(c));
+  assert.ok(pos.every((i) => i >= 0), `faltam comandos: ${ordem.filter((_, i) => pos[i] < 0)}`);
+  assert.deepEqual([...pos].sort((a, b) => a - b), pos);
+  const p = blocosDe('manutencao', 'backup-auto').filter((b) => Object.hasOwn(b, 'p')).map((b) => b.p).join('\n');
+  for (const n of [1, 2, 3, 4]) assert.match(p, new RegExp(`\\*\\*${n}\\. `), `passo ${n} numerado`);
+  assert.match(p, /integridade=ok/);
+  // o instalador é só `npm run backup:instalar`: o comando `npm run backup -- instalar` não existe
+  assert.doesNotMatch(strings(CAPS).join('\n') + README_BRUTO, /backup -- instalar/);
+  for (const c of cmds) assert.doesNotMatch(c, /\n/, c);
+  // README: o passo a passo e os códigos de saída
+  assert.match(README, /Código de saída do auto: 0 tudo certo; 1 o backup local falhou[^;]*; 3 o local deu certo/);
+  assert.match(README, /Código de saída: 0 ok; 1 falha[^;]*; 2 o banco restaurado não passou na integridade/);
+  assert.match(textoDe('manutencao', 'backup-auto'), /0: tudo certo\. 1: o backup local falhou\. 3: o local deu certo/);
+});
+
+test('backup automático: perder a chave inutiliza as cópias do Drive, o instalador não a recupera e o gpg não leva a senha na linha de comando', () => {
+  const docs = textoDe('manutencao', 'backup-auto');
+  for (const [nome, t] of [['Docs', docs], ['README', README]]) {
+    assert.match(t, /Perder a chave torna as cópias do Drive impossíveis de abrir/, nome);
+    assert.match(t, /gerenciador de senhas/, nome);
+    assert.match(t, /~\/\.config\/achadinhoturbo\/backup\.chave/, nome);
+    assert.match(t, /Se você atualizar o Node\.js, rode npm run backup:instalar de novo/, nome);
+    assert.match(t, /gpg --no-symkey-cache --output backup\.tar\.gz --decrypt disparador-AAAA-MM-DD-HH-MM-SS\.tar\.gz\.gpg/, `${nome}: pedido interativo da senha`);
+    assert.match(t, /gpg --batch --pinentry-mode loopback --passphrase-file backup\.chave --output backup\.tar\.gz --decrypt/, `${nome}: senha por arquivo`);
+    assert.doesNotMatch(t, /--passphrase(?![-\w])/, `${nome}: senha na linha de comando`);
+    assert.doesNotMatch(t, /--passphrase-fd/, nome);
+  }
+  assert.match(docs, /Não rode o instalador[^.]*: ele criaria uma chave nova, que não abre as cópias antigas/);
+  assert.match(README, /Nunca rode o instalador de novo para "recuperar" a chave[^.]*: se o arquivo sumiu, o instalador cria uma chave nova, e ela não abre as cópias antigas/);
+  assert.match(docs, /Nunca rode o instalador para isso/);
+  // o livro não traz `cat` de segredo (qa-docs CA8): a chave se lê com `less`, que só mostra, e nos Docs e no README
+  assert.match(README, /less ~\/\.config\/achadinhoturbo\/backup\.chave/);
+  assert.doesNotMatch(README + docs, /\bcat ~\/\.config/);
+  // a chave nunca é impressa pelo programa: só o comando `cat` do próprio dono a mostra
+  assert.match(docs, /O programa nunca a mostra na tela, no log nem no Histórico/);
+  assert.match(README, /O programa nunca a mostra na tela, no log, no Histórico nem no estado do backup/);
+});
+
+test('backup automático: "não envie sem criptografia" no lugar de "não envie para a nuvem", e o aviso de atraso vai aos destinos de "Erro de disparo"', () => {
+  assert.doesNotMatch(TEXTO_DOCS + README, /envie para a nuvem/);
+  assert.match(textoDe('privacidade', 'dados'), /Não compartilhe, não envie sem criptografia e nunca faça commit deles/);
+  assert.match(textoDe('manutencao', 'backup'), /não envie sem criptografia/);
+  assert.match(README, /Não compartilhe nem envie sem criptografia/);
+  assert.match(textoDe('privacidade', 'dados'), /Cópia do backup no Google Drive/);
+  assert.match(README, /\*?Backups\*? \(data\/backups\/ e a cópia no Google Drive\)/);
+  // avisos: Docs (resultados/avisos), README (Relatórios e avisos) e o TIP dos “?”
+  assert.match(textoDe('resultados', 'avisos'), /Backup atrasado Usa o mesmo canal do “Erro de disparo”/);
+  assert.match(README, /Aviso de backup atrasado: usa o mesmo canal do \*?Erro de disparo/);
+  assert.match(limpo(lerRaiz('public/ajuda.js')), /'relatorios\.avisos': '[^']*“Erro de disparo”: uma mensagem não saiu, ou o backup automático está atrasado \(mais de 26 h/);
+  // limites: backups no computador, no Drive e o atraso
+  const linhas = CAPS.referencia.secoes.find((x) => x.id === 'limites').blocos.find((b) => b.tabela).tabela.linhas.map((l) => l[0]);
+  for (const r of ['Backups no computador', 'Backups no Google Drive', 'Backup atrasado']) assert.ok(linhas.includes(r), r);
+  // o backup é às 03:00 e o manual não conta para o aviso (decisões do dono)
+  for (const t of [textoDe('manutencao', 'backup-auto'), README]) {
+    assert.match(t, /às 03:00/);
+    assert.match(t, /não conta para o aviso de (?:backup )?atraso|não conta para o aviso de backup atrasado/);
+  }
+});
+
+test('backup automático: lixeira do Drive (até 30 dias), exclusão de pessoa só depois da rotação e pasta nova ou vazia na restauração', () => {
+  const alvos = [['Docs (privacidade)', textoDe('privacidade', 'dados')], ['Docs (backup-auto)', textoDe('manutencao', 'backup-auto')], ['README', README]];
+  for (const [nome, t] of alvos) {
+    assert.match(t, /lixeira do Drive, onde o Google as mantém por até 30 dias/, `${nome}: lixeira`);
+    assert.match(t, /[Ee]xcluir alguém do programa só tira essa pessoa das cópias depois que elas saem da rotação/, `${nome}: exclusão`);
+  }
+  assert.match(textoDe('privacidade', 'dados'), /O computador guarda 7 cópias e o Drive guarda 14/);
+  assert.match(README, /O computador guarda 7 cópias e o Drive guarda 14/);
+  assert.match(textoDe('manutencao', 'backup-auto'), /cifrada para o seu Google Drive, com uma chave que só você tem/);
+  assert.match(README, /cifrada para o seu Google Drive, com uma chave que só você tem/);
+  for (const [nome, t, apagar] of [['Docs (backup-auto)', textoDe('manutencao', 'backup-auto'), /apague antes a pasta que ele criou/], ['Docs (backup)', textoDe('manutencao', 'backup'), /apague a pasta antes\)/], ['README', README, /apague antes a pasta de teste/]]) {
+    assert.match(t, /pasta nova ou vazia/, `${nome}: pasta nova ou vazia`);
+    assert.match(t, apagar, `${nome}: apagar a pasta de teste`);
+  }
+});
+
+test('backup automático: a pasta do Drive nos Docs e no README é a do REMOTO_PADRAO, e todo comando com ela leva o remoto entre aspas', () => {
+  const pasta = REMOTO_PADRAO.slice(REMOTO_PADRAO.indexOf(':') + 1);
+  assert.equal(REMOTO_PADRAO, 'gdrive:Achadinho Turbo - Backups');
+  const docs = textoDe('manutencao', 'backup-auto');
+  for (const [nome, t] of [['Docs (backup-auto)', docs], ['README', README]]) {
+    assert.ok(t.includes(`pasta ${pasta} do Drive`), `${nome}: onde baixar pelo navegador`);
+  }
+  assert.ok(docs.includes(`Pasta ${pasta}, em arquivos .tar.gz.gpg`), 'Docs: tabela do backup automático');
+  assert.ok(README.includes(`para a pasta ${pasta} do remoto gdrive:`), 'README: passo 3 do auto');
+  assert.doesNotMatch(TEXTO_DOCS + README + limpo(lerRaiz('public/ajuda.js')), /achadinhoturbo-backups/, 'sobrou o nome antigo');
+  // sem aspas, o shell parte "gdrive:Achadinho Turbo - Backups" em quatro argumentos
+  const comandos = [...todosComandos(), ...[...README_BRUTO.matchAll(/`([^`\n]+)`/g)].map((m) => m[1])];
+  const comPasta = comandos.filter((c) => /\bgdrive:\S/.test(c) && !/^"?gdrive:/.test(c));
+  assert.ok(comPasta.filter((c) => todosComandos().includes(c)).length >= 1, 'o livro mostra o comando que lista as cópias');
+  assert.ok(comPasta.some((c) => README_BRUTO.includes(`\`${c}\``)), 'o README também');
+  for (const c of comPasta) assert.ok(c.includes(`"${REMOTO_PADRAO}"`), `remoto sem aspas: ${c}`);
 });
 
 test('Docs: um comando por bloco (nenhum bloco de comando tem mais de uma linha)', () => {

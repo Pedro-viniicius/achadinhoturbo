@@ -52,7 +52,57 @@ Em casa, só no `localhost`, o painel abre sem login (aparece um aviso no termin
 
 ### Backup
 
-`npm run backup [pasta]` copia o banco com `VACUUM INTO` (seguro com o programa rodando) e a sessão do WhatsApp num `.tar.gz`, mantendo os 7 mais recentes. O destino padrão é `data/backups/`, que o `.gitignore` já exclui; se você apontar para dentro de um repositório git não ignorado, o script avisa. **Nunca faça commit de um backup.** Para conferir um backup: `npm run backup -- restaurar arquivo.tar.gz ../achadinho-restaurado` (extrai numa pasta nova, fora da pasta do programa, e roda `PRAGMA integrity_check`; o passo a passo para trocar a `data/` está nos Docs, capítulo *Manutenção*). **O pacote contém a sessão do seu WhatsApp**: trate como senha. Ele também leva o ID e o segredo da credencial da Amazon, o **número de WhatsApp de cada remetente** (veja [Remetente](#remetente-links-enviados-por-outro-número)) e, com o espelhamento, **textos de mensagens de grupos de terceiros** (já mascarados; veja [Privacidade (LGPD)](#privacidade-lgpd)).
+`npm run backup [pasta]` copia o banco com `VACUUM INTO` (seguro com o programa rodando) e a sessão do WhatsApp num `.tar.gz`, mantendo os 7 mais recentes. O destino padrão é `data/backups/` (outra pasta precisa já existir ou ser escrita com `/`, como `./bk`), que o `.gitignore` já exclui; se você apontar para dentro de um repositório git não ignorado, o script avisa. **Nunca faça commit de um backup.** Esse comando é **só local**: não manda nada para o Drive e não conta para o aviso de backup atrasado (veja abaixo). Para conferir um backup: `npm run backup -- restaurar arquivo.tar.gz ../achadinho-restaurado` (extrai numa pasta nova, fora da pasta do programa, e roda `PRAGMA integrity_check`; o passo a passo para trocar a `data/` está nos Docs, capítulo *Manutenção*). **O pacote contém a sessão do seu WhatsApp**: trate como senha. Ele também leva o ID e o segredo da credencial da Amazon, o **número de WhatsApp de cada remetente** (veja [Remetente](#remetente-links-enviados-por-outro-número)) e, com o espelhamento, **textos de mensagens de grupos de terceiros** (já mascarados; veja [Privacidade (LGPD)](#privacidade-lgpd)).
+
+#### Backup automático e cópia criptografada no Google Drive
+
+Um timer do systemd (`achadinhoturbo-backup.timer`) roda `scripts/backup.js auto` todo dia às **03:00** (com até 10 minutos de folga). Se o computador estiver desligado nesse horário, o backup roda quando você o ligar. Como o serviço do painel, é um timer de usuário: só roda com a sua sessão aberta no computador. Cada execução:
+
+1. Faz o backup local de sempre, em `data/backups/`, mantendo os 7 mais recentes.
+2. **Criptografa** o pacote com `gpg` (AES256) e **confere**: decifra o arquivo numa pasta temporária e roda o `PRAGMA integrity_check`. Se a conferência falhar, nada sobe.
+3. Envia o `.tar.gz.gpg` com o `rclone` para a pasta `Achadinho Turbo - Backups` do remoto `gdrive:`, com até 3 tentativas (esperando 2 e depois 10 minutos). Só sobe arquivo criptografado: o programa recusa qualquer outro.
+4. Depois de o envio do dia dar certo, apaga do Drive o que passar das 14 cópias, mas só arquivos chamados `disparador-AAAA-MM-DD-HH-MM-SS.tar.gz.gpg`. O Drive guarda as 14 cópias mais recentes.
+
+Falha de internet, de Drive ou de `rclone` nunca apaga nem invalida o backup local.
+
+A cópia vai **cifrada** para o **seu** Google Drive, com uma chave que só você tem. O computador guarda 7 cópias e o Drive guarda 14. As cópias que saem da rotação vão para a **lixeira do Drive**, onde o Google as mantém por até 30 dias. Por isso, **excluir alguém do programa só tira essa pessoa das cópias depois que elas saem da rotação e da lixeira do Drive** (veja [Privacidade (LGPD)](#privacidade-lgpd)).
+
+**Instalar (uma vez):** é preciso ter o `gpg` e o `rclone` instalados e o Google Drive configurado no `rclone` com o nome `gdrive` (`rclone config`, tipo `drive`). Depois, na pasta do programa:
+
+```
+npm run backup:instalar
+```
+
+O instalador confere os três, cria a chave se ela ainda não existir, grava as duas units em `~/.config/systemd/user/`, liga o timer e mostra a próxima execução. Pode ser rodado de novo sem trocar a chave nem duplicar nada. **Se você atualizar o Node.js, rode `npm run backup:instalar` de novo**: a unit guarda o caminho do `node`.
+
+**A chave.** A chave nasce uma única vez, no instalador: 32 bytes aleatórios em `~/.config/achadinhoturbo/backup.chave` (arquivo com permissão 600, numa pasta 700). **Perder a chave torna as cópias do Drive impossíveis de abrir.** Se este computador se perder, a chave vai junto: copie-a **agora** para o seu gerenciador de senhas, abrindo o arquivo no seu próprio terminal, só para ler (`less ~/.config/achadinhoturbo/backup.chave`; saia com Q). Não cole a chave em chat, e-mail nem no próprio Drive. O programa nunca a mostra na tela, no log, no Histórico nem no estado do backup. **Nunca rode o instalador de novo para "recuperar" a chave**: se o arquivo sumiu, o instalador cria uma chave **nova**, e ela não abre as cópias antigas. Recupere o arquivo a partir do gerenciador de senhas. Sem a chave (ou com a permissão aberta), o automático faz só a cópia local e recusa o Drive.
+
+**Aviso de backup atrasado.** Cada execução grava `data/backup-estado.json` (hora, resultado de cada lado e último sucesso; sem chave e sem dado pessoal) e deixa uma linha no Histórico, com *Backup* na coluna *Origem* (nível ok ou aviso, nunca erro). Se o último sucesso do backup local **ou** do Drive tiver mais de 26 h (ou o estado não puder ser lido), o programa avisa pelo WhatsApp os números que recebem *Erro de disparo* em *Relatórios e avisos*: no máximo **1 vez a cada 24 h** e nunca na primeira hora depois de o programa ligar. Sem número cadastrado para esse aviso, só o Histórico mostra. Se o WhatsApp estiver fora, o aviso espera.
+
+**Conferir e diagnosticar:**
+
+- `systemctl --user list-timers achadinhoturbo-backup.timer` mostra a próxima execução.
+- `systemctl --user start achadinhoturbo-backup.service` roda o backup agora.
+- `journalctl --user -u achadinhoturbo-backup -n 20 --no-pager` mostra o resultado (só mensagens fixas, nunca a chave).
+- Código de saída do `auto`: **0** tudo certo; **1** o backup local falhou (o Drive nem é tentado); **3** o local deu certo, mas o Drive ou a conferência falhou.
+- O Drive deixou de aceitar (token vencido)? Rode `rclone config reconnect gdrive:`.
+
+**Restaurar a cópia do Drive:** com a chave no lugar, `npm run backup -- restaurar-drive ../achadinho-restaurado` baixa a cópia **mais recente**, decifra e roda a mesma conferência do `restaurar` (`PRAGMA integrity_check`; o resultado deve trazer `integridade=ok`). Para uma cópia específica, acrescente o nome no fim: `npm run backup -- restaurar-drive ../achadinho-restaurado disparador-AAAA-MM-DD-HH-MM-SS.tar.gz.gpg`. Os nomes saem de `rclone lsf "gdrive:Achadinho Turbo - Backups"` (as aspas são necessárias: o nome da pasta tem espaços). O comando recusa uma pasta dentro da pasta do programa e uma pasta que já exista com conteúdo: use sempre uma pasta nova ou vazia (o `restaurar` manual segue a mesma regra). Para repetir o teste, apague antes a pasta de teste. Código de saída: **0** ok; **1** falha (a mensagem diz o motivo); **2** o banco restaurado não passou na integridade. Depois, troque a `data/` como no passo a passo dos Docs (capítulo *Manutenção*). Em outro computador, instale o programa, o `gpg` e o `rclone`, configure o remoto `gdrive` (`rclone config`) e crie o arquivo da chave com o que está no gerenciador de senhas (arquivo com permissão 600, dentro de uma pasta com permissão 700: `mkdir -p -m 700 ~/.config/achadinhoturbo`) **sem rodar o instalador**.
+
+**Restaurar sem o programa, em qualquer computador com `gpg`:** baixe o `.tar.gz.gpg` pelo navegador (pasta `Achadinho Turbo - Backups` do Drive) e decifre. Antes, rode `umask 077` no terminal, para os arquivos novos nascerem visíveis só para você. O `gpg` pede a senha: cole a chave. A senha não vai na linha de comando. **Se o gpg não pedir a senha, o arquivo não é o seu backup cifrado: apague-o e não use.**
+
+```
+gpg --no-symkey-cache --output backup.tar.gz --decrypt disparador-AAAA-MM-DD-HH-MM-SS.tar.gz.gpg
+```
+
+Ou, com a chave num arquivo seu (apague-o depois):
+
+```
+gpg --batch --pinentry-mode loopback --passphrase-file backup.chave --output backup.tar.gz --decrypt disparador-AAAA-MM-DD-HH-MM-SS.tar.gz.gpg
+```
+
+Depois, `mkdir ../achadinho-restaurado` e `tar -xzf backup.tar.gz -C ../achadinho-restaurado`. Apague o `backup.tar.gz` (ele tem a sessão do WhatsApp). Dentro da pasta ficam o `disparador.db` e a `wa_auth`.
+
 
 ## Menu do painel
 
@@ -587,7 +637,7 @@ Quem controla o número do remetente consegue mandar links para os seus grupos, 
 
 ### Privacidade e segurança do remetente
 
-- **O número do remetente fica só no seu computador, entra no backup e é apagado ao excluir o remetente** (o Histórico fica com o nome). Os backups que você já fez continuam com o número até saírem do rodízio (o programa guarda os 7 mais recentes). Está na tabela `remetentes` de `data/disparador.db`; a API do painel mostra só o número mascarado e nunca o identificador interno do WhatsApp. Nunca vai para log, console nem mensagem de erro.
+- **O número do remetente fica só no seu computador (e na cópia criptografada do backup), entra no backup e é apagado ao excluir o remetente** (o Histórico fica com o nome). Os backups que você já fez continuam com o número até saírem da rotação (7 no computador; 14 no Google Drive, que depois ficam até 30 dias na lixeira do Drive). Está na tabela `remetentes` de `data/disparador.db`; a API do painel mostra só o número mascarado e nunca o identificador interno do WhatsApp. Nunca vai para log, console nem mensagem de erro.
 - **O texto da mensagem não é guardado.** Ficam só os campos lidos dele (título, preço, cupom…), com e-mails, telefones e sequências de 8 ou mais dígitos já escondidos, só quando a mensagem tem um link só e só até o link ser decidido. Links do Mercado Livre e links curtos são guardados sem os parâmetros. Os itens já decididos são apagados no prazo de *Ajustes → Privacidade dos grupos*, e o que ainda conta para "não repetir" é mantido pelas horas definidas.
 - Só mensagens **privadas** de números cadastrados e ligados são tratadas. Grupos, status, canais, mensagens da própria conta e qualquer outro número não geram item, resposta nem linha de log.
 
@@ -601,6 +651,7 @@ Em *Comunicação → Relatórios e avisos* você cadastra os **números que rec
 - **Limite padrão por grupo**: só preenche o limite de cada link **novo** do rotacionador (padrão 1000; vale de 2 a 1.024, o máximo do WhatsApp). Links que já existem não mudam: o aviso de lotação usa o limite de cada link.
 - **Aviso de grupo lotando**: quando um grupo do rotacionador chega a 95% do limite. Avisa uma vez por grupo e só avisa de novo depois que ele cair abaixo de 90% do limite.
 - **Aviso de erro de disparo**: mensagem **agregada** com os erros novos, **no máximo 1 a cada 30 minutos**. Só sai com o WhatsApp conectado: se ele caiu, o aviso chega quando voltar.
+- **Aviso de backup atrasado**: usa o mesmo canal do *Erro de disparo* (os números com esse aviso marcado). Sai quando o último backup que deu certo, no computador ou no Google Drive, tem mais de 26 h; no máximo 1 a cada 24 h. Veja [Backup](#backup).
 
 ## Conexões
 
@@ -655,7 +706,8 @@ Conferido uma vez contra a Central de Afiliados real (02/11/2026): a lista de pr
 - **Números de telefone e e-mails em `data/`:** além do pseudônimo dos membros, o banco guarda os **números de WhatsApp que você cadastra para receber avisos** (tabela `aviso_destinos`) e os **nomes e e-mails da equipe e dos convidados** (tabelas `users` e `invites`). A API mostra o número mascarado; o programa não escreve número nem e-mail no log nem em mensagem de erro. **Os backups carregam tudo isso**: trate-os como dado pessoal.
 - **Convites:** o banco guarda só uma impressão (hash) do link, nunca o link. Convites usados, cancelados ou vencidos são apagados 30 dias depois, na próxima vez que a tela *Equipe* abre. Para apagar os dados de alguém da equipe, remova a pessoa em *Equipe* (o e-mail ainda fica no convite que ela usou até essa limpeza).
 - **Espelhamento da Amazon**: o programa ouve os grupos de origem, mas entrega ao espelhamento só `{ grupo, se foi do seu número, texto, id da mensagem, hora }`: **nunca o número, o identificador nem o nome de exibição de quem postou**. Só os links da Amazon são tratados; o resto da conversa é descartado. Na tabela `espelho_itens` ficam o JID e o **nome do grupo** de origem, o id da mensagem (só para não processar duas vezes) e o **texto da mensagem**, guardado **mascarado** (e-mails, telefones e qualquer sequência de 8 ou mais dígitos viram `…`) e cortado em **1000 caracteres**. Esse texto **não vai para o navegador** (nem na fila de completar) e **não entra no log**, que usa só nomes de grupo. Para a Amazon vão o link postado (para abrir o encurtador), o código do produto e a sua tag, nunca o texto da mensagem, o grupo ou quem postou. **Os backups carregam esses textos de grupos de terceiros**: mesmo mascarados, trate o pacote como dado pessoal. **Retenção:** os itens já decididos (enviados, descartados, expirados, com erro) são apagados depois do prazo de *Ajustes → Privacidade dos grupos* (padrão 90 dias; **0 = guardar para sempre**, e então os textos também ficam), na limpeza que roda ao iniciar e a cada 6 h. Ficam de fora dessa limpeza o que ainda está na fila de decisão ou na fila para completar (esta expira sozinha, veja [Fila para completar](#fila-para-completar)) e o item enviado que ainda conta para o "não repetir" do espelhamento. **Apagar um espelhamento apaga na hora todos os itens e textos dele.** O botão *Apagar o que já passou do prazo* de *Ajustes* aplica a mesma regra na hora, inclusive aos itens do espelhamento.
-- **Remetente**: o número de cada remetente (e o identificador interno que o WhatsApp usa para ele) fica só na tabela `remetentes` do banco, **entra no backup** e é **apagado ao excluir o remetente** (os backups já feitos continuam com ele até saírem do rodízio dos 7 mais recentes); a API mostra só o número mascarado, e nem log, console nem mensagem de erro o levam. O **texto da mensagem não é guardado**: só os campos lidos dele, já mascarados. Veja [Privacidade e segurança do remetente](#privacidade-e-segurança-do-remetente).
+- **Backups** (`data/backups/` e a cópia no Google Drive): carregam o banco e a sessão do WhatsApp, ou seja, **tudo o que está acima**. Os de `data/backups/` ficam sem criptografia no seu disco (os 7 mais recentes); os do Drive sobem **criptografados** (AES256) com uma chave que só existe no seu computador e no seu gerenciador de senhas (as 14 cópias mais recentes). O Google não consegue abri-los, e você também não, se perder a chave. As cópias que saem da rotação vão para a lixeira do Drive, onde o Google as mantém por até 30 dias, e **excluir alguém do programa só tira essa pessoa das cópias depois que elas saem da rotação e da lixeira do Drive**. O estado do backup (`data/backup-estado.json`) não tem dado pessoal. Veja [Backup](#backup).
+- **Remetente**: o número de cada remetente (e o identificador interno que o WhatsApp usa para ele) fica só na tabela `remetentes` do banco, **entra no backup** e é **apagado ao excluir o remetente** (os backups já feitos continuam com ele até saírem da rotação (7 no computador; 14 no Google Drive, que depois ficam até 30 dias na lixeira do Drive)); a API mostra só o número mascarado, e nem log, console nem mensagem de erro o levam. O **texto da mensagem não é guardado**: só os campos lidos dele, já mascarados. Veja [Privacidade e segurança do remetente](#privacidade-e-segurança-do-remetente).
 - **Catálogo do Etiqueta**: o token fica num arquivo seu; o programa guarda só o caminho, lê o arquivo a cada pedido e nunca o põe em banco, log, URL, mensagem de erro ou tela. Ficam no banco as ofertas já tratadas (título, preço, foto, categoria e link), sem dado pessoal; veja [Privacidade e segurança](#privacidade-e-segurança) do Catálogo.
 - **Fotos enviadas:** as fotos de *Disparar mensagem* ficam em `data/uploads/` e são apagadas **7 dias depois** de não terem mais nenhum envio ativo (agendado ou repetido) que as use.
 - **Retenção:** eventos, leituras e cliques são apagados depois do prazo de *Ajustes → Privacidade dos grupos* (padrão 90 dias; a limpeza roda ao iniciar e a cada 6 h). Sessões vencidas também.
@@ -670,5 +722,5 @@ Conferido uma vez contra a Central de Afiliados real (02/11/2026): a lista de pr
 ## Cuidados
 
 - A conexão com o WhatsApp é **não oficial**. Há risco de o número ser restringido. Mantenha as pausas em *Ajustes* (padrão de 6 s entre grupos e 30 s entre ofertas, com mínimo de 2 s e de 5 s) e evite volume alto.
-- A pasta `data` guarda a sessão do seu WhatsApp, números de telefone dos avisos, e-mails da equipe, fotos enviadas e segredos das conexões. Não compartilhe nem envie para a nuvem.
+- A pasta `data` guarda a sessão do seu WhatsApp, números de telefone dos avisos, e-mails da equipe, fotos enviadas e segredos das conexões. Não compartilhe nem envie sem criptografia (a cópia do backup no Google Drive só sobe criptografada).
 - O programa só ouve em `127.0.0.1`. Num servidor, quem expõe é o Nginx com HTTPS, e o painel exige login.

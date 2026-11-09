@@ -8,6 +8,7 @@ data/
 # backups: carregam a sessão do WhatsApp e dados pessoais
 backups/
 *.tar.gz
+*.gpg
 # segredos
 .env
 .env.*

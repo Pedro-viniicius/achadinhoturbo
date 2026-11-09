@@ -212,9 +212,9 @@ test('API: configuração de fonte só com chaves e tipos conhecidos; token da e
   } finally { await s.fechar(); }
 });
 
-test('backup: destino padrão fica em data/backups (ignorado pelo git) e o .gitignore cobre backups, tar.gz e .env', () => {
+test('backup: destino padrão fica em data/backups (ignorado pelo git) e o .gitignore cobre backups, tar.gz, .gpg e .env', () => {
   const gi = fs.readFileSync(new URL('../.gitignore', import.meta.url), 'utf8');
-  for (const linha of ['data/', 'backups/', '*.tar.gz', '.env', '.env.*', '!.env.example']) assert.ok(gi.split('\n').includes(linha), linha);
+  for (const linha of ['data/', 'backups/', '*.tar.gz', '*.gpg', '.env', '.env.*', '!.env.example']) assert.ok(gi.split('\n').includes(linha), linha);
   const src = fs.readFileSync(new URL('../scripts/backup.js', import.meta.url), 'utf8');
   assert.ok(src.includes("path.join(DATA_DIR, 'backups')")); assert.ok(!src.includes("path.join(DATA_DIR, '..', 'backups')"));
 });

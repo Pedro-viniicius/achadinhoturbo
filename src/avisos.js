@@ -4,6 +4,7 @@
 // Os números dos destinos (aviso_destinos.jid) são dado pessoal: ficam só no banco, a listagem mascara e eles nunca
 // vão para log, console nem mensagem de erro. O log usa o nome do destino.
 
+import fs from 'node:fs';
 import { addLog, getSetting, setSetting } from './db.js';
 import { resumo, evasaoDoDia, startOfDay, dayOf } from './analytics.js';
 import { parseLink, statusDosGrupos, LOTACAO_PCT, LIMITE_MAX } from './rotador.js';
@@ -20,6 +21,19 @@ const MAX_NOME = 60;
 const MAX_DIGITOS_NOME = 5;              // o nome vai para o log: com 6 ou mais algarismos pode ser um telefone
 const CONSULTAS_MAX = 10;               // consultas de número ao WhatsApp (onWhatsApp) por IP…
 const CONSULTAS_JANELA_MS = 10 * 60000; // …a cada 10 min: cadastrar um número é raro, varrer números não
+export const BACKUP_ATRASO_H = 26;        // último sucesso do backup (local ou Drive) mais velho que isto = atrasado
+const BACKUP_REPETIR_MS = 24 * 3600000;   // …e o aviso de atraso se repete no máximo 1 vez a cada 24 h
+const BACKUP_CARENCIA_MS = 60 * 60000;    // …nunca na primeira hora depois de o programa ligar (o timer Persistent ainda roda)
+const BACKUP_SALTO_MS = 5 * 60000;        // …nem depois de o PC voltar da suspensão: o relógio andou isto além do tempo acordado
+const BACKUP_ESTADO_MAX = 64 * 1024;      // estado maior que isto não é o nosso arquivo
+const ORIGEM_BACKUP = { id: null, name: 'Backup' };
+// Frases fixas por etapa que falhou (scripts/backup.js, MOTIVOS_BACKUP): o texto do arquivo nunca vai direto ao Histórico.
+// As chaves são as mesmas do script (test/backup.test.js compara os dois mapas).
+export const MOTIVOS_BACKUP = {
+  chave_ausente: 'a chave de criptografia não foi encontrada', chave_aberta: 'a chave de criptografia (ou a pasta dela) está com permissão aberta',
+  banco: 'não consegui copiar o banco', cifrar: 'não consegui criptografar o pacote', verificacao: 'o pacote criptografado não passou na conferência',
+  envio: 'o envio ao Google Drive falhou', limpeza_drive: 'não consegui apagar as cópias antigas do Drive',
+};
 const MAX_ERRO_BRUTO = 500;             // corta antes das regex: texto enorme de uma biblioteca não trava o servidor
 const MSG_NUMERO = 'Número inválido. Use DDD e número, ex.: 35 99999-1234.';
 const ORIGEM = { id: null, name: 'Avisos' }; // coluna "Regra" do Histórico
@@ -168,7 +182,13 @@ async function destinoDoCorpo({ db, wa }, corpo, atual = null, antesDeConsultar 
 }
 
 // ---------- resumo, avisos e tick ----------
-export function createAvisos({ db, wa } = {}) {
+/**
+ * `estadoBackup`: caminho do data/backup-estado.json que o scripts/backup.js grava (sem ele, não há aviso de backup).
+ * `inicio`: quando o programa ligou (carência do aviso de atraso).
+ * `monotonico`: relógio que só anda com o PC acordado (o `performance.now()` do Linux não conta a suspensão). Comparado
+ * com o `now` dos ticks, mostra quando o PC voltou da suspensão: aí a carência recomeça.
+ */
+export function createAvisos({ db, wa, estadoBackup = null, inicio = Date.now(), monotonico = () => performance.now() } = {}) {
   const destinos = (filtro = () => true) => todosDestinos(db).filter(filtro);
   const registrar = (level, message) => addLog(db, { rule: ORIGEM, level, message });
 
@@ -288,6 +308,91 @@ export function createAvisos({ db, wa } = {}) {
     for (const d of lista) await entregar(d, texto, 'o aviso de erro');
   }
 
+  // ---------- backup ----------
+  /** Lê o estado do backup: null = o arquivo não existe; 'ilegivel' = existe mas não dá para confiar; senão o objeto. */
+  function lerEstadoBackup() {
+    let fd = null;
+    try {
+      // lstat não segue link simbólico; o que não é arquivo comum (FIFO, dispositivo, pasta, link) não é o nosso arquivo
+      if (!fs.lstatSync(estadoBackup).isFile()) return 'ilegivel';
+      // O_NOFOLLOW/O_NONBLOCK: se o arquivo for trocado por um link ou FIFO entre o lstat e o open, o open não segue nem espera
+      fd = fs.openSync(estadoBackup, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+      if (!fs.fstatSync(fd).isFile()) return 'ilegivel';
+      const buf = Buffer.alloc(BACKUP_ESTADO_MAX + 1); // um byte além do limite basta para saber que passou
+      let n = 0;
+      while (n < buf.length) {
+        const r = fs.readSync(fd, buf, n, buf.length - n, null);
+        if (r === 0) break;
+        n += r;
+      }
+      if (n > BACKUP_ESTADO_MAX) return 'ilegivel';
+      const e = JSON.parse(buf.toString('utf8', 0, n));
+      return e && typeof e === 'object' && !Array.isArray(e) ? e : 'ilegivel';
+    } catch (e) { return e?.code === 'ENOENT' ? null : 'ilegivel'; } finally { if (fd != null) try { fs.closeSync(fd); } catch { /* já fechado */ } }
+  }
+  const registrarBackup = (level, message) => addLog(db, { rule: ORIGEM_BACKUP, level, message }); // coluna "Regra": Backup
+  const instante = (v) => (Number.isFinite(v) && v > 0 ? v : null);
+  const ladoOk = (l) => l && typeof l === 'object' && l.ok === true;
+  const motivoDe = (l) => (typeof l?.motivo === 'string' && Object.hasOwn(MOTIVOS_BACKUP, l.motivo) ? MOTIVOS_BACKUP[l.motivo] : undefined);
+
+  /** Linha do Histórico de uma execução nova do backup: 'ok' ou 'aviso', nunca 'erro' (não pode gerar aviso de erro de disparo). */
+  function linhaDoBackup(e) {
+    const { local, drive } = e;
+    const drivePronto = ladoOk(drive);
+    const copias = Number.isInteger(drive?.copias) && drive.copias >= 0 && drive.copias <= 1000 ? drive.copias : null;
+    const partes = [ladoOk(local) ? 'cópia no computador ok' : `cópia no computador falhou${motivoDe(local) ? ` (${motivoDe(local)})` : ''}`];
+    if (drivePronto) partes.push(`cópia no Google Drive ok${copias == null ? '' : ` (${copias} ${copias === 1 ? 'cópia guardada' : 'cópias guardadas'})`}`);
+    else if (drive?.ok === false) partes.push(`cópia no Google Drive falhou${motivoDe(drive) ? ` (${motivoDe(drive)})` : ''}`);
+    else partes.push('cópia no Google Drive não foi tentada');
+    if (drivePronto && motivoDe(drive)) partes.push(`atenção: ${motivoDe(drive)}`);
+    registrarBackup(ladoOk(local) && drivePronto && !motivoDe(drive) ? 'ok' : 'aviso', `Backup automático: ${partes.join('; ')}.`);
+  }
+
+  // Carência do aviso de atraso: desde que o programa ligou ou desde que o PC voltou da suspensão (o timer do backup é
+  // Persistent e roda logo ao acordar). Um tick demorado (regra disparando por muitos minutos) não conta como suspensão:
+  // nele o relógio monotônico anda junto com o de parede.
+  let inicioCarencia = inicio;
+  let tickAnterior = null; // { now, mono } da passada anterior (os dois lidos no começo do tick)
+
+  const idade = (ts, now) => (ts == null ? 'nunca deu certo' : `há ${Math.max(0, Math.floor((now - ts) / 3600000))} h`);
+
+  /**
+   * Backup: cada execução nova do `auto` (tentativa_em diferente de backup_visto) vira uma linha no Histórico. Se o último
+   * sucesso, local ou do Drive, é mais velho que BACKUP_ATRASO_H (ou o estado não pode ser lido), avisa os destinos que
+   * recebem "Erro de disparo", 1× a cada 24 h (avisos_backup_ultimo) e só depois da carência de 60 min desde `inicio` ou
+   * desde a volta da suspensão (o relógio de parede andou mais de BACKUP_SALTO_MS além do monotônico entre dois ticks;
+   * `now` e `mono` são lidos juntos no começo do tick, antes de qualquer envio que possa demorar).
+   * Sem destinos, só o Histórico. Com destinos e o WhatsApp fora, espera. Nada de caminho nem número no texto.
+   * Não é `async`: só devolve uma promise quando há entrega a fazer. Uma passada que não tem o que mandar (quase todas)
+   * não acrescenta voltas de microtask ao tick, e os testes que correm contra o relógio (qa-grade) dependem dessa ordem.
+   */
+  function avisoDeBackup(now, mono) {
+    if (!estadoBackup) return;
+    if (tickAnterior && (now - tickAnterior.now) - (mono - tickAnterior.mono) > BACKUP_SALTO_MS) inicioCarencia = now;
+    tickAnterior = { now, mono };
+    const e = lerEstadoBackup();
+    if (e == null) return; // nunca rodou (ou o automático não foi instalado): nada a dizer
+    if (e !== 'ilegivel') {
+      const t = instante(e.tentativa_em);
+      if (t != null && String(t) !== String(getSetting(db, 'backup_visto'))) { setSetting(db, 'backup_visto', t); linhaDoBackup(e); }
+    }
+    if (now - inicioCarencia < BACKUP_CARENCIA_MS) return;
+    const ok = e === 'ilegivel' ? [] : [instante(e.ultimo_ok_local), instante(e.ultimo_ok_drive)];
+    const limite = BACKUP_ATRASO_H * 3600000;
+    if (e !== 'ilegivel' && ok.every((t) => t != null && now - t <= limite)) return; // em dia
+    if (now - Number(getSetting(db, 'avisos_backup_ultimo', 0)) < BACKUP_REPETIR_MS) return;
+    const lista = destinos((d) => d.ativo && d.avisos.includes('erro'));
+    if (lista.length && !wa.isReady()) return; // espera o WhatsApp voltar
+    setSetting(db, 'avisos_backup_ultimo', now);
+    const itens = e === 'ilegivel' ? ['Não consegui ler o estado do backup']
+      : [`Cópia no computador: ${idade(ok[0], now)}`, `Cópia no Google Drive: ${idade(ok[1], now)}`];
+    registrarBackup('aviso', `Backup atrasado. ${itens.join('; ')}.${lista.length ? '' : ' Nenhum número recebe o aviso de erro de disparo.'}`);
+    const texto = ['⚠️ *O backup está atrasado*', ...itens.map((i) => (e === 'ilegivel' ? `${i}.` : `• ${i}`)), '',
+      'Veja o Histórico no painel e confira o backup automático (capítulo Manutenção dos Docs).'].join('\n');
+    if (!lista.length) return undefined;
+    return (async () => { for (const d of lista) await entregar(d, texto, 'o aviso de backup atrasado'); })();
+  }
+
   function textoLotacao(grupos) {
     const linhas = [`🚨 *${grupos.length === 1 ? 'Grupo lotando' : 'Grupos lotando'}*`];
     for (const g of grupos) {
@@ -327,13 +432,14 @@ export function createAvisos({ db, wa } = {}) {
 
   return {
     /**
-     * Chamado a cada tick: resumo diário, aviso de erro e aviso de lotação. Uma parte que falha não impede as outras;
+     * Chamado a cada tick: resumo diário, aviso de erro, backup e aviso de lotação. Uma parte que falha não impede as outras;
      * o erro sobe sem número (o agendador o mostra no console).
      */
     async tick(now = Date.now()) {
       let falha = null;
-      for (const passo of [resumoDiario, avisoDeErro, avisoDeLotacao]) {
-        try { await passo(now); } catch (e) { falha ??= e; }
+      const mono = monotonico(); // junto com o `now`: um envio lento antes do backup não pode parecer suspensão no tick seguinte
+      for (const passo of [resumoDiario, avisoDeErro, avisoDeBackup, avisoDeLotacao]) {
+        try { const r = passo(now, mono); if (r) await r; } catch (e) { falha ??= e; }
       }
       if (falha) throw new Error(semNumero(falha));
     },

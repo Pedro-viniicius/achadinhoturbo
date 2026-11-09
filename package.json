@@ -12,7 +12,8 @@
     "simular": "node --disable-warning=ExperimentalWarning src/server.js --simular",
     "test": "node --disable-warning=ExperimentalWarning --test \"test/**/*.test.js\"",
     "senha": "node --disable-warning=ExperimentalWarning scripts/senha.js",
-    "backup": "node --disable-warning=ExperimentalWarning scripts/backup.js"
+    "backup": "node --disable-warning=ExperimentalWarning scripts/backup.js",
+    "backup:instalar": "node --disable-warning=ExperimentalWarning scripts/backup-instalar.js"
   },
   "dependencies": {
     "@whiskeysockets/baileys": "7.0.0-rc14",
