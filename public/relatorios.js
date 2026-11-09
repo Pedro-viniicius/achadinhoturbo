@@ -46,7 +46,7 @@ const TEXTOS_RELATORIOS = {
   semBlocos: 'Para separar o resumo por nicho, crie blocos em <a href="#blocos">Blocos de análise</a>.',
   avisosLegenda: 'Avisos', ativo: 'Ativo', ativoDica: 'Desligado, o número não recebe nada até você ligar de novo.',
   ativoSoDono: 'Só o Dono desliga um número que recebe “Erro de disparo”.',
-  ativoSoDonoLista: 'Números com “Erro de disparo” ligado só o Dono desliga.',
+  ativoSoDonoLista: 'Só o Dono desliga os números ligados que recebem “Erro de disparo”.',
   salvar: 'Salvar número', salvando: 'Salvando…', cancelar: 'Cancelar',
   faltaNome: 'Dê um nome ao número.', faltaNumero: 'Número inválido. Use DDD e número, ex.: 35 99999-1234.',
   faltaBloco: 'Marque ao menos um bloco ou escolha “Todos os grupos”.',
