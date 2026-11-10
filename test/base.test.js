@@ -1085,6 +1085,159 @@ test('anti-banimento etapa 1 (CA1): banco da versão anterior abre sem perder na
   }
 });
 
+// Não repetir produto parecido (plano nao-repetir-produto-parecido, etapa 1): sent_offers ganha title e price_cents
+// (centavos; NULL = desconhecido) no fim, o índice por regra e hora, e os envios antigos do catálogo são preenchidos uma
+// vez a partir de catalogo_itens.oferta (título de qualquer item da mesma regra e chave; preço só de item 'enviado').
+const COLUNAS_SENT_OFFERS = ['id', 'rule_id', 'offer_key', 'sent_at', 'title', 'price_cents'];
+
+function conferirSentOffers(db, quando) {
+  assert.deepEqual(colunas(db, 'sent_offers'), COLUNAS_SENT_OFFERS, `colunas de sent_offers, as novas no fim (${quando})`);
+  assert.deepEqual(semCid(db, 'sent_offers').slice(-2), [
+    { name: 'title', type: 'TEXT', notnull: 0, dflt_value: null, pk: 0 },
+    { name: 'price_cents', type: 'INTEGER', notnull: 0, dflt_value: null, pk: 0 },
+  ], `title e price_cents aceitam nulo e não têm padrão (${quando})`);
+  assert.equal(db.prepare("SELECT tbl_name FROM sqlite_master WHERE type = 'index' AND name = 'idx_sent_quando'").get()?.tbl_name, 'sent_offers', `índice por regra e hora (${quando})`);
+  assert.deepEqual(db.prepare('PRAGMA index_info(idx_sent_quando)').all().map((c) => c.name), ['rule_id', 'sent_at'], `colunas do índice (${quando})`);
+  assert.equal(db.prepare('PRAGMA index_list(sent_offers)').all().find((i) => i.name === 'idx_sent_quando')?.unique, 0, `o índice não é único (${quando})`);
+  assert.deepEqual(objetosDe(db).filter((o) => o.tbl_name === 'sent_offers').map((o) => o.name).sort(), ['idx_sent', 'idx_sent_quando', 'sent_offers'],
+    `sent_offers só com os dois índices, sem duplicar (${quando})`);
+}
+
+/** Banco como o do serviço antes desta etapa: esquema atual sem sent_offers.title/price_cents e sem idx_sent_quando. */
+function bancoSemTituloNosEnvios(dir, { manterTitulo = false } = {}) {
+  const velho = openDb(dir);
+  velho.exec('DROP INDEX IF EXISTS idx_sent_quando');
+  for (const col of ['price_cents', ...(manterTitulo ? [] : ['title'])]) {
+    if (colunas(velho, 'sent_offers').includes(col)) velho.exec(`ALTER TABLE sent_offers DROP COLUMN ${col}`);
+  }
+  return velho;
+}
+
+test('não repetir parecido etapa 1: banco novo tem sent_offers.title, price_cents e idx_sent_quando; reabrir não cria nem altera nada', () => {
+  const dir = tmp();
+  const db1 = openDb(dir);
+  conferirSentOffers(db1, 'primeira abertura');
+  db1.prepare('INSERT INTO sent_offers (rule_id, offer_key, sent_at) VALUES (1, ?, 10)').run('MLB1');
+  db1.prepare('INSERT INTO sent_offers (rule_id, offer_key, sent_at, title, price_cents) VALUES (1, ?, 20, ?, ?)').run('MLB2', 'Fone Bluetooth Sem Fio', 4990);
+  const esquema = objetosDe(db1);
+  const dados = linhas(db1, 'SELECT * FROM sent_offers ORDER BY id');
+  assert.deepEqual(dados.map((r) => [r.title, r.price_cents]), [[null, null], ['Fone Bluetooth Sem Fio', 4990]], 'gravação sem título fica com os dois nulos');
+  db1.close();
+
+  const db2 = openDb(dir);
+  conferirSentOffers(db2, 'segunda abertura');
+  assert.deepEqual(objetosDe(db2), esquema, 'reabrir não cria nem altera nada');
+  assert.deepEqual(linhas(db2, 'SELECT * FROM sent_offers ORDER BY id'), dados, 'envios intactos ao reabrir');
+  db2.close();
+});
+
+test('não repetir parecido etapa 1 (CA1, CA4): banco da versão anterior abre sem perder nada e ganha título e preço dos envios do catálogo', () => {
+  const dir = tmp();
+  const velho = bancoSemTituloNosEnvios(dir);
+  const item = velho.prepare('INSERT INTO catalogo_itens (rule_id, chave, loja, status, oferta, criado_em) VALUES (3, ?, ?, ?, ?, 1)');
+  const envio = velho.prepare('INSERT INTO sent_offers (rule_id, offer_key, sent_at) VALUES (?, ?, ?)');
+  // [chave, loja, status, oferta, título esperado, preço esperado em centavos]
+  const casos = [
+    ['MLB1', 'ml', 'enviado', '{"title":"Shampoo Lola From Rio 500ml","price":49.9}', 'Shampoo Lola From Rio 500ml', 4990],
+    ['MLB2', 'ml', 'enviado', '{"title":"Areia Higiênica Fina 4kg","price":10}', 'Areia Higiênica Fina 4kg', 1000],
+    ['MLB3', 'ml', 'enviado', '{"title":"Ração Gatos 1kg","price":19.9}', 'Ração Gatos 1kg', 1990], // 19.9 * 100 = 1989.99…
+    ['ASIN:B0X', 'amazon', 'descartado', '{"title":"Cicaplast Baume B5 40ml","price":59.9}', 'Cicaplast Baume B5 40ml', null],
+    ['SHOPEE:1.2', 'shopee', 'enviado', '{"title":"Kit Escova Dental","price":"49.90"}', 'Kit Escova Dental', null], // preço em texto
+    ['MLB4', 'ml', 'enviado', '{"title":"Fone Sem Preço","price":0}', 'Fone Sem Preço', null],
+    ['MLB5', 'ml', 'enviado', '{"title":"Fone Negativo","price":-5}', 'Fone Negativo', null],
+    ['MLB6', 'ml', 'enviado', '{"title":"Fone Nulo","price":null}', 'Fone Nulo', null],
+    ['MLB7', 'ml', 'enviado', 'isto não é json {', null, null],
+    ['MLB8', 'ml', 'enviado', '{"price":25.5}', null, 2550], // oferta sem título
+  ];
+  for (const [chave, loja, status, oferta] of casos) { item.run(chave, loja, status, oferta); envio.run(3, chave, 1730000000000); }
+  envio.run(3, 'MLB999', 1730000000001); // fonte do ML, sem item no catálogo
+  envio.run(4, 'MLB1', 1730000000002); // mesma chave em outra regra: o item é da regra 3
+  velho.exec(`
+    INSERT INTO groups (jid, name, size, updated_at) VALUES ('g1@g.us', 'Grupo 1', 250, 1);
+    INSERT INTO rules (id, name, group_jids, dedupe_days, created_at) VALUES (3, 'Catálogo', '["g1@g.us"]', 7, 1), (4, 'ML', '["g1@g.us"]', 3, 1);
+    INSERT INTO log (ts, rule_id, rule_name, level, group_name, offer_title, message) VALUES (1730000000000, 3, 'Catálogo', 'ok', 'Grupo 1', 'Fone', 'enviado');
+    INSERT INTO envios (id, tipo, payload, group_jids, status, created_at) VALUES (5, 'oferta', '{"oferta":{"title":"Fone"}}', '["g1@g.us"]', 'concluido', 1);
+  `);
+  assert.ok(!colunas(velho, 'sent_offers').includes('title') && !colunas(velho, 'sent_offers').includes('price_cents'), 'o banco simulado não tem as colunas novas');
+  assert.ok(!existe(velho, 'index', 'idx_sent_quando'), 'o banco simulado não tem idx_sent_quando');
+  const objetosAntigos = objetosDe(velho);
+  const tabelasAntigas = objetosAntigos.filter((o) => o.type === 'table').map((o) => o.name);
+  const colunasAntes = semCid(velho, 'sent_offers');
+  const antes = {};
+  for (const t of tabelasAntigas) antes[t] = linhas(velho, `SELECT * FROM ${t} ORDER BY rowid`);
+  velho.close();
+
+  const esperado = [...casos.map(([, , , , title, price_cents]) => ({ title, price_cents })), { title: null, price_cents: null }, { title: null, price_cents: null }];
+  for (let abertura = 1; abertura <= 2; abertura++) {
+    const db = openDb(dir);
+    conferirSentOffers(db, `abertura ${abertura}`);
+    assert.deepEqual(semCid(db, 'sent_offers').slice(0, colunasAntes.length), colunasAntes, `as colunas antigas de sent_offers não mudam (abertura ${abertura})`);
+    assert.deepEqual(linhas(db, 'SELECT * FROM sent_offers ORDER BY rowid'), antes.sent_offers.map((r, i) => ({ ...r, ...esperado[i] })),
+      `envios intactos, com título e preço preenchidos só onde o catálogo tem o dado (abertura ${abertura})`);
+    for (const t of tabelasAntigas.filter((t) => t !== 'sent_offers')) {
+      assert.deepEqual(linhas(db, `SELECT * FROM ${t} ORDER BY rowid`), antes[t], `${t} intacta (abertura ${abertura})`);
+    }
+    assert.deepEqual(objetosDe(db).filter((o) => o.name !== 'idx_sent_quando' && o.name !== 'sent_offers'),
+      objetosAntigos.filter((o) => o.name !== 'sent_offers'), `nenhuma outra tabela ou índice muda (abertura ${abertura})`);
+    db.close();
+  }
+});
+
+test('não repetir parecido etapa 1: o preenchimento roda uma vez só e nunca troca o que já está gravado', () => {
+  const dir = tmp();
+  // Banco que já tinha title (abertura interrompida entre os dois ALTER TABLE): o título gravado fica, o preço vem do catálogo.
+  const velho = bancoSemTituloNosEnvios(dir, { manterTitulo: true });
+  velho.exec(`
+    INSERT INTO catalogo_itens (rule_id, chave, loja, status, oferta, criado_em) VALUES
+      (3, 'MLB1', 'ml', 'enviado', '{"title":"Título do catálogo","price":49.9}', 1),
+      (3, 'MLB2', 'ml', 'enviado', '{"title":"Fone Bluetooth Sem Fio","price":79.9}', 1);
+    INSERT INTO sent_offers (rule_id, offer_key, sent_at, title) VALUES (3, 'MLB1', 10, 'Título já gravado'), (3, 'MLB2', 20, NULL);
+  `);
+  velho.close();
+
+  const db1 = openDb(dir);
+  assert.deepEqual(linhas(db1, 'SELECT offer_key, title, price_cents FROM sent_offers ORDER BY id'), [
+    { offer_key: 'MLB1', title: 'Título já gravado', price_cents: 4990 },
+    { offer_key: 'MLB2', title: 'Fone Bluetooth Sem Fio', price_cents: 7990 },
+  ], 'COALESCE: o título gravado não é trocado pelo do catálogo');
+  // Depois da migração, envio novo sem título (código antigo) e um apagado à mão: a próxima abertura não preenche de novo.
+  db1.exec(`UPDATE sent_offers SET title = NULL, price_cents = NULL WHERE offer_key = 'MLB2';
+    INSERT INTO sent_offers (rule_id, offer_key, sent_at) VALUES (3, 'MLB1', 30);`);
+  const depois = linhas(db1, 'SELECT * FROM sent_offers ORDER BY id');
+  db1.close();
+
+  const db2 = openDb(dir);
+  assert.deepEqual(linhas(db2, 'SELECT * FROM sent_offers ORDER BY id'), depois, 'a segunda abertura não refaz o preenchimento');
+  db2.close();
+});
+
+test('não repetir parecido etapa 1: falha no preenchimento não derruba o openDb, deixa os envios como estavam e não loga a mensagem do banco', (t) => {
+  const dir = tmp();
+  const velho = bancoSemTituloNosEnvios(dir);
+  velho.exec(`
+    INSERT INTO catalogo_itens (rule_id, chave, loja, status, oferta, criado_em) VALUES (3, 'MLB1', 'ml', 'enviado', '{"title":"Fone Bluetooth Sem Fio","price":49.9}', 1);
+    INSERT INTO sent_offers (rule_id, offer_key, sent_at) VALUES (3, 'MLB1', 10);
+    CREATE TRIGGER trava_envios BEFORE UPDATE ON sent_offers BEGIN SELECT RAISE(ABORT, 'Maria 5531999990000'); END;
+  `);
+  velho.close();
+  const erro = t.mock.method(console, 'error', () => {});
+
+  const db1 = openDb(dir);
+  assert.deepEqual(colunas(db1, 'sent_offers'), COLUNAS_SENT_OFFERS, 'as colunas novas entram mesmo com a falha');
+  assert.ok(existe(db1, 'index', 'idx_sent_quando'), 'o índice novo também');
+  assert.deepEqual(linhas(db1, 'SELECT offer_key, title, price_cents FROM sent_offers'), [{ offer_key: 'MLB1', title: null, price_cents: null }],
+    'o UPDATE inteiro volta atrás: o envio fica sem título e sem preço (não é comparado)');
+  assert.equal(erro.mock.callCount(), 1, 'a falha é avisada uma vez no console');
+  const dito = erro.mock.calls[0].arguments.map(String).join(' ');
+  assert.match(dito, /^\[db\] .* ERR_SQLITE_ERROR$/, 'só o código do erro');
+  assert.doesNotMatch(dito, /Maria|5531999990000/, 'nada da mensagem do banco');
+  db1.close();
+
+  const db2 = openDb(dir);
+  assert.equal(erro.mock.callCount(), 1, 'a segunda abertura não tenta de novo');
+  db2.close();
+});
+
 test('anti-banimento etapa 1 (CA5): jitter varia ±VARIACAO_PAUSA em torno do valor, com o aleatório injetável', (t) => {
   assert.equal(util.VARIACAO_PAUSA, 0.3, 'variação de ±30%, a mesma que o /state vai expor');
   // determinístico: as pontas e o meio da faixa

@@ -13,6 +13,7 @@ import { createRotinas } from './rotinas.js';
 import { createRitmo, pausaGrupoGravada, pausaOfertaGravada } from './ritmo.js';
 import { proximoHorario, horarioDe, resolverVencido, proximoEnvio, qtdDaLinha, templateDaLinha } from './grade.js';
 import { sleep, jitter, inWindow, alignToWindow } from './util.js';
+import { criarTrava, lerEnviados, comparar, centavos, maisBarataOBastante, tituloParaGuardar, comFraseMaisBarata, textoConflito, textoPassou, textoConferencia, HORAS_ENTRE_PARECIDOS } from './parecido.js';
 import { PAUSA_DESCARTADA_H, MOTIVOS_VERIFICADOR, CAUSAS } from './verificador.js';
 
 // Pausas entre mensagens e horário de funcionamento: moram em ./util.js (src/envios.js usa o mesmo ritmo anti-bloqueio);
@@ -145,6 +146,43 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
     descartadas.set(chavePausa(rule, key), agora + PAUSA_DESCARTADA_MS);
   }
 
+  // ---------- produto igual ou parecido (plano nao-repetir-produto-parecido): uma linha "Pulada" por conflito
+  // Fora das Novidades a mesma candidata volta a cada execução e seria pulada de novo pelo mesmo motivo (achados R4/S1):
+  // "regra\0chave\0conflito" → até quando a linha não se repete (só em memória; um reinício loga de novo, uma vez).
+  // O conflito é a anterior (tipo e sent_at): outra anterior, ou a mesma em outro tipo, é conflito novo e ganha linha.
+  // Na mesma rodada não há sent_at: vale o título da escolhida, por HORAS_ENTRE_PARECIDOS.
+  // A pulada na conferência (mais barata na escolha, mais cara na loja) usa o mesmo mapa, com o tipo 'conferencia'.
+  const puladasLogadas = new Map();
+  /** Tira as entradas vencidas (sem crescer para sempre): uma vez por execução da regra (achado R10). */
+  function limparPuladasLogadas(agora) {
+    for (const [k, ate] of puladasLogadas) if (ate <= agora) puladasLogadas.delete(k);
+  }
+  /** Linha 'info' de `offer_title` com `message`, só se o conflito `k` ainda não foi dito; ele fica dito até `ate`. */
+  function logarUmaVez(rule, k, ate, offer_title, message, agora) {
+    if (puladasLogadas.has(k)) return;
+    puladasLogadas.set(k, Math.max(ate, agora + 1));
+    log(rule, { level: 'info', offer_title, message });
+  }
+  // a anterior deixa de barrar quando a janela da regra ("dias sem repetir") vence
+  const fimDaJanela = (rule, sentAt) => sentAt + (Number(rule.dedupe_days) || 0) * 86400000;
+  function logarPuladaUmaVez(rule, p, agora) {
+    const { tipo, anterior } = p.r;
+    const rodada = tipo === 'rodada';
+    const k = `${rule.id}\0${p.key}\0${tipo}\0${rodada ? anterior.title : anterior.sent_at}`;
+    // a da rodada não tem envio: vale por HORAS_ENTRE_PARECIDOS
+    const ate = rodada ? agora + HORAS_ENTRE_PARECIDOS * 3600000 : fimDaJanela(rule, anterior.sent_at);
+    logarUmaVez(rule, k, ate, p.title, textoConflito(p.r, agora), agora);
+  }
+
+  // ---------- ofertas saindo agora (achados Q1 e R1): desde a escolha de cada uma (pickOffers, no mesmo ponto em que
+  // entra na trava da rodada) até a gravação em sent_offers ou o fim da execução, as ofertas que a execução em
+  // andamento de cada regra vai mandar. O "Enviar" do Catálogo as consulta dentro da transação (src/catalogo-itens.js,
+  // usarEmEnvio): a regra só grava a reserva depois de mandar aos grupos. A prévia não entra aqui.
+  // regra → (chave → { key, title }); só em memória, uma execução por regra de cada vez (running)
+  const emEnvio = new Map();
+  const tirarDoEnvio = (ruleId, key) => { emEnvio.get(ruleId)?.delete(key); };
+  catalogoItens?.usarEmEnvio?.((ruleId) => [...(emEnvio.get(ruleId)?.values() ?? [])]);
+
   /**
    * Confere a oferta da regra logo antes do link (D1). As fontes antigas são do Mercado Livre; o catálogo manda a
    * própria loja. Sem verificador → enviar como veio. Nunca lança: um descarte não para as outras ofertas (D6).
@@ -153,7 +191,7 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
   async function conferirDaRegra(offer) {
     if (!verificador) return { acao: 'enviar', oferta: offer, sufixo: null };
     try {
-      const { lidoEm = null, ...oferta } = offer;
+      const { lidoEm = null, maisBarata: _marca, ...oferta } = offer; // a marca da trava é interna: o verificador não a vê
       const r = await verificador.conferir(offer.catalogo ? oferta : { ...oferta, loja: 'mercadolivre' }, { lidoEm });
       if (r?.acao === 'enviar' && r.oferta && typeof r.oferta === 'object') return { acao: 'enviar', oferta: r.oferta, sufixo: typeof r.sufixo === 'string' && r.sufixo ? r.sufixo : null };
       if (r?.acao === 'descartar' && Object.hasOwn(MOTIVOS_VERIFICADOR, r.motivo)) {
@@ -302,9 +340,10 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
 
   /**
    * Estado de uma execução: o que o catálogo leu (para o cursor), o que os filtros da regra recusaram, o que esperou
-   * e as chaves que cada fonte trouxe (vistas: o catálogo conta a de outra fonte como tratada, R11).
+   * e as chaves que cada fonte trouxe (vistas: o catálogo conta a de outra fonte como tratada, R11). `puladas`: as
+   * ofertas barradas por já ter saído (ou estar saindo) uma igual ou parecida (src/parecido.js): { key, title, r } cada uma.
    */
-  const novaExecucao = () => ({ paginas: new Map(), recusadas: new Set(), esperando: new Map(), vistas: new Set() });
+  const novaExecucao = () => ({ paginas: new Map(), recusadas: new Set(), esperando: new Map(), vistas: new Set(), puladas: [] });
   // a regra apagada no meio da execução não grava nada do catálogo: o id pode ser reaproveitado por uma regra nova
   const regraExiste = (id) => !!db.prepare('SELECT 1 FROM rules WHERE id = ?').get(id);
   const esperar = (exec, motivo) => exec.esperando.set(motivo, (exec.esperando.get(motivo) || 0) + 1);
@@ -338,7 +377,7 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
   function utilizavelNa(rule) {
     let cheia = null;
     return (c) => {
-      if (!LOJAS_CATALOGO.has(c?.loja) || ml.rejectReason(c, rule) || esperaDaLoja(c)) return false;
+      if (!LOJAS_CATALOGO.has(c?.loja) || ml.rejectReason(c, rule) || esperaDaLoja(c) || pausada(rule, c.key)) return false;
       if (!motivosDeRevisao(c).length) return true;
       cheia ??= catalogoItens.revisaoCheia(rule.id);
       return !cheia;
@@ -352,9 +391,16 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
    * `previa`: pré-visualização (o catálogo não faz a primeira leitura até o fim nem escreve avisos, S3).
    * Cada oferta sai com `lidoEm` (D7, a idade dos dados para a regra do frescor do verificador): o instante de antes da
    * leitura das fontes; null no catálogo e na lista com preço digitado (idade desconhecida). A descartada pelo
-   * verificador há menos de PAUSA_DESCARTADA_H fica fora da escolha (D6).
+   * verificador há menos de PAUSA_DESCARTADA_H fica fora da escolha (D6), como a pulada na conferência (achado Q5).
+   * Produto igual ou parecido (plano nao-repetir-produto-parecido, regras 7 e 8): depois dos filtros e das esperas, a
+   * oferta que repete o título de outra enviada pela regra, ou é parecida com ela, vai para `exec.puladas`, a não ser
+   * que seja o mesmo título (nenhuma parecida nas últimas 24 h) e esteja pelo menos DESCONTO_MINIMO_MAIS_BARATA% abaixo
+   * do menor preço dele na janela (D10/D11): então entra com `maisBarata` (a mensagem leva a frase) e o `runRule`
+   * confere o preço de novo depois da conferência na loja. O catálogo que vai à revisão não leva a marca.
+   * `saindo` (Map, só no runRule): recebe cada escolhida que vai sair (a que vai à revisão não) na hora em que é
+   * escolhida, para o "Enviar" do Catálogo já vê-la durante as leituras que faltam (achado R1).
    */
-  async function pickOffers(rule, want, exec = novaExecucao(), { previa = false } = {}) {
+  async function pickOffers(rule, want, exec = novaExecucao(), { previa = false, saindo = null } = {}) {
     const lidoEm = Date.now();
     const cands = await ml.candidates(rule, {
       links, onWarn: (m) => log(rule, { level: 'aviso', message: m }),
@@ -363,16 +409,40 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
       utilizavel: fonteCatalogo ? utilizavelNa(rule) : undefined,
     });
     const picked = []; let tried = 0; const maxTries = Math.max(want * 8, 10);
+    const agora = Date.now();
+    // chave exata continua com wasSent/tratada; aqui só o título: o que a regra enviou na janela e o que já está escolhido
+    const trava = criarTrava({
+      enviados: rule.dedupe_days > 0 ? lerEnviados(db, rule.id, agora - rule.dedupe_days * 86400000) : [],
+      agora, dedupeDias: rule.dedupe_days,
+    });
+    /** Barra (→ o resultado da trava, anotado em `exec.puladas`) ou libera (→ null); `marca` recebe a anterior quando é mais barata. */
+    const barrada = (o, marca) => {
+      const r = trava.avaliar({ key: o.key, title: o.title, price: o.price });
+      if (r?.acao === 'barrar') { exec.puladas.push({ key: o.key, title: o.title, r }); return r; }
+      if (r?.acao === 'liberar') marca.maisBarata = { title: r.anterior.title, preco: r.anterior.preco, sent_at: r.anterior.sent_at };
+      return null;
+    };
     for (const c of cands) {
       if (picked.length >= want) break;
       if (doCatalogo(rule, c)) {
         if (!LOJAS_CATALOGO.has(c.loja)) continue;
         if (ml.rejectReason(c, rule)) { exec.recusadas.add(c.key); continue; }
+        // pulada na conferência há menos de PAUSA_DESCARTADA_H (achado Q5): fora da escolha, e o cursor passa por ela
+        if (pausada(rule, c.key)) { exec.recusadas.add(c.key); continue; }
         const espera = esperaDaLoja(c);
         if (espera) { esperar(exec, espera); continue; }
+        const marca = {};
+        // barrada por um envio anterior: tratada como recusada, para o cursor das Novidades não ficar preso nela. A da
+        // mesma rodada não (achado R1): se a escolhida não sair (esgotada, revisão, falha de link, teto), o cursor fica na
+        // página e a próxima execução a avalia de novo, contra o que saiu de fato
+        const b = barrada(c, marca);
+        if (b) { if (b.tipo !== 'rodada') exec.recusadas.add(c.key); continue; }
         const motivos = motivosDeRevisao(c);
         if (motivos.length && catalogoItens.revisaoCheia(rule.id)) { esperar(exec, 'revisao_cheia'); continue; }
-        picked.push({ ...c, catalogo: true, motivos, lidoEm: null });
+        // a que vai à revisão não leva a marca: o "Enviar" decide de novo
+        picked.push({ ...c, catalogo: true, motivos, lidoEm: null, ...(motivos.length ? {} : marca) });
+        trava.acrescentar({ key: c.key, title: c.title });
+        if (!motivos.length) saindo?.set(c.key, { key: c.key, title: c.title });
         continue;
       }
       if (tried >= maxTries) continue;
@@ -386,7 +456,11 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
       }
       const why = ml.rejectReason(offer, rule);
       if (why) continue;
-      picked.push({ ...offer, lidoEm: offer.digitado === true ? null : lidoEm });
+      const marca = {};
+      if (barrada(offer, marca)) continue;
+      picked.push({ ...offer, lidoEm: offer.digitado === true ? null : lidoEm, ...marca });
+      trava.acrescentar({ key: offer.key, title: offer.title });
+      saindo?.set(offer.key, { key: offer.key, title: offer.title });
     }
     return picked;
   }
@@ -488,10 +562,37 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
       if (problem) { log(rule, { level: 'erro', message: `Regra incompleta: ${problem}.` }); summary.errors++; return summary; }
 
       const want = qtdDa(rule, linha);
+      // as que vão sair (a que vai à revisão do Catálogo não) entram em `emEnvio` já na escolha: o "Enviar" do Catálogo
+      // as vê até a gravação (Q1), também durante as leituras da escolha que faltam (R1)
+      emEnvio.set(rule.id, new Map());
+      // o "Enviar" do Catálogo que passou durante a escolha (antes de a parecida dele ser escolhida) gravou a reserva
+      // depois de a trava ler os enviados: cada oferta é conferida de novo contra o que entrou em sent_offers desde
+      // aqui (R1). Pelo id, não pelo relógio: uma reserva no mesmo milissegundo do início também conta
+      const ultimaReserva = Number(db.prepare('SELECT MAX(id) AS n FROM sent_offers').get()?.n) || 0;
       let picked;
-      try { picked = await pickOffers(rule, want, exec); } catch (e) {
+      try { picked = await pickOffers(rule, want, exec, { saindo: emEnvio.get(rule.id) }); } catch (e) {
         log(rule, { level: 'erro', message: 'Não consegui buscar ofertas: ' + e.message }); summary.errors++; return summary;
       }
+      const gravadas = new Set(); // os ids que esta execução gravou em sent_offers (não contam na conferência abaixo)
+      /**
+       * Reserva gravada por outro (o "Enviar" do Catálogo) desde o início da escolha que barra a oferta: a mesma chave
+       * (→ { mesmaChave }) ou um título igual ou parecido (→ o resultado de barrar, para a linha do Histórico). Nunca
+       * com a exceção do mais barato: as duas sairiam no mesmo horário (D12). → null se pode sair.
+       */
+      const reservadaDurante = (o) => {
+        // `+rule_id`: só as linhas depois de `ultimaReserva` (pelo id), sem varrer o índice da regra inteira
+        const novas = db.prepare('SELECT id, offer_key, title, price_cents, sent_at FROM sent_offers WHERE id > ? AND +rule_id = ? ORDER BY id').all(ultimaReserva, rule.id);
+        for (const e of novas) {
+          if (gravadas.has(Number(e.id))) continue;
+          if (String(e.offer_key) === String(o.key)) return { mesmaChave: true };
+          const tipo = comparar(o.title, e.title);
+          if (tipo) return { acao: 'barrar', tipo, anterior: { title: e.title, preco: Number.isInteger(e.price_cents) && e.price_cents > 0 ? e.price_cents : null, sent_at: e.sent_at } };
+        }
+        return null;
+      };
+      // produto igual ou parecido já enviado (ou escolhido): uma linha por conflito, só 'info' (nunca alerta)
+      limparPuladasLogadas(Date.now());
+      for (const p of exec.puladas) logarPuladaUmaVez(rule, p, Date.now());
       if (!picked.length) { log(rule, { level: 'info', message: 'Sem ofertas novas dentro dos filtros desta vez.' }); return summary; }
 
       const d = delays();
@@ -500,12 +601,36 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
       // descarte do verificador (D8): uma linha 'aviso' por oferta, nunca 'erro'; a oferta não é reposta (D6)
       const descartar = (o, c) => { summary.descartadas++; log(rule, { level: 'aviso', offer_title: o.title, message: c.texto }); };
       for (let i = 0; i < picked.length; i++) {
+        if (i > 0) tirarDoEnvio(rule.id, picked[i - 1].key); // a anterior saiu (já está em sent_offers) ou foi pulada
+        const reservada = reservadaDurante(picked[i]);
+        if (reservada) {
+          // a reservada pelo Catálogo conta como tratada no cursor das Novidades, como a barrada na escolha
+          if (picked[i].catalogo) exec.recusadas.add(picked[i].key);
+          // a mesma chave já está na fila do Catálogo: sem linha, como a chave exata (wasSent/tratada)
+          if (!reservada.mesmaChave) logarPuladaUmaVez(rule, { key: picked[i].key, title: picked[i].title, r: reservada }, Date.now());
+          continue;
+        }
         // proteção do número antes de cada oferta (nem conferência nem link): sem vaga para os grupos (até o teto), ou
         // com o silêncio começando, a execução para aqui e o resto não sai (a regra por intervalo volta quando liberar).
         // As vagas ficam separadas durante a conferência e o link: quem chega depois já as vê ocupadas
         const lib = vaga.pedir(Date.now(), { precisa: groups.length });
         if (!lib.ok) { parada = lib; summary.parou = lib.motivo; break; }
         let offer = picked[i]; const etq = tagDaFonte(offer);
+        // a marca "mais barata" fica em picked[i]: a oferta que volta do verificador é outro objeto, sem ela
+        const maisBarata = picked[i].maisBarata ?? null;
+        // depois da conferência na loja o preço pode ter subido: sem ficar pelo menos DESCONTO_MINIMO_MAIS_BARATA% abaixo do
+        // anterior, a frase não vale (regra 8, D11). Preço ilegível conta como não mais barata (achados S2/Q2); sem preço
+        // não há o que dizer na linha
+        const naoMaisBarata = (o) => !!maisBarata && !maisBarataOBastante(centavos(o.price), maisBarata.preco);
+        // Fica PAUSA_DESCARTADA_H fora da escolha, como a descartada (achado Q5): a vaga da execução seguinte vai à próxima
+        // candidata. A linha sai uma vez por conflito (a anterior), enquanto ela estiver na janela da regra
+        const puladaNaConferencia = (o) => {
+          const agora = Date.now();
+          pausar(rule, picked[i].key);
+          if (centavos(o.price) === null) return;
+          const k = `${rule.id}\0${picked[i].key}\0conferencia\0${maisBarata.sent_at}`;
+          logarUmaVez(rule, k, fimDaJanela(rule, maisBarata.sent_at), o.title, textoConferencia(maisBarata, o.price, agora), agora);
+        };
         let gerados; // um link por código de rastreio distinto (linksPorCodigo)
         let sufixo = ''; // do verificador, na linha 'ok' de cada grupo (D8)
         if (offer.catalogo) {
@@ -520,6 +645,7 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
               // registrado no Catálogo (sem aviso de descarte, sem link): em `exec.recusadas` o cursor das Novidades avança
               // por ela e não fica preso, e em outras ordens ela pode voltar a valer se o preço cair
               if (ml.rejectReason(offer, rule)) { exec.recusadas.add(picked[i].key); continue; }
+              if (naoMaisBarata(offer)) { puladaNaConferencia(offer); exec.recusadas.add(picked[i].key); continue; }
             } else if (c.motivo === 'nao_conferido') {
               motivos = ['nao_conferido'];
               detalhe = c.texto.startsWith(MOTIVOS_VERIFICADOR.nao_conferido) ? c.texto.slice(MOTIVOS_VERIFICADOR.nao_conferido.length) : '';
@@ -551,6 +677,7 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
           // o preço conferido pode ter saído dos filtros da regra (preço máximo, desconto mínimo): como no pickOffers, é só
           // "fora dos filtros", sem aviso de descarte e sem link (não é reposta nesta execução)
           if (verificador && ml.rejectReason(offer, rule)) continue;
+          if (naoMaisBarata(offer)) { puladaNaConferencia(offer); continue; }
           gerados = await linksPorCodigo(offer, etq, jids);
           if (!gerados.algum) {
             log(rule, { level: 'erro', offer_title: offer.title, message: 'Link de afiliado não gerado: ' + gerados.falha });
@@ -559,7 +686,10 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
         }
         const textos = new Map(); // um texto por link
         const textoDe = (link) => {
-          if (!textos.has(link)) textos.set(link, renderTemplate(tpl.body, { ...offer, link }, tplOpts()));
+          if (!textos.has(link)) {
+            const texto = renderTemplate(tpl.body, { ...offer, link }, tplOpts());
+            textos.set(link, maisBarata ? comFraseMaisBarata(texto) : texto); // CA5: só quem saiu por ser mais barata
+          }
           return textos.get(link);
         };
         summary.offers++; let okCount = 0;
@@ -595,10 +725,13 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
           if (g < groups.length - 1) await sleep(jitter(d.group));
         }
         if (okCount && !(offer.catalogo && !regraExiste(rule.id))) {
-          db.prepare('INSERT INTO sent_offers (rule_id, offer_key, sent_at) VALUES (?,?,?)').run(rule.id, offer.key, Date.now());
+          gravadas.add(Number(db.prepare('INSERT INTO sent_offers (rule_id, offer_key, sent_at, title, price_cents) VALUES (?,?,?,?,?)')
+            .run(rule.id, offer.key, Date.now(), tituloParaGuardar(offer.title), centavos(offer.price)).lastInsertRowid));
           if (offer.catalogo) catalogoItens.registrar(rule, offer, 'enviado');
+          if (maisBarata) log(rule, { level: 'info', offer_title: offer.title, message: textoPassou(maisBarata, offer.price, Date.now()) });
         }
         vaga.soltar(); // a pausa entre ofertas não segura vagas: a próxima oferta pede de novo
+        tirarDoEnvio(rule.id, picked[i].key); // gravada em sent_offers (ou sem nenhum grupo ok): não está mais saindo
         if (parada) break;
         if (i < picked.length - 1) await sleep(jitter(d.offer));
       }
@@ -623,6 +756,7 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
       }
       return summary;
     } finally {
+      emEnvio.delete(rule.id); // também em erro: nada fica "saindo agora" depois da execução
       vaga.soltar(); // as vagas separadas e não usadas (oferta pulada, falha do envio) voltam ao teto
       fecharCatalogo(rule, exec); // avisos de espera e cursor do catálogo, no fim (nunca na pré-visualização)
       const now = Date.now();
@@ -730,12 +864,19 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
     const nome = (id) => db.prepare('SELECT name FROM tags WHERE id = ?').get(id)?.name;
     const linkPrevia = (o) => (!o.catalogo || o.loja === 'ml' ? LINK_ML_PREVIA
       : o.loja === 'amazon' ? `https://www.amazon.com.br/dp/${o.asin}?tag=•••` : o.link);
+    // a que sairia por ser mais barata mostra a frase (sem conferir na loja, o preço é o da escolha)
+    const textoDaPrevia = (tpl, o, link) => {
+      const texto = renderTemplate(tpl.body, { ...o, link, vistoEm: Date.now() }, tplOpts());
+      return o.maisBarata ? comFraseMaisBarata(texto) : texto;
+    };
     return picked.map((o) => {
       const motivos = o.catalogo ? o.motivos : [];
       const etiqueta = o.catalogo && o.loja !== 'ml' ? null : nome(o.tag_id) || nome(rule.tag_id) || null;
       // revisao/motivos: a oferta iria à revisão em vez de sair (o painel mostra "Esperaria revisão" e o motivo)
       // a prévia não confere na loja: {HORA_PRECO} sai com a hora de agora (no envio, a da conferência), como nas outras prévias
-      return { ...o, etiqueta, fonte: (o.source_index ?? 0) + 1, revisao: motivos.length > 0, motivos, text: tpl ? renderTemplate(tpl.body, { ...o, link: linkPrevia(o), vistoEm: Date.now() }, tplOpts()) : '' };
+      // a marca da trava é interna (achados R7/S3): só a frase no texto diz que ela sairia como mais barata
+      const { maisBarata: _marca, ...oferta } = o;
+      return { ...oferta, etiqueta, fonte: (o.source_index ?? 0) + 1, revisao: motivos.length > 0, motivos, text: tpl ? textoDaPrevia(tpl, o, linkPrevia(o)) : '' };
     });
   }
 

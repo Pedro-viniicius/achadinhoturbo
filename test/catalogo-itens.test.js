@@ -2,6 +2,7 @@
 // CA7; decisões P4, P5 e P6 do dono). createCatalogoItens direto, com a fila de envios real (createEnvios), o
 // WhatsApp em dryRun (o que "sai" fica em wa.simulated), links em modo trocável e a Amazon de verdade sem
 // credencial (montarLink não usa rede). O fetch global fica bloqueado e o último teste prova que ninguém o chamou.
+// Produto igual ou parecido no "Enviar" (plano nao-repetir-produto-parecido, etapa 5): bloco "produto parecido".
 // As rotas são montadas num Express mínimo (a ligação ao server.js é a etapa 5), com o soDono real de src/auth.js.
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -19,6 +20,7 @@ import { soDono } from '../src/auth.js';
 import { createCatalogoItens, montarRotas, ErroCatalogoItem, TETO_REVISAO, MOTIVOS, lerChave, precoSuspeito } from '../src/catalogo-itens.js';
 import { validarAjustesOferta, lerPrecoDigitado, lerTextoCurto, ErroEspelho } from '../src/espelho.js';
 import * as rastreio from '../src/rastreio.js';
+import { FRASE_MAIS_BARATA, textoConflito, textoPassou } from '../src/parecido.js';
 
 let acessosRede = 0;
 globalThis.fetch = async () => { acessosRede++; throw new Error('rede proibida no teste'); };
@@ -846,6 +848,277 @@ test('catálogo Shopee com a fila de envios sem linksRastreioShopee (embrulho do
   await s.envios.runEnvio(r.envio_id);
   assert.ok(s.enviados().every((m) => m.text.endsWith(LINK_SHOPEE_OK)));
   assert.deepEqual(rastreados(s.db, r.envio_id).map((l) => [l.jid, l.nivel, l.esperado, l.motivo]), [['111@g.us', 'nenhum', 1, 'sem_link_rastreio'], ['222@g.us', 'padrao', 0, null]]);
+});
+
+// ------------------------------------------------------------------------------------------------ produto parecido
+// Plano nao-repetir-produto-parecido, etapa 5 (CA4–CA8): o "Enviar" passa pela trava de src/parecido.js dentro da
+// transação. Títulos com 3+ palavras significativas (os das fixtures acima têm 1 ou 2 e não entram na comparação).
+
+const HORA = 3600000;
+const AREIA_FINA = 'Areia Sanitária Pipicat Fina 12kg';
+const AREIA_MISTA = 'Areia Sanitária Pipicat Mista 12kg';   // 4 de 5 palavras em comum com a fina: parecida
+const RACAO = 'Ração Golden Gatos Castrados 10kg';          // nada em comum: outro produto
+const AREIA_FINA_2 = 'AREIA SANITÁRIA PIPICAT FINA (12KG)';    // a mesma sequência da fina: o mesmo produto
+const FRASE_INICIO = `${FRASE_MAIS_BARATA}\n\n`;
+
+/** Envio anterior da regra em `sent_offers` (como a regra ou o "Enviar" gravam): `preco` em centavos, `ha` em ms. */
+const jaSaiu = (s, regra, { key, title, preco, ha }) => s.db.prepare('INSERT INTO sent_offers (rule_id, offer_key, sent_at, title, price_cents) VALUES (?,?,?,?,?)')
+  .run(regra.id, key, s.relogio.t - ha, title, preco);
+const naoEnviada = (s, anterior, tipo = 'parecido') => textoConflito({ acao: 'barrar', tipo, anterior }, s.relogio.t, { prefixo: 'Não enviada' });
+/** Barrada: 409 com a frase, nada gravado (item na revisão, nenhum envio, reservas e Histórico iguais, fila quieta). */
+async function barrada(s, id, corpo, mensagem) {
+  const antes = { reservas: s.contar('SELECT COUNT(*) AS n FROM sent_offers'), logs: s.logs().length, acordou: s.acordou.n, oferta: s.item(id).oferta };
+  await recusa(s.itens.enviar(id, corpo), 409, mensagem);
+  assert.deepEqual([s.item(id).status, s.item(id).envio_id, s.item(id).decidido_em, s.item(id).oferta], ['revisao', null, null, antes.oferta]);
+  assert.equal(s.contar('SELECT COUNT(*) AS n FROM envios'), 0);
+  assert.equal(s.contar('SELECT COUNT(*) AS n FROM sent_offers'), antes.reservas);
+  assert.equal(s.logs().length, antes.logs);
+  assert.equal(s.acordou.n, antes.acordou);
+}
+const reserva = (s, regra, chave) => ({ ...s.db.prepare('SELECT title, price_cents, sent_at FROM sent_offers WHERE rule_id = ? AND offer_key = ? ORDER BY id DESC').get(regra.id, chave) });
+
+test('parecido CA2/CA4/CA6: parecida há 3 h com qualquer preço, ou o mesmo título com outra chave sem os 5% a menos, recebe 409 com o porquê e nada é gravado', async () => {
+  const s = montar();
+  const regra = s.regra({ dedupe_days: 7 });
+  jaSaiu(s, regra, { key: 'MLB1001', title: AREIA_FINA, preco: 4990, ha: 3 * HORA });
+  const anterior = { title: AREIA_FINA, preco: 4990, sent_at: s.relogio.t - 3 * HORA };
+
+  const igual = s.revisao(regra, ML(1002, { title: AREIA_MISTA, price: 49.9 }), ['falha_link']);
+  const frase = naoEnviada(s, anterior);
+  assert.match(frase, /^Não enviada: parecida com "Areia Sanitária Pipicat Fina 12kg", que saiu por este disparo às \d\d:\d\d( de \d\d\/\d\d)? por R\$ 49,90\. Ofertas parecidas esperam 24 h\.$/);
+  await barrada(s, igual, {}, frase);
+
+  const cara = s.revisao(regra, ML(1003, { title: AREIA_MISTA, price: 59.9 }), ['falha_link']);
+  await barrada(s, cara, {}, frase);
+
+  // D10: a parecida não tem exceção de preço, nem bem mais barata
+  const barata = s.revisao(regra, ML(1009, { title: AREIA_MISTA, price: 19.9 }), ['falha_link']);
+  await barrada(s, barata, {}, frase);
+
+  const mesmo = s.revisao(regra, ML(1004, { title: AREIA_FINA, price: 49.9 }), ['falha_link']);
+  const fraseMesmo = naoEnviada(s, anterior, 'mesmo');
+  assert.match(fraseMesmo, /^Não enviada: o mesmo produto saiu por este disparo às .+ por R\$ 49,90, com outro código \("Areia Sanitária Pipicat Fina 12kg"\)\. Só sai de novo se estiver pelo menos 5% mais barato\.$/);
+  await barrada(s, mesmo, {}, fraseMesmo);
+  // R$ 47,41 não chega aos 5% de R$ 49,90 (o limite é R$ 47,40)
+  const quase = s.revisao(regra, ML(1010, { title: AREIA_FINA_2, price: 47.41 }), ['falha_link']);
+  await barrada(s, quase, {}, fraseMesmo);
+
+  // pela rota: o 409 leva a frase (o painel fecha o diálogo e mostra a mensagem)
+  const h = await subirRotas(s);
+  try {
+    const r = await h.pedir(`/api/catalogo/itens/${igual}/enviar`, 'dono', { method: 'POST', body: {} });
+    assert.deepEqual([r.status, r.json], [409, { erro: frase }]);
+  } finally { await h.fechar(); }
+
+  // outro produto, mesmo com 3+ palavras, sai sem a marca (e a reserva guarda título e preço)
+  const outro = s.revisao(regra, ML(1005, { title: RACAO, price: 120 }), ['falha_link']);
+  const r = await s.itens.enviar(outro, {});
+  assert.equal(Object.hasOwn(s.envio(r.envio_id).payload, 'mais_barata'), false);
+  assert.deepEqual(reserva(s, regra, 'MLB1005'), { title: RACAO, price_cents: 12000, sent_at: s.relogio.t });
+  assert.equal(s.logs().length, 0, 'nada no Histórico antes da fila');
+});
+
+test('parecido CA4/CA5/CA6: o mesmo título 5% abaixo do menor preço dele sai com a marca no payload, a frase na mensagem e, quando sai, a linha no Histórico', async () => {
+  const s = montar();
+  const regra = s.regra({ dedupe_days: 7 });
+  jaSaiu(s, regra, { key: 'MLB1001', title: AREIA_FINA, preco: 5990, ha: 5 * HORA });
+  jaSaiu(s, regra, { key: 'MLB1006', title: AREIA_FINA_2, preco: 4990, ha: 3 * HORA });
+  const doMinimo = { title: AREIA_FINA_2, preco: 4990, sent_at: s.relogio.t - 3 * HORA };
+
+  // 5% abaixo de R$ 59,90 mas não da menor (R$ 49,90; limite R$ 47,40): barra citando a do mínimo
+  const meio = s.revisao(regra, ML(1007, { title: AREIA_FINA, price: 54.9 }), ['falha_link']);
+  await barrada(s, meio, {}, naoEnviada(s, doMinimo, 'mesmo'));
+  const umCentavo = s.revisao(regra, ML(1011, { title: AREIA_FINA, price: 49.89 }), ['falha_link']);
+  await barrada(s, umCentavo, {}, naoEnviada(s, doMinimo, 'mesmo'));
+
+  const id = s.revisao(regra, ML(1002, { title: AREIA_FINA, price: 47.4 }), ['falha_link']);
+  const r = await s.itens.enviar(id, {});
+  const e = s.envio(r.envio_id);
+  assert.deepEqual(e.payload.mais_barata, { preco_anterior: 4990 }, 'a marca da fila não muda (falha fechada)');
+  assert.deepEqual(e.payload.parecida_anterior, { titulo: doMinimo.title, enviada_em: doMinimo.sent_at }, 'só para o texto do Histórico');
+  assert.equal(e.payload.offer.price, 47.4);
+  assert.deepEqual(reserva(s, regra, 'MLB1002'), { title: AREIA_FINA, price_cents: 4740, sent_at: s.relogio.t });
+  assert.equal(s.item(id).status, 'enviado');
+  assert.equal(s.acordou.n, 1);
+  assert.deepEqual(s.logs(), [], 'R5/Q3: o clique não diz que saiu; quem diz é a fila, depois de mandar');
+
+  // a fila (WhatsApp simulado) manda a mensagem com a frase na primeira linha, com a foto
+  await s.envios.runEnvio(r.envio_id);
+  assert.equal(s.envio(r.envio_id).status, 'concluido');
+  const linhas = s.logs().filter((l) => l.level === 'info');
+  assert.deepEqual(linhas, [{ rule_id: null, rule_name: 'Catálogo: Perfumes do catálogo', level: 'info', group_name: null, offer_title: AREIA_FINA,
+    message: textoPassou(doMinimo, 47.4, Date.now()) }], 'uma linha só, depois dos dois grupos');
+  assert.match(linhas[0].message, /^Saiu como oportunidade melhor: o mesmo produto saiu às \d\d:\d\d por R\$ 49,90 \("AREIA SANITÁRIA PIPICAT FINA \(12KG\)"\); agora por R\$ 47,40\.$/);
+  assert.doesNotMatch(JSON.stringify(linhas), /@g\.us|@s\.whatsapp|Achadinhos|Tech/, 'sem JID nem nome de grupo');
+  assert.deepEqual(s.logs().map((l) => l.level), ['ok', 'ok', 'info'], 'a linha vem depois das linhas de envio');
+  const msgs = s.enviados();
+  assert.equal(msgs.length, 2);
+  for (const m of msgs) {
+    assert.ok(m.text.startsWith(FRASE_INICIO), m.text);
+    assert.match(m.text.slice(FRASE_INICIO.length), /^\*Areia Sanitária Pipicat Fina 12kg\*/);
+    assert.equal(m.image, IMG_ML);
+  }
+
+  // sem foto (ajuste "sem foto"): a frase também vai no texto
+  const semFoto = s.revisao(regra, ML(1008, { title: 'Areia Sanitária Pipicat Fina 12kg Original', price: 39.9 }), ['falha_link']);
+  const r2 = await s.itens.enviar(semFoto, { ajustes: { sem_foto: true } });
+  assert.deepEqual(s.envio(r2.envio_id).payload.mais_barata, { preco_anterior: 4740 }, 'a menor agora é a que acabou de sair');
+  await s.envios.runEnvio(r2.envio_id);
+  const novas = s.enviados().slice(2);
+  assert.equal(novas.length, 2);
+  for (const m of novas) { assert.ok(m.text.startsWith(FRASE_INICIO)); assert.equal(m.image, undefined); }
+});
+
+test('parecido CA4: anterior sem preço guardado barra (nada a comparar), mesmo com a candidata bem mais barata', async () => {
+  const s = montar();
+  const regra = s.regra({ dedupe_days: 7 });
+  jaSaiu(s, regra, { key: 'MLB1001', title: AREIA_FINA, preco: null, ha: 2 * HORA });
+  const id = s.revisao(regra, ML(1002, { title: AREIA_FINA_2, price: 19.9 }), ['falha_link']);
+  const frase = naoEnviada(s, { title: AREIA_FINA, preco: null, sent_at: s.relogio.t - 2 * HORA }, 'mesmo');
+  assert.match(frase, /^Não enviada: o mesmo produto saiu por este disparo às .+ sem preço guardado para comparar, com outro código /);
+  await barrada(s, id, {}, frase);
+});
+
+test('parecido CA4: o preço comparado é o ajustado no "Revisar oferta"', async () => {
+  const s = montar();
+  const regra = s.regra({ dedupe_days: 7 });
+  jaSaiu(s, regra, { key: 'MLB1001', title: AREIA_FINA, preco: 4990, ha: 3 * HORA });
+  const anterior = { title: AREIA_FINA, preco: 4990, sent_at: s.relogio.t - 3 * HORA };
+  // guardada mais barata, ajustada para mais cara: barra
+  const subiu = s.revisao(regra, ML(1002, { title: AREIA_FINA_2, price: 39.9 }), ['falha_link']);
+  await barrada(s, subiu, { ajustes: { price: '55,00' } }, naoEnviada(s, anterior, 'mesmo'));
+  // título ajustado para outro produto: não é mais o mesmo
+  const r0 = await s.itens.enviar(subiu, { ajustes: { title: RACAO, price: '55,00' } });
+  assert.equal(Object.hasOwn(s.envio(r0.envio_id).payload, 'mais_barata'), false);
+  // guardada mais cara, ajustada para mais barata: sai com a marca e o preço ajustado
+  const caiu = s.revisao(regra, ML(1003, { title: AREIA_FINA_2, price: 59.9 }), ['falha_link']);
+  const r = await s.itens.enviar(caiu, { ajustes: { price: '45,00' } });
+  const e = s.envio(r.envio_id);
+  assert.deepEqual([e.payload.mais_barata, e.payload.offer.price], [{ preco_anterior: 4990 }, 45]);
+  assert.equal(reserva(s, regra, 'MLB1003').price_cents, 4500);
+});
+
+test('parecido CA2/CA8: 25 h depois a parecida sai sem frase; o mesmo título segue barrado até "dias sem repetir"; com 0 dias sai sem frase', async () => {
+  const s = montar();
+  const regra = s.regra({ dedupe_days: 3 });
+  jaSaiu(s, regra, { key: 'MLB1001', title: AREIA_FINA, preco: 4990, ha: 25 * HORA });
+  const parecida = s.revisao(regra, ML(1002, { title: AREIA_MISTA, price: 59.9 }), ['falha_link']);
+  const r = await s.itens.enviar(parecida, {});
+  assert.equal(Object.hasOwn(s.envio(r.envio_id).payload, 'mais_barata'), false);
+  await s.envios.runEnvio(r.envio_id);
+  assert.equal(s.enviados().length, 2);
+  for (const m of s.enviados()) assert.ok(!m.text.includes(FRASE_MAIS_BARATA), 'nenhuma outra mensagem leva a frase');
+  assert.equal(s.logs().some((l) => l.level === 'info'), false);
+
+  // a parecida acabou de sair: barraria o mesmo título como parecida (D10). Mais 25 h, só o mesmo título conta
+  s.relogio.t += 25 * HORA;
+  const mesmo = s.revisao(regra, ML(1003, { title: AREIA_FINA, price: 59.9 }), ['falha_link']);
+  await recusa(s.itens.enviar(mesmo, {}), 409, naoEnviada(s, { title: AREIA_FINA, preco: 4990, sent_at: s.relogio.t - 50 * HORA }, 'mesmo'));
+
+  // "dias sem repetir" = 0: a trava entre rodadas fica desligada, como a da chave exata
+  const zero = s.regra({ name: 'Sem janela', dedupe_days: 0 });
+  jaSaiu(s, zero, { key: 'MLB1001', title: AREIA_FINA, preco: 4990, ha: 1 * HORA });
+  const z = s.revisao(zero, ML(1003, { title: AREIA_FINA, price: 59.9 }), ['falha_link']);
+  const rz = await s.itens.enviar(z, {});
+  assert.equal(Object.hasOwn(s.envio(rz.envio_id).payload, 'mais_barata'), false);
+  assert.deepEqual(reserva(s, zero, 'MLB1003'), { title: AREIA_FINA, price_cents: 5990, sent_at: s.relogio.t });
+});
+
+test('parecido: parecida de outra regra não barra', async () => {
+  const s = montar();
+  const outra = s.regra({ name: 'Pets', dedupe_days: 7 });
+  const regra = s.regra({ dedupe_days: 7 });
+  jaSaiu(s, outra, { key: 'MLB1001', title: AREIA_FINA, preco: 4990, ha: 1 * HORA });
+  const id = s.revisao(regra, ML(1002, { title: AREIA_MISTA, price: 59.9 }), ['falha_link']);
+  const r = await s.itens.enviar(id, {});
+  assert.equal(Object.hasOwn(s.envio(r.envio_id).payload, 'mais_barata'), false);
+});
+
+test('parecido R3/CA8: o "Enviar de novo" do item que falhou não se barra na própria reserva', async () => {
+  const s = montar();
+  const regra = s.regra({ dedupe_days: 7 });
+  const id = s.revisao(regra, ML(1002, { title: AREIA_MISTA, price: 49.9 }), ['falha_link']);
+  quebrarWhatsApp(s);
+  const r1 = await s.itens.enviar(id, {});
+  await s.envios.runEnvio(r1.envio_id);
+  quebrarWhatsApp(s, false);
+  assert.equal(daLista(s, id).pode_reenviar, true);
+  assert.equal(reservas(s, regra, 'MLB1002'), 1, 'a reserva do envio que falhou ainda está lá (liberarFalhos não rodou)');
+  s.relogio.t += HORA;
+  const r2 = await s.itens.enviar(id, {});
+  assert.equal(Object.hasOwn(s.envio(r2.envio_id).payload, 'mais_barata'), false);
+  assert.equal(reservas(s, regra, 'MLB1002'), 1, 'uma reserva só (a do envio novo)');
+  assert.deepEqual(reserva(s, regra, 'MLB1002'), { title: AREIA_MISTA, price_cents: 4990, sent_at: s.relogio.t });
+});
+
+test('parecido: dois "Enviar" de parecidas ao mesmo tempo, com o mesmo preço, geram um envio só; a outra recebe "Não enviada"', async () => {
+  const s = montar();
+  const regra = s.regra({ dedupe_days: 7 });
+  const a = s.revisao(regra, ML(1001, { title: AREIA_FINA, price: 49.9 }), ['falha_link']);
+  const b = s.revisao(regra, ML(1002, { title: AREIA_MISTA, price: 49.9 }), ['falha_link']);
+  const r = await Promise.allSettled([s.itens.enviar(a, {}), s.itens.enviar(b, {})]);
+  assert.deepEqual(r.map((x) => x.status).sort(), ['fulfilled', 'rejected']);
+  const erro = r.find((x) => x.status === 'rejected').reason;
+  assert.equal(erro.status, 409);
+  assert.match(erro.message, /^Não enviada: parecida com "Areia Sanitária Pipicat (Fina|Mista) 12kg", que saiu por este disparo às \d\d:\d\d por R\$ 49,90\./);
+  assert.equal(s.contar('SELECT COUNT(*) AS n FROM envios'), 1);
+  assert.equal(s.contar('SELECT COUNT(*) AS n FROM sent_offers'), 1);
+  assert.deepEqual([s.item(a).status, s.item(b).status].sort(), ['enviado', 'revisao']);
+});
+
+// Achado Q1: a execução da regra em andamento só grava a reserva depois de mandar aos grupos; o agendador entrega as
+// ofertas que ela escolheu por usarEmEnvio e o "Enviar" as trata como a mesma rodada (barra sempre)
+const saindoAgora = (titulo) => `Não enviada: parecida com "${titulo}", que está saindo agora por este disparo. Tente de novo em alguns minutos.`;
+
+test('parecido Q1: parecida com uma oferta que a regra está mandando agora recebe 409, mesmo mais barata e com 0 dias; nada é gravado', async () => {
+  const s = montar();
+  const regra = s.regra({ dedupe_days: 7 });
+  const sem = s.regra({ name: 'Sem repetir', dedupe_days: 0 });
+  const pedidos = [];
+  s.itens.usarEmEnvio((ruleId) => { pedidos.push(ruleId); return ruleId === regra.id || ruleId === sem.id ? [{ key: 'MLB1001', title: AREIA_FINA }] : []; });
+  // a mais barata não passa: a que está saindo não tem preço a comparar (como a escolhida da mesma rodada)
+  const id = s.revisao(regra, ML(1002, { title: AREIA_MISTA, price: 19.9 }), ['falha_link']);
+  await barrada(s, id, {}, saindoAgora(AREIA_FINA));
+  assert.equal(saindoAgora(AREIA_FINA), naoEnviada(s, { title: AREIA_FINA, preco: null, sent_at: null }, 'saindo'), 'a frase é a de src/parecido.js');
+  const idSem = s.revisao(sem, ML(1003, { title: AREIA_MISTA, price: 59.9 }), ['falha_link']);
+  await barrada(s, idSem, {}, saindoAgora(AREIA_FINA));
+  assert.deepEqual(pedidos, [regra.id, sem.id], 'consulta a lista da regra do item');
+});
+
+test('parecido Q1: com ofertas saindo agora, outro produto e o item de outra regra saem; o título ajustado vale; a mesma chave recebe 409', async () => {
+  const s = montar();
+  const regra = s.regra({ dedupe_days: 7 });
+  const outra = s.regra({ name: 'Pets', dedupe_days: 7 });
+  s.itens.usarEmEnvio((ruleId) => (ruleId === regra.id ? [{ key: 'MLB1001', title: AREIA_FINA }, { key: 'MLB1009', title: 'x' }, null, { key: 'MLB1008' }] : []));
+  // a própria oferta que a regra está mandando (ponto "mesma chave" da seguranca): sairia duas vezes. Vale a chave, não o
+  // título (aqui ajustado para outro produto); nada é gravado
+  const mesma = s.revisao(regra, ML(1001, { title: RACAO, price: 89.9 }), ['falha_link']);
+  await barrada(s, mesma, {}, saindoAgora(AREIA_FINA));
+  assert.equal(reservas(s, regra, 'MLB1001'), 0);
+  const racao = s.revisao(regra, ML(1004, { title: RACAO, price: 89.9 }), ['falha_link']);
+  assert.ok((await s.itens.enviar(racao, {})).envio_id, 'outro produto sai');
+  const deOutra = s.revisao(outra, ML(1002, { title: AREIA_MISTA, price: 49.9 }), ['falha_link']);
+  assert.ok((await s.itens.enviar(deOutra, {})).envio_id, 'a lista é por regra');
+  const ajustada = s.revisao(regra, ML(1005, { title: AREIA_MISTA, price: 49.9 }), ['falha_link']);
+  assert.ok((await s.itens.enviar(ajustada, { ajustes: { title: RACAO } })).envio_id, 'o título ajustado não é parecido');
+});
+
+test('parecido Q1: a lista que lança ou fora do formato não derruba o "Enviar" (só o nome do erro no console); usarEmEnvio(null) desliga', async (t) => {
+  const s = montar();
+  const regra = s.regra({ dedupe_days: 7 });
+  const erros = t.mock.method(console, 'error', () => {});
+  s.itens.usarEmEnvio(() => { throw new Error('lista com Fulano 11 99999-0000'); });
+  const a = s.revisao(regra, ML(1002, { title: AREIA_MISTA, price: 49.9 }), ['falha_link']);
+  assert.ok((await s.itens.enviar(a, {})).envio_id);
+  assert.deepEqual(erros.mock.calls.map((c) => c.arguments.join(' ')), ['[catalogo] ofertas em envio: Error']);
+  s.itens.usarEmEnvio(() => 'não é lista');
+  const b = s.revisao(regra, ML(1004, { title: RACAO, price: 89.9 }), ['falha_link']);
+  assert.ok((await s.itens.enviar(b, {})).envio_id);
+  const nova = s.regra({ name: 'Nova', dedupe_days: 7 });
+  s.itens.usarEmEnvio(() => [{ key: 'MLB1001', title: AREIA_FINA }]);
+  s.itens.usarEmEnvio(null);
+  const c = s.revisao(nova, ML(1002, { title: AREIA_MISTA, price: 49.9 }), ['falha_link']);
+  assert.ok((await s.itens.enviar(c, {})).envio_id, 'sem a lista, nada está saindo');
 });
 
 test('nenhum acesso à rede nos testes deste arquivo', () => {

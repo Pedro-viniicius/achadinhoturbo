@@ -25,6 +25,8 @@ CREATE TABLE IF NOT EXISTS rules (
 CREATE TABLE IF NOT EXISTS sent_offers (
   id INTEGER PRIMARY KEY, rule_id INTEGER, offer_key TEXT, sent_at INTEGER);
 CREATE INDEX IF NOT EXISTS idx_sent ON sent_offers (rule_id, offer_key, sent_at);
+-- envios da regra numa janela de tempo, com título e preço (src/parecido.js: não repetir produto igual ou parecido)
+CREATE INDEX IF NOT EXISTS idx_sent_quando ON sent_offers (rule_id, sent_at);
 CREATE TABLE IF NOT EXISTS log (
   id INTEGER PRIMARY KEY, ts INTEGER, rule_id INTEGER, rule_name TEXT, level TEXT,
   group_name TEXT, offer_title TEXT, message TEXT);
@@ -202,7 +204,24 @@ const EXTRA_COLUMNS = [
   ['rules', 'grade', 'TEXT'],
   // quantos admins o grupo tem (proteção do número: selo "Falta 2º admin"); só a contagem, sem quem são. NULL = desconhecido
   ['groups', 'admins', 'INTEGER'],
+  // não repetir produto parecido: título e preço (em centavos) de cada oferta enviada pela regra. NULL = desconhecido,
+  // e a linha não entra na comparação (título) ou barra a exceção do mais barato (preço)
+  ['sent_offers', 'title', 'TEXT'],
+  ['sent_offers', 'price_cents', 'INTEGER'],
 ];
+
+// Preenche título e preço dos envios antigos a partir do item do catálogo da mesma regra e chave. O preço só vem de
+// item 'enviado' com price numérico > 0. CASE aninhado: json_type/json_extract só rodam sobre JSON válido. Envios das
+// outras fontes (sem item no catálogo) ficam NULL. COALESCE: nunca troca o que já está gravado.
+const PREENCHER_ENVIADOS = `
+UPDATE sent_offers SET
+  title = COALESCE(title, (SELECT CASE WHEN json_valid(c.oferta) THEN json_extract(c.oferta, '$.title') END
+    FROM catalogo_itens c WHERE c.rule_id = sent_offers.rule_id AND c.chave = sent_offers.offer_key)),
+  price_cents = COALESCE(price_cents, (SELECT CASE WHEN json_valid(c.oferta) THEN
+      CASE WHEN json_type(c.oferta, '$.price') IN ('integer', 'real') AND json_extract(c.oferta, '$.price') > 0
+        THEN CAST(ROUND(json_extract(c.oferta, '$.price') * 100) AS INTEGER) END END
+    FROM catalogo_itens c WHERE c.rule_id = sent_offers.rule_id AND c.chave = sent_offers.offer_key AND c.status = 'enviado'))
+WHERE title IS NULL OR price_cents IS NULL`;
 
 // "[ … ]" é um pedaço opcional: some sozinho quando algum placeholder dentro dele está vazio (renderTemplate).
 // Só vale para instalações novas; quem já tem o template "Padrão" no banco continua com o texto de antes.
@@ -233,8 +252,18 @@ export function openDb(dir) {
   const db = new DatabaseSync(path.join(dir, 'disparador.db'));
   db.exec('PRAGMA journal_mode = WAL;');
   db.exec(SCHEMA);
+  // o preenchimento roda uma vez só: na abertura em que sent_offers ganha price_cents
+  const preencherEnviados = !db.prepare('PRAGMA table_info(sent_offers)').all().some((c) => c.name === 'price_cents');
   for (const [table, col, type] of EXTRA_COLUMNS) {
     if (!db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === col)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${type}`);
+  }
+  if (preencherEnviados) {
+    try {
+      db.exec(PREENCHER_ENVIADOS);
+    } catch (e) {
+      // sem e.message: a mensagem do banco pode trazer dados. Os envios antigos ficam sem título e preço (não comparados).
+      console.error('[db] não consegui preencher título e preço dos envios antigos:', e?.code || e?.name || 'erro');
+    }
   }
   if (!db.prepare('SELECT 1 FROM templates LIMIT 1').get()) {
     db.prepare('INSERT INTO templates (name, body, created_at) VALUES (?, ?, ?)')

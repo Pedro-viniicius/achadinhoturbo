@@ -27,6 +27,18 @@
 // "Enviar" pede os links com Sub_id à fila de envios (envios.linksRastreioShopee) e guarda em `links_rastreio`.
 // Preço suspeito (CA7, decisão P4 do dono): sem "Enviar mesmo com 100%". Depois dos ajustes, desconto de 100% ou
 // preço antigo ≥ 10× o preço recusa com frase fixa.
+// Produto igual ou parecido (plano nao-repetir-produto-parecido, etapa 5; CA4–CA7): com "dias sem repetir" > 0, o
+// "Enviar" passa pela trava de src/parecido.js DENTRO da transação, comparando o título e o preço da oferta já com os
+// ajustes contra o que já está gravado em `sent_offers` na janela (outra chave). Dois "Enviar" de parecidas não passam
+// juntos, nem um "Enviar" depois do que a regra já gravou. A rodada da regra em andamento só grava a reserva depois
+// de mandar aos grupos: o agendador entrega as ofertas que ela escolheu (usarEmEnvio, desde a escolha de cada uma) e a
+// mesma oferta ou a parecida com uma delas recebe 409 "…que está saindo agora…", com qualquer "dias sem repetir" e
+// mesmo mais barata (achados Q1 e R1).
+// Barrada → 409 com a frase "Não enviada: …". Liberada por ser o mesmo título pelo menos DESCONTO_MINIMO_MAIS_BARATA%
+// mais barato, sem parecida nas últimas 24 h (adendo do plano, D10/D11) → o payload leva
+// `mais_barata: { preco_anterior }` (centavos) e, só para o texto do Histórico, `parecida_anterior: { titulo,
+// enviada_em }`; a fila confere o preço de novo, põe a frase na mensagem e, se a oferta sair em algum grupo, escreve
+// a linha "Saiu como oportunidade melhor: …" (src/envios.js). A reserva em `sent_offers` guarda título e preço (centavos).
 //
 // Privacidade: nada aqui é dado pessoal (ofertas e nomes de regra e de grupo). Erro inesperado do banco não vai à
 // resposta nem ao console com a mensagem (ela pode trazer valores da query).
@@ -37,6 +49,7 @@ import { LINK_SHOPEE } from './shopee.js';
 import { discountPct } from './template.js';
 import { emCentavos } from './catalogo.js';
 import { validarAjustesOferta } from './espelho.js';
+import { centavos, criarTrava, lerEnviados, textoConflito, tituloParaGuardar } from './parecido.js';
 
 const DIA = 86400000;
 export const TETO_REVISAO = 50;             // pendentes por regra (P5): acima, as novas esperam sem entrar
@@ -76,7 +89,11 @@ const SEM_ETIQUETA = 'A etiqueta desta oferta foi apagada. Escolha uma etiqueta 
 const SEM_AMAZON = 'A integração com a Amazon não está disponível neste servidor.';
 const SEM_TAG = 'Falta a tag de associado da Amazon. Cadastre em Conexões → Amazon antes de enviar.';
 
-/** Erro com status HTTP (montarRotas responde com ele). A mensagem é sempre fixa, nunca com dado de fora. */
+/**
+ * Erro com status HTTP (montarRotas responde com ele). A mensagem é fixa, nunca com dado de fora; a exceção é o 409 de
+ * produto igual ou parecido, montado pelas frases de src/parecido.js com o título de uma oferta (texto do catálogo,
+ * cortado em 60, sem dado pessoal).
+ */
 export class ErroCatalogoItem extends Error {
   constructor(status, mensagem) {
     super(mensagem);
@@ -161,13 +178,24 @@ function aplicarAjustes(base, a) {
  * (modo e status da extensão); `amazon`: o cliente da Amazon (montarLink, para saber se há tag); `envios`: a fila de
  * src/envios.js (lerFoto e, sem `acordar`, processarPendentes); `acordar`: pede um tick do agendador (é por ele que
  * o envio aprovado sai); `agora`: relógio (testes).
- * → { tratada, registrar, revisaoCheia, listar, enviar, descartar, contar }
+ * → { tratada, registrar, revisaoCheia, listar, enviar, descartar, contar, liberarFalhos, usarEmEnvio }
  */
 export function createCatalogoItens({ db, wa = null, links = null, amazon = null, envios = null, acordar = null, agora = Date.now } = {}) {
   const regraPorId = (id) => parseRule(db.prepare('SELECT * FROM rules WHERE id = ?').get(id));
   const grupoExiste = (jid) => !!db.prepare('SELECT 1 FROM groups WHERE jid = ?').get(jid);
   const nomeDaRegra = (nome) => String(nome ?? '').replace(/\s+/g, ' ').trim().slice(0, MAX_NOME) || 'sem nome';
   const log = (regra, o) => addLog(db, { rule: { id: null, name: `Catálogo: ${nomeDaRegra(regra?.name)}` }, ...o });
+
+  // ofertas que a execução em andamento de cada regra escolheu e ainda não gravou em `sent_offers`: o agendador,
+  // criado depois, liga a leitura dele por usarEmEnvio (sem agendador, nenhuma)
+  let emEnvio = null;
+  function usarEmEnvio(fn) { emEnvio = typeof fn === 'function' ? fn : null; }
+  /** → [{ key, title }] da execução em andamento da regra; nunca lança (lista em memória). */
+  function saindoNaRegra(ruleId) {
+    let lista = [];
+    try { lista = emEnvio ? emEnvio(ruleId) : []; } catch (e) { console.error('[catalogo] ofertas em envio:', e?.name || 'erro'); }
+    return (Array.isArray(lista) ? lista : []).filter((o) => o && typeof o.title === 'string');
+  }
 
   function pedirEnvio() {
     if (acordar) { acordar(); return; }
@@ -409,7 +437,10 @@ export function createCatalogoItens({ db, wa = null, links = null, amazon = null
   /**
    * POST /api/catalogo/itens/:id/enviar { ajustes } → { envio_id }. Item em 'revisao', ou 'enviado' cujo envio
    * aprovado terminou sem nenhum grupo ok (pode_reenviar, R3); senão 409. Preço ainda suspeito depois dos ajustes →
-   * 400 com frase fixa. Grupos, template e "enviar foto" são os da regra.
+   * 400 com frase fixa. Grupos, template e "enviar foto" são os da regra. Igual (outra chave) ou parecida com uma
+   * oferta enviada pela regra na janela, sem a exceção do mais barato (só o mesmo título, DESCONTO_MINIMO_MAIS_BARATA%
+   * abaixo) → 409 "Não enviada: …" (src/parecido.js). A mesma oferta (mesma chave), igual ou parecida com uma que a
+   * regra está mandando agora (usarEmEnvio) → 409 "…que está saindo agora…", mesmo se mais barata.
    */
   async function enviar(itemId, corpo, { userId = null } = {}) {
     const id = idValido(itemId);
@@ -461,6 +492,29 @@ export function createCatalogoItens({ db, wa = null, links = null, amazon = null
     const guardar = JSON.stringify({ ...guardada, ...semChave }); // a oferta como saiu (com os ajustes), para a lista
     const now = agora();
     const envioId = transacao(() => {
+      // produto igual ou parecido já enviado pela regra na janela (outra chave; a própria reserva não conta)
+      const dias = Number(regra.dedupe_days);
+      if (dias > 0) {
+        const trava = criarTrava({ enviados: lerEnviados(db, regra.id, now - dias * DIA), agora: now, dedupeDias: dias });
+        const v = trava.avaliar({ key: item.chave, title: oferta.title, price: oferta.price });
+        if (v?.acao === 'barrar') throw new ErroCatalogoItem(409, textoConflito(v, now, { prefixo: 'Não enviada' }));
+        if (v?.acao === 'liberar') {
+          payload.mais_barata = { preco_anterior: v.anterior.preco };
+          // a linha "Saiu como oportunidade melhor" é da fila, quando a oferta sair de fato (achados R5/Q3)
+          payload.parecida_anterior = { titulo: v.anterior.title, enviada_em: v.anterior.sent_at };
+        }
+      }
+      // escolhida por uma execução da regra em andamento, que só grava em `sent_offers` depois de mandar aos grupos
+      // (achado Q1): parecida com ela barra sempre, como na mesma rodada, sem a exceção do mais barato
+      const naRegra = saindoNaRegra(regra.id);
+      // a própria oferta escolhida pela regra (o "Enviar de novo" de um envio que falhou): a trava pula a mesma chave,
+      // e sem esta conferência ela sairia duas vezes, pela regra e pelo clique
+      const propria = naRegra.find((o) => String(o.key) === String(item.chave));
+      if (propria) throw new ErroCatalogoItem(409, textoConflito({ tipo: 'saindo', anterior: { title: propria.title } }, now, { prefixo: 'Não enviada' }));
+      const saindo = criarTrava({ enviados: [], agora: now, dedupeDias: 0 });
+      for (const o of naRegra) saindo.acrescentar(o);
+      const s = saindo.avaliar({ key: item.chave, title: oferta.title, price: oferta.price });
+      if (s?.acao === 'barrar') throw new ErroCatalogoItem(409, textoConflito({ ...s, tipo: 'saindo' }, now, { prefixo: 'Não enviada' }));
       // a trava: só um "Enviar" muda o item de 'revisao' (ou do envio que falhou); o segundo vê 0 linhas e recebe 409
       const r = reenvio
         ? db.prepare(`UPDATE catalogo_itens SET oferta = ?, decidido_em = ? WHERE id = ? AND status = 'enviado' AND envio_id = ?
@@ -473,7 +527,8 @@ export function createCatalogoItens({ db, wa = null, links = null, amazon = null
         VALUES ('oferta', ?, ?, 'agora', NULL, 'pendente', ?, ?, ?)`)
         .run(JSON.stringify(payload), JSON.stringify(destinos), now, Number.isInteger(userId) ? userId : null, now).lastInsertRowid);
       db.prepare('UPDATE catalogo_itens SET envio_id = ? WHERE id = ?').run(novo, id);
-      db.prepare('INSERT INTO sent_offers (rule_id, offer_key, sent_at) VALUES (?,?,?)').run(regra.id, item.chave, now);
+      db.prepare('INSERT INTO sent_offers (rule_id, offer_key, sent_at, title, price_cents) VALUES (?,?,?,?,?)')
+        .run(regra.id, item.chave, now, tituloParaGuardar(oferta.title), centavos(oferta.price));
       return novo;
     });
     pedirEnvio();
@@ -492,7 +547,7 @@ export function createCatalogoItens({ db, wa = null, links = null, amazon = null
     return { ok: true };
   }
 
-  return { tratada, registrar, revisaoCheia, listar, enviar, descartar, contar, liberarFalhos };
+  return { tratada, registrar, revisaoCheia, listar, enviar, descartar, contar, liberarFalhos, usarEmEnvio };
 }
 
 /** Responde JSON; ErroCatalogoItem vira o status dele. Erro inesperado (banco) não devolve nem registra a mensagem. */

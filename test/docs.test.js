@@ -807,6 +807,8 @@ const FATOS = [
   { nome: 'idade máxima dos dados para enviar sem conferir (min)', valor: 30, texto: (v) => new RegExp(`dados[^.]{0,60}de até ${v} min`), codigo: [['src/verificador.js', /export const FRESCOR_MIN = (\d+);/]] },
   { nome: 'segundos de espera de cada conferência', valor: 20, texto: (v) => new RegExp(`espera até ${v} segundos`), codigo: [['src/verificador.js', /export const TEMPO_MAX_MS = (\d+)000;/]] },
   { nome: 'horas da oferta descartada fora da escolha do disparo automático', valor: 6, texto: (v) => new RegExp(`não volta a ser escolhida por ${v} horas`), codigo: [['src/verificador.js', /export const PAUSA_DESCARTADA_H = (\d+);/]] },
+  // a parecida que sobe na conferência usa a mesma pausa (achado Q5 do não repetir parecido)
+  { nome: 'horas da parecida pulada na conferência fora da escolha', valor: 6, texto: (v) => new RegExp(`fica ${v} horas fora da escolha`), codigo: [['src/verificador.js', /export const PAUSA_DESCARTADA_H = (\d+);/]] },
   // Mercado Livre conferido pela extensão (plano verificador-ml-extensao, etapa 6, CA6/CA3/CA5)
   { nome: 'conferências do Mercado Livre por hora pela extensão', valor: 120, texto: (v) => new RegExp(`no máximo ${v} conferências por hora`), codigo: [['src/links.js', /export const LIMITE_PRODUTO_HORA = (\d+);/]] },
   { nome: 'minutos sem pedir ao Mercado Livre depois de uma verificação', valor: 30, texto: (v) => new RegExp(`para de pedir por ${v} min`), codigo: [['src/links.js', /export const PAUSA_VERIFICACAO_MIN = (\d+);/]] },
@@ -814,6 +816,12 @@ const FATOS = [
   { nome: 'horas da pausa na segunda verificação seguida', valor: 2, texto: (v) => new RegExp(`a pausa passa a ${v} h e depois`), codigo: [['src/links.js', /PAUSAS_VERIFICACAO_MIN = Object\.freeze\(\[PAUSA_VERIFICACAO_MIN, (\d+) \* 60,/]] },
   { nome: 'horas da pausa máxima depois de verificações seguidas', valor: 6, texto: (v) => new RegExp(`depois a ${v} h \\(o máximo\\)`), codigo: [['src/links.js', /PAUSAS_VERIFICACAO_MIN = Object\.freeze\(\[[^\]]*, (\d+) \* 60\]\);/]] },
   { nome: 'segundos que a extensão espera por um produto do Mercado Livre', valor: 15, texto: (v) => new RegExp(`espera até ${v} s na extensão`), codigo: [['extension/background.js', /const TETO_PRODUTO = (\d+)000;/]] },
+  // Não repetir produto igual nem parecido (plano nao-repetir-produto-parecido, etapa 6, CA9): os números vêm de src/parecido.js
+  { nome: 'horas que ofertas parecidas esperam', valor: 24, texto: (v) => new RegExp(`parecidas esperam ${v} h\\b`), codigo: [['src/parecido.js', /export const HORAS_ENTRE_PARECIDOS = (\d+);/]] },
+  { nome: 'grau de semelhança das ofertas parecidas (%)', valor: 75, texto: (v) => new RegExp(`${v}% das palavras`), codigo: [['src/parecido.js', /export const LIMIAR_PARECIDO = 0\.(\d+);/]] },
+  { nome: 'primeiras palavras do título que entram na comparação', valor: 8, texto: (v) => new RegExp(`só as ${v} primeiras palavras`), codigo: [['src/parecido.js', /export const PALAVRAS_PARECIDO = (\d+);/]] },
+  // adendo de 10/11 (D11): o mesmo produto com outro código só volta antes do prazo com este desconto mínimo
+  { nome: 'desconto mínimo para o mesmo produto sair antes do prazo (%)', valor: 5, texto: (v) => new RegExp(`pelo menos ${v}% mais barato\\b`), codigo: [['src/parecido.js', /export const DESCONTO_MINIMO_MAIS_BARATA = (\d+);/]] },
   { nome: 'segundos até o programa desistir do pedido de produto', valor: 18, texto: (v) => new RegExp(`desiste em ${v} s\\b`), codigo: [['src/links.js', /export const PRAZO_PRODUTO_MS = (\d+)000;/]] },
 ];
 
@@ -837,6 +845,100 @@ test('FATOS: o texto montado do valor não casa com outro valor (a tabela de fat
     const outro = f.texto(f.valor + 1);
     assert.doesNotMatch(README + '\n' + TEXTO_DOCS, outro, `${f.nome}: ${outro} também casa; o texto não prova o valor`);
   }
+});
+
+// A frase que abre a mensagem de uma oferta mais barata que a parecida (src/parecido.js) é citada no README e no capítulo do
+// Disparo automático como o programa a manda: mudar a constante sem mudar o texto (ou o contrário) derruba o teste.
+test('Parecidas: README e o capítulo do Disparo automático trazem FRASE_MAIS_BARATA idêntica à do código', async () => {
+  const { FRASE_MAIS_BARATA } = await import('../src/parecido.js');
+  assert.ok(FRASE_MAIS_BARATA.length > 40, 'a frase do código não ficou vazia');
+  assert.ok(README.includes(limpo(FRASE_MAIS_BARATA)), 'README sem a FRASE_MAIS_BARATA');
+  const cap = limpo(strings(CAPS['disparo-automatico']).join('\n'));
+  assert.ok(cap.includes(limpo(FRASE_MAIS_BARATA)), 'cap-disparos.js sem a FRASE_MAIS_BARATA');
+  assert.ok(!limpo(strings(CAPS['referencia']).join('\n')).includes('Nossa busca achou'), 'a referência cita as linhas do Histórico, não a frase da mensagem');
+});
+
+// As linhas do Histórico que o README e a referência citam vêm de textoConflito/textoPassou/textoConferencia/textoNaoMaisBarata
+// (src/parecido.js): a abertura de cada uma e o trecho fixo do fim precisam estar nos dois textos.
+test('Parecidas: a referência e o README citam as linhas do Histórico que src/parecido.js produz', async () => {
+  const { textoConflito, textoPassou, textoConferencia, textoNaoMaisBarata } = await import('../src/parecido.js');
+  const agora = new Date(2026, 10, 9, 12, 0).getTime();
+  const ant = { title: 'X', preco: 4990, sent_at: new Date(2026, 10, 8, 9, 2).getTime() };
+  const REF = limpo(strings(CAPS['referencia']).join('\n')).replace(/[“”]/g, '"');
+  const frases = [
+    textoConflito({ tipo: 'mesmo', anterior: ant }, agora), textoConflito({ tipo: 'parecido', anterior: ant }, agora),
+    textoConflito({ tipo: 'rodada', anterior: ant }, agora), textoConflito({ tipo: 'mesmo', anterior: ant }, agora, { prefixo: 'Não enviada' }),
+    textoPassou(ant, 39.9, agora), textoConferencia(ant, 52, agora), textoNaoMaisBarata(52, 4990),
+  ];
+  for (const f of frases) {
+    const abertura = f.split(/[:]/)[0];
+    assert.ok(REF.includes(abertura), `a referência não cita "${abertura}"`);
+  }
+  for (const abertura of ['Pulada', 'Saiu como oportunidade melhor', 'Descartada: preço subiu para']) assert.ok(README.includes(abertura), `o README não cita "${abertura}"`);
+  assert.ok(README.includes('Não enviada'), 'o README não cita "Não enviada"');
+  // o trecho fixo do fim de cada frase de "Pulada" aparece nos dois textos, como o programa o monta
+  for (const fim of ['Só sai de novo se estiver pelo menos 5% mais barato.', 'Ofertas parecidas esperam 24 h.', 'que foi escolhida neste mesmo envio.']) {
+    assert.ok(frases.some((f) => f.endsWith(fim)), `o código não termina com "${fim}"`);
+    assert.ok(README.includes(fim), `o README não traz "${fim}"`);
+    assert.ok(REF.includes(fim), `a referência não traz "${fim}"`);
+  }
+  // adendo de 10/11 (D10/D11): as linhas como os docs as citam (título "…", o exemplo das 09:02) saem letra por letra do código
+  const hoje = new Date(2026, 10, 10, 14, 0).getTime();
+  const as902 = new Date(2026, 10, 10, 9, 2).getTime();
+  const exemplo = [
+    textoConflito({ tipo: 'mesmo', anterior: { title: '…', preco: 4990, sent_at: new Date(2026, 10, 8, 9, 2).getTime() } }, hoje),
+    textoConflito({ tipo: 'parecido', anterior: { title: '…', preco: 4990, sent_at: as902 } }, hoje),
+    textoPassou({ title: '…', preco: 5990, sent_at: as902 }, 49.9, hoje),
+    textoConferencia({ title: '…', preco: 4990, sent_at: as902 }, 52, hoje),
+    textoNaoMaisBarata(52, 4990),
+  ];
+  for (const f of exemplo) {
+    assert.ok(README.includes(f), `o README não traz "${f}"`);
+    assert.ok(REF.includes(f), `a referência não traz "${f}"`);
+  }
+  // o que a regra antiga dizia (parecida mais barata saía com o aviso; qualquer centavo bastava) saiu dos textos
+  for (const velho of ['salvo se estiverem mais baratas', 'não é mais menor que o da oferta parecida', 'Saiu como oportunidade melhor: parecida com', 'Os dois só saem antes disso se estiverem mais baratos']) {
+    assert.ok(!README.includes(velho), `o README ainda diz "${velho}"`);
+    assert.ok(!REF.includes(velho), `a referência ainda diz "${velho}"`);
+    assert.ok(!TEXTO_DOCS.includes(velho), `os Docs ainda dizem "${velho}"`);
+    assert.ok(!limpo(lerRaiz('public/ajuda.js')).includes(velho), `o ajuda.js ainda diz "${velho}"`);
+  }
+  // o 409 do "Enviar" no meio de uma execução da regra (achado Q1): a frase inteira, com "…" no lugar do título
+  const saindo = textoConflito({ tipo: 'saindo', anterior: { title: '…', preco: null, sent_at: null } }, agora, { prefixo: 'Não enviada' });
+  assert.equal(saindo, 'Não enviada: parecida com "…", que está saindo agora por este disparo. Tente de novo em alguns minutos.');
+  assert.ok(README.includes(saindo), 'o README não traz a frase do 409 "saindo agora"');
+  assert.ok(REF.includes(saindo), 'a referência não traz a frase do 409 "saindo agora"');
+});
+
+// R3: o exemplo do que NÃO é parecido (e do que costuma ser) que o README e o capítulo do Disparo automático citam tem de
+// valer no código: produtos diferentes da mesma marca, de linhas diferentes, não são parecidos; outra versão da mesma linha é.
+test('Parecidas (R3): o exemplo citado nos docs é o que comparar() decide', async () => {
+  const { comparar } = await import('../src/parecido.js');
+  const exemplo = 'um tênis e uma camiseta da Nike';
+  const versao = 'outra cor, outro tamanho, ou o shampoo e o condicionador da mesma linha';
+  assert.ok(README.includes(exemplo) && README.includes(versao), 'README sem o exemplo');
+  const cap = limpo(strings(CAPS['disparo-automatico']).join('\n'));
+  assert.ok(cap.includes(exemplo) && cap.includes(versao), 'cap-disparos.js sem o exemplo');
+  assert.ok(!README.includes('um shampoo e um condicionador, por exemplo') && !cap.includes('um shampoo e um condicionador, por exemplo'), 'o exemplo antigo saiu');
+  // mesma marca, linhas diferentes: nunca parecido
+  assert.equal(comparar('Tênis Nike Air Max Preto 42', 'Camiseta Nike Dri Fit Azul M'), null);
+  assert.equal(comparar('Tênis Nike Revolution 7 Masculino Corrida', 'Camiseta Nike Dri-Fit Academy Masculina'), null);
+  // outra versão da mesma linha: parecido (cor, tamanho, shampoo × condicionador da mesma linha)
+  assert.equal(comparar('Fone de Ouvido Bluetooth JBL Tune 510BT Preto', 'Fone de Ouvido Bluetooth JBL Tune 510BT Branco'), 'parecido');
+  assert.equal(comparar('Areia Higiênica Pipicat Fina 4kg', 'Areia Higiênica Pipicat Fina 12kg'), 'parecido');
+  assert.equal(comparar('Shampoo Lola Meu Cacho Minha Vida 500ml', 'Condicionador Lola Meu Cacho Minha Vida 500ml'), 'parecido');
+});
+
+// R2/Q4, R5/Q3 e R4: o que mudou na rodada 1 de correção precisa estar escrito onde o dono lê o Histórico.
+test('Parecidas (rodada 1): Novidades, a linha "Saiu como…" do "Enviar" e a linha única por conflito estão no README e na referência', () => {
+  const REF = limpo(strings(CAPS['referencia']).join('\n'));
+  const novidades = 'No Catálogo em ordem Novidades, ela conta como tratada e só volta se o Etiqueta atualizar a oferta.';
+  assert.equal(REF.split(novidades).length - 1, 2, 'a parecida pulada e a pulada na conferência');
+  assert.ok(README.includes('a oferta pulada conta como tratada e só volta se o Etiqueta atualizar a oferta'), 'README sem a regra das Novidades');
+  assert.ok(README.includes('Saiu como oportunidade melhor entra no *Histórico* só depois que a fila manda a oferta a algum grupo'), 'README sem a hora da linha do "Enviar"');
+  assert.ok(REF.includes('No “Enviar” do Catálogo, a linha aparece quando a fila manda a oferta a algum grupo.'), 'referência sem a hora da linha do "Enviar"');
+  assert.ok(README.includes('Cada conflito aparece uma vez'), 'README sem a linha única por conflito');
+  assert.ok(!README.includes('linhas de aviso (nunca com nome de grupo'), 'R8: as linhas são informativas');
 });
 
 // A versão da extensão que manda o Sub_id da Shopee (P4) não é um inteiro: fica fora de FATOS, mas segue a mesma ideia. A fonte é
@@ -1498,7 +1600,7 @@ test('Verificador (rodada 1): as frases de R1, Q2 e S2 e a regra do descarte no 
 test('Verificador: a 3ª tabela de "motivos" de Referência cobre MOTIVOS_VERIFICADOR, com o texto do Histórico', () => {
   assert.deepEqual(Object.keys(MOTIVOS_VERIFICADOR).sort(), ['esgotado', 'nao_conferido', 'preco_subiu']);
   const tabelas = blocosDe('referencia', 'motivos').filter((b) => b.tabela).map((b) => b.tabela);
-  assert.equal(tabelas.length, 3, 'Catálogo, Espelhamento e Verificador');
+  assert.equal(tabelas.length, 4, 'Catálogo, Espelhamento, Verificador e Produto repetido ou parecido');
   assert.deepEqual(tabelas[2].colunas, ['Resultado', 'Quando acontece', 'O que fazer']);
   const primeira = tabelas[2].linhas.map((l) => l[0]);
   for (const [chave, texto] of Object.entries(MOTIVOS_VERIFICADOR)) {

@@ -62,6 +62,7 @@ import { mesclarOferta } from './oferta-texto.js';
 import { hostPermitido } from './ml.js';
 import { montarEnquete } from './whatsapp.js';
 import { renderTemplate, discountPct } from './template.js';
+import { centavos, comFraseMaisBarata, maisBarataOBastante, textoNaoMaisBarata, textoPassou } from './parecido.js';
 import { sleep, jitter } from './util.js';
 import { pausaGrupoGravada } from './ritmo.js';
 import { OfertaDescartada, MOTIVOS_VERIFICADOR, FRESCOR_MIN, MARGEM_AGENDADO_MIN } from './verificador.js';
@@ -1314,6 +1315,11 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
    * idade dos dados para o verificador (conferirOferta), que pode lançar OfertaDescartada antes de qualquer link.
    * → { enviar(jid) → texto do log, falha(jid) → motivo do grupo sem link (ou null), rastreio(jid) → linha do rastreio,
    *   avisos (oferta) → frases para o Histórico, nível aviso (ID de rastreamento da Amazon recusado) }
+   * Oferta do Catálogo com `mais_barata: { preco_anterior }` (centavos): depois da conferência, só sai se o preço que vai
+   * na mensagem continua pelo menos DESCONTO_MINIMO_MAIS_BARATA% menor (senão OfertaDescartada 'preco_subiu'), e a
+   * mensagem começa com a FRASE_MAIS_BARATA.
+   * Com ela e `parecida_anterior: { titulo, enviada_em }` (só para o texto), devolve também `passou`: a linha "Saiu como
+   * oportunidade melhor" com o preço conferido, que o runEnvio põe no Histórico quando o primeiro grupo recebe.
    */
   async function preparar(tipo, p, jids = [], { lidoEm = null } = {}) {
     if (tipo === 'oferta') {
@@ -1344,13 +1350,36 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
       } catch (e) { throw semLink(e); }
       // verificador (D1): depois das checagens sem rede e antes do link, fora do try acima (a descartada não é "link de
       // afiliado não gerado"); a oferta barrada sai daqui como OfertaDescartada, sem pedir link nenhum
+      // "mais barata" (plano nao-repetir-produto-parecido, CA4/CA5): marca gravada só pelo "Enviar" do Catálogo; em outra
+      // origem é ignorada. Marca presente e inválida falha fechada, antes de qualquer conferência na loja.
+      let precoAnterior = null;
+      if (p.origem?.tipo === 'catalogo' && Object.hasOwn(p, 'mais_barata')) {
+        precoAnterior = p.mais_barata?.preco_anterior;
+        if (!Number.isInteger(precoAnterior) || precoAnterior <= 0) throw new OfertaDescartada('nao_conferido');
+      }
       const { offer, sufixo } = await conferirOferta(p, lidoEm);
+      // com o preço que vai na mensagem (depois da conferência), a oferta tem de continuar pelo menos
+      // DESCONTO_MINIMO_MAIS_BARATA% abaixo da mesma oferta enviada antes (D11); senão é descartada, sem link e sem
+      // envio. Preço ilegível = não conferido (nunca vai com a frase).
+      if (precoAnterior !== null) {
+        const conferido = centavos(offer.price);
+        if (conferido === null) throw new OfertaDescartada('nao_conferido');
+        if (!maisBarataOBastante(conferido, precoAnterior)) throw new OfertaDescartada('preco_subiu', textoNaoMaisBarata(offer.price, precoAnterior));
+      }
+      // a linha do Histórico (achados R5/Q3): montada aqui, com o preço conferido, e escrita só se a oferta sair; o título
+      // e a hora da parecida servem só ao texto (sem eles, a oferta sai com a frase e sem esta linha)
+      const pa = p.parecida_anterior;
+      const passou = precoAnterior !== null && pa && typeof pa.titulo === 'string' && pa.titulo.trim() && Number.isFinite(pa.enviada_em)
+        ? textoPassou({ title: pa.titulo, preco: precoAnterior, sent_at: pa.enviada_em }, offer.price, Date.now()) : null;
       let porGrupo; const avisos = [];
       // Amazon: sempre https://www.amazon.com.br/dp/<ASIN>?tag=<tag>, montado do ASIN (nunca o link que veio)
       try { porGrupo = await linksPorGrupo(p, etiqueta, jids, avisos); } catch (e) { throw semLink(e); }
       const textos = new Map(); // link → texto: um por código, não por grupo
       const textoDe = (link) => {
-        if (!textos.has(link)) textos.set(link, renderTemplate(tpl.body, { ...offer, link }, tplOpts(db)));
+        if (!textos.has(link)) {
+          const t = renderTemplate(tpl.body, { ...offer, link }, tplOpts(db));
+          textos.set(link, precoAnterior !== null ? comFraseMaisBarata(t) : t); // a frase só sai com a marca já conferida
+        }
         return textos.get(link);
       };
       // foto: a enviada pelo painel (Buffer) ou a URL que a loja devolveu, só de CDN permitido (o Baileys baixa a URL)
@@ -1366,6 +1395,7 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
           : ehMagalu ? 'Enviado pela Magalu, com a sua loja de parceiro' : `Enviado com a etiqueta ${linha.codigo}`);
       return {
         avisos,
+        passou,
         falha(jid) {
           const l = porGrupo.get(jid);
           if (l?.link) return null;
@@ -1484,6 +1514,7 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
       const faltam = jids.filter((j) => !feitos.has(j) && !falhos.has(j));
       ok = jids.filter((j) => feitos.has(j)).length;
       erro = jids.filter((j) => falhos.has(j) && !feitos.has(j)).length;
+      const okAntes = ok; // retomada: a linha "Saiu como oportunidade melhor" sai uma vez, no primeiro grupo que recebe
       let envio = null;
       if (faltam.length && segurar()) adiado = true; // nem prepara: o link e a conferência de preço ficam para quando sair
       if (faltam.length && !adiado) {
@@ -1539,6 +1570,7 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
           // com o ritmo, a pausa entre grupos é a do embrulho do `wa` (entre quaisquer duas mensagens)
           if (!ritmo && i < faltam.length - 1) await sleep(jitter(pausa));
         }
+        if (envio.passou && okAntes === 0 && ok > 0) log({ level: 'info', message: envio.passou });
       }
     } catch (err) {
       // falha inesperada (banco, JSON): registra e não deixa o envio preso em 'enviando'
