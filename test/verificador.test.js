@@ -2,6 +2,8 @@
 // decidir (pura) e createVerificador().conferir com leitores falsos por loja. As leituras "de verdade" usam o
 // conferirProduto do ML com fixtures injetadas e os clientes reais da Amazon e da Shopee sem credencial ou com um
 // fetch falso. O fetch global fica bloqueado e o último teste prova que ninguém o chamou.
+// Entrega 2 (docs/produto/planos/verificador-ml-extensao.md, etapa 4; CA1–CA4, CA6, CA8): no modo de link
+// 'extension', o ML é lido só pela extensão (links.requestProduto falso), com as falhas nomeadas virando CAUSAS.
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -76,6 +78,14 @@ test('verificador: constantes e frases fixas do contrato', () => {
     'a Shopee não devolveu o produto', 'a página não trouxe o preço', 'a loja demorou demais']) {
     assert.ok(Object.values(CAUSAS).includes(frase), frase);
   }
+  // entrega 2 (D8): as causas da leitura pela extensão do Chrome
+  assert.deepEqual(
+    [CAUSAS.extensao_off, CAUSAS.extensao_antiga, CAUSAS.ml_verificacao, CAUSAS.limite_hora],
+    ['a extensão do Chrome não está conectada', 'a extensão do Chrome precisa ser recarregada',
+      'o Mercado Livre pediu verificação no navegador', 'o limite de conferências por hora foi atingido'],
+  );
+  // achado R1: catálogo de várias versões e o link não diz qual
+  assert.equal(CAUSAS.varias_versoes, 'o produto tem várias versões e o link não diz qual');
 });
 
 test('verificador: OfertaDescartada leva motivo e texto; motivo desconhecido vira nao_conferido', () => {
@@ -170,6 +180,23 @@ test('decidir: leitura sem preço é sem conferência ("a página não trouxe o 
   assert.equal(decidir({ ...base, lidoEm: null, leitura: { causa: '<b>x</b>' } }).texto, 'Descartada: não deu para conferir o preço (a loja não respondeu)');
   assert.equal(decidir({ ...base, lidoEm: null, leitura: { causa: 'toString' } }).texto, 'Descartada: não deu para conferir o preço (a loja não respondeu)');
   assert.equal(decidir({ ...base, lidoEm: null, leitura: { causa: 'demorou' } }).texto, 'Descartada: não deu para conferir o preço (a loja demorou demais)');
+});
+
+test('decidir (R1): várias versões e o link não diz qual: esgotado e o menor preço acima do limite descartam; o resto é sem conferência, nunca "conferido"', () => {
+  const v = (extra) => ({ varias: true, ...extra });
+  assert.equal(decidir({ ...base, leitura: v({ price: null, disponivel: false }) }).motivo, 'esgotado');
+  assert.equal(decidir({ ...base, leitura: v({ price: 120, disponivel: true }) }).texto, 'Descartada: preço subiu de R$ 100,00 para R$ 120,00 (+20%, o limite é 5%)');
+  const causa = 'o produto tem várias versões e o link não diz qual';
+  // até o limite, igual ou mais barato: não dá para saber o preço do anúncio
+  for (const price of [105, 100, 80]) {
+    assert.deepEqual(decidir({ ...base, leitura: v({ price, disponivel: true }) }), { acao: 'enviar', conferido: false, precoNovo: null, sufixo: ` · preço não conferido (${causa})` }, String(price));
+    assert.deepEqual(decidir({ ...base, lidoEm: T0 - 31 * MIN, leitura: v({ price, disponivel: true }) }), { acao: 'descartar', motivo: 'nao_conferido', texto: `Descartada: não deu para conferir o preço (${causa})` });
+  }
+  // sem preço (versões misturadas), e sem referência para comparar: idem; a causa da leitura não vale mais que `varias`
+  assert.equal(decidir({ ...base, leitura: v({ price: null, disponivel: null, causa: 'sem_preco' }) }).sufixo, ` · preço não conferido (${causa})`);
+  assert.equal(decidir({ ...base, referencia: null, leitura: v({ price: 90, disponivel: true }) }).sufixo, ` · preço não conferido (${causa})`);
+  // só o true literal liga
+  for (const varias of ['true', 1, {}]) assert.equal(decidir({ ...base, leitura: { price: 100, disponivel: true, varias } }).conferido, true, JSON.stringify(varias));
 });
 
 // ---------------------------------------------------------------------------------------------- conferir
@@ -529,6 +556,192 @@ test('verificador: textos e sufixos são só frases fixas, CAUSAS e preços (nad
   // a alta disponivel 'nao' (não booleano) não é esgotado
   const r = await createVerificador({ db: novoDb(), ml: mlFalso({ price: 100, disponivel: 'nao' }), agora: () => T0 }).conferir(ofertaMl());
   assert.equal(r.acao, 'enviar');
+});
+
+// ---------------------------------------------------------------------------------- ML pela extensão (entrega 2)
+/** links falso: modo de link e requestProduto que conta as chamadas (resposta fixa, função ou promessa). */
+function linksFalso(resposta, { modo = 'extension' } = {}) {
+  const chamadas = [];
+  const l = {
+    chamadas,
+    modo: () => (typeof modo === 'function' ? modo() : modo),
+    requestProduto: async (...args) => { chamadas.push(args); return typeof resposta === 'function' ? resposta(...args) : resposta; },
+  };
+  return l;
+}
+
+test('conferir (ML, extensão): no modo extension lê só pela extensão, nunca pelo servidor (CA1, D5, D9)', async () => {
+  const links = linksFalso({ price: 90, disponivel: true });
+  const ml = { conferirProduto: proibido('ml.conferirProduto') };
+  const v = createVerificador({ db: novoDb(), ml, links, amazon: amazonFalsa(proibido('amazon')), shopee: shopeeFalsa(proibido('shopee')), agora: () => T0 });
+  const r = await v.conferir(ofertaMl({ vistoEm: 1 }), { lidoEm: null });
+  assert.deepEqual(links.chamadas, [[{ url: URL_ML }]]);
+  assert.deepEqual([r.acao, r.conferido, r.sufixo], ['enviar', true, ' · preço atualizado de R$ 100,00 para R$ 90,00']);
+  assert.deepEqual([r.oferta.price, r.oferta.oldPrice, r.oferta.discountPct, r.oferta.vistoEm], [90, 150, 40, T0]);
+  // a oferta do Catálogo (loja 'ml') e a URL de catálogo /p/ também vão à extensão; o anúncio que a oferta conhece
+  // (a chave MLB…, o metadata.id da Central, ou o item_id do payload) vai como pdp_filters (R1)
+  const url = 'https://www.mercadolivre.com.br/fone-bom/p/MLB12345678';
+  const r2 = await v.conferir(ofertaMl({ loja: 'ml', url }));
+  assert.equal(r2.conferido, true);
+  assert.deepEqual(links.chamadas.at(-1), [{ url: `${url}?pdp_filters=item_id:MLB1234567890` }]);
+  await v.conferir(ofertaMl({ url, key: undefined, item_id: 'MLB5257531512' }));
+  assert.deepEqual(links.chamadas.at(-1), [{ url: `${url}?pdp_filters=item_id:MLB5257531512` }]);
+  // sem anúncio (a chave é o próprio catálogo, ou o meli.la colado): só o catálogo; o rastreio de terceiro sai
+  for (const key of ['MLB12345678', 'https://meli.la/1AbCdEf', undefined]) {
+    await v.conferir(ofertaMl({ url: `${url}?matt_tool=1#polycard`, key }));
+    assert.deepEqual(links.chamadas.at(-1), [{ url }], String(key));
+  }
+  // o resumo de várias versões chega ao decidir: o menor preço acima do limite descarta; senão, sem conferência
+  const variasSubiu = createVerificador({ db: novoDb(), ml, links: linksFalso({ price: 130, disponivel: true, varias: true }), agora: () => T0 });
+  assert.equal((await variasSubiu.conferir(ofertaMl({ url, key: undefined }))).motivo, 'preco_subiu');
+  const variasOk = createVerificador({ db: novoDb(), ml, links: linksFalso({ price: 90, disponivel: true, varias: true }), agora: () => T0 });
+  const rv = await variasOk.conferir(ofertaMl({ url, key: undefined }), { lidoEm: T0 });
+  assert.deepEqual([rv.acao, rv.conferido, rv.sufixo, rv.oferta.price], ['enviar', false, ' · preço não conferido (o produto tem várias versões e o link não diz qual)', 100]);
+  // preço acima do limite descarta como na leitura pelo servidor
+  const subiu = createVerificador({ db: novoDb(), ml, links: linksFalso({ price: 120, disponivel: true }), agora: () => T0 });
+  assert.equal((await subiu.conferir(ofertaMl())).texto, 'Descartada: preço subiu de R$ 100,00 para R$ 120,00 (+20%, o limite é 5%)');
+  // o ML pela extensão segue "conferível" (a desconexão é passageira)
+  assert.equal(v.podeConferir('mercadolivre'), true);
+});
+
+test('conferir (ML, extensão): esgotado só com disponivel false (com ou sem preço); sem preço é "a página não trouxe o preço" (CA2)', async () => {
+  const ml = { conferirProduto: proibido('ml.conferirProduto') };
+  for (const resposta of [{ price: null, disponivel: false }, { price: 100, disponivel: false }]) {
+    const v = createVerificador({ db: novoDb(), ml, links: linksFalso(resposta), agora: () => T0 });
+    assert.deepEqual(await v.conferir(ofertaMl(), { lidoEm: T0 }), { acao: 'descartar', motivo: 'esgotado', texto: 'Descartada: esgotado na loja' });
+  }
+  for (const resposta of [{ price: null, disponivel: true }, { price: null, disponivel: null }, { price: 0, disponivel: true }, {}]) {
+    const v = createVerificador({ db: novoDb(), ml, links: linksFalso(resposta), agora: () => T0 });
+    assert.equal((await v.conferir(ofertaMl(), { lidoEm: null })).texto, 'Descartada: não deu para conferir o preço (a página não trouxe o preço)', JSON.stringify(resposta));
+    const fresco = await v.conferir(ofertaMl(), { lidoEm: T0 - 29 * MIN });
+    assert.deepEqual([fresco.acao, fresco.conferido, fresco.sufixo], ['enviar', false, ' · preço não conferido (a página não trouxe o preço)']);
+  }
+  // disponivel que não é booleano não é esgotado
+  const v = createVerificador({ db: novoDb(), ml, links: linksFalso({ price: 100, disponivel: 'OutOfStock' }), agora: () => T0 });
+  assert.deepEqual([(await v.conferir(ofertaMl())).acao, (await v.conferir(ofertaMl())).conferido], ['enviar', true]);
+});
+
+test('conferir (ML, extensão): cada falha vira a sua causa, com a regra dos 30 min (29 sai, 31 descarta) (CA3, CA4, CA6, D8)', async () => {
+  const ml = { conferirProduto: proibido('ml.conferirProduto') };
+  const casos = [
+    [{ falha: 'desconectada' }, 'a extensão do Chrome não está conectada'],
+    [{ falha: 'antiga' }, 'a extensão do Chrome precisa ser recarregada'],
+    [{ falha: 'verificacao' }, 'o Mercado Livre pediu verificação no navegador'],
+    [{ falha: 'limite' }, 'o limite de conferências por hora foi atingido'],
+    [{ falha: 'tempo' }, 'a loja demorou demais'],
+    [{ falha: 'erro' }, 'a loja não respondeu'],
+    // falha desconhecida, que não é texto, ou nome herdado do protótipo: "a loja não respondeu"
+    [{ falha: 'xyz' }, 'a loja não respondeu'],
+    [{ falha: 'toString' }, 'a loja não respondeu'],
+    [{ falha: 'constructor' }, 'a loja não respondeu'],
+    [{ falha: 1 }, 'a loja não respondeu'],
+    [{ falha: ['antiga'] }, 'a loja não respondeu'],
+    [{ falha: undefined, price: 100, disponivel: true }, 'a loja não respondeu'],
+    // resposta fora do contrato (requestProduto nunca devolve isso): sem conferência
+    [null, 'a loja não respondeu'],
+    [undefined, 'a loja não respondeu'],
+    ['texto', 'a loja não respondeu'],
+  ];
+  for (const [resposta, causa] of casos) {
+    const links = linksFalso(resposta);
+    const v = createVerificador({ db: novoDb(), ml, links, agora: () => T0 });
+    const nome = JSON.stringify(resposta) ?? String(resposta);
+    const fresco = await v.conferir(ofertaMl({ vistoEm: 7 }), { lidoEm: T0 - 29 * MIN });
+    assert.deepEqual([fresco.acao, fresco.conferido, fresco.sufixo, fresco.oferta.price, 'vistoEm' in fresco.oferta],
+      ['enviar', false, ` · preço não conferido (${causa})`, 100, false], nome);
+    assert.deepEqual(await v.conferir(ofertaMl(), { lidoEm: T0 - 31 * MIN }),
+      { acao: 'descartar', motivo: 'nao_conferido', texto: `Descartada: não deu para conferir o preço (${causa})` }, nome);
+    assert.deepEqual(await v.conferir(ofertaMl(), { lidoEm: null }),
+      { acao: 'descartar', motivo: 'nao_conferido', texto: `Descartada: não deu para conferir o preço (${causa})` }, nome);
+    assert.equal(links.chamadas.length, 3, nome);
+  }
+});
+
+test('conferir (ML, extensão): URL que não é de anúncio ou catálogo do ML é "a loja não respondeu" sem pedido à extensão (D8, S1)', async () => {
+  const links = linksFalso(proibido('requestProduto'));
+  const v = createVerificador({ db: novoDb(), ml: { conferirProduto: proibido('ml.conferirProduto') }, links, agora: () => T0 });
+  const fora = [
+    'http://produto.mercadolivre.com.br/MLB-1234567890-fone-_JM', 'https://produto.mercadolibre.com/MLB-1', 'https://meli.la/abc123',
+    'https://produto.mercadolivre.com.br.golpe.example/MLB-1', 'https://golpemercadolivre.com.br/MLB-1',
+    'https://user@produto.mercadolivre.com.br/MLB-1', 'https://:senha@produto.mercadolivre.com.br/MLB-1',
+    'https://produto.mercadolivre.com.br:8443/MLB-1',
+    `https://produto.mercadolivre.com.br/MLB-1234567?x=${'a'.repeat(2048)}`, 'não é URL', '', undefined, null, 42,
+    // S1: outras páginas do Mercado Livre (a extensão busca com a sessão do dono)
+    'https://mercadolivre.com.br/MLB-1234567', 'https://www.mercadolivre.com.br/jms/mlb/lgz/logout', 'https://myaccount.mercadolivre.com.br/MLB-1234567',
+    'https://www.mercadolivre.com.br/social/p/MLB123', 'https://www.mercadolivre.com.br/carrinho', 'https://produto.mercadolivre.com.br/MLB-1',
+  ];
+  for (const url of fora) {
+    const r = await v.conferir(ofertaMl({ url }), { lidoEm: null });
+    assert.equal(r.texto, 'Descartada: não deu para conferir o preço (a loja não respondeu)', String(url));
+  }
+  assert.equal(links.chamadas.length, 0);
+  // anúncio e catálogo nos dois hosts de produto valem
+  const ok = linksFalso({ price: 100, disponivel: true });
+  const v2 = createVerificador({ db: novoDb(), ml: { conferirProduto: proibido('ml.conferirProduto') }, links: ok, agora: () => T0 });
+  for (const url of ['https://www.mercadolivre.com.br/MLB-1234567', 'https://www.mercadolivre.com.br/x/p/MLB1', 'https://produto.mercadolivre.com.br/MLB-1234567-x-_JM']) {
+    assert.equal((await v2.conferir(ofertaMl({ url }))).conferido, true, url);
+  }
+  assert.equal(ok.chamadas.length, 3);
+});
+
+test('conferir (ML): modo direct, fake ou sem links lê pelo conferirProduto e não pede à extensão (CA8)', async () => {
+  for (const [nome, links] of [
+    ['direct', linksFalso(proibido('requestProduto'), { modo: 'direct' })],
+    ['fake', linksFalso(proibido('requestProduto'), { modo: 'fake' })],
+    ['sem links', null],
+    ['links sem modo()', { requestProduto: proibido('requestProduto') }],
+  ]) {
+    const ml = mlFalso({ price: 90, disponivel: true });
+    const v = createVerificador({ db: novoDb(), ml, links, agora: () => T0 });
+    const r = await v.conferir(ofertaMl());
+    assert.deepEqual(ml.chamadas, [[URL_ML]], nome);
+    assert.deepEqual([r.conferido, r.oferta.price], [true, 90], nome);
+    if (links?.chamadas) assert.equal(links.chamadas.length, 0, nome);
+  }
+  // o modo é lido a cada conferência (o dono troca o modo de link em Ajustes sem reiniciar)
+  let modo = 'direct';
+  const ml = mlFalso({ price: 100, disponivel: true });
+  const links = linksFalso({ falha: 'desconectada' }, { modo: () => modo });
+  const v = createVerificador({ db: novoDb(), ml, links, agora: () => T0 });
+  assert.equal((await v.conferir(ofertaMl())).conferido, true);
+  modo = 'extension';
+  assert.equal((await v.conferir(ofertaMl(), { lidoEm: T0 })).sufixo, ' · preço não conferido (a extensão do Chrome não está conectada)');
+  assert.deepEqual([ml.chamadas.length, links.chamadas.length], [1, 1]);
+});
+
+test('conferir (ML, extensão): simulado e desligado não pedem à extensão (CA8)', async () => {
+  const links = linksFalso(proibido('requestProduto'));
+  const ml = { conferirProduto: proibido('ml.conferirProduto') };
+  const simulado = await createVerificador({ db: novoDb(), ml, links, simulado: true, agora: () => T0 }).conferir(ofertaMl(), { lidoEm: null });
+  assert.deepEqual([simulado.acao, simulado.conferido, simulado.oferta.vistoEm], ['enviar', true, T0]);
+  const db = novoDb();
+  setSetting(db, 'verificador_ativo', '0');
+  const desligado = await createVerificador({ db, ml, links, agora: () => T0 }).conferir(ofertaMl(), { lidoEm: null });
+  assert.deepEqual([desligado.acao, desligado.conferido, desligado.sufixo], ['enviar', false, null]);
+  assert.equal(links.chamadas.length, 0);
+});
+
+test('conferir (ML, extensão): requestProduto que lança (fora do contrato) é "a loja não respondeu", sem ler pelo servidor e sem vazar a mensagem', async (t) => {
+  const log = t.mock.method(console, 'error', () => {});
+  const links = linksFalso(() => { throw new Error(`falhou ${URL_ML} token=abc`); });
+  const v = createVerificador({ db: novoDb(), ml: { conferirProduto: proibido('ml.conferirProduto') }, links, agora: () => T0 });
+  assert.equal((await v.conferir(ofertaMl())).texto, 'Descartada: não deu para conferir o preço (a loja não respondeu)');
+  // modo() que lança também não cai na leitura pelo servidor
+  const quebrado = { modo: () => { throw new Error('getMode quebrou'); }, requestProduto: proibido('requestProduto') };
+  const v2 = createVerificador({ db: novoDb(), ml: { conferirProduto: proibido('ml.conferirProduto') }, links: quebrado, agora: () => T0 });
+  assert.equal((await v2.conferir(ofertaMl(), { lidoEm: T0 })).sufixo, ' · preço não conferido (a loja não respondeu)');
+  assert.equal(log.mock.callCount(), 2);
+  for (const c of log.mock.calls) assert.equal(c.arguments.map(String).join(' '), '[verificador] conferência sem resposta (mercadolivre): Error');
+});
+
+test('conferir (ML, extensão): pedido que não volta é cortado no prazo do verificador ("a loja demorou demais")', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const links = linksFalso(() => new Promise(() => {}));
+  const v = createVerificador({ db: novoDb(), ml: { conferirProduto: proibido('ml.conferirProduto') }, links, agora: () => T0, tempoMaxMs: 500 });
+  const p = v.conferir(ofertaMl(), { lidoEm: T0 - 29 * MIN });
+  await new Promise((r) => setImmediate(r));
+  t.mock.timers.tick(500);
+  assert.equal((await p).sufixo, ' · preço não conferido (a loja demorou demais)');
 });
 
 test('verificador: nenhum teste acessou a rede (CA6)', () => {

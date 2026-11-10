@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "achadinhoturbo · Conector",
-  "version": "1.4.2",
-  "description": "Busca ofertas da sua Central de Afiliados do Mercado Livre e gera links de afiliado (meli.la e s.shopee.com.br) com a sua sessão. Nenhum cookie sai do navegador.",
+  "version": "1.5.0",
+  "description": "Busca ofertas da sua Central de Afiliados do Mercado Livre, gera links de afiliado (meli.la e s.shopee.com.br) e confere preço e estoque no Mercado Livre com a sua sessão. Nenhum cookie sai do navegador.",
   "permissions": [
     "storage",
     "alarms",

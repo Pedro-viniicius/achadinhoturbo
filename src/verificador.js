@@ -4,9 +4,13 @@
 //
 // - decidir({ leitura, referencia, precoOferta, limitePct, lidoEm, agora, digitado }) → decisão. Pura: sem rede,
 //   sem banco, sem relógio próprio.
-//   - leitura = { price, disponivel, discountPct?, oldPrice? } (a loja respondeu) ou { causa } (sem conferência; chave de CAUSAS).
+//   - leitura = { price, disponivel, discountPct?, oldPrice?, varias? } (a loja respondeu) ou { causa } (sem conferência;
+//     chave de CAUSAS). `varias: true`: catálogo do ML de várias versões e o link não diz qual (ml.urlProdutoML e
+//     resumoDasVariantes de src/ml.js); `price` é o menor preço entre as versões, todas à venda.
 //   - Esgotado só com sinal explícito (D5): `disponivel === false`, com ou sem preço → descartar 'esgotado'.
-//   - Sem preço lido (> 0) → sem conferência (causa da leitura, ou 'sem_preco').
+//   - Sem preço lido (> 0) → sem conferência (causa da leitura, 'varias_versoes' com `varias`, ou 'sem_preco').
+//   - `varias` com preço: só o descarte vale (o menor preço acima do limite → 'preco_subiu'); senão, sem conferência
+//     ('varias_versoes'): nunca o preço de uma versão como se fosse o do anúncio.
 //   - Sem conferência (D3): `lidoEm` (ms) de até FRESCOR_MIN atrás → enviar, sem conferir, com o sufixo
 //     " · preço não conferido (<causa>)"; mais velho, no futuro ou desconhecido → descartar 'nao_conferido'.
 //   - Conferido (D4): referência inválida → enviar sem comparar. Preço atual acima de referência × (1 + L/100)
@@ -14,7 +18,7 @@
 //     atual (`precoNovo`) e o sufixo " · preço atualizado de R$ X para R$ Y"; preço digitado à mão é mantido.
 //   → { acao: 'enviar', conferido, precoNovo: número|null, sufixo: texto|null }
 //     | { acao: 'descartar', motivo: 'esgotado'|'preco_subiu'|'nao_conferido', texto }
-// - createVerificador({ db, ml, amazon, shopee, simulado = false, agora = Date.now, tempoMaxMs = TEMPO_MAX_MS })
+// - createVerificador({ db, ml, amazon, shopee, links = null, simulado = false, agora = Date.now, tempoMaxMs = TEMPO_MAX_MS })
 //   → { ativo(), limitePct(), conferir(oferta, { lidoEm, referencia }), podeConferir(loja) }
 //   - ativo(): `settings.verificador_ativo` diferente de '0' (ausente = ligado). limitePct(): inteiro de 0 a
 //     LIMITE_MAX_PCT de `settings.verificador_limite_pct`; ausente ou fora disso = LIMITE_PADRAO_PCT.
@@ -25,6 +29,14 @@
 //     ou na simulação). A leitura do ML não traz preço antigo; a da Amazon traz `oldPrice` e ele vale mais que o gravado.
 //   - Leitura por loja (D2): ML por ml.conferirProduto(url); Amazon por amazon.lerItem(asin, { fresco: true });
 //     Shopee por shopee.lerItem(shopId, itemId, { fresco: true }), só preço (a API não traz estoque); Magalu nunca.
+//   - ML no modo de link 'extension' (`links.modo()`; plano verificador-ml-extensao, D5/D8/D9): só pela extensão do
+//     Chrome, por links.requestProduto({ url }), e nunca pelo servidor (a leitura dele é barrada e soma pontos no
+//     anti-robô da sessão do dono). A URL passa por ml.urlProdutoML (só anúncio ou catálogo do ML; senão 'loja_fora'
+//     sem pedido), com o anúncio da oferta (`item_id`, `itemId` ou a chave `MLB…`, como o `metadata.id` da Central)
+//     como `pdp_filters` num catálogo sem filtro. A resposta
+//     (nunca rejeita) é { price, disponivel } (já validada por ml.lerProdutoDaExtensao) ou { falha }, que vira causa:
+//     desconectada → extensao_off, antiga → extensao_antiga, verificacao → ml_verificacao, limite → limite_hora,
+//     tempo → demorou, erro (ou outra) → loja_fora. Modo 'direct'/'fake' ou sem `links`: ml.conferirProduto.
 //   - Cada leitura leva no máximo `tempoMaxMs` (Promise.race; a promessa perdedora tem o seu .catch e o timer é
 //     limpo). Erro do leitor = sem conferência; no console vai só a loja e o `e.name` (nunca URL, corpo ou mensagem).
 //   - `conferir` nunca lança. → { acao: 'enviar', oferta, conferido, sufixo|null } (cópia da oferta; `vistoEm` = agora()
@@ -37,6 +49,7 @@
 // Os textos são frases fixas, CAUSAS e preços formatados por brl(): nada vindo da loja além de números validados.
 
 import * as mlPadrao from './ml.js';
+import { urlProdutoML } from './ml.js';
 import { getSetting } from './db.js';
 import { brl, discountPct as calcularDesconto } from './template.js';
 
@@ -63,6 +76,21 @@ export const CAUSAS = Object.freeze({
   shopee_sem_produto: 'a Shopee não devolveu o produto',
   sem_preco: 'a página não trouxe o preço',
   demorou: 'a loja demorou demais',
+  extensao_off: 'a extensão do Chrome não está conectada',
+  extensao_antiga: 'a extensão do Chrome precisa ser recarregada',
+  ml_verificacao: 'o Mercado Livre pediu verificação no navegador',
+  limite_hora: 'o limite de conferências por hora foi atingido',
+  varias_versoes: 'o produto tem várias versões e o link não diz qual',
+});
+
+/** Falha nomeada de links.requestProduto → chave de CAUSAS (D8). Outra falha → 'loja_fora'. */
+const CAUSA_DA_FALHA = Object.freeze({
+  desconectada: 'extensao_off',
+  antiga: 'extensao_antiga',
+  verificacao: 'ml_verificacao',
+  limite: 'limite_hora',
+  tempo: 'demorou',
+  erro: 'loja_fora',
 });
 
 /** Oferta que o verificador barrou (a fila lança esta no preparar). `motivo` é chave de MOTIVOS_VERIFICADOR. */
@@ -118,14 +146,16 @@ export function decidir({ leitura, referencia, precoOferta, limitePct, lidoEm, a
   if (leitura && leitura.disponivel === false) {
     return { acao: 'descartar', motivo: 'esgotado', texto: MOTIVOS_VERIFICADOR.esgotado };
   }
-  const atual = precoValido(leitura?.price);
-  if (atual == null) {
-    const causa = CAUSAS[causaValida(leitura?.causa ?? 'sem_preco')];
+  const semConferencia = (chave) => {
+    const causa = CAUSAS[causaValida(chave)];
     if (dadosFrescos(lidoEm, agora)) return { acao: 'enviar', conferido: false, precoNovo: null, sufixo: ` · preço não conferido (${causa})` };
     return { acao: 'descartar', motivo: 'nao_conferido', texto: `${MOTIVOS_VERIFICADOR.nao_conferido} (${causa})` };
-  }
+  };
+  const varias = leitura?.varias === true;
+  const atual = precoValido(leitura?.price);
+  if (atual == null) return semConferencia(varias ? 'varias_versoes' : leitura?.causa ?? 'sem_preco');
   const ref = precoValido(referencia);
-  if (ref == null) return { acao: 'enviar', conferido: true, precoNovo: null, sufixo: null };
+  if (ref == null) return varias ? semConferencia('varias_versoes') : { acao: 'enviar', conferido: true, precoNovo: null, sufixo: null };
   const limite = limiteValido(limitePct);
   const atualC = centavos(atual);
   const refC = centavos(ref);
@@ -134,6 +164,8 @@ export function decidir({ leitura, referencia, precoOferta, limitePct, lidoEm, a
     const alta = altaTexto(((atualC - refC) / refC) * 100, limite);
     return { acao: 'descartar', motivo: 'preco_subiu', texto: `${MOTIVOS_VERIFICADOR.preco_subiu} de ${brl(ref)} para ${brl(atual)} (+${alta}%, o limite é ${limite}%)` };
   }
+  // várias versões: até a mais barata passou do limite, ou não dá para saber o preço do anúncio
+  if (varias) return semConferencia('varias_versoes');
   const oferta = precoValido(precoOferta);
   if (digitado !== true && oferta != null && centavos(oferta) === refC && atualC !== refC) {
     return { acao: 'enviar', conferido: true, precoNovo: atual, sufixo: ` · preço atualizado de ${brl(ref)} para ${brl(atual)}` };
@@ -164,6 +196,18 @@ function idsShopee(oferta) {
   return m ? { shopId: m[1], itemId: m[2] } : null;
 }
 
+/** O anúncio que a oferta do ML conhece (`MLB…`): `item_id`/`itemId` do payload ou a chave (o `metadata.id` da Central). */
+function itemDaOferta(oferta) {
+  for (const v of [oferta.item_id, oferta.itemId, oferta.key]) if (typeof v === 'string' && /^MLB\d{6,20}$/.test(v)) return v;
+  return null;
+}
+
+/** Leitura do ML ({ price, disponivel, varias? }) só com número válido, estoque booleano e `varias` só se for true. */
+const leituraMl = (r) => ({
+  price: precoValido(r?.price), disponivel: r?.disponivel === true || r?.disponivel === false ? r.disponivel : null,
+  ...(r?.varias === true ? { varias: true } : {}),
+});
+
 const SEM_API_AMAZON = new Set(['sem_credenciais', 'sem_tag', 'credenciais_invalidas', 'sem_acesso', 'tag_invalida']);
 const SEM_API_SHOPEE = new Set(['sem_credenciais', 'credencial_recusada', 'sem_acesso', 'conta_restrita']);
 
@@ -174,7 +218,7 @@ function causaDoErro(loja, e) {
   return 'loja_fora';
 }
 
-export function createVerificador({ db, ml = mlPadrao, amazon = null, shopee = null, simulado = false, agora = Date.now, tempoMaxMs = TEMPO_MAX_MS } = {}) {
+export function createVerificador({ db, ml = mlPadrao, amazon = null, shopee = null, links = null, simulado = false, agora = Date.now, tempoMaxMs = TEMPO_MAX_MS } = {}) {
   const prazo = typeof tempoMaxMs === 'number' && Number.isFinite(tempoMaxMs) && tempoMaxMs > 0 ? tempoMaxMs : TEMPO_MAX_MS;
 
   function ativo() {
@@ -203,12 +247,27 @@ export function createVerificador({ db, ml = mlPadrao, amazon = null, shopee = n
     return l === 'amazon' ? amazonLiga() : shopeeLiga();
   }
 
+  /** O ML é lido pela extensão (modo de link 'extension')? Nesse modo o servidor nunca lê o ML (D5). */
+  const mlPelaExtensao = () => typeof links?.modo === 'function' && links.modo() === 'extension';
+
+  /** Leitura do ML pela extensão. → { price, disponivel, varias? } | { causa }. */
+  async function lerMlPelaExtensao(oferta) {
+    const url = urlProdutoML(oferta.url, { item: itemDaOferta(oferta) });
+    if (!url) return { causa: 'loja_fora' };
+    const r = await links.requestProduto({ url });
+    if (!r || typeof r !== 'object') return { causa: 'loja_fora' };
+    if (Object.hasOwn(r, 'falha')) {
+      return { causa: typeof r.falha === 'string' && Object.hasOwn(CAUSA_DA_FALHA, r.falha) ? CAUSA_DA_FALHA[r.falha] : 'loja_fora' };
+    }
+    return leituraMl(r);
+  }
+
   /** Lê a loja. → { price, disponivel, discountPct? } | { causa }. Pode lançar (o lerComPrazo trata). */
   async function lerLoja(loja, oferta) {
     if (loja === 'magalu') return { causa: 'magalu' };
     if (loja === 'mercadolivre') {
-      const r = await ml.conferirProduto(oferta.url);
-      return { price: precoValido(r?.price), disponivel: r?.disponivel === true || r?.disponivel === false ? r.disponivel : null };
+      if (mlPelaExtensao()) return lerMlPelaExtensao(oferta);
+      return leituraMl(await ml.conferirProduto(oferta.url));
     }
     if (loja === 'amazon') {
       if (!amazonLiga()) return { causa: 'amazon_sem_api' };

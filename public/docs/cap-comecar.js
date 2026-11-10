@@ -76,7 +76,7 @@ docsCapitulo({
       id: 'extensao', titulo: 'Instalar a extensão do Chrome',
       onde: '[[Conexões → Mercado Livre]]',
       blocos: [
-        { p: 'A extensão usa a sua sessão na Central de Afiliados do Mercado Livre para gerar os links `meli.la` e ler a lista de ofertas. Nenhum cookie sai do seu Chrome: ela devolve só a lista de produtos e o link pronto.' },
+        { p: 'A extensão usa a sua sessão na Central de Afiliados do Mercado Livre para gerar os links `meli.la`, ler a lista de ofertas e, na versão 1.5.0, conferir o preço e o estoque do produto antes de cada envio. Nenhum cookie sai do seu Chrome: ela devolve só a lista de produtos, o link pronto e, na conferência, o preço e a disponibilidade.' },
         { passos: [
           'No Chrome, abra `chrome://extensions` e ligue o “Modo do desenvolvedor”.',
           'Clique em “Carregar sem compactação” e escolha a pasta `extension` do programa.',
@@ -86,7 +86,7 @@ docsCapitulo({
           'Volte a Conexões: a linha de estado diz “Extensão conectada.”',
         ] },
         { nota: 'dica', texto: 'O Chrome precisa ficar aberto enquanto os disparos rodam. A extensão abre sozinha uma aba fixada da Central. Para os links da Shopee, entre também em `affiliate.shopee.com.br`.' },
-        { nota: 'erro', texto: '“Não há sessão de afiliado neste Chrome” no Histórico. A sessão venceu. Entre de novo na Central de Afiliados nesse Chrome. Se a Shopee não gera links, abra `chrome://extensions` e clique em “Recarregar” na extensão: a versão 1.3.0 pede uma permissão nova.' },
+        { nota: 'erro', texto: '“Não há sessão de afiliado neste Chrome” no Histórico. A sessão venceu. Entre de novo na Central de Afiliados nesse Chrome. Se a Shopee não gera links, abra `chrome://extensions` e clique em “Recarregar” na extensão: a versão 1.3.0 pede uma permissão nova. Depois de atualizar a pasta `extension` para a 1.5.0, clique em “Recarregar” também: até lá, o Histórico diz “a extensão do Chrome precisa ser recarregada” nas conferências do Mercado Livre.' },
         { nota: 'aviso', texto: 'O token da extensão funciona como uma senha. Se achar que ele vazou, o Dono clica em “Gerar novo token” em Conexões. A extensão para de funcionar até você colar o novo.' },
       ],
     },

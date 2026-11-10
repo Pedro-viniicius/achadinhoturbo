@@ -99,11 +99,11 @@ const TIPS = {
   // ajustes
   'ajustes.pausas': 'Espera entre mensagens. O programa varia o tempo ao acaso para parecer humano. Mais curto = mais risco de bloqueio.',
   'ajustes.titulo': 'Tamanho máximo de {TITULO_PRODUTO}: tira “Compatível com…”, “Premium”, “Alta Qualidade” e corta sem partir palavra. 0 = nome inteiro.',
-  'ajustes.verificador': 'Antes de cada envio o programa lê o preço e o estoque na loja. Se estiver esgotado ou o preço subiu mais que o limite, a oferta não sai e o Histórico diz o motivo. Se o preço caiu, sai com o preço novo. Se a loja não responder, a oferta só sai se os dados forem de até 30 min.',
+  'ajustes.verificador': 'Antes de cada envio o programa lê o preço e o estoque na loja. Se estiver esgotado ou o preço subiu mais que o limite, a oferta não sai e o Histórico diz o motivo. Se o preço caiu, sai com o preço novo. Se a loja não responder, a oferta só sai se os dados forem de até 30 min. O Mercado Livre é conferido pela extensão do Chrome.',
   'ajustes.verificador.limite': 'Quanto o preço pode ter subido, em %, desde a oferta que você viu. Padrão 5, de 0 a 50. Acima disso a oferta é descartada. 0 = qualquer alta descarta.',
   'ajustes.modo_link': 'Pela extensão: link meli.la com a sua etiqueta (gera comissão). Link direto: sem etiqueta, só para testar o fluxo.',
   'ajustes.privacidade': 'Quem entra, sai ou lê é guardado com um pseudônimo (código derivado do número com uma chave local), não com o número. Depois do prazo, os registros são apagados de vez. É o que a LGPD chama de minimização e retenção.',
-  'ajustes.extensao': 'Fica em Conexões. A extensão fica no seu Chrome, logada no Mercado Livre, e é quem gera os links e busca a lista da Central. Cookies nunca saem do navegador.',
+  'ajustes.extensao': 'Fica em Conexões. A extensão fica no seu Chrome, logada no Mercado Livre, e é quem gera os links, busca a lista da Central e, desde a versão 1.5.0, confere o preço e o estoque do Mercado Livre antes do envio (recarregue-a em chrome://extensions depois de atualizar). Cookies nunca saem do navegador.',
   // disparo manual
   'manual': 'Dispare uma oferta agora ou em um horário de hoje, sem criar disparo automático. Cole o link, escolha grupos e template.',
   'manual.link': 'Cole o link do produto. “Identificar” descobre a loja e lê título, preço e foto. Mercado Livre, Amazon, Shopee e Magalu geram link de afiliado; Facebook ainda não. Na Magalu o painel não lê o produto: você preenche título e preço.',

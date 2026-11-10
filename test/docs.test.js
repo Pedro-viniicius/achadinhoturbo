@@ -799,6 +799,14 @@ const FATOS = [
   { nome: 'idade máxima dos dados para enviar sem conferir (min)', valor: 30, texto: (v) => new RegExp(`dados[^.]{0,60}de até ${v} min`), codigo: [['src/verificador.js', /export const FRESCOR_MIN = (\d+);/]] },
   { nome: 'segundos de espera de cada conferência', valor: 20, texto: (v) => new RegExp(`espera até ${v} segundos`), codigo: [['src/verificador.js', /export const TEMPO_MAX_MS = (\d+)000;/]] },
   { nome: 'horas da oferta descartada fora da escolha do disparo automático', valor: 6, texto: (v) => new RegExp(`não volta a ser escolhida por ${v} horas`), codigo: [['src/verificador.js', /export const PAUSA_DESCARTADA_H = (\d+);/]] },
+  // Mercado Livre conferido pela extensão (plano verificador-ml-extensao, etapa 6, CA6/CA3/CA5)
+  { nome: 'conferências do Mercado Livre por hora pela extensão', valor: 120, texto: (v) => new RegExp(`no máximo ${v} conferências por hora`), codigo: [['src/links.js', /export const LIMITE_PRODUTO_HORA = (\d+);/]] },
+  { nome: 'minutos sem pedir ao Mercado Livre depois de uma verificação', valor: 30, texto: (v) => new RegExp(`para de pedir por ${v} min`), codigo: [['src/links.js', /export const PAUSA_VERIFICACAO_MIN = (\d+);/]] },
+  // achado S2: verificações seguidas alongam a pausa (2 h, depois 6 h, o máximo)
+  { nome: 'horas da pausa na segunda verificação seguida', valor: 2, texto: (v) => new RegExp(`a pausa passa a ${v} h e depois`), codigo: [['src/links.js', /PAUSAS_VERIFICACAO_MIN = Object\.freeze\(\[PAUSA_VERIFICACAO_MIN, (\d+) \* 60,/]] },
+  { nome: 'horas da pausa máxima depois de verificações seguidas', valor: 6, texto: (v) => new RegExp(`depois a ${v} h \\(o máximo\\)`), codigo: [['src/links.js', /PAUSAS_VERIFICACAO_MIN = Object\.freeze\(\[[^\]]*, (\d+) \* 60\]\);/]] },
+  { nome: 'segundos que a extensão espera por um produto do Mercado Livre', valor: 15, texto: (v) => new RegExp(`espera até ${v} s na extensão`), codigo: [['extension/background.js', /const TETO_PRODUTO = (\d+)000;/]] },
+  { nome: 'segundos até o programa desistir do pedido de produto', valor: 18, texto: (v) => new RegExp(`desiste em ${v} s\\b`), codigo: [['src/links.js', /export const PRAZO_PRODUTO_MS = (\d+)000;/]] },
 ];
 
 test('FATOS: cada número aparece nos Docs e no README e bate com a constante do código', () => {
@@ -1499,7 +1507,7 @@ test('Verificador: a 3ª tabela de "motivos" de Referência cobre MOTIVOS_VERIFI
 
 test('Verificador: toda causa de CAUSAS e as frases fixas do código aparecem nos Docs e no README', () => {
   const ver = lerRaiz('src/verificador.js'); const server = lerRaiz('src/server.js'); const sched = lerRaiz('src/scheduler.js');
-  assert.equal(Object.keys(CAUSAS).length, 7);
+  assert.equal(Object.keys(CAUSAS).length, 12);
   for (const causa of Object.values(CAUSAS)) {
     assert.ok(TEXTO_DOCS.includes(causa), `Docs: causa “${causa}”`);
     assert.ok(README.includes(causa), `README: causa “${causa}”`);
@@ -1521,6 +1529,67 @@ test('Verificador: toda causa de CAUSAS e as frases fixas do código aparecem no
   assert.ok(ver.includes('${MOTIVOS_VERIFICADOR.preco_subiu} de ${brl(ref)} para ${brl(atual)} (+${alta}%, o limite é ${limite}%)'));
   const subiu = /Descartada: preço subiu de R\$ 89,90 para R\$ 99,90 \(\+11%, o limite é 5%\)/;
   assert.match(TEXTO_DOCS, subiu); assert.match(README, subiu);
+});
+
+test('Verificador, ML pela extensão: as quatro causas novas, a versão 1.5.0 e o que ainda lê pelo servidor estão nos Docs, no README e no TIPS', () => {
+  const NOVAS = ['extensao_off', 'extensao_antiga', 'ml_verificacao', 'limite_hora'];
+  const ver = readmeSecao('Conferência de preço e estoque antes do envio');
+  const secoes = [['Docs: manutencao/verificador', secaoTxt('manutencao', 'verificador')], ['Docs: referencia/motivos', secaoTxt('referencia', 'motivos')], ['README: Conferência', ver]];
+  for (const k of NOVAS) {
+    assert.ok(Object.hasOwn(CAUSAS, k), `CAUSAS.${k}`);
+    for (const [onde, txt] of secoes) assert.ok(txt.includes(CAUSAS[k]), `${onde}: causa “${CAUSAS[k]}”`);
+  }
+  // a lista "Entre parênteses…" de cada lugar traz as doze causas (a causa também aparece em outros parágrafos: não basta achar a frase na seção)
+  const listas = [
+    ['Docs: manutencao/verificador', strings(CAPS.manutencao.secoes.find((x) => x.id === 'verificador').blocos).find((t) => t.includes('a causa pode ser'))],
+    ['Docs: referencia/motivos', strings(CAPS.referencia.secoes.find((x) => x.id === 'motivos').blocos).find((t) => t.includes('Entre parênteses vai a causa'))],
+    ['README: Causas', README_BRUTO.split('\n').find((l) => l.startsWith('- **Causas**'))],
+  ];
+  for (const [onde, txt] of listas) {
+    assert.ok(txt, `${onde}: não achei a lista de causas`);
+    for (const causa of Object.values(CAUSAS)) assert.ok(limpo(txt).includes(causa), `${onde}: a lista não traz “${causa}”`);
+  }
+  // o ML é conferido pela extensão: a grafia antiga (leitura pelo programa, "sem usar a extensão") não volta
+  for (const [onde, txt] of [secoes[0], secoes[2]]) {
+    assert.doesNotMatch(txt, /sem usar a extensão|pelo próprio programa \(sem a extensão\)/, `${onde}: grafia antiga`);
+    assert.match(txt, /Mercado Livre.{0,40}pela extensão do Chrome, com a sessão do seu navegador/i, `${onde}: ML pela extensão`);
+    assert.match(txt, /Sem a extensão conectada[\s\S]{0,60}não há conferência/, `${onde}: sem a extensão, sem conferência`);
+    // honestidade: o Identificar/Criar do Disparo manual e o modo direto ainda leem pelo servidor, que o ML costuma barrar
+    assert.match(txt, /Identificar\W{0,3} e o \W{0,3}Criar/, `${onde}: Identificar e Criar`);
+    assert.match(txt, /costuma barrar/, `${onde}: o ML costuma barrar a leitura pelo programa`);
+  }
+  // verificação: sem aba, sem nova tentativa, sem CAPTCHA, e o dono passa por ela no Chrome
+  for (const [onde, txt] of [secoes[0], secoes[2]]) {
+    assert.match(txt, /não abre aba, não tenta de novo e não resolve CAPTCHA/, onde);
+    assert.match(txt, /passe você mesmo pela verificação/, onde);
+  }
+  // versão 1.5.0: manifest, README ("Extensão do Chrome"), capítulo de instalação e verbete de Ajustes
+  assert.equal(JSON.parse(lerRaiz('extension/manifest.json')).version, '1.5.0');
+  const ext = readmeSecao('Extensão do Chrome');
+  assert.match(ext, /versão 1\.5\.0 confere o preço e o estoque do Mercado Livre/);
+  assert.match(ext, /recarregue a extensão em chrome:\/\/extensions e mantenha o Chrome logado no Mercado Livre/);
+  assert.match(ext, /sem abrir aba/); assert.match(ext, /não pede permissão nova/i);
+  const inst = secaoTxt('primeiros-passos', 'extensao');
+  assert.match(inst, /versão 1\.5\.0, conferir o preço e o estoque/); assert.match(inst, /1\.5\.0, clique em “Recarregar”/);
+  const dica = limpo(tipsDoPainel()['ajustes.extensao']);
+  assert.match(dica, /versão 1\.5\.0/); assert.match(dica, /preço e o estoque do Mercado Livre/); assert.match(dica, /chrome:\/\/extensions/);
+  assert.match(limpo(tipsDoPainel()['ajustes.verificador']), /Mercado Livre é conferido pela extensão do Chrome/);
+  // a linha de limites da Referência cita o teto e a pausa
+  const limites = limpo(strings(CAPS.referencia.secoes.find((x) => x.id === 'limites').blocos).join('\n'));
+  assert.match(limites, /Mercado Livre é conferido pela extensão, no máximo 120 vezes por hora, e para de pedir por 30 min/);
+});
+
+test('Verificador, ML pela extensão (S2, R1, R4): a conta do dono, como desligar, a pausa que alonga, as várias versões e o que não foi testado', () => {
+  const secoes = [['Docs: manutencao/verificador', secaoTxt('manutencao', 'verificador')], ['README: Conferência', readmeSecao('Conferência de preço e estoque antes do envio')]];
+  for (const [onde, txt] of secoes) {
+    assert.match(txt, /mesma conta de afiliado que gera os links\W{0,3} ?meli\.la/, `${onde}: a conferência usa a conta de afiliado do dono`);
+    assert.match(txt, /pediu verificação no navegador\W{0,3} várias vezes seguidas, desligue a chave\W{0,3} ?Conferir antes de cada envio/, `${onde}: como desligar`);
+    assert.match(txt, /Ajustes → Conferir preço e estoque antes de enviar/, `${onde}: onde desligar`);
+    assert.match(txt, /continuam valendo se o programa reiniciar/, `${onde}: a pausa sobrevive ao reinício`);
+    assert.match(txt, /uma conferência que dá certo volta aos 30 min/, `${onde}: a pausa volta aos 30 min`);
+    assert.match(txt, /nunca usa o preço de uma versão como se fosse o do anúncio/, `${onde}: várias versões`);
+  }
+  assert.match(README, /conferência do Mercado Livre pela extensão foi provada só com páginas de exemplo e uma leitura manual no Chrome do dono/, 'R4');
 });
 
 test('Verificador: o que os Docs e o README dizem da conferência não promete "Enviar mesmo assim" nem o campo de falha (D3, D12)', () => {

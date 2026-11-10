@@ -198,12 +198,112 @@ function* blocosJsonLd(html) {
   }
 }
 
-/** O primeiro nó schema.org Product de cada bloco JSON-LD da página, na ordem (bloco que não é JSON é pulado). */
-function* produtosJsonLd(html) {
+/**
+ * Item do anúncio que o link aponta: o `item_id:MLB…` de `pdp_filters` (página de catálogo aberta para um anúncio,
+ * como `…/p/MLB15142194?pdp_filters=item_id:MLB5257531512`) ou o MLB de um link de anúncio. Página de catálogo sem
+ * `pdp_filters` → null (o MLB dela é do catálogo, não de um anúncio); endereço inválido → null.
+ */
+export function itemDoAnuncio(url) {
+  let u;
+  try { u = new URL(String(url ?? '')); } catch { return null; }
+  const filtro = (u.searchParams.get('pdp_filters') || '').match(/(?:^|[^\w])item_id:MLB-?(\d{6,20})(?!\d)/i);
+  if (filtro) return `MLB${filtro[1]}`;
+  return isCatalogUrl(u.href) ? null : extractItemId(u.pathname);
+}
+
+// Endereço de produto que vai à extensão do Chrome (ela busca com a sessão do dono; plano verificador-ml-extensao,
+// achado S1). Os mesmos padrões estão em urlProdutoML de extension/background.js, que confere de novo.
+const MAX_URL_PRODUTO = 2048;
+const HOSTS_PRODUTO_ML = new Set(['www.mercadolivre.com.br', 'produto.mercadolivre.com.br']);
+/** Anúncio: um segmento só, com o id no começo (/MLB-5257531512-fritadeira-_JM), como ANUNCIO_ML de src/envios.js. */
+const CAMINHO_ANUNCIO_ML = /^\/MLB-?\d{6,20}(?:[-_](?:[\w.~-]|%(?!2f|5c|2e)[0-9a-f]{2})*)?$/i;
+/** Catálogo: /p/MLB… no começo ou depois de um slug só, e nada depois, como CATALOGO_ML de src/envios.js. */
+const CAMINHO_CATALOGO_ML = /^\/(?:(?:[\w.~-]|%(?!2f|5c|2e)[0-9a-f]{2})+\/)?p\/MLB(\d{1,20})$/i;
+const FILTRO_ITEM_ML = /^item_id:MLB\d{6,20}$/;
+const ITEM_ML = /^MLB\d{6,20}$/;
+
+/**
+ * Endereço de produto do Mercado Livre que pode ir à extensão: https em www.mercadolivre.com.br ou
+ * produto.mercadolivre.com.br, sem porta nem credenciais, caminho de anúncio ou de catálogo (nunca a vitrine
+ * /social/, nem conta, carrinho, login…). → `origin + pathname` e, da query, só `pdp_filters=item_id:MLB…` (um só,
+ * nesse formato exato); o resto (rastreio de terceiro, `#`) fica de fora. `item` (opcional, `MLB…`): o anúncio que a
+ * oferta conhece (ex.: o `metadata.id` da Central); vai como `pdp_filters` num catálogo sem filtro, se não for o
+ * número do próprio catálogo. Fora disso → null.
+ */
+export function urlProdutoML(url, { item = null } = {}) {
+  if (typeof url !== 'string' || !url || url.length > MAX_URL_PRODUTO) return null;
+  let u;
+  try { u = new URL(url); } catch { return null; }
+  if (u.protocol !== 'https:' || u.port || u.username || u.password || !HOSTS_PRODUTO_ML.has(u.hostname)) return null;
+  let caminho;
+  try { caminho = decodeURIComponent(u.pathname); } catch { return null; }
+  if (/(?:^|\/)social(?:\/|$)/i.test(caminho)) return null;
+  const catalogo = CAMINHO_CATALOGO_ML.exec(u.pathname);
+  if (!catalogo && !CAMINHO_ANUNCIO_ML.test(u.pathname)) return null;
+  const filtros = u.searchParams.getAll('pdp_filters');
+  let filtro = filtros.length === 1 && FILTRO_ITEM_ML.test(filtros[0]) ? filtros[0] : null;
+  if (!filtro && catalogo && typeof item === 'string' && ITEM_ML.test(item) && item !== `MLB${catalogo[1]}`) filtro = `item_id:${item}`;
+  const v = `${u.origin}${u.pathname}${filtro ? `?pdp_filters=${filtro}` : ''}`;
+  return v.length <= MAX_URL_PRODUTO ? v : null;
+}
+
+/** `sku` de uma variante na forma do item do anúncio ("MLB5257531512"), ou null se não for um MLB. */
+function skuDoAnuncio(sku) {
+  if (typeof sku !== 'string') return null;
+  const m = sku.trim().match(/^MLB-?(\d{6,20})$/i);
+  return m ? `MLB${m[1]}` : null;
+}
+
+/**
+ * A variante de um ProductGroup (`hasVariant`) que é a do anúncio: a de `sku` igual ao item do link. Sem item no
+ * link, ou com uma variante só e sem `sku`, vale a única variante. Fora disso → null: nunca a variante de outro
+ * anúncio (outra voltagem, outra cor, outro preço).
+ */
+function varianteDoAnuncio(variantes, item, skuDe) {
+  if (item) {
+    const v = variantes.find((x) => skuDe(x) === item);
+    if (v) return v;
+  }
+  if (variantes.length === 1 && (!item || skuDe(variantes[0]) == null)) return variantes[0];
+  return null;
+}
+
+/**
+ * Resumo de um ProductGroup de várias variantes quando o link não diz qual é a do anúncio (achado R1): nunca o preço
+ * de uma variante como se fosse o do anúncio. `variantes`: [{ preco (número; 0 ou null = sem), disponivel }].
+ *   todas esgotadas (sinal explícito)        → { price: null, disponivel: false, varias: true }
+ *   todas à venda e com preço                 → { price: o menor deles, disponivel: true, varias: true }
+ *   outro caso, ou a lista pode estar cortada → { price: null, disponivel: null, varias: true }
+ * O verificador (decidir) só descarta com isso: esgotado, ou o menor preço acima do limite; senão, sem conferência.
+ */
+function resumoDasVariantes(variantes, { cortada = false } = {}) {
+  const r = { price: null, disponivel: null, varias: true };
+  if (cortada || !variantes.length) return r;
+  if (variantes.every((v) => v.disponivel === false)) return { ...r, disponivel: false };
+  if (variantes.every((v) => v.disponivel === true && v.preco > 0)) return { ...r, price: Math.min(...variantes.map((v) => v.preco)), disponivel: true };
+  return r;
+}
+
+const tiposLd = (n) => [].concat(n?.['@type']);
+
+/**
+ * O produto de cada bloco JSON-LD da página, na ordem (bloco que não é JSON é pulado): o primeiro nó schema.org
+ * ProductGroup ou, sem ele, o primeiro Product. Do ProductGroup (página de catálogo do Mercado Livre: as ofertas ficam
+ * em `hasVariant`, sem `offers` no topo) sai a variante do anúncio `item` (varianteDoAnuncio), com o nome e a imagem
+ * do grupo quando ela não tem; sem variante do anúncio, o bloco não informa nada (nem estoque).
+ */
+function* produtosJsonLd(html, item = null) {
   for (const bloco of blocosJsonLd(html)) {
     let data; try { data = JSON.parse(bloco); } catch { continue; }
-    const nodes = [].concat(data, data?.['@graph'] || []).flat();
-    const prod = nodes.find((n) => n && [].concat(n['@type']).includes('Product'));
+    const nodes = [].concat(data, data?.['@graph'] || []).flat().filter((n) => n && typeof n === 'object');
+    const grupo = nodes.find((n) => tiposLd(n).includes('ProductGroup'));
+    if (grupo) {
+      const variantes = [].concat(grupo.hasVariant ?? []).filter((v) => v && typeof v === 'object' && !Array.isArray(v));
+      const v = varianteDoAnuncio(variantes, item, (x) => skuDoAnuncio(x.sku));
+      if (v) yield { ...v, name: v.name || grupo.name, image: v.image || grupo.image };
+      continue;
+    }
+    const prod = nodes.find((n) => tiposLd(n).includes('Product'));
     if (prod) yield prod;
   }
 }
@@ -230,16 +330,17 @@ function disponivelJsonLd(valor) {
 }
 
 /**
- * Uma passada só pela página: o produto (JSON-LD, ou a página social do afiliado) e o estoque informado.
+ * Uma passada só pela página: o produto (JSON-LD, ou a página social do afiliado) e o estoque informado. `item` é o
+ * anúncio do link (itemDoAnuncio), que escolhe a variante de um ProductGroup.
  * → { produto: { title, price, oldPrice, image, disponivel? } | null, disponivel: true|false|null }
  * `produto.disponivel` (true/false) só vem quando a oferta do produto lido informa `availability` (ver
  * disponivelJsonLd); a página social não informa estoque. `disponivel` do resultado é o do produto ou, sem ele, o
  * primeiro JSON-LD da página que responder (anúncio esgotado costuma vir sem preço).
  */
-function lerHtmlProduto(html) {
+function lerHtmlProduto(html, item = null) {
   html = String(html ?? '');
   let produto = null; let disponivel = null; // `disponivel`: o primeiro availability válido da página, de qualquer produto
-  for (const prod of produtosJsonLd(html)) {
+  for (const prod of produtosJsonLd(html, item)) {
     const off = ofertaDoProduto(prod);
     const daOferta = disponivelJsonLd(off.availability);
     if (disponivel == null) disponivel = daOferta;
@@ -264,12 +365,33 @@ function lerHtmlProduto(html) {
 }
 
 /**
- * Lê o JSON-LD (schema.org Product) que as páginas de produto costumam trazer; sem ele, tenta a página social do afiliado.
- * Com JSON-LD, `disponivel` (true/false) só vem quando a oferta informa `availability` (ver disponivelJsonLd); a página
- * social não informa estoque.
+ * O primeiro ProductGroup da página com mais de uma variante, resumido por resumoDasVariantes (para um link sem o
+ * anúncio: catálogo /p/MLB… sem `pdp_filters`). Sem esse grupo → null. Só o verificador usa (conferirProduto).
  */
-export function parseProductHtml(html) {
-  return lerHtmlProduto(html).produto;
+function grupoSemAnuncio(html) {
+  for (const bloco of blocosJsonLd(String(html ?? ''))) {
+    let data; try { data = JSON.parse(bloco); } catch { continue; }
+    const nodes = [].concat(data, data?.['@graph'] || []).flat().filter((n) => n && typeof n === 'object');
+    const grupo = nodes.find((n) => tiposLd(n).includes('ProductGroup'));
+    if (!grupo) continue;
+    const variantes = [].concat(grupo.hasVariant ?? []).filter((v) => v && typeof v === 'object' && !Array.isArray(v));
+    if (variantes.length < 2) continue;
+    return resumoDasVariantes(variantes.map((v) => {
+      const off = ofertaDoProduto(v);
+      return { preco: num(off.price ?? off.lowPrice), disponivel: disponivelJsonLd(off.availability) };
+    }));
+  }
+  return null;
+}
+
+/**
+ * Lê o JSON-LD (schema.org Product, ou a variante do anúncio de um ProductGroup) que as páginas de produto costumam
+ * trazer; sem ele, tenta a página social do afiliado. `url` é o link pedido: dele sai o anúncio que escolhe a variante
+ * (sem ele, só um ProductGroup de uma variante é lido). Com JSON-LD, `disponivel` (true/false) só vem quando a oferta
+ * informa `availability` (ver disponivelJsonLd); a página social não informa estoque.
+ */
+export function parseProductHtml(html, { url } = {}) {
+  return lerHtmlProduto(html, itemDoAnuncio(url)).produto;
 }
 
 /** Maior página de produto lida (a social tem ~1 MB): acima disso, a leitura é cortada e dá erro. */
@@ -375,7 +497,7 @@ export async function resolveOffer(cand, { fetchJson = getJson, fetchText } = {}
   }
   if (!data) {
     try {
-      const p = parseProductHtml(await getText(cand.url));
+      const p = parseProductHtml(await getText(cand.url), { url: cand.url });
       if (p) { const { url: urlDaPagina, ...resto } = semDisponivel(p); data = { sold: 0, freeShipping: false, ...resto }; urlProduto = urlDaPagina || null; }
       else why = (why ? why + '; ' : '') + 'página sem dados de produto';
     } catch (e) { why = (why ? why + '; ' : '') + `página ${e.message}`; }
@@ -402,7 +524,8 @@ export async function resolveOffer(cand, { fetchJson = getJson, fetchText } = {}
  *
  * Devolve { price, disponivel }: `price` > 0 ou null (a leitura não trouxe preço); `disponivel` false só com sinal
  * explícito da loja (API: available_quantity 0 ou status ≠ active; JSON-LD: OutOfStock, SoldOut, Discontinued),
- * true se a loja diz que está à venda, null se não diz. Lança se o endereço não for do Mercado Livre ou se a página
+ * true se a loja diz que está à venda, null se não diz. Catálogo sem o anúncio no link (sem `pdp_filters`) e com
+ * várias variantes: o resumo delas com `varias: true` (resumoDasVariantes). Lança se o endereço não for do Mercado Livre ou se a página
  * não puder ser lida (a mensagem nunca traz o endereço nem o conteúdo da loja).
  */
 export async function conferirProduto(url, { fetchJson = getJson, fetchText = getPagina } = {}) {
@@ -417,8 +540,107 @@ export async function conferirProduto(url, { fetchJson = getJson, fetchText = ge
     if (daApi && (daApi.disponivel === false || precoValido(daApi.price))) return { price: precoValido(daApi.price), disponivel: daApi.disponivel };
   }
   const html = await fetchText(alvo);
-  const { produto: p, disponivel: daPagina } = lerHtmlProduto(html);
-  return { price: precoValido(p?.price), disponivel: daPagina ?? daApi?.disponivel ?? null };
+  const item = itemDoAnuncio(alvo);
+  const { produto: p, disponivel: daPagina } = lerHtmlProduto(html, item);
+  const price = precoValido(p?.price);
+  // catálogo sem o anúncio no link e com várias variantes: o resumo delas, nunca o preço de uma como se fosse o dele
+  if (price == null && !item) { const resumo = grupoSemAnuncio(html); if (resumo) return resumo; }
+  return { price, disponivel: daPagina ?? daApi?.disponivel ?? null };
+}
+
+/** Teto de ofertas (uma por bloco JSON-LD) e de variantes por ProductGroup na resposta da extensão. */
+export const MAX_OFERTAS_EXTENSAO = 5;
+export const MAX_VARIANTES_EXTENSAO = 30;
+const MAX_PRECO_EXTENSAO = 10_000_000;
+
+/** Objeto JSON simples (não array) cujas chaves estão todas em `chaves`. */
+function objetoCom(o, chaves) {
+  if (!o || typeof o !== 'object' || Array.isArray(o)) return false;
+  const proto = Object.getPrototypeOf(o);
+  if (proto !== Object.prototype && proto !== null) return false;
+  return Object.keys(o).every((k) => chaves.includes(k));
+}
+
+const TEXTO_OU_NULO = (v, max) => v == null || (typeof v === 'string' && v.length <= max);
+
+/**
+ * Preço de uma oferta da extensão: número, ou texto de até 30 caracteres lido por `num`, entre 0 e 10.000.000.
+ * Ausente → 0 (sem preço). Fora do formato ou da faixa → undefined (a resposta inteira é recusada).
+ */
+function precoDaExtensao(v) {
+  if (v == null) return 0;
+  let n;
+  if (typeof v === 'number') n = v;
+  else if (typeof v === 'string' && v.length <= 30) n = num(v) ?? 0;
+  else return undefined;
+  return Number.isFinite(n) && n >= 0 && n <= MAX_PRECO_EXTENSAO ? n : undefined;
+}
+
+/** Uma oferta (Product ou variante) da extensão → { nome, preco, availability }, ou undefined fora do formato. */
+function ofertaDaExtensao(o, chaves) {
+  if (!objetoCom(o, chaves) || typeof o.nome !== 'boolean') return undefined;
+  if (!TEXTO_OU_NULO(o.availability, 100) || ('sku' in o && !TEXTO_OU_NULO(o.sku, 30))) return undefined;
+  const preco = precoDaExtensao(o.price);
+  if (preco === undefined) return undefined;
+  return { nome: o.nome, preco, availability: o.availability ?? null, sku: o.sku ?? null };
+}
+
+/**
+ * Valida a resposta de um pedido `produto_ml` da extensão do Chrome (entrada externa: formato fixo, tetos, `num`,
+ * enum do estoque) e aplica a mesma escolha de lerHtmlProduto. `url` é o link do pedido (o servidor o conhece; a
+ * extensão nunca devolve endereço): dele sai o anúncio que escolhe a variante de um ProductGroup.
+ *
+ * Formato de `data` (nenhuma outra chave é aceita):
+ *   { estado: 'verificacao' }
+ *   { estado: 'lido', ofertas: [até 5, uma por bloco JSON-LD com produto, na ordem da página] }, cada oferta:
+ *     Product:      { nome: boolean, price?: number|string(≤30)|null, availability?: string(≤100)|null }
+ *     ProductGroup: { nome: boolean, variantes: [1 a 30 × { sku?: string(≤30)|null, nome: boolean, price?, availability? }] }
+ *
+ * → { price: number|null, disponivel: true|false|null } (`price` > 0 ou null), { bloqueado: true } (o Mercado Livre
+ * pediu verificação) ou null (formato inválido). Sem anúncio no link e sem preço de outra oferta, o primeiro grupo de
+ * várias variantes vira o resumo delas, com `varias: true` (resumoDasVariantes; com 30 variantes, a extensão pode ter
+ * cortado a lista, e o resumo não informa nada), como em conferirProduto.
+ */
+export function lerProdutoDaExtensao(data, { url } = {}) {
+  if (objetoCom(data, ['estado']) && data.estado === 'verificacao') return { bloqueado: true };
+  if (!objetoCom(data, ['estado', 'ofertas']) || data.estado !== 'lido') return null;
+  if (!Array.isArray(data.ofertas) || data.ofertas.length > MAX_OFERTAS_EXTENSAO) return null;
+  const item = itemDoAnuncio(url);
+  const lidas = [];
+  let resumo = null; // o primeiro grupo de várias variantes sem a do anúncio (o link não diz qual)
+  for (const o of data.ofertas) {
+    if (o && typeof o === 'object' && 'variantes' in o) {
+      if (!objetoCom(o, ['nome', 'variantes']) || typeof o.nome !== 'boolean') return null;
+      const vs = o.variantes;
+      if (!Array.isArray(vs) || vs.length < 1 || vs.length > MAX_VARIANTES_EXTENSAO) return null;
+      const variantes = [];
+      for (const v of vs) {
+        const lida = ofertaDaExtensao(v, ['sku', 'nome', 'price', 'availability']);
+        if (!lida) return null;
+        variantes.push(lida);
+      }
+      const v = varianteDoAnuncio(variantes, item, (x) => skuDoAnuncio(x.sku));
+      if (v) lidas.push({ ...v, nome: o.nome || v.nome }); // sem variante do anúncio, o grupo não dá preço a ninguém
+      else if (!item && variantes.length > 1 && !resumo) {
+        resumo = resumoDasVariantes(variantes.map((x) => ({ preco: x.preco, disponivel: disponivelJsonLd(x.availability) })),
+          { cortada: vs.length >= MAX_VARIANTES_EXTENSAO });
+      }
+      continue;
+    }
+    const lida = ofertaDaExtensao(o, ['nome', 'price', 'availability']);
+    if (!lida) return null;
+    lidas.push(lida);
+  }
+  // como lerHtmlProduto: o preço é o da primeira oferta com nome e preço; o estoque é o dela ou, sem ele, o primeiro
+  // informado na página
+  let escolhida = null; let disponivel = null;
+  for (const o of lidas) {
+    const d = disponivelJsonLd(o.availability);
+    if (disponivel == null) disponivel = d;
+    if (!escolhida && o.nome && o.preco > 0) escolhida = { price: o.preco, disponivel: d };
+  }
+  if (!escolhida && resumo) return resumo;
+  return { price: escolhida?.price ?? null, disponivel: escolhida?.disponivel ?? disponivel };
 }
 
 /** Busca na API pública do Mercado Livre (experimental: pode exigir login/token). */

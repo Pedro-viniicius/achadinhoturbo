@@ -81,7 +81,8 @@ export function criarServicos({ db, wa, links, fast = FAST, dir = DATA_DIR, ml =
     scheduler?.tick().catch((e) => console.error('[agendador]', e?.name || 'erro'));
   };
   const catalogoItens = createCatalogoItens({ db, wa, links, amazon, envios, acordar });
-  const verificador = verificar === true ? createVerificador({ db, ml, amazon, shopee, simulado: simulado === true }) : null;
+  // links: no modo extension, o verificador lê o ML pela extensão (links.requestProduto; plano verificador-ml-extensao, D9)
+  const verificador = verificar === true ? createVerificador({ db, ml, amazon, shopee, links, simulado: simulado === true }) : null;
   scheduler = createScheduler({ db, wa, links, fast, dir, ml, amazon, shopee, magalu, catalogo, catalogoItens, verificador });
   wa.onMensagem((m) => scheduler.espelho.receber(m));
   // Para desligar o envio pelo sócio na hora: desligue os remetentes no painel (ou apague esta linha e reinicie)
@@ -169,10 +170,11 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
     next();
   };
   // Long-poll: manda os cabeçalhos na hora (a extensão já sabe que está conectada)
-  // e só depois o corpo, quando chegar um pedido ou der 20 s.
+  // e só depois o corpo, quando chegar um pedido ou der 20 s. `x-recursos` (depois do token): o que esta extensão sabe
+  // atender além dos links e da lista (a 1.5.0 manda "produto_ml"); links.poll ignora nome desconhecido e cabeçalho longo.
   app.get('/api/ext/poll', extAuth, async (req, res) => {
     res.status(200).type('application/json').flushHeaders();
-    res.end(JSON.stringify({ job: await links.poll(20000) }));
+    res.end(JSON.stringify({ job: await links.poll(20000, { recursos: req.headers['x-recursos'] }) }));
   });
   // `longo` (só no pedido link_shopee): o longLink, que serve só para conferir o ID de afiliado; links.submit o valida.
   // `sub_id_aplicado` (só no link_shopee com Sub_id): a extensão diz se o Sub_id entrou no link; só o true literal vale.
@@ -764,7 +766,8 @@ if (import.meta.url === `file://${process.argv[1].replace(/\\/g, '/')}` || proce
   if (migrados) console.log(`Privacidade: ${migrados} registros de participantes convertidos em pseudônimos.`);
   // leitura conta 1× por pessoa por dia de negócio (a virada do dia de Relatórios e avisos), como os relatórios
   const wa = createWhatsApp({ db, dir: DATA_DIR, dryRun: DRY_RUN, pseudo: (id) => pseudonimo(db, id), diaDe: (ts) => dayOf(ts, viradaMin(db)) });
-  const links = createLinkService({ getMode: () => (DRY_RUN ? 'fake' : getSetting(db, 'link_mode', 'extension')) });
+  // db: a pausa e o teto das conferências do ML pela extensão sobrevivem ao reinício (plano verificador-ml-extensao, S2)
+  const links = createLinkService({ db, getMode: () => (DRY_RUN ? 'fake' : getSetting(db, 'link_mode', 'extension')) });
   // verificador de preço e estoque ligado (D9); na simulação, confirma sem acessar a rede
   const { amazon, shopee, catalogo, catalogoItens, scheduler } = criarServicos({ db, wa, links, fast: FAST, dir: DATA_DIR, ml: mlPadrao, verificar: true, simulado: DRY_RUN });
   let app;

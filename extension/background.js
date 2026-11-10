@@ -1,8 +1,10 @@
 // Conector da Central de Afiliados (achadinhoturbo): busca pedidos no painel (que roda no seu computador) e
 // os executa de dentro de uma aba da Central de Afiliados do Mercado Livre ou do portal de afiliados da Shopee,
-// com a sua sessão. Três pedidos: gerar link meli.la com a etiqueta, buscar a lista "Produtos selecionados para
-// você" e gerar o link de afiliado da Shopee (s.shopee.com.br, pelo "Link personalizado" do portal).
-// Só os links e a lista voltam para o painel. Cookies e tokens ficam no navegador, e nada disso vai para o console.
+// com a sua sessão. Quatro pedidos: gerar link meli.la com a etiqueta, buscar a lista "Produtos selecionados para
+// você", gerar o link de afiliado da Shopee (s.shopee.com.br, pelo "Link personalizado" do portal) e ler o preço e o
+// estoque de um produto do Mercado Livre (produto_ml: um fetch daqui, sem aba, e só o JSON-LD resumido volta).
+// Só os links, a lista e esse resumo voltam para o painel. Cookies e tokens ficam no navegador, e nada disso vai
+// para o console.
 
 const PADRAO = { servidor: 'http://127.0.0.1:3737', token: '' };
 const ML = 'https://www.mercadolivre.com.br';
@@ -17,8 +19,15 @@ const API_LISTA = '/affiliate-program/api/hub/search?is_affiliate=true&device=de
 const ESPERA_ABA = 30000;
 const TETO_PEDIDO = 80000;
 const TETO_OFERTAS = 55000; // abaixo dos 60 s de requestOffers em src/links.js
+// Leitura de produto (produto_ml): o fetch da página tem 12 s (corpo incluído) e o pedido inteiro, 15 s, abaixo dos
+// 18 s de requestProduto em src/links.js. O estouro não marca centralTravada: a aba da Central não entra nesse pedido.
+const TEMPO_PRODUTO = 12000;
+const TETO_PRODUTO = 15000;
+// Recursos que o poll anuncia ao painel (cabeçalho x-recursos): sem `produto_ml`, o servidor não manda esse pedido.
+const RECURSOS = 'produto_ml';
 const CENTRAL_SEM_RESPOSTA = 'a Central de Afiliados do Mercado Livre não respondeu a tempo. A extensão recarrega a aba e tenta de novo no próximo pedido';
 const SHOPEE_SEM_RESPOSTA = 'o portal de afiliados da Shopee não respondeu a tempo. A extensão recarrega a aba e tenta de novo no próximo pedido';
+const PRODUTO_SEM_RESPOSTA = 'a página do produto no Mercado Livre não respondeu a tempo';
 let rodando = false;
 let centralTravada = false; // uma chamada à Central ficou sem resposta: recarrega a aba antes da próxima
 let shopeeTravada = false; // o mesmo para a aba do portal da Shopee
@@ -283,6 +292,189 @@ async function chamarPortalShopee(corpo, tipoPrograma) {
 }
 // ---- Shopee: funções puras (fim) ----
 
+// ---- Mercado Livre produto: funções puras (início) ----
+// Sem chrome.* e sem estado: test/extensao-produto.test.js extrai este trecho por estes marcadores. O servidor valida
+// a resposta de novo (lerProdutoDaExtensao em src/ml.js) e recusa a resposta inteira se houver chave a mais.
+const MAX_URL_PRODUTO_ML = 2048;
+const MAX_PAGINA_ML = 3 * 1024 * 1024; // bytes do corpo da página (pelo content-length e contando o que chega)
+const MAX_TAG_LD = 512; // a mesma varredura de blocosJsonLd em src/ml.js
+const MAX_BLOCOS_LD = 50;
+const MAX_OFERTAS_ML = 5; // MAX_OFERTAS_EXTENSAO em src/ml.js
+const MAX_VARIANTES_ML = 30; // MAX_VARIANTES_EXTENSAO em src/ml.js
+const MAX_PRECO_ML = 10000000;
+const PRODUTO_RECUSADO = 'endereço de produto do Mercado Livre recusado pela extensão';
+const PRODUTO_GRANDE = 'a página do produto no Mercado Livre é grande demais';
+
+const hostDoML = (h) => h === 'mercadolivre.com.br' || h.endsWith('.mercadolivre.com.br');
+// Os mesmos padrões de urlProdutoML em src/ml.js: só anúncio ou catálogo, nos dois hosts de produto
+const HOSTS_PRODUTO_ML = ['www.mercadolivre.com.br', 'produto.mercadolivre.com.br'];
+const CAMINHO_ANUNCIO_ML = /^\/MLB-?\d{6,20}(?:[-_](?:[\w.~-]|%(?!2f|5c|2e)[0-9a-f]{2})*)?$/i;
+const CAMINHO_CATALOGO_ML = /^\/(?:(?:[\w.~-]|%(?!2f|5c|2e)[0-9a-f]{2})+\/)?p\/MLB\d{1,20}$/i;
+const FILTRO_ITEM_ML = /^item_id:MLB\d{6,20}$/;
+// Partes do endereço final (rótulos do host e segmentos do caminho) que são a página de verificação do Mercado Livre
+const PARTES_VERIFICACAO_ML = ['gz', 'account-verification', 'captcha'];
+
+/**
+ * Só aceita o endereço de um produto (anúncio /MLB-… ou catálogo …/p/MLB…) em https://www.mercadolivre.com.br ou
+ * https://produto.mercadolivre.com.br, nunca a vitrine /social/; sem porta, credenciais nem `#`; da query, só
+ * `pdp_filters=item_id:MLB…`; até 2048 caracteres e exatamente na forma que o painel manda (origin + caminho
+ * [+ ?pdp_filters=…]). Qualquer outra página do Mercado Livre (conta, carrinho, sair…) → null: a extensão busca com a
+ * sessão do dono.
+ */
+function urlProdutoML(v) {
+  if (typeof v !== 'string' || !v || v.length > MAX_URL_PRODUTO_ML || v.includes('#')) return null;
+  let u;
+  try { u = new URL(v); } catch { return null; }
+  if (u.protocol !== 'https:' || !HOSTS_PRODUTO_ML.includes(u.hostname) || u.port || u.username || u.password) return null;
+  let caminho;
+  try { caminho = decodeURIComponent(u.pathname); } catch { return null; }
+  if (/(?:^|\/)social(?:\/|$)/i.test(caminho)) return null;
+  if (!CAMINHO_CATALOGO_ML.test(u.pathname) && !CAMINHO_ANUNCIO_ML.test(u.pathname)) return null;
+  const filtros = u.searchParams.getAll('pdp_filters');
+  const filtro = filtros.length === 1 && FILTRO_ITEM_ML.test(filtros[0]) ? filtros[0] : null;
+  return `${u.origin}${u.pathname}${filtro ? `?pdp_filters=${filtro}` : ''}` === v ? v : null;
+}
+
+/**
+ * Status e endereço final da resposta (depois dos redirecionamentos) → { estado: 'verificacao' } (o Mercado Livre
+ * pediu verificação: endereço final fora de https://*.mercadolivre.com.br, um rótulo do host ou um segmento do caminho
+ * igual a `gz`, `account-verification` ou `captcha`, ou HTTP 403/429), { erro } (outro HTTP fora de 2xx) ou
+ * { ler: true } (ler o corpo). A query e o slug de um produto ("teclado-anti-captcha") nunca contam.
+ */
+function estadoDaResposta(status, urlFinal) {
+  let u = null;
+  try { u = new URL(String(urlFinal ?? '')); } catch { /* sem endereço final: trata como fora do Mercado Livre */ }
+  const fora = !u || u.protocol !== 'https:' || !hostDoML(u.hostname);
+  const partes = fora ? [] : [...u.hostname.split('.'), ...u.pathname.toLowerCase().split('/')];
+  if (fora || partes.some((p) => PARTES_VERIFICACAO_ML.includes(p)) || status === 403 || status === 429) return { estado: 'verificacao' };
+  if (!(status >= 200 && status < 300)) return { erro: `a página do produto respondeu HTTP ${Number(status) || 0}` };
+  return { ler: true };
+}
+
+/**
+ * Corpo da resposta como texto, com teto de MAX_PAGINA_ML bytes. Acima disso, cancela a leitura e lança
+ * PRODUTO_GRANDE. Outras falhas (tempo esgotado, rede) lançam o erro da leitura.
+ */
+async function corpoDaPaginaML(r) {
+  const declarado = r.headers?.get?.('content-length');
+  if (declarado != null && declarado !== '' && !(Number(declarado) <= MAX_PAGINA_ML)) {
+    try { await r.body?.cancel?.(); } catch { /* já fechado */ }
+    throw new Error(PRODUTO_GRANDE);
+  }
+  const leitor = r.body?.getReader?.();
+  if (!leitor) return '';
+  const dec = new TextDecoder();
+  let texto = ''; let total = 0;
+  for (;;) {
+    const { done, value } = await leitor.read();
+    if (done) break;
+    total += value?.byteLength ?? 0;
+    if (total > MAX_PAGINA_ML) {
+      try { await leitor.cancel(); } catch { /* já fechado */ }
+      throw new Error(PRODUTO_GRANDE);
+    }
+    texto += dec.decode(value, { stream: true });
+  }
+  return texto + dec.decode();
+}
+
+/**
+ * Conteúdo de cada `<script type="application/ld+json">…</script>` da página, na ordem, até MAX_BLOCOS_LD. Cópia de
+ * blocosJsonLd (src/ml.js): varredura linear, sem regex `[\s\S]*?` sobre a página toda.
+ */
+function* blocosJsonLdML(html) {
+  const abre = new RegExp(`<script[^<>]{0,${MAX_TAG_LD}}>`, 'gi');
+  const tipo = /^<script[^>]+type=["']application\/ld\+json["'][^>]*>$/i;
+  const fecha = /<\/script>/gi;
+  let pos = 0;
+  for (let n = 0; n < MAX_BLOCOS_LD;) {
+    abre.lastIndex = pos;
+    const tag = abre.exec(html);
+    if (!tag) return;
+    pos = tag.index + tag[0].length;
+    if (!tipo.test(tag[0])) continue;
+    fecha.lastIndex = pos;
+    const fim = fecha.exec(html);
+    if (!fim) return;
+    yield html.slice(pos, fim.index);
+    n++;
+    pos = fim.index + fim[0].length;
+  }
+}
+
+const tiposLdML = (n) => [].concat(n['@type']);
+const objetoLd = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
+
+/** `price` (ou `lowPrice`) e `availability` da primeira oferta do nó, já no formato que o servidor aceita. */
+function precoEEstoqueML(no) {
+  const off = [].concat(no.offers || [])[0];
+  const o = off && typeof off === 'object' ? off : {};
+  const p = o.price ?? o.lowPrice;
+  let price = null;
+  if (typeof p === 'number' && Number.isFinite(p) && p >= 0 && p <= MAX_PRECO_ML) price = p;
+  else if (typeof p === 'string' && p.length <= 30) price = p;
+  const availability = typeof o.availability === 'string' && o.availability.length <= 100 ? o.availability : null;
+  return { price, availability };
+}
+
+/**
+ * Resumo do JSON-LD da página: até MAX_OFERTAS_ML itens, um por bloco, na ordem. Em cada bloco vale o primeiro nó
+ * ProductGroup (página de catálogo: as ofertas ficam em `hasVariant`), que vira { nome, variantes: [até 30 ×
+ * { sku, nome, price, availability }] }, ou, sem ele, o primeiro Product, que vira { nome, price, availability }.
+ * `nome` diz só se o nó tem nome (o nome não sai daqui). A extensão não escolhe a variante: o servidor escolhe pelo
+ * endereço do pedido. Bloco que não é JSON, sem produto ou com grupo sem variante não gera item.
+ */
+function ofertasDoHtml(html) {
+  const ofertas = [];
+  for (const bloco of blocosJsonLdML(String(html ?? ''))) {
+    if (ofertas.length >= MAX_OFERTAS_ML) break;
+    let data;
+    try { data = JSON.parse(bloco); } catch { continue; }
+    const nodes = [].concat(data, data?.['@graph'] || []).flat().filter((n) => n && typeof n === 'object');
+    const grupo = nodes.find((n) => tiposLdML(n).includes('ProductGroup'));
+    if (grupo) {
+      const variantes = [].concat(grupo.hasVariant ?? []).filter(objetoLd).slice(0, MAX_VARIANTES_ML).map((v) => ({
+        sku: typeof v.sku === 'string' && v.sku.length <= 30 ? v.sku : null,
+        nome: !!v.name,
+        ...precoEEstoqueML(v),
+      }));
+      if (variantes.length) ofertas.push({ nome: !!grupo.name, variantes });
+      continue;
+    }
+    const prod = nodes.find((n) => tiposLdML(n).includes('Product'));
+    if (prod) ofertas.push({ nome: !!prod.name, ...precoEEstoqueML(prod) });
+  }
+  return ofertas;
+}
+// ---- Mercado Livre produto: funções puras (fim) ----
+
+/**
+ * Lê o preço e o estoque de um produto do Mercado Livre com um fetch daqui (service worker), com os cookies do
+ * navegador: sem aba, sem navegar, sem repetir e sem resolver CAPTCHA. Página de verificação → { estado:
+ * 'verificacao' } (o painel para de pedir por um tempo). Só o resumo do JSON-LD volta; nunca o HTML nem o endereço.
+ */
+async function lerProdutoML(job, pedido = {}) {
+  const url = urlProdutoML(job.url);
+  if (!url) throw new Error(PRODUTO_RECUSADO);
+  if (pedido.encerrado) throw new Error(PRODUTO_SEM_RESPOSTA);
+  const semResposta = (e) => (e?.name === 'TimeoutError' || e?.name === 'AbortError'
+    ? new Error(PRODUTO_SEM_RESPOSTA) : new Error('não consegui abrir a página do produto no Mercado Livre'));
+  let r;
+  try {
+    // no-store: o preço tem de ser o de agora, nunca o do cache HTTP do Chrome
+    r = await fetch(url, { credentials: 'include', redirect: 'follow', cache: 'no-store', signal: AbortSignal.timeout(TEMPO_PRODUTO) });
+  } catch (e) { throw semResposta(e); }
+  const v = estadoDaResposta(r.status, r.url);
+  if (!v.ler) {
+    try { await r.body?.cancel?.(); } catch { /* já fechado */ }
+    if (v.erro) throw new Error(v.erro);
+    return { data: { estado: 'verificacao' } };
+  }
+  let html;
+  try { html = await corpoDaPaginaML(r); } catch (e) { throw e?.message === PRODUTO_GRANDE ? e : semResposta(e); }
+  return { data: { estado: 'lido', ofertas: ofertasDoHtml(html) } };
+}
+
 let abaShopee = null; // a aba que a extensão abriu para o portal (reaproveitada mesmo se a Shopee a levar ao login)
 
 /** Usa uma aba do portal já aberta (de preferência a do Link personalizado) ou abre uma fixada, em segundo plano. */
@@ -360,11 +552,16 @@ async function buscarOfertas(job, pedido) {
   return paginas;
 }
 
-/** O trabalho de um pedido, já no formato da resposta (sem id e ok). */
+/**
+ * O trabalho de um pedido, já no formato da resposta (sem id e ok). Tipo desconhecido é recusado: nunca vira pedido de
+ * link (um link sem etiqueta seria pior que nenhum).
+ */
 async function executar(job, pedido) {
+  if (job.type === 'link') return { link: await gerarLink(job, pedido) };
   if (job.type === 'ofertas') return { data: await buscarOfertas(job, pedido) };
   if (job.type === 'link_shopee') return gerarLinkShopee(job, pedido);
-  return { link: await gerarLink(job, pedido) };
+  if (job.type === 'produto_ml') return lerProdutoML(job, pedido);
+  throw new Error('pedido desconhecido');
 }
 
 async function laco() {
@@ -376,7 +573,7 @@ async function laco() {
       let resp;
       try {
         // o painel segura o poll por 20 s; sem resposta em 30 s, o laço para e o alarme o religa
-        resp = await fetch(`${c.servidor}/api/ext/poll`, { headers: { 'x-token': c.token }, signal: AbortSignal.timeout(30000) });
+        resp = await fetch(`${c.servidor}/api/ext/poll`, { headers: { 'x-token': c.token, 'x-recursos': RECURSOS }, signal: AbortSignal.timeout(30000) });
       } catch { await status({ ok: false, erro: 'Painel fechado ou endereço errado.' }); return; }
       if (resp.status === 401) { await status({ ok: false, erro: 'Token recusado. Copie de novo em Conexões → Mercado Livre, no painel.' }); return; }
       await status({ ok: true, erro: null, em: Date.now() });
@@ -386,15 +583,17 @@ async function laco() {
       let corpo;
       // Um resultado por pedido: passado o teto, responde o erro e segue; o que o trabalho der depois é ignorado.
       const pedido = { encerrado: false };
-      const estouro = new Error(job.type === 'link_shopee' ? SHOPEE_SEM_RESPOSTA : CENTRAL_SEM_RESPOSTA);
-      const teto = job.type === 'ofertas' ? TETO_OFERTAS : TETO_PEDIDO;
+      const produto = job.type === 'produto_ml';
+      const estouro = new Error(produto ? PRODUTO_SEM_RESPOSTA : job.type === 'link_shopee' ? SHOPEE_SEM_RESPOSTA : CENTRAL_SEM_RESPOSTA);
+      const teto = produto ? TETO_PRODUTO : job.type === 'ofertas' ? TETO_OFERTAS : TETO_PEDIDO;
       try {
         corpo = { id: job.id, ok: true, ...(await comPrazo(executar(job, pedido), teto, estouro)) };
         await status({ ultimoErro: null });
       } catch (e) {
         if (e === estouro) {
           pedido.encerrado = true; // o trabalho abandonado para na próxima etapa, sem chamar nem recarregar de novo
-          if (job.type === 'link_shopee') shopeeTravada = true; else centralTravada = true;
+          // a leitura de produto não usa aba: o estouro dela não recarrega a Central nem o portal
+          if (job.type === 'link_shopee') shopeeTravada = true; else if (!produto) centralTravada = true;
         }
         corpo = { id: job.id, ok: false, error: String(e.message || e) };
         await status({ ultimoErro: corpo.error });
