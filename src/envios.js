@@ -39,6 +39,13 @@
 // log com o nível `erro` (que vira aviso por WhatsApp). A que sai leva o preço conferido e o `vistoEm` ({HORA_PRECO}), e
 // o sufixo do verificador (" · preço não conferido (…)", " · preço atualizado de …") vai na linha `ok` de cada grupo.
 // Sem `verificador` (null), nada disso acontece: a oferta sai como foi gravada.
+// Proteção do número (plano anti-banimento, etapa 5; ADR-012): com `ritmo` (src/ritmo.js), o `wa` daqui é o embrulhado
+// (conta toda mensagem e faz a pausa mínima entre quaisquer duas, de qualquer origem: as esperas próprias da fila saem)
+// e a fila pergunta ritmo.liberado() antes de cada envio e de cada grupo. Sem vaga no teto, o envio volta a `pendente`
+// NA MESMA ocorrência (a retomada pula quem já recebeu) e a fila para até o próximo tick. No horário de silêncio, o que
+// tem hora marcada (agendado, repetido, Grupo vivo) é pulado com `aviso`; o "agora" espera, e o tempo em silêncio não
+// conta para as 2 h. Só o "agora" criado pelo painel com `ignorar_silencio` ("Enviar mesmo assim") sai no silêncio, e
+// nunca passa do teto. Sem `ritmo` (null), a fila é a de antes, com as próprias pausas.
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -56,6 +63,7 @@ import { hostPermitido } from './ml.js';
 import { montarEnquete } from './whatsapp.js';
 import { renderTemplate, discountPct } from './template.js';
 import { sleep, jitter } from './util.js';
+import { pausaGrupoGravada } from './ritmo.js';
 import { OfertaDescartada, MOTIVOS_VERIFICADOR, FRESCOR_MIN, MARGEM_AGENDADO_MIN } from './verificador.js';
 
 /** Disparo manual agendado para longe, de uma loja que o verificador não consegue conferir (ela sairia sem preço novo ou nunca). */
@@ -88,7 +96,13 @@ const CAMPOS_OFERTA = ['key', 'title', 'price', 'oldPrice', 'discountPct', 'sold
 const LINK_EXEMPLO = 'https://meli.la/(gerado no envio)';
 const NAO_RECONHECI = 'Não reconheci este link. Cole o endereço completo da página do produto.';
 const PERDEU = 'perdeu o horário: passou mais de 2 h (WhatsApp desconectado ou programa desligado).';
+// o mesmo prazo das 2 h, quando quem segurou foi o teto da proteção (achado R1): nível `aviso`, nunca `erro`
+const limiteCheio = (n) => `o limite de ${n} mensagens por hora ficou cheio por mais de 2 h.`;
 const SEM_TEXTO = 'Escreva a mensagem.';
+// Proteção do número (plano anti-banimento): motivo do envio marcado que caiu no silêncio e linha do Histórico da fila
+const PULADO_SILENCIO = 'pulado: horário de silêncio.';
+const PROTECAO = { id: null, name: 'Proteção do número' }; // a mesma origem das linhas do teto (src/ritmo.js)
+export const SILENCIO_SO_AGORA = 'Só o envio "agora" pode sair no horário de silêncio. O agendado e o repetido que caem nele são pulados.';
 // Amazon (plano espelhamento-amazon, decisão 6): o navegador só ajusta estes campos; `image` e `link` são sempre do servidor
 const MAX_TITULO = 200;
 const MAX_CUPOM = 30;
@@ -138,6 +152,7 @@ const mascararTag = (link) => String(link).replace(/([?&]tag=)[^&#]*/, '$1••
 
 const pad = (n) => String(n).padStart(2, '0');
 const hora = (ts) => { const d = new Date(ts); return `${pad(d.getDate())}/${pad(d.getMonth() + 1)} ${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+const horaMin = (ts) => { const d = new Date(ts); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; };
 const lerJson = (txt, padrao) => { try { return JSON.parse(txt) ?? padrao; } catch { return padrao; } };
 /**
  * Quando os dados da oferta foram lidos, em ms, para a regra do frescor do verificador: `envios.created_at` (ms, como
@@ -460,11 +475,15 @@ function origemDoLog(tipo, p) {
  * só para resolver link curto; sem ele, o link curto da Magalu vira 'invalido' (o de produto não precisa dele).
  * `lojas`: o módulo src/lojas.js (injetável nos testes). O Identificar do Disparo manual (identificar) usa os mesmos
  * ml/amazon/shopee/magalu/lojas do envio. `verificador`: createVerificador de src/verificador.js; sem ele (null), a
- * oferta sai sem a conferência de preço e estoque (ver o topo).
+ * oferta sai sem a conferência de preço e estoque (ver o topo). `ritmo`: createRitmo de src/ritmo.js, a proteção do
+ * número (ver o topo); sem ele (null), sem teto nem silêncio, com as pausas próprias da fila.
  */
-export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acordar = null, amazon = null, shopee = null, magalu = null, lojas = lojasPadrao, verificador = null } = {}) {
+export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acordar = null, amazon = null, shopee = null, magalu = null, lojas = lojasPadrao, verificador = null, ritmo = null } = {}) {
+  // o agendador já passa o `wa` embrulhado (embrulhar de novo devolve o mesmo); quem passa só o ritmo também conta
+  if (ritmo) wa = ritmo.embrulhar(wa);
   const pastaFotos = dir ? path.join(dir, 'uploads') : null;
-  const pausaEntreGrupos = () => (fast ? 0 : Number(getSetting(db, 'delay_group_s', 6)));
+  // presa entre o mínimo e o máximo da proteção também na leitura (achado S2)
+  const pausaEntreGrupos = () => (fast ? 0 : pausaGrupoGravada(getSetting(db, 'delay_group_s', 6)));
   // o modo em que o serviço de links vai gerar o link (src/links.js): simulação = links falsos, sem extensão
   const modoLink = () => links?.modo?.();
   let ultimaMensagem = 0; // quando este módulo mandou a última mensagem: o envio seguinte espera a pausa
@@ -480,9 +499,53 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
   const nomeDoGrupo = (jid) => db.prepare('SELECT name FROM groups WHERE jid = ?').get(jid)?.name ?? null;
   const okNaOcorrencia = (id, ocorrencia) => new Set(db.prepare('SELECT jid FROM envio_resultados WHERE envio_id = ? AND ocorrencia = ? AND ok = 1')
     .all(id, ocorrencia).map((r) => r.jid));
+  /** Grupos com resultado de falha nesta ocorrência e nenhum ok (o envio que lançou pode ter saído). */
+  const falhosNaOcorrencia = (id, ocorrencia) => new Set(db.prepare(`SELECT jid FROM envio_resultados WHERE envio_id = ? AND ocorrencia = ?
+    GROUP BY jid HAVING MAX(ok) = 0`).all(id, ocorrencia).map((r) => r.jid));
   const registrar = (id, ocorrencia, jid, nome, ok, erro) => db.prepare('INSERT INTO envio_resultados (envio_id, ocorrencia, ts, jid, group_name, ok, erro) VALUES (?,?,?,?,?,?,?)')
     .run(id, ocorrencia, Date.now(), jid, nome, ok ? 1 : 0, erro);
   const logDe = (e, p) => (o) => addLog(db, { rule: { id: null, name: origemDoLog(e.tipo, p) }, offer_title: tituloDe(e.tipo, p) || null, ...o });
+
+  // Proteção do número (ver o topo). O "Enviar mesmo assim" (CA7, P5) vale só para o "agora" do Disparo manual e do
+  // Disparar mensagem: espelho, remetente, catálogo e Grupo vivo nunca gravam o campo, e mesmo assim não o seguem.
+  const ignoraSilencio = (e, p) => e.quando === 'agora' && p?.ignorar_silencio === true && (p.origem?.tipo ?? 'manual') === 'manual';
+  // hora marcada: no silêncio é pulado (P4), não espera. O Grupo vivo grava 'agora', mas sai num horário da rotina.
+  const temHoraMarcada = (e, p) => e.quando !== 'agora' || p?.origem?.tipo === 'rotina';
+  let silencioAvisado = null; // fim do período de silêncio já avisado no Histórico (uma linha por período)
+  // envios que o teto segurou na ocorrência atual (id → { ocorrencia, limite }), só em memória: se o prazo das 2 h
+  // vencer, o motivo é o teto e a linha é `aviso` (R1). Reiniciar o programa esquece: volta o motivo de sempre.
+  const seguradoPeloTeto = new Map();
+  const marcarTeto = (e, r) => { if (r?.motivo === 'limite') seguradoPeloTeto.set(e.id, { ocorrencia: e.next_run_at, limite: r.limite }); };
+  /** Pode mandar mais uma mensagem deste envio a um grupo agora? Sem ritmo, sempre. → o resultado de liberado() */
+  const vez = (e, p) => (ritmo ? ritmo.liberado(undefined, { ignorarSilencio: ignoraSilencio(e, p) }) : { ok: true });
+
+  /** "Agora" no silêncio: uma linha `aviso` por período, por mais envios que fiquem esperando. */
+  function avisarSilencio(fim) {
+    if (fim == null || silencioAvisado === fim) return;
+    silencioAvisado = fim;
+    const s = ritmo.silencio();
+    addLog(db, { rule: PROTECAO, level: 'aviso', message: `Horário de silêncio (${s.de} às ${s.ate}): a fila espera até as ${horaMin(fim)}.` });
+  }
+
+  /**
+   * Envio com hora marcada que venceu no silêncio (P4): o repetido vai para a próxima ocorrência, o único termina em
+   * `erro` (com quantos grupos já tinham recebido nesta ocorrência), e a linha do Histórico é `aviso`, nunca `erro`.
+   */
+  function puladoNoSilencio(e, p, now) {
+    const log = logDe(e, p);
+    const linha = { level: 'aviso', message: `Horário de ${horaMin(e.next_run_at)} ${PULADO_SILENCIO}` };
+    if (e.quando === 'repetir') {
+      const prox = proximaOcorrencia(lerJson(e.repetir, null), Math.max(now, e.next_run_at));
+      const r = db.prepare("UPDATE envios SET status = ?, next_run_at = ? WHERE id = ? AND status = 'pendente' AND next_run_at = ?")
+        .run(prox ? 'pendente' : 'concluido', prox, e.id, e.next_run_at);
+      if (r.changes) log(linha);
+      return;
+    }
+    const ok = okNaOcorrencia(e.id, e.next_run_at).size;
+    const r = db.prepare("UPDATE envios SET status = 'erro', last_run_at = ?, resultado = ? WHERE id = ? AND status = 'pendente' AND next_run_at = ?")
+      .run(Date.now(), JSON.stringify({ ok, erro: 0, motivo: PULADO_SILENCIO }), e.id, e.next_run_at);
+    if (r.changes) log(linha);
+  }
 
   /**
    * Linha de rastreio_envios do grupo que recebeu a oferta (CA1). Falha ao gravar não desfaz o envio (a mensagem já
@@ -1048,7 +1111,8 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
    * Valida o corpo de POST /api/envios por tipo (oferta|mensagem|enquete) e quando (agora|agendado|repetir),
    * resolve a oferta no servidor (o que o navegador manda não é confiável) e grava em `envios`.
    * "agora" grava `pendente` já vencido e chama acordar() (sai no tick do agendador, na fila); sem agendador,
-   * processarPendentes() sem esperar. → { id, status, next_run_at }
+   * processarPendentes() sem esperar. `ignorar_silencio: true` ("Enviar mesmo assim") só com "agora" (senão, erro) e
+   * vai ao payload; nunca ignora o teto. → { id, status, next_run_at }
    */
   async function criar(corpo, { userId = null } = {}) {
     const b = corpo && typeof corpo === 'object' && !Array.isArray(corpo) ? corpo : {};
@@ -1057,6 +1121,9 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
     const quando = b.quando == null || b.quando === '' ? 'agora' : b.quando;
     if (!QUANDOS.includes(quando)) throw new Error('Quando enviar: agora, agendado ou repetir.');
     if (tipo === 'oferta' && quando === 'repetir') throw new Error('O disparo manual sai agora ou agendado para hoje.');
+    // "Enviar mesmo assim" (CA7, decisão P5 do dono): só `true` liga, e só no envio "agora"; agendado e repetido seguem o silêncio
+    const ignorarSilencio = b.ignorar_silencio === true;
+    if (ignorarSilencio && quando !== 'agora') throw new Error(SILENCIO_SO_AGORA);
 
     // 1. conteúdo, sem rede (a loja não conectada é recusada aqui, antes de qualquer coisa: CA2)
     const conteudo = tipo === 'oferta' ? conteudoDaOferta({ url: b.url, template_id: b.template_id, tag_id: b.tag_id, ajustes: b.ajustes })
@@ -1098,6 +1165,7 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
       const texto = conteudo.texto.includes(conteudo.previa_url) ? conteudo.texto : `${conteudo.texto}\n\n${conteudo.previa_url}`.trim();
       payload = { ...conteudo, texto, previa };
     } else payload = conteudo;
+    if (ignorarSilencio) payload = { ...payload, ignorar_silencio: true };
 
     if (quando === 'agora') nextRunAt = Date.now();
     const id = Number(db.prepare(`INSERT INTO envios (tipo, payload, group_jids, quando, repetir, status, next_run_at, user_id, created_at)
@@ -1349,8 +1417,14 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
    * Fecha a rodada: concluido/erro, ou de volta a pendente na próxima ocorrência (repetir). Só mexe no envio se ele
    * ainda está nesta ocorrência: quem pausou e retomou (outro next_run_at) não tem o estado desfeito por esta rodada.
    * `descartado` (o motivo do verificador) vai em `resultado.descartado` (D11); o envio descartado termina em `erro`.
+   * `adiado` (proteção do número: sem vaga no teto ou em silêncio): volta a `pendente` NA MESMA ocorrência, sem
+   * resultado; a próxima rodada pula quem já recebeu (okNaOcorrencia) e o prazo das 2 h segue contando dela.
    */
-  function finalizar(e, ocorrencia, { ok, erro, motivo, descartado = null }) {
+  function finalizar(e, ocorrencia, { ok, erro, motivo, descartado = null, adiado = false }) {
+    if (adiado) {
+      db.prepare("UPDATE envios SET status = 'pendente' WHERE id = ? AND status = 'enviando' AND next_run_at = ?").run(e.id, ocorrencia);
+      return;
+    }
     const fim = Date.now();
     const resultado = motivo ? { ok, erro, motivo } : { ok, erro };
     if (descartado) resultado.descartado = descartado;
@@ -1373,7 +1447,10 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
    * (pausado e retomado para o próximo horário), não envia. Sem ela, vale o next_run_at atual.
    * Oferta barrada pelo verificador (OfertaDescartada no preparar): uma linha `aviso` com o motivo, o mesmo texto em cada
    * grupo que faltava (ok = 0) e `resultado.descartado`; nenhuma linha `erro` no log (D8).
-   * → { ok, erro } da ocorrência, ou { pulado: true } se outro já está enviando ou a ocorrência mudou.
+   * Com `ritmo`: antes de preparar (link, conferência de preço) e antes de cada grupo, liberado(); sem vaga no teto (uma
+   * linha `aviso` por episódio, de avisarLimite) ou com o silêncio começando no meio, o resto fica para depois (`adiado`).
+   * → { ok, erro } da ocorrência (mais `adiado: true` se o resto voltou à fila), ou { pulado: true } se outro já está
+   * enviando ou a ocorrência mudou.
    */
   async function runEnvio(id, { ocorrencia: esperada } = {}) {
     const n = idValido(id);
@@ -1387,21 +1464,38 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
     if (ocorrencia == null) { ocorrencia = Date.now(); db.prepare('UPDATE envios SET next_run_at = ? WHERE id = ?').run(ocorrencia, n); }
     const p = lerJson(e.payload, {});
     const log = logDe(e, p);
-    let ok = 0; let erro = 0; let motivo = null; let descartado = null;
+    let ok = 0; let erro = 0; let motivo = null; let descartado = null; let adiado = false;
+    // teto (achados S1/Q2): a vaga do próximo grupo fica separada no ritmo desde a conferência até a mensagem sair
+    const vaga = ritmo ? ritmo.vaga() : null;
+    /** Proteção do número: falta vaga no teto (avisa uma vez por episódio) ou é horário de silêncio? */
+    const segurar = () => {
+      if (!vaga) return false;
+      const r = vaga.pedir(undefined, { ignorarSilencio: ignoraSilencio(e, p) });
+      if (r.ok) return false;
+      if (r.motivo === 'limite') { ritmo.avisarLimite(undefined, r); marcarTeto({ ...e, next_run_at: ocorrencia }, r); }
+      return true;
+    };
     try {
       const jids = lerJson(e.group_jids, []);
       const feitos = okNaOcorrencia(n, ocorrencia); // retomada: quem já recebeu nesta ocorrência não recebe de novo
-      const faltam = jids.filter((j) => !feitos.has(j));
-      ok = jids.length - faltam.length;
+      // nem quem falhou nesta ocorrência: o envio que lançou pode ter saído, e repetir mandaria duas vezes ("a verificar"
+      // do seguranca); a falha continua contando no fim da ocorrência
+      const falhos = falhosNaOcorrencia(n, ocorrencia);
+      const faltam = jids.filter((j) => !feitos.has(j) && !falhos.has(j));
+      ok = jids.filter((j) => feitos.has(j)).length;
+      erro = jids.filter((j) => falhos.has(j) && !feitos.has(j)).length;
       let envio = null;
-      if (faltam.length) {
+      if (faltam.length && segurar()) adiado = true; // nem prepara: o link e a conferência de preço ficam para quando sair
+      if (faltam.length && !adiado) {
         try { envio = await preparar(e.tipo, p, faltam, { lidoEm: lidoEmDe(e.created_at) }); } catch (err) {
           motivo = limparErro(err instanceof OfertaDescartada ? err.texto : err?.message);
           if (err instanceof OfertaDescartada) descartado = err.motivo;
         }
         for (const aviso of envio?.avisos || []) log({ level: 'aviso', message: aviso });
       }
-      if (faltam.length && descartado) {
+      if (adiado) {
+        // nada sai agora: o finalizar devolve o envio a 'pendente' nesta ocorrência
+      } else if (faltam.length && descartado) {
         // verificador (D8): a oferta não sai para ninguém, sem link pedido; um `aviso` só (nunca `erro`, que vira aviso
         // por WhatsApp) e o motivo em cada grupo, para o histórico do Disparo manual, do espelho e do catálogo
         log({ level: 'aviso', message: motivo });
@@ -1419,6 +1513,8 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
           // cancelado ou pausado no meio da rodada, ou já em outra ocorrência (pausado e retomado): para aqui
           const agora = estadoDe(n);
           if (agora?.status !== 'enviando' || agora.next_run_at !== ocorrencia) break;
+          // proteção do número: o teto encheu (outra origem também conta) ou o silêncio começou: o resto volta à fila
+          if (segurar()) { adiado = true; break; }
           const jid = faltam[i]; const nome = nomeDoGrupo(jid);
           // só os grupos deste link ficam sem a oferta (ex.: o padrão falhou e o código associado não): sem tentar
           const semLink = envio.falha?.(jid);
@@ -1430,6 +1526,7 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
           }
           try {
             const detalhe = await envio.enviar(jid);
+            vaga?.usar(); // a saída já conta em wa_saidas
             registrar(n, ocorrencia, jid, nome, true, null); ok++;
             log({ level: 'ok', group_name: nome, message: detalhe });
             gravarRastreio(e, p, jid, envio.rastreio?.(jid));
@@ -1439,47 +1536,82 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
             log({ level: 'erro', group_name: nome, message: `Falha no envio: ${m}` });
           }
           ultimaMensagem = Date.now();
-          if (i < faltam.length - 1) await sleep(jitter(pausa));
+          // com o ritmo, a pausa entre grupos é a do embrulho do `wa` (entre quaisquer duas mensagens)
+          if (!ritmo && i < faltam.length - 1) await sleep(jitter(pausa));
         }
       }
     } catch (err) {
       // falha inesperada (banco, JSON): registra e não deixa o envio preso em 'enviando'
-      motivo = limparErro(err?.message); erro = Math.max(erro, 1);
+      motivo = limparErro(err?.message); erro = Math.max(erro, 1); adiado = false;
       log({ level: 'erro', message: `Falha no envio: ${motivo}` });
     } finally {
-      finalizar(e, ocorrencia, { ok, erro, motivo, descartado });
+      vaga?.soltar(); // vaga separada e não usada (falha do envio, cancelado no meio) volta ao teto
+      if (!adiado) seguradoPeloTeto.delete(n);
+      finalizar(e, ocorrencia, { ok, erro, motivo, descartado, adiado });
     }
-    return { ok, erro };
+    return adiado ? { ok, erro, adiado: true } : { ok, erro };
   }
 
-  /** Agendado que perdeu o horário: o único vira erro; o repetido pula para a próxima ocorrência. */
+  /**
+   * Agendado que perdeu o horário: o único vira erro; o repetido pula para a próxima ocorrência. Se quem o segurou
+   * nesta ocorrência foi o teto (seguradoPeloTeto), o motivo diz isso e a linha é `aviso` (R1): não é falha do
+   * programa nem do WhatsApp, e `erro` dispararia o alerta por WhatsApp.
+   */
   function perdeuHorario(e, now) {
     const log = logDe(e, lerJson(e.payload, {}));
+    const teto = seguradoPeloTeto.get(e.id);
+    seguradoPeloTeto.delete(e.id);
+    const pelo = teto && teto.ocorrencia === e.next_run_at ? limiteCheio(teto.limite) : null;
+    const motivo = pelo ?? PERDEU;
     if (e.quando === 'repetir') {
       const prox = proximaOcorrencia(lerJson(e.repetir, null), now);
       const r = db.prepare("UPDATE envios SET status = ?, next_run_at = ? WHERE id = ? AND status = 'pendente' AND next_run_at = ?")
         .run(prox ? 'pendente' : 'concluido', prox, e.id, e.next_run_at);
-      if (r.changes) log({ level: 'aviso', message: `Horário de ${hora(e.next_run_at)} pulado: ${PERDEU}${prox ? ` Próximo: ${hora(prox)}.` : ''}` });
+      if (r.changes) log({ level: 'aviso', message: `Horário de ${hora(e.next_run_at)} pulado: ${motivo}${prox ? ` Próximo: ${hora(prox)}.` : ''}` });
       return;
     }
     const r = db.prepare("UPDATE envios SET status = 'erro', last_run_at = ?, resultado = ? WHERE id = ? AND status = 'pendente'")
-      .run(Date.now(), JSON.stringify({ ok: 0, erro: 0, motivo: PERDEU }), e.id);
-    if (r.changes) log({ level: 'erro', message: `Não enviado: ${PERDEU}` });
+      .run(Date.now(), JSON.stringify({ ok: 0, erro: 0, motivo }), e.id);
+    if (r.changes) log({ level: pelo ? 'aviso' : 'erro', message: `Não enviado: ${motivo}` });
   }
 
   /**
    * Roda, um de cada vez, os envios 'pendente' com next_run_at vencido (e trata o horário perdido), com a pausa entre
-   * grupos também entre um envio e o seguinte. → quantos rodaram
+   * grupos também entre um envio e o seguinte. Com `ritmo` (ver o topo), a pausa é a do embrulho do `wa`; no
+   * silêncio, o envio com hora marcada é pulado e o "agora" espera (o tempo em silêncio não conta para as 2 h); sem
+   * vaga no teto, a fila para aqui até o próximo tick. → quantos rodaram
    */
   async function processarPendentes(now = Date.now()) {
     const vencidos = db.prepare(`SELECT id, tipo, quando, repetir, next_run_at, payload FROM envios
       WHERE status = 'pendente' AND next_run_at IS NOT NULL AND next_run_at <= ? ORDER BY next_run_at, id`).all(now);
     let rodaram = 0;
-    for (const e of vencidos) {
-      if (now - e.next_run_at > ATRASO_MAX) { perdeuHorario(e, now); continue; }
-      if (!wa.isReady()) continue; // espera o WhatsApp voltar (até 2 h)
-      const espera = ultimaMensagem + jitter(pausaEntreGrupos()) - Date.now();
-      if (espera > 0) await sleep(espera);
+    for (let i = 0; i < vencidos.length; i++) {
+      const e = vencidos[i];
+      const p = ritmo ? lerJson(e.payload, {}) : null;
+      const atraso = ritmo && !temHoraMarcada(e, p) ? ritmo.atrasoAgora(e.next_run_at, now) : now - e.next_run_at;
+      if (atraso > ATRASO_MAX) { perdeuHorario(e, now); continue; }
+      if (ritmo) {
+        // hora marcada que caiu no silêncio e só foi vista depois dele (Q3: serviço desligado de madrugada, tick das
+        // 07:05 para o das 06:50): pulada como a da grade, não sai fora de hora
+        if (temHoraMarcada(e, p) && ritmo.silencio(e.next_run_at).agora) { puladoNoSilencio(e, p, now); continue; }
+        const r = vez(e, p);
+        if (!r.ok && r.motivo === 'silencio') {
+          if (temHoraMarcada(e, p)) puladoNoSilencio(e, p, now); else avisarSilencio(r.ate);
+          continue;
+        }
+        if (!r.ok) {
+          // teto cheio: o resto da fila espera o próximo tick, e todos os que esperam ficam marcados como segurados pelo
+          // teto (o motivo certo, se passarem das 2 h)
+          ritmo.avisarLimite(undefined, r);
+          for (const outro of vencidos.slice(i)) marcarTeto(outro, r);
+          break;
+        }
+      }
+      if (!wa.isReady()) { seguradoPeloTeto.delete(e.id); continue; } // espera o WhatsApp voltar (até 2 h)
+      if (!ritmo) {
+        const espera = ultimaMensagem + jitter(pausaEntreGrupos()) - Date.now();
+        if (espera > 0) await sleep(espera);
+      }
       try {
         const r = await runEnvio(e.id, { ocorrencia: e.next_run_at }); // pausado e retomado nesse meio-tempo: não sai agora
         if (!r.pulado) rodaram++;
@@ -1524,7 +1656,9 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
     for (const e of db.prepare(`SELECT * FROM envios e WHERE ${em} AND e.status IN ('pendente','enviando')`).all(...tipos)) {
       const jids = lerJson(e.group_jids, []);
       const feitos = e.next_run_at == null ? new Set() : okNaOcorrencia(e.id, e.next_run_at);
-      const faltam = jids.filter((j) => !feitos.has(j));
+      // quem falhou nesta ocorrência não é tentado de novo nela (runEnvio): não está mais na fila
+      const falhos = e.next_run_at == null ? new Set() : falhosNaOcorrencia(e.id, e.next_run_at);
+      const faltam = jids.filter((j) => !feitos.has(j) && !falhos.has(j));
       if (!faltam.length) continue;
       naFila += faltam.length;
       fila.push({ ...cabecalho(e), quando: e.next_run_at ?? e.created_at, grupo: grupoDe(faltam), grupos: faltam.length, status: e.status, erro: null });

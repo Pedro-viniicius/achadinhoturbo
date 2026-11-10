@@ -61,6 +61,8 @@ const MSG = Object.freeze({
   desconectado: 'O WhatsApp está desconectado. Conecte o número antes de disparar.', // a mesma do "agora" de envios.criar
   semGruposAgora: 'Os grupos desta rotina não existem mais. Edite a rotina e escolha os grupos de novo.',
   semTextoAgora: 'Esta rotina está sem texto. Edite a rotina.',
+  // R2 (anti-banimento): no horário de silêncio o "Enviar agora" do Grupo vivo é recusado, antes de gravar
+  silencio: (ate) => `Horário de silêncio até ${ate}: o Enviar agora do Grupo vivo não sai agora.`,
   freio: `Esta rotina já foi enviada agora há pouco. Espere ${ENVIAR_AGORA_INTERVALO_MIN === 1 ? 'um minuto' : `${ENVIAR_AGORA_INTERVALO_MIN} minutos`} para enviar de novo.`,
   indisponivel: 'O Grupo vivo não está disponível neste servidor.',
   inesperado: 'Não consegui concluir. Tente de novo.',
@@ -116,8 +118,10 @@ function lerRotina(r) {
 /**
  * Rotinas do Grupo vivo. `wa`: o WhatsApp (isReady); `acordar`: pede um tick do agendador já (é por ele que a ocorrência
  * sai); sem ele, `envios.processarPendentes`. `agora`: relógio e `sortear`: número em [0, 1) do sorteio (testes).
+ * `silencio(now)`: o horário de silêncio da proteção do número (ritmo.silencio de src/ritmo.js, { agora, ate_ts }),
+ * passado pelo agendador; sem ele, o "Enviar agora" não confere o silêncio.
  */
-export function createRotinas({ db, wa = null, acordar = null, envios = null, agora = Date.now, sortear = Math.random } = {}) {
+export function createRotinas({ db, wa = null, acordar = null, envios = null, agora = Date.now, sortear = Math.random, silencio = null } = {}) {
   const waPronto = () => { try { return !!wa?.isReady?.(); } catch { return false; } };
   const grupoExiste = (jid) => !!db.prepare('SELECT 1 FROM groups WHERE jid = ?').get(jid);
   const nomeDoLog = (nome) => `Grupo vivo: ${String(nome ?? '').replace(/\s+/g, ' ').trim().slice(0, MAX_NOME_LOG) || 'sem nome'}`;
@@ -378,14 +382,20 @@ export function createRotinas({ db, wa = null, acordar = null, envios = null, ag
 
   /**
    * POST /api/rotinas/:id/enviar: grava a ocorrência já (ligada ou não) e avança o rodízio, sem mexer no próximo horário.
-   * Exige o WhatsApp conectado, como o "agora" de Disparar mensagem. Freio: um envio aceito por minuto em cada rotina
-   * (429); o pedido recusado por outro motivo não conta. → { envio_id, grupos }
+   * Exige o WhatsApp conectado, como o "agora" de Disparar mensagem, e fora do horário de silêncio (R2). Freio: um
+   * envio aceito por minuto em cada rotina (429); o pedido recusado por outro motivo não conta. → { envio_id, grupos }
    */
   function enviarAgora(id) {
     const n = idValido(id);
     if (!rotinaPorId(n)) throw new ErroRotina(404, MSG.naoEncontrada);
     if (!waPronto()) throw new ErroRotina(400, MSG.desconectado);
     const now = agora();
+    // horário de silêncio (R2): recusado antes de gravar a ocorrência e de avançar o rodízio (não conta no freio)
+    const sil = silencio?.(now);
+    if (sil?.agora) {
+      const d = new Date(sil.ate_ts);
+      throw new ErroRotina(400, MSG.silencio(`${pad(d.getHours())}:${pad(d.getMinutes())}`));
+    }
     const feito = transacao(() => {
       const r = rotinaPorId(n);
       if (!r) throw new ErroRotina(404, MSG.naoEncontrada);

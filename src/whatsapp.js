@@ -243,14 +243,18 @@ export function createWhatsApp({ db, dir, dryRun = false, pseudo = (id) => id, d
     if (idsEnviados.size > MAX_IDS_ENVIADOS) idsEnviados.delete(idsEnviados.values().next().value);
   }
 
-  const upsertGroup = db.prepare(`INSERT INTO groups (jid, name, size, updated_at, is_admin, description) VALUES (?,?,?,?,?,?)
+  const upsertGroup = db.prepare(`INSERT INTO groups (jid, name, size, updated_at, is_admin, description, admins) VALUES (?,?,?,?,?,?,?)
     ON CONFLICT(jid) DO UPDATE SET name = excluded.name, size = excluded.size, updated_at = excluded.updated_at,
-      is_admin = excluded.is_admin, description = excluded.description`);
+      is_admin = excluded.is_admin, description = excluded.description, admins = excluded.admins`);
   const insEvent = db.prepare('INSERT INTO group_events (ts, jid, participant, action, by_link, actor) VALUES (?,?,?,?,?,?)');
   const bumpSize = db.prepare('UPDATE groups SET size = MAX(0, COALESCE(size, 0) + ?), updated_at = ? WHERE jid = ?');
   const insRead = db.prepare('INSERT OR IGNORE INTO group_reads (jid, participant, day, ts) VALUES (?,?,?,?)');
 
   const meInfo = () => ({ id: sock?.user?.id, lid: sock?.user?.lid });
+  const ehAdmin = (p) => p?.admin === 'admin' || p?.admin === 'superadmin' || !!p?.isAdmin || !!p?.isSuperAdmin;
+  /** Quantos admins o grupo tem (selo "Falta 2º admin"). Só o número sai daqui: nenhum jid nem telefone é guardado.
+   * Sem a lista de participantes (ou vazia, o que não acontece num grupo em que estamos), devolve null = desconhecido. */
+  const contarAdmins = (participants) => (Array.isArray(participants) && participants.length ? participants.filter(ehAdmin).length : null);
 
   async function syncGroups() {
     if (dryRun) return;
@@ -262,8 +266,8 @@ export function createWhatsApp({ db, dir, dryRun = false, pseudo = (id) => id, d
       const now = Date.now();
       for (const g of list) {
         const mine = (g.participants || []).find((p) => sameUser(p, me));
-        const admin = mine ? (mine.admin === 'admin' || mine.admin === 'superadmin' || mine.isAdmin || mine.isSuperAdmin ? 1 : 0) : null;
-        upsertGroup.run(g.id, g.subject || g.id, g.size ?? g.participants?.length ?? null, now, admin, g.desc || null);
+        const admin = mine ? (ehAdmin(mine) ? 1 : 0) : null;
+        upsertGroup.run(g.id, g.subject || g.id, g.size ?? g.participants?.length ?? null, now, admin, g.desc || null, contarAdmins(g.participants));
       }
       const keep = list.map((g) => g.id);
       if (keep.length) db.prepare(`DELETE FROM groups WHERE jid NOT IN (${keep.map(() => '?').join(',')})`).run(...keep);

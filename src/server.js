@@ -30,6 +30,8 @@ import { CATEGORIAS, ORDENS, POR_PAGINA } from './afiliados.js';
 import { overview, resumo, evasaoDoDia, periodRange, startOfDay, dayOf } from './analytics.js';
 import { MODOS, LIMITE_MAX, LOTACAO_PCT, slugify, parseLink, pickGroup, statusDosGrupos, verificarLotacao, encaixarGrupoNovo } from './rotador.js';
 import { addLog } from './db.js';
+import { createRitmo, semearProtecao, validarProtecao, ERRO_SILENCIO_IGUAIS, LIMITE_HORA_MIN, LIMITE_HORA_MAX, PAUSA_MIN_GRUPO_S, PAUSA_MAX_GRUPO_S, PAUSA_MIN_OFERTA_S, PAUSA_MAX_OFERTA_S } from './ritmo.js';
+import { VARIACAO_PAUSA } from './util.js';
 import { validarGrade, horarioDe, horaDaLinha, proximoEnvio, qtdDaLinha, templateDaLinha, MAX_HORARIOS_GRADE, INTERVALO_MIN_GRADE, TOLERANCIA_MIN, MAX_QTD_GRADE } from './grade.js';
 import crypto from 'node:crypto';
 
@@ -101,6 +103,10 @@ function limiteVerificador(v) {
   return Number.isInteger(n) && n >= 0 && n <= LIMITE_MAX_PCT ? n : null;
 }
 
+/** PUT /api/ajustes com pausas: elas mudaram para o cartão Proteção do número (PUT /api/protecao, só o Dono). */
+export const ERRO_PAUSAS_EM_PROTECAO = 'As pausas ficam em Proteção do número.';
+const ORIGEM_PROTECAO = { id: null, name: 'Proteção do número' }; // coluna "Regra" do Histórico, a mesma de src/ritmo.js
+
 const ASIN_SONDA = 'B000000000'; // montarLink com um ASIN de sonda diz se há tag da Amazon salva, sem rede
 
 // amazon, shopee, catalogo e catalogoItens: os mesmos do agendador (criarServicos); sem eles, as rotas tratam a loja
@@ -121,6 +127,14 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
   // só lê os Ajustes do verificador (ligado e limite), com as regras e os padrões de src/verificador.js; sem rede
   const ajustesVerificador = createVerificador({ db });
   const exigeDono = soDono(auth); // Operador recebe 403; sem login no painel, passa
+  // Proteção do número (plano anti-banimento, ADR-012): o porteiro é o do agendador (scheduler.ritmo), e o que as rotas
+  // mandam pelo WhatsApp (ctx.wa: o "Enviar teste" sem agendador) sai pelo wa embrulhado dele (scheduler.wa), que conta
+  // no teto e respeita a pausa mínima. Servidor montado sem eles: um porteiro próprio no mesmo banco, para nada sair
+  // sem contar.
+  const ritmo = scheduler?.ritmo ?? createRitmo({ db, fast: FAST });
+  const waSaida = scheduler?.wa ?? (wa ? ritmo.embrulhar(wa) : wa);
+  // quem salvou (com login no painel), como o log da Equipe: mexer em proteção deixa rastro de quem foi
+  const porQuemDe = (req) => (req.user?.nome ? ` (por ${String(req.user.nome).slice(0, 60)})` : '');
   const loginLimiter = createLimiter({ max: 5, windowMs: 15 * 60 * 1000 });       // por IP (/64 no IPv6)
   const loginGlobal = createLimiter({ max: 50, windowMs: 15 * 60 * 1000 });        // todas as origens juntas
   const extLimiter = createLimiter({ max: 20, windowMs: 15 * 60 * 1000 });
@@ -284,6 +298,22 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
       tag_amazon: tag,
     };
   };
+  /**
+   * Proteção do número no /api/state: uso do teto na janela de 60 min (limite_hora null = teto desligado), a variação
+   * das pausas (o painel mostra a faixa real) e o horário de silêncio. `limites`: as faixas que o PUT /api/protecao
+   * aceita, para o painel validar igual. Uma falha aqui nunca derruba o /api/state.
+   */
+  const estadoProtecao = () => {
+    try {
+      const u = ritmo.uso(); const s = ritmo.silencio();
+      return {
+        limite_hora: u.limite, usados: u.usados, libera_em: u.libera_em, variacao_pausa: VARIACAO_PAUSA,
+        silencio: { ativo: s.ativo, de: s.de, ate: s.ate, agora: s.agora, ate_ts: s.ate_ts },
+        limites: { limite_hora_min: LIMITE_HORA_MIN, limite_hora_max: LIMITE_HORA_MAX, delay_group_min: PAUSA_MIN_GRUPO_S, delay_group_max: PAUSA_MAX_GRUPO_S,
+          delay_offer_min: PAUSA_MIN_OFERTA_S, delay_offer_max: PAUSA_MAX_OFERTA_S },
+      };
+    } catch (e) { console.error('[proteção] estado:', e?.code || e?.name || 'erro'); return null; }
+  };
   // ---------- estado geral ----------
   app.get('/api/state', wrap((req) => ({
     whatsapp: wa.state(), extensao: links.status(), simulacao: DRY_RUN,
@@ -307,6 +337,7 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
     espelhos_na_fila: one("SELECT COUNT(*) AS n FROM espelho_itens WHERE status = 'na_fila'").n, // ofertas espelhadas esperando o dono completar
     amostras: { amazon: SAMPLE_OFFER_AMAZON }, // oferta de exemplo para a prévia do template (sem tag no link)
     catalogo: estadoCatalogo(),
+    protecao: estadoProtecao(), // as pausas continuam em `ajustes`
     // limites da grade de horários do Disparo automático (src/grade.js) e das rotinas do Grupo vivo (src/rotinas.js),
     // para os editores e o contador do painel
     grade: { max_horarios: MAX_HORARIOS_GRADE, intervalo_min: INTERVALO_MIN_GRADE, tolerancia_min: TOLERANCIA_MIN, max_qtd: MAX_QTD_GRADE,
@@ -315,13 +346,14 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
 
   app.put('/api/ajustes', wrap((req) => {
     const { delay_group_s, delay_offer_s, link_mode, titulo_max, retencao_dias, verificador_ativo, verificador_limite_pct } = req.body ?? {};
+    // as pausas são do cartão Proteção do número, só do Dono (PUT /api/protecao): recusa antes de gravar qualquer campo
+    if (delay_group_s != null || delay_offer_s != null) throw new Error(ERRO_PAUSAS_EM_PROTECAO);
     // Conferência de preço e estoque (D10: sem soDono, como os outros Ajustes). Os dois campos são validados antes de
     // gravar qualquer um; desligar (de ligado para desligado) deixa uma linha `aviso` no Histórico.
     if (verificador_ativo != null && typeof verificador_ativo !== 'boolean') throw new Error(ERRO_VERIFICADOR_ATIVO);
     const limiteVf = verificador_limite_pct != null ? limiteVerificador(verificador_limite_pct) : null;
     if (verificador_limite_pct != null && limiteVf == null) throw new Error(ERRO_VERIFICADOR_LIMITE);
-    // quem salvou (com login no painel), como o log da Equipe: mexer na proteção de preço deixa rastro de quem foi
-    const porQuem = req.user?.nome ? ` (por ${String(req.user.nome).slice(0, 60)})` : '';
+    const porQuem = porQuemDe(req); // mexer na proteção de preço deixa rastro de quem foi
     if (limiteVf != null) {
       const antes = ajustesVerificador.limitePct();
       setSetting(db, 'verificador_limite_pct', limiteVf);
@@ -334,12 +366,49 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
     }
     if (retencao_dias != null) { const n = Number(retencao_dias); if (!(n >= 0 && n <= 3650)) throw new Error('Retenção: de 0 (para sempre) a 3650 dias.'); setSetting(db, 'retencao_dias', Math.round(n)); }
     if (titulo_max != null) { const n = Number(titulo_max); if (!(n >= 0 && n <= 200)) throw new Error('Tamanho do título: de 0 (inteiro) a 200.'); setSetting(db, 'titulo_max', Math.round(n)); }
-    if (delay_group_s != null) setSetting(db, 'delay_group_s', Math.max(2, Number(delay_group_s) || 6));
-    if (delay_offer_s != null) setSetting(db, 'delay_offer_s', Math.max(5, Number(delay_offer_s) || 30));
     if (link_mode != null) {
       if (!['extension', 'direct'].includes(link_mode)) throw new Error('Modo de link inválido');
       setSetting(db, 'link_mode', link_mode);
     }
+  }));
+
+  /**
+   * Proteção do número (cartão de Ajustes): teto por hora, horário de silêncio e as pausas. Só o Dono (P2; o Operador
+   * recebe 403). Tudo é validado (validarProtecao, src/ritmo.js) antes de gravar qualquer campo; campo ausente ou null
+   * fica como está. Os dois horários do silêncio são gravados juntos (o que faltar no corpo vem do atual), para a
+   * configuração nunca ficar pela metade. Cada mudança vira uma linha `aviso` no Histórico, com "(por <nome>)".
+   */
+  app.put('/api/protecao', exigeDono, wrap((req) => {
+    const antes = ritmo.silencio();
+    const v = validarProtecao(req.body, { silencio_de: antes.de, silencio_ate: antes.ate });
+    const mexeSilencio = v.silencio_ativo != null || v.silencio_de != null || v.silencio_ate != null;
+    const de = v.silencio_de ?? antes.de; const ate = v.silencio_ate ?? antes.ate;
+    // gravado ilegível (vale o padrão) pode dar Das = Até com o que veio no corpo: recusa antes de gravar qualquer campo
+    if (mexeSilencio && de === ate) throw new Error(ERRO_SILENCIO_IGUAIS);
+    const porQuem = porQuemDe(req);
+    const linhas = [];
+    if (v.limite_hora != null) {
+      const era = ritmo.uso().limite;
+      setSetting(db, 'wa_limite_hora', v.limite_hora);
+      if (era !== v.limite_hora) linhas.push(`Máximo de mensagens por hora: ${era ?? 'sem limite'} → ${v.limite_hora}`);
+    }
+    if (mexeSilencio) {
+      setSetting(db, 'wa_silencio_de', de);
+      setSetting(db, 'wa_silencio_ate', ate);
+      if (v.silencio_ativo != null) setSetting(db, 'wa_silencio_ativo', v.silencio_ativo ? '1' : '0');
+      const depois = ritmo.silencio();
+      const faixa = (x) => `das ${x.de} às ${x.ate}`;
+      if (antes.ativo && !depois.ativo) linhas.push('Horário de silêncio desligado');
+      else if (!antes.ativo && depois.ativo) linhas.push(`Horário de silêncio ligado: ${faixa(depois)}`);
+      else if (antes.de !== depois.de || antes.ate !== depois.ate) linhas.push(`Horário de silêncio: ${faixa(antes)} → ${faixa(depois)}`);
+    }
+    for (const [k, padrao, rotulo] of [['delay_group_s', 6, 'Pausa entre um grupo e outro'], ['delay_offer_s', 30, 'Pausa entre uma oferta e a próxima']]) {
+      if (v[k] == null) continue;
+      const era = Number(getSetting(db, k, padrao));
+      setSetting(db, k, v[k]);
+      if (era !== v[k]) linhas.push(`${rotulo}: ${era} s → ${v[k]} s`);
+    }
+    for (const l of linhas) addLog(db, { rule: ORIGEM_PROTECAO, level: 'aviso', message: `${l}${porQuem}` });
   }));
 
   // ---------- WhatsApp ----------
@@ -690,7 +759,12 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
       db.exec('COMMIT');
     } catch (e) { db.exec('ROLLBACK'); throw e; }
   }));
-  app.post('/api/rules/:id/run', wrap((req) => { scheduler.runRule(Number(req.params.id), { manual: true }).catch(() => {}); return { iniciado: true }; }));
+  // barrado pelo silêncio ou pelo teto (R4): 409 com a frase do Histórico, que o painel mostra no aviso de erro
+  app.post('/api/rules/:id/run', (req, res) => {
+    const r = scheduler.enviarAgora ? scheduler.enviarAgora(Number(req.params.id))
+      : (scheduler.runRule(Number(req.params.id), { manual: true }).catch(() => {}), { iniciado: true });
+    if (r.barrado) res.status(409).json({ erro: r.barrado }); else res.json({ iniciado: true });
+  });
   app.get('/api/rules/:id/offers', wrap((req) => scheduler.previewOffers(Number(req.params.id))));
   // "Limpar já enviadas": também as ofertas do catálogo que saíram (as em revisão e as descartadas ficam)
   app.post('/api/rules/:id/reset-sent', wrap((req) => {
@@ -742,7 +816,8 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
   app.get('/api/simulados', wrap(() => wa.simulated.slice(-50).map((m) => (String(m.jid).endsWith('@g.us') ? m : { ...m, jid: mascararNumero(m.jid) }))));
 
   // ---------- features novas: cada módulo monta as próprias rotas, todas depois do Host/Origin e do login ----------
-  const ctx = { db, wa, links, scheduler, auth, wrap, soDono: exigeDono, dataDir, ml, amazon, shopee, catalogo, catalogoItens, enderecoPublico, publicHost, gravarCookie, sidDe,
+  // wa: o embrulhado (conta no teto e respeita a pausa mínima); os ouvintes e o estado vêm do original, por herança
+  const ctx = { db, wa: waSaida, links, scheduler, auth, wrap, soDono: exigeDono, dataDir, ml, amazon, shopee, catalogo, catalogoItens, enderecoPublico, publicHost, gravarCookie, sidDe,
     viradaMin: () => viradaMin(db) };
   // importador e ganhos: tudo só do Dono, inclusive GET (ctx.soDono); ganhos usa ctx.viradaMin
   // rotasRotinas (Grupo vivo): o serviço é scheduler.rotinas, lido na hora; Operador pode tudo, sem soDono (P15)
@@ -762,6 +837,8 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
 // ---------- inicialização ----------
 if (import.meta.url === `file://${process.argv[1].replace(/\\/g, '/')}` || process.argv[1]?.endsWith('server.js')) {
   const db = openDb(DATA_DIR);
+  // padrões da proteção do número (40 por hora, silêncio das 23:00 às 07:00) só onde o dono ainda não escolheu
+  semearProtecao(db);
   const migrados = migrarPseudonimos(db);
   if (migrados) console.log(`Privacidade: ${migrados} registros de participantes convertidos em pseudônimos.`);
   // leitura conta 1× por pessoa por dia de negócio (a virada do dia de Relatórios e avisos), como os relatórios

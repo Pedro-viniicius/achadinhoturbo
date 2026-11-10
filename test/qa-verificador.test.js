@@ -630,6 +630,8 @@ test('main de src/server.js em DRY_RUN: o verificador está ligado (a Magalu "ag
   const dir = tmp(); const db = openDb(dir);
   db.prepare('INSERT INTO groups (jid, name, size, updated_at) VALUES (?,?,?,?)').run(G1, 'Achadinhos', 10, Date.now());
   db.prepare("INSERT INTO conexoes (plataforma, config, segredos, updated_at) VALUES ('magalu', ?, '{}', ?)").run(JSON.stringify({ loja: 'lojadodono' }), Date.now());
+  // o main semeia o silêncio de 23:00 às 07:00 (anti-banimento); desligado aqui para o "agora" sair a qualquer hora do relógio
+  db.prepare("INSERT INTO settings (key, value) VALUES ('wa_silencio_ativo', '0')").run();
   db.close?.();
   const porta = await new Promise((ok) => { const x = http.createServer().listen(0, '127.0.0.1', () => { const p = x.address().port; x.close(() => ok(p)); }); });
   const filho = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', path.join(RAIZ, 'src/server.js')], {

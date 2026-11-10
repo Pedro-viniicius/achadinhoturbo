@@ -746,10 +746,18 @@ const FATOS = [
   { nome: 'ofertas por página do catálogo', valor: 200, texto: (v) => new RegExp(`páginas de ${v} ofertas|${v} ofertas por página`), codigo: [['src/catalogo.js', /const LIMITE = (\d+);/]] },
   { nome: 'erros de senha até o bloqueio', valor: 5, texto: (v) => new RegExp(`(?:${numero(v)}) (?:tentativas|senhas) erradas bloqueiam o IP`, 'i'), codigo: [['src/server.js', /const loginLimiter = createLimiter\(\{ max: (\d+),/]] },
   { nome: 'minutos do bloqueio de login', valor: 15, texto: (v) => new RegExp(`bloqueiam o IP por ${v} minutos`), codigo: [['src/server.js', /const loginLimiter = createLimiter\(\{ max: \d+, windowMs: (\d+) \* 60 \* 1000 \}\)/]] },
-  { nome: 'pausa padrão entre grupos', valor: 6, texto: (v) => new RegExp(`\\b${v} s entre grupos`), codigo: [['src/server.js', /getSetting\(db, 'delay_group_s', (\d+)\)/], ['src/scheduler.js', /getSetting\(db, 'delay_group_s', (\d+)\)/], ['src/envios.js', /getSetting\(db, 'delay_group_s', (\d+)\)/]] },
-  { nome: 'pausa padrão entre ofertas', valor: 30, texto: (v) => new RegExp(`\\b${v} s entre ofertas`), codigo: [['src/server.js', /getSetting\(db, 'delay_offer_s', (\d+)\)/], ['src/scheduler.js', /getSetting\(db, 'delay_offer_s', (\d+)\)/]] },
-  { nome: 'pausa mínima entre grupos', valor: 2, texto: (v) => new RegExp(`mínimo de ${v} s e de \\d+ s`), codigo: [['src/server.js', /setSetting\(db, 'delay_group_s', Math\.max\((\d+),/]] },
-  { nome: 'pausa mínima entre ofertas', valor: 5, texto: (v) => new RegExp(`mínimo de \\d+ s e de ${v} s`), codigo: [['src/server.js', /setSetting\(db, 'delay_offer_s', Math\.max\((\d+),/]] },
+  { nome: 'pausa padrão entre grupos', valor: 6, texto: (v) => new RegExp(`\\b${v} s entre grupos`), codigo: [['src/server.js', /getSetting\(db, 'delay_group_s', (\d+)\)/], ['src/scheduler.js', /getSetting\(db, 'delay_group_s', (\d+)\)/], ['src/envios.js', /getSetting\(db, 'delay_group_s', (\d+)\)/], ['src/ritmo.js', /export const PAUSA_GRUPO_PADRAO_S = (\d+);/]] },
+  { nome: 'pausa padrão entre ofertas', valor: 30, texto: (v) => new RegExp(`\\b${v} s entre ofertas`), codigo: [['src/server.js', /getSetting\(db, 'delay_offer_s', (\d+)\)/], ['src/scheduler.js', /getSetting\(db, 'delay_offer_s', (\d+)\)/], ['src/ritmo.js', /export const PAUSA_OFERTA_PADRAO_S = (\d+);/]] },
+  { nome: 'pausa mínima entre grupos', valor: 2, texto: (v) => new RegExp(`mínimo de ${v} s e de \\d+ s`), codigo: [['src/ritmo.js', /export const PAUSA_MIN_GRUPO_S = (\d+);/]] },
+  { nome: 'pausa mínima entre ofertas', valor: 5, texto: (v) => new RegExp(`mínimo de \\d+ s e de ${v} s`), codigo: [['src/ritmo.js', /export const PAUSA_MIN_OFERTA_S = (\d+);/]] },
+  // Proteção do número (plano anti-banimento, etapa 9, CA10): padrões e faixas lidos de src/ritmo.js e src/util.js
+  { nome: 'limite de mensagens por hora (padrão)', valor: 40, texto: (v) => new RegExp(`limite de ${v} mensagens por hora`), codigo: [['src/ritmo.js', /export const LIMITE_HORA_PADRAO = (\d+);/]] },
+  { nome: 'limite de mensagens por hora (máximo da faixa de 1 a N)', valor: 200, texto: (v) => new RegExp(`de 1 a ${v}\\b`), codigo: [['src/ritmo.js', /export const LIMITE_HORA_MAX = (\d+);/]] },
+  { nome: 'silêncio: hora em que começa (padrão)', valor: 23, texto: (v) => new RegExp(`das ${v}:00 às 07:00`), codigo: [['src/ritmo.js', /export const SILENCIO_PADRAO = Object\.freeze\(\{ de: '(\d+):00',/]] },
+  { nome: 'silêncio: hora em que acaba (padrão)', valor: 7, texto: (v) => new RegExp(`das 23:00 às 0${v}:00`), codigo: [['src/ritmo.js', /export const SILENCIO_PADRAO = Object\.freeze\(\{ de: '\d+:00', ate: '0?(\d+):00' \}\);/]] },
+  { nome: 'variação das pausas (±%)', valor: 3, texto: (v) => new RegExp(`±${v}0%`), codigo: [['src/util.js', /export const VARIACAO_PAUSA = 0\.(\d+);/]] },
+  { nome: 'pausa máxima entre grupos (s)', valor: 60, texto: (v) => new RegExp(`[Dd]e 2 a ${v} s`), codigo: [['src/ritmo.js', /export const PAUSA_MAX_GRUPO_S = (\d+);/]] },
+  { nome: 'pausa máxima entre ofertas (s)', valor: 600, texto: (v) => new RegExp(`[Dd]e 5 a ${v} s`), codigo: [['src/ritmo.js', /export const PAUSA_MAX_OFERTA_S = (\d+);/]] },
   { nome: 'atraso máximo de um agendado (horas)', valor: 2, texto: (v) => new RegExp(`perde o horário por mais de ${v} horas`), codigo: [['src/envios.js', /const ATRASO_MAX = (\d+) \* 3600000;/]] },
   { nome: 'tamanho máximo da mensagem', valor: 4096, texto: (v) => new RegExp(`[Aa]té ${v} caracteres`), codigo: [['src/envios.js', /const MAX_TEXTO = (\d+);/]] },
   { nome: 'validade do convite (dias)', valor: 7, texto: (v) => new RegExp(`(?:convite|link) vale ${v} dias`), codigo: [['src/auth.js', /export const CONVITE_MS = (\d+) \* 24 \* 60 \* 60 \* 1000;/]] },
@@ -1634,4 +1642,75 @@ test('Verificador: a seção de Manutenção usa os rótulos do cartão de Ajust
   const lojas = blocosDe('manutencao', 'verificador').find((b) => b.tabela).tabela.linhas.map((l) => l[0]);
   assert.deepEqual(lojas, ['Mercado Livre', 'Amazon', 'Shopee', 'Magalu']);
   assert.match(secaoTxt('manutencao', 'verificador'), /a Magalu nunca|O programa não lê a página da Magalu/);
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// Proteção do número (plano anti-banimento, etapa 9, CA10): a seção nova, as frases do Histórico e os rótulos citados
+// nos Docs e no README são os que o código escreve, e o que mudou de lugar (as pausas) não ficou com o nome antigo.
+// ---------------------------------------------------------------------------------------------------------------
+test('Proteção do número: a seção nova cobre limite, silêncio, "mesmo assim", pausas e o que fica com o dono', () => {
+  const ids = CAPS.manutencao.secoes.map((s) => s.id);
+  assert.ok(ids.includes('protecao-do-numero'), 'seção manutencao/protecao-do-numero');
+  assert.ok(ids.indexOf('protecao-do-numero') < ids.indexOf('ajustes'), 'antes da seção de Ajustes');
+  assert.match(CAPS.manutencao.secoes.find((s) => s.id === 'protecao-do-numero').onde, /Ajustes → Proteção do número/);
+  const txt = secaoTxt('manutencao', 'protecao-do-numero');
+  for (const r of [/Na última hora: 12 de 40/, /60 minutos/, /uma oferta para 5 grupos são 5 mensagens/, /nunca fica preso/, /nada se perde nem sai duas vezes/,
+    /uma linha de aviso/, /nunca erro/, /Não há “Enviar mesmo assim” para o limite/, /pulado/, /Enviar mesmo assim/, /nunca o limite por hora/, /erro 400/,
+    /±30%/, /entre 4 e 8 s/, /quaisquer duas mensagens/, /Só o Dono muda/, /Operador vê/, /Salvar proteção do número/, /segundo admin em cada grupo/, /chip reserva com WhatsApp Business/, /400 mensagens por dia/]) {
+    assert.match(txt, r, `protecao-do-numero: ${r}`);
+  }
+  // os verbetes dos ícones "?" levam a ela (o mapa exato está em test/qa.test.js)
+  const ajuda = lerRaiz('public/ajuda.js');
+  for (const k of ['ajustes.protecao', 'ajustes.limite_hora', 'ajustes.silencio', 'ajustes.pausas']) assert.match(ajuda, new RegExp(`'${k}': 'manutencao/protecao-do-numero'`));
+  assert.match(ajuda, /'grupos\.admin': 'grupos\/convites'/);
+  assert.match(secaoTxt('grupos', 'convites'), /Falta 2º admin/);
+});
+
+test('Proteção do número: as frases do Histórico e os rótulos que os Docs e o README citam são os do código', () => {
+  const ritmo = lerRaiz('src/ritmo.js'); const agendador = lerRaiz('src/scheduler.js'); const fila = lerRaiz('src/envios.js'); const servidor = lerRaiz('src/server.js');
+  // [trecho no código, trecho nos Docs e no README]
+  const frases = [
+    ['Limite de ${lim} mensagens por hora atingido: o que falta sai a partir das ${hhmm(ate)}.', ritmo, 'Limite de 40 mensagens por hora atingido: o que falta sai a partir das 15:20.'],
+    ['Horário de silêncio (${s.de} às ${s.ate}): disparo adiado para as ${horaDe(ate)}.', agendador, 'Horário de silêncio (23:00 às 07:00): disparo adiado para as 07:00.'],
+    ['Horário de silêncio (${s.de} às ${s.ate}): a fila espera até as ${horaMin(fim)}.', fila, 'Horário de silêncio (23:00 às 07:00): a fila espera até as 07:00.'],
+    ['Horário ${horaDe(horario)} pulado: horário de silêncio.', agendador, 'Horário 10:00 pulado: horário de silêncio.'],
+    ['Horário de ${horaMin(e.next_run_at)} ${PULADO_SILENCIO}', fila, 'Horário de 10:00 pulado: horário de silêncio.'],
+    ['Enviar agora não saiu: horário de silêncio até ${horaDe(r.ate)}.', agendador, 'Enviar agora não saiu: horário de silêncio até 07:00.'],
+    ['Enviar agora não saiu: limite de ${r.limite} mensagens por hora atingido; há vaga a partir das ${horaDe(r.ate)}.', agendador, 'limite de 40 mensagens por hora atingido; há vaga a partir das 15:20.'],
+    ['`o limite de ${r.limite} mensagens por hora encheu`', agendador, 'saíram 3 de 5 ofertas; o limite de 40 mensagens por hora encheu.'],
+    ['`Máximo de mensagens por hora: ${era ?? \'sem limite\'} → ${v.limite_hora}`', servidor, 'Máximo de mensagens por hora: 40 → 60 (por Ana)'],
+    ['\'Horário de silêncio desligado\'', servidor, 'Horário de silêncio desligado (por Ana)'],
+    // rodada 1 de correções: o prazo das 2 h vencido atrás do teto (R1) e o "Enviar agora" do Grupo vivo no silêncio (R2)
+    ['`o limite de ${n} mensagens por hora ficou cheio por mais de 2 h.`', fila, 'Não enviado: o limite de 40 mensagens por hora ficou cheio por mais de 2 h.'],
+    ['`Horário de silêncio até ${ate}: o Enviar agora do Grupo vivo não sai agora.`', lerRaiz('src/rotinas.js'), 'Horário de silêncio até 07:00: o Enviar agora do Grupo vivo não sai agora.'],
+    ['Pausa entre um grupo e outro', servidor, 'Pausa entre um grupo e outro: 6 s → 8 s (por Ana)'],
+  ];
+  const docs = TEXTO_DOCS;
+  for (const [noCodigo, fonte, citada] of frases) {
+    assert.ok(fonte.includes(noCodigo), `o código não escreve mais: ${noCodigo}`);
+    assert.ok(docs.includes(citada), `os Docs não citam: ${citada}`);
+  }
+  // o README traz as principais, e "Histórico: Regra = Proteção do número" é o nome que o código grava
+  for (const citada of ['Limite de 40 mensagens por hora atingido: o que falta sai a partir das 15:20.', 'Horário 10:00 pulado: horário de silêncio.', 'Enviar agora não saiu: horário de silêncio até 07:00.',
+    'Não enviado: o limite de 40 mensagens por hora ficou cheio por mais de 2 h.', 'Horário de silêncio até 07:00: o Enviar agora do Grupo vivo não sai agora.']) assert.ok(README.includes(citada), `o README não cita: ${citada}`);
+  assert.ok(ritmo.includes("name: 'Proteção do número'")); assert.match(secaoTxt('manutencao', 'protecao-do-numero'), /“Proteção do número”/);
+  // os rótulos do painel
+  const app = lerRaiz('public/app.js'); const disparos = lerRaiz('public/disparos.js'); const paineis = lerRaiz('public/paineis.js');
+  for (const r of ['Proteção do número', 'Salvar proteção do número', 'Não enviar de madrugada']) assert.ok(app.includes(r), `app.js: ${r}`);
+  for (const r of ['Enviar mesmo assim', 'Cancelar']) assert.ok(disparos.includes(r), `disparos.js: ${r}`);
+  assert.ok(paineis.includes('Falta 2º admin') && paineis.includes('Tornar admin') && paineis.includes('Dados do grupo'));
+  for (const r of ['Salvar proteção do número', 'Não enviar de madrugada', 'Na prática: de 4 a 8 segundos']) assert.ok(docs.includes(r), `os Docs não citam: ${r}`);
+  assert.ok(README.includes('Falta 2º admin') && README.includes('Não enviar de madrugada'));
+});
+
+test('Proteção do número: o cartão de pausas e o botão "Salvar pausas" não existem mais, nem nos Docs nem no README', () => {
+  for (const [onde, txt] of [['Docs', TEXTO_DOCS], ['README', README]]) {
+    assert.doesNotMatch(txt, /Salvar pausas/, `${onde}: "Salvar pausas" sumiu do painel`);
+    assert.doesNotMatch(txt, /Ajustes → Pausas entre mensagens/, `${onde}: o cartão "Pausas entre mensagens" virou parte de "Proteção do número"`);
+  }
+  assert.ok(!lerRaiz('public/app.js').includes('Salvar pausas'));
+  // o texto do "Funciona das" cita o silêncio, e a lista de limites traz o teto, o silêncio e as pausas
+  assert.match(secaoTxt('disparo-automatico', 'ritmo'), /horário de silêncio de Ajustes/);
+  const limites = blocosDe('referencia', 'limites').find((b) => b.tabela).tabela.linhas.map((l) => l[0]);
+  for (const k of ['Pausas entre mensagens', 'Mensagens por hora do número', 'Horário de silêncio']) assert.ok(limites.includes(k), `referencia/limites sem "${k}"`);
 });

@@ -69,7 +69,8 @@ docsCapitulo({
           'Abra [[Grupos]]. A lista mostra os grupos em que o número está.',
         ] },
         { nota: 'dica', texto: 'O QR se renova sozinho a cada poucos segundos. Se a lista de grupos estiver desatualizada, clique em “Atualizar lista de grupos”, na tela Grupos.' },
-        { nota: 'aviso', texto: 'A conexão é não oficial e o WhatsApp pode restringir o número. Prefira um número de que você não dependa, mantenha as pausas de Ajustes e evite volume alto.' },
+        { nota: 'aviso', texto: 'A conexão é não oficial e o WhatsApp pode restringir o número. Prefira um número de que você não dependa e evite volume alto. O programa já protege o número com um limite de 40 mensagens por hora, horário de silêncio das 23:00 às 07:00 e pausas entre mensagens: veja [Proteção do número](#docs/manutencao/protecao-do-numero).' },
+        { nota: 'dica', texto: 'Tenha um **segundo chip de reserva**, com o WhatsApp Business instalado, e deixe esse número também dentro dos seus grupos. Se este número for restringido, você o conecta em [[Números de WhatsApp]] e continua enviando. Nessa tela, uma linha mostra quantas mensagens saíram na última hora. E ponha um **segundo admin em cada grupo**: em [[Grupos]], o selo “Falta 2º admin” mostra quais faltam.' },
       ],
     },
     {

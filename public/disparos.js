@@ -21,6 +21,21 @@ const TEXTOS_DISPAROS = {
     titulo: 'Disparar mensagem', ajuda: 'mensagem',
     sub: 'Uma mensagem comum (com foto, se quiser) ou uma enquete para os grupos que você escolher. Envie agora, agende ou repita nos dias da semana. Para rotinas que se repetem (bom dia, enquete da semana), use <a href="#grupo-vivo">Grupo vivo</a>.',
   },
+  // Proteção do número (plano anti-banimento, etapa 8; spec docs/produto/specs/anti-banimento.md): avisos acima do botão.
+  // Só o envio "agora" tem "Enviar mesmo assim", e só para o silêncio: o teto por hora nunca é ignorado.
+  protecao: {
+    agoraTitulo: (ate) => `Horário de silêncio até ${ate}.`,
+    agoraCorpo: 'Se você enviar agora, as mensagens saem fora do horário que você protegeu.',
+    mesmoAssim: 'Enviar mesmo assim', cancelar: 'Cancelar',
+    silencioTitulo: (de, ate) => `Horário de silêncio das ${de} às ${ate}.`,
+    agendado: (hora) => `O envio marcado para ${hora} cai nele e será pulado. Escolha outra hora se quiser que ele saia.`,
+    repetirUm: (hora) => `O horário ${hora} cai nele e será pulado.`,
+    repetirVarios: (horas) => `Os horários ${horas} caem nele e serão pulados.`,
+    repetirOutros: 'Os outros horários saem normalmente.',
+    tetoTitulo: 'Limite desta hora atingido.',
+    teto: (oQue, hora) => (hora ? `${oQue} entra na fila e sai a partir das ${hora}. Nada sai duas vezes.` : `${oQue} entra na fila e sai quando houver vaga. Nada sai duas vezes.`),
+    oQue: { oferta: 'A oferta', mensagem: 'A mensagem', enquete: 'A enquete' },
+  },
   // estados gerais
   semConexao: 'Sem resposta do programa. Confira se ele está rodando e tente de novo.',
   soDono: 'Só o Dono pode fazer isso.',
@@ -277,6 +292,58 @@ function dispDescRepetir(rep = {}) {
 const dispBrl = (n) => (n == null || n === '' || Number.isNaN(Number(n)) ? '' : Number(n).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' }));
 const dispPlural = (n, um, varios) => `${n} ${n === 1 ? um : varios}`;
 
+// ---------- proteção do número: silêncio e teto por hora (GET /api/state → protecao) ----------
+const DISP_RE_HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
+/** O horário de silêncio do servidor quando está ligado e legível; senão null (sem `protecao` no estado: sem aviso). */
+function dispSilencio() {
+  const s = S.st?.protecao?.silencio;
+  return s && s.ativo === true && DISP_RE_HHMM.test(s.de || '') && DISP_RE_HHMM.test(s.ate || '') && s.de !== s.ate ? s : null;
+}
+/** O servidor diz que agora é hora de silêncio? */
+const dispAgoraNoSilencio = () => dispSilencio()?.agora === true;
+/** "HH:MM" cai dentro do silêncio {de, ate}? Mesma regra do servidor: de ≤ hora < até, passando da meia-noite se de > até. */
+function dispHoraNoSilencio(hhmm, s) {
+  if (!s || !DISP_RE_HHMM.test(hhmm || '')) return false;
+  const min = (h) => Number(h.slice(0, 2)) * 60 + Number(h.slice(3, 5));
+  const m = min(hhmm); const de = min(s.de); const ate = min(s.ate);
+  return de < ate ? m >= de && m < ate : m >= de || m < ate;
+}
+/** Teto por hora cheio: { libera_em } (ms ou null) ou null. */
+function dispTetoCheio() {
+  const p = S.st?.protecao;
+  if (!p || !Number.isFinite(p.limite_hora) || p.limite_hora < 1 || !Number.isFinite(p.usados) || p.usados < p.limite_hora) return null;
+  return { libera_em: Number.isFinite(p.libera_em) ? p.libera_em : null };
+}
+/**
+ * Avisos acima do botão Disparar/Enviar, em HTML ('' = nada a avisar):
+ *  - "agora" no silêncio: com `confirma`, o aviso com "Enviar mesmo assim" e "Cancelar" (o botão principal abre isto);
+ *  - agendado ou repetido no silêncio: só o aviso de que serão pulados, sem botão;
+ *  - "agora" com o teto da hora cheio: a oferta/mensagem entra na fila (sem "mesmo assim": o teto nunca é ignorado).
+ * `quando`: 'agora' | 'agendado' | 'repetir'; `hora` (agendado) e `horarios` (repetir) em "HH:MM"; `tipo`: oferta | mensagem | enquete.
+ */
+function dispAvisosProtecao({ quando, hora = '', horarios = [], confirma = false, tipo = 'oferta' } = {}) {
+  const P = TEXTOS_DISPAROS.protecao; const sil = dispSilencio(); const partes = [];
+  const aviso = (corpo, papel = 'status') => `<div class="aviso-impl" role="${papel}"><div class="aviso-corpo">${corpo}</div></div>`;
+  if (sil) {
+    if (quando === 'agora' && confirma && sil.agora === true) {
+      partes.push(aviso(`<p><b>${esc(P.agoraTitulo(sil.ate))}</b> ${esc(P.agoraCorpo)}</p>
+        <div class="linha"><button type="button" data-silencio="mesmo-assim">${P.mesmoAssim}</button><button type="button" data-silencio="cancelar">${P.cancelar}</button></div>`, 'alert'));
+    } else if (quando === 'agendado' && dispHoraNoSilencio(String(hora).slice(0, 5), sil)) {
+      partes.push(aviso(`<p><b>${esc(P.silencioTitulo(sil.de, sil.ate))}</b> ${esc(P.agendado(String(hora).slice(0, 5)))}</p>`));
+    } else if (quando === 'repetir') {
+      const lista = [...new Set(horarios)].filter((h) => DISP_RE_HHMM.test(h)).sort();
+      const dentro = lista.filter((h) => dispHoraNoSilencio(h, sil));
+      if (dentro.length) {
+        const frase = dentro.length === 1 ? P.repetirUm(dentro[0]) : P.repetirVarios(dispLista(dentro));
+        partes.push(aviso(`<p><b>${esc(P.silencioTitulo(sil.de, sil.ate))}</b> ${esc(frase)}${dentro.length < lista.length ? ' ' + esc(P.repetirOutros) : ''}</p>`));
+      }
+    }
+  }
+  const teto = quando === 'agora' ? dispTetoCheio() : null;
+  if (teto) partes.push(aviso(`<p><b>${P.tetoTitulo}</b> ${esc(P.teto(P.oQue[tipo] || P.oQue.oferta, teto.libera_em ? dispHHMM(teto.libera_em) : ''))}</p>`));
+  return partes.join('');
+}
+
 // ---------- peças compartilhadas pelas duas telas ----------
 /** mostrarErros de app.js, com a caixa logo acima do rodapé do card e o título certo para envio. */
 function dispErros(form, erros, titulo = TEXTOS_DISPAROS.antesDeEnviar) {
@@ -374,7 +441,7 @@ function dispItemAgendado(a, { podePausar }) {
 function dispRepintar(el, html) {
   if (el.dataset.ass === html) return;
   const f = document.activeElement;
-  const chave = f && el.contains(f) && f.dataset.act ? `[data-act="${f.dataset.act}"][data-id="${f.dataset.id}"]` : '';
+  const chave = f && el.contains(f) && f.dataset.act ? `[data-act="${f.dataset.act}"][data-id="${f.dataset.id}"]` : f && el.contains(f) && f.dataset.silencio ? `[data-silencio="${f.dataset.silencio}"]` : '';
   el.innerHTML = html; el.dataset.ass = html;
   if (chave) $(chave, el)?.focus();
 }
@@ -732,6 +799,7 @@ function paginaDisparoManual() {
           <small class="dica" id="dm-agendar-dica">${T.agendarDica}</small>
           <label class="campo" id="dm-hora-campo" hidden><span>${T.horaHoje} ${REQ}</span><input type="time" id="dm-hora" style="width:auto;justify-self:start"${confere ? ' aria-describedby="dm-hora-confere"' : ''}>${confere ? `<small class="dica" id="dm-hora-confere">${T.agendarConfere}</small>` : ''}</label>
         </div>
+        <div id="dm-silencio" style="display:grid;gap:8px" hidden></div>
         <div class="rodape-card"><button type="button" class="pri" id="dm-disparar" aria-describedby="dm-motivo">${T.disparar}</button><span class="dica" id="dm-motivo" aria-live="polite"></span></div>
       </form>
     </div>
@@ -746,13 +814,13 @@ function paginaDisparoManual() {
   const selTpl = $('#dm-tpl'); const selTag = $('#dm-tag'); const pv = $('#dm-pv'); const pvLeg = $('#dm-pv-leg');
   const dadosEl = $('#dm-dados'); const etqEl = $('#dm-etq'); const etqAmazonEl = $('#dm-etq-amazon'); const etqShopeeEl = $('#dm-etq-shopee'); const etqMagaluEl = $('#dm-etq-magalu');
   const chkAg = $('#dm-agendar'); const campoHora = $('#dm-hora-campo'); const inHora = $('#dm-hora');
-  const btn = $('#dm-disparar'); const motivoEl = $('#dm-motivo'); const kpisEl = $('#dm-kpis'); const histEl = $('#dm-hist');
+  const btn = $('#dm-disparar'); const silEl = $('#dm-silencio'); const motivoEl = $('#dm-motivo'); const kpisEl = $('#dm-kpis'); const histEl = $('#dm-hist');
   // produto: o que a identificação devolveu; texto: a prévia do servidor para o template textoTpl.
   // Amazon e Shopee: dados = a seção "Dados da oferta" (dadosOferta); bloqueio = por que não dá para disparar (link inválido, sem tag,
   // sem caminho para o link); asin só serve à prévia da Amazon; editou = o dono mexeu nos dados (a prévia deixa de ser a do servidor);
   // via = "Vai sair pela …" (Shopee); seqEtq descarta a leitura do ID de afiliado que chegou depois de o link mudar;
   // lojaParceiro e linkMagalu (Magalu) = o nome salvo e o link de afiliado do `texto` do servidor, para a etiqueta e a prévia.
-  const st = { url: '', loja: null, produto: null, texto: '', textoTpl: '', dados: null, bloqueio: '', asin: '', via: '', seqEtq: 0, lojaParceiro: '', linkMagalu: '', semConferencia: false, editou: false, identificando: false, enviando: false, ok: '' };
+  const st = { url: '', loja: null, produto: null, texto: '', textoTpl: '', dados: null, bloqueio: '', asin: '', via: '', seqEtq: 0, lojaParceiro: '', linkMagalu: '', semConferencia: false, editou: false, identificando: false, enviando: false, ok: '', confirmaSil: false };
   const ehShopee = () => st.loja?.id === 'shopee';
   const ehMagalu = () => st.loja?.id === 'magalu';
   form.onsubmit = (e) => e.preventDefault(); // Enter num campo nunca dispara
@@ -805,6 +873,13 @@ function paginaDisparoManual() {
     if (st.enviando) motivoEl.textContent = gerando ? T.shopee.gerando : T.enviando;
     else if (st.ok) motivoEl.innerHTML = `<span class="nivel-ok">✓ ${esc(st.ok)}</span>`;
     else motivoEl.textContent = m || resumo();
+    pintarAvisos();
+  };
+  // Avisos do silêncio e do teto por hora acima do botão. A confirmação do "agora" cai se o dono passa para Agendar ou se o silêncio acaba.
+  const pintarAvisos = () => {
+    if (st.confirmaSil && (chkAg.checked || !dispAgoraNoSilencio())) st.confirmaSil = false;
+    const html = dispAvisosProtecao({ quando: chkAg.checked ? 'agendado' : 'agora', hora: inHora.value, confirma: st.confirmaSil, tipo: 'oferta' });
+    dispRepintar(silEl, html); silEl.hidden = !html;
   };
 
   // ----- identificar -----
@@ -990,7 +1065,8 @@ function paginaDisparoManual() {
   inHora.oninput = atualizar;
 
   // ----- disparar -----
-  btn.onclick = async () => {
+  // "Enviar mesmo assim" (só no "agora" dentro do silêncio) manda ignorar_silencio; o servidor recusa o campo em qualquer outro "quando".
+  const disparar = async (ignorarSilencio = false) => {
     const erros = [];
     if (!st.produto && !st.dados) erros.push({ msg: T.motivoProduto, el: inUrl });
     if (st.bloqueio) erros.push({ msg: st.bloqueio, el: inUrl });
@@ -1000,6 +1076,10 @@ function paginaDisparoManual() {
     if (chkAg.checked && !inHora.value) erros.push({ msg: T.faltaHora, el: inHora });
     else if (chkAg.checked && horaPassada()) erros.push({ msg: T.horaPassada, el: inHora });
     if (dispErros(form, erros)) return;
+    if (!chkAg.checked && !ignorarSilencio && dispAgoraNoSilencio()) { // primeiro o aviso, com a saída "Enviar mesmo assim"
+      st.confirmaSil = true; atualizar(); $('[data-silencio="cancelar"]', silEl)?.focus(); return;
+    }
+    st.confirmaSil = false;
     const n = grupos.marcados(form).length; const hhmm = inHora.value;
     // Corpo achatado, como POST /api/envios lê (o servidor relê o produto pela url: o que a tela mostrou não vale).
     // Amazon: `ajustes` leva só o que o dono editou (título, preços, cupom, frete, foto por upload); nunca link nem URL de foto.
@@ -1008,6 +1088,7 @@ function paginaDisparoManual() {
       ...(chkAg.checked ? { agendar_data: dispDataISO(), agendar_hhmm: hhmm } : {}),
       url: st.url, tag_id: st.dados ? null : Number(selTag.value) || null, template_id: Number(selTpl.value),
       ...(st.dados ? { ajustes: st.dados.ajustes() } : {}),
+      ...(!chkAg.checked && ignorarSilencio ? { ignorar_silencio: true } : {}),
     };
     st.enviando = true; const soltar = dispTravar(form); form.setAttribute('aria-busy', 'true'); atualizar();
     let ok = false;
@@ -1025,6 +1106,12 @@ function paginaDisparoManual() {
       carregarHist();
     }
     atualizar();
+  };
+  btn.onclick = () => disparar(false);
+  silEl.onclick = (ev) => {
+    const b = ev.target.closest('button[data-silencio]'); if (!b) return;
+    if (b.dataset.silencio === 'cancelar') { st.confirmaSil = false; atualizar(); btn.focus(); }
+    else if (b.dataset.silencio === 'mesmo-assim') return disparar(true);
   };
 
   // ----- histórico (direita) -----
@@ -1109,6 +1196,7 @@ function paginaDispararMensagem() {
               <small class="dica">${T.repetirDica}</small></div>
           </div>
         </fieldset>
+        <div id="mg-silencio" style="display:grid;gap:8px" hidden></div>
         <div class="rodape-card"><button type="button" class="pri" id="mg-enviar">${T.dispararAgora}</button><span class="dica" id="mg-resumo" aria-live="polite"></span></div>
       </form>
     </div>
@@ -1130,9 +1218,9 @@ function paginaDispararMensagem() {
   const pvImg = $('#mg-pv-img'); const pvTxt = $('#mg-pv-txt'); const pvLink = $('#mg-pv-link');
   const qAg = $('#mg-q-agendado'); const qRep = $('#mg-q-repetir'); const inData = $('#mg-data'); const inHora = $('#mg-hora');
   const diasEl = $('#mg-dias'); const horEl = $('#mg-horarios'); const inHorNovo = $('#mg-hor-novo'); const addHor = $('#mg-hor-add'); const contHor = $('#mg-hor-cont');
-  const btn = $('#mg-enviar'); const resumoEl = $('#mg-resumo'); const agEl = $('#mg-agendadas'); const kpisEl = $('#mg-kpis'); const histEl = $('#mg-hist');
+  const btn = $('#mg-enviar'); const silEl = $('#mg-silencio'); const resumoEl = $('#mg-resumo'); const agEl = $('#mg-agendadas'); const kpisEl = $('#mg-kpis'); const histEl = $('#mg-hist');
   // foto = { nome, dataUrl, id, subindo, erro }; fotoSeq descarta resposta de foto já trocada
-  const st = { tipo: 'mensagem', imagem: 'nenhuma', quando: 'agora', foto: null, fotoSeq: 0, opcoes: ['', ''], dias: new Set(), horarios: [], enviando: false, ok: '' };
+  const st = { tipo: 'mensagem', imagem: 'nenhuma', quando: 'agora', foto: null, fotoSeq: 0, opcoes: ['', ''], dias: new Set(), horarios: [], enviando: false, ok: '', confirmaSil: false };
   form.onsubmit = (e) => e.preventDefault();
 
   // ----- prévia -----
@@ -1156,6 +1244,12 @@ function paginaDispararMensagem() {
   const quandoTxt = () => (st.quando === 'agora' ? 'agora'
     : st.quando === 'agendado' ? (inData.value && inHora.value ? dispDataFrase(inData.value, inHora.value) : 'falta a data e a hora')
       : st.dias.size && st.horarios.length ? dispDescRepetir({ dias: [...st.dias], horarios: st.horarios }).toLowerCase() : 'falta dia e horário');
+  // Avisos do silêncio e do teto por hora acima do botão. A confirmação do "agora" cai se o dono passa para Agendar/Repetir ou se o silêncio acaba.
+  const pintarAvisos = () => {
+    if (st.confirmaSil && (st.quando !== 'agora' || !dispAgoraNoSilencio())) st.confirmaSil = false;
+    const html = dispAvisosProtecao({ quando: st.quando, hora: inHora.value, horarios: st.horarios, confirma: st.confirmaSil, tipo: st.tipo });
+    dispRepintar(silEl, html); silEl.hidden = !html;
+  };
   const atualizar = () => {
     secMsg.hidden = st.tipo !== 'mensagem'; secEnq.hidden = st.tipo !== 'enquete';
     boxUpload.hidden = st.imagem !== 'upload'; boxPrevia.hidden = st.imagem !== 'previa';
@@ -1167,6 +1261,7 @@ function paginaDispararMensagem() {
     if (st.enviando) resumoEl.textContent = btn.textContent;
     else if (st.ok) resumoEl.innerHTML = `<span class="nivel-ok">✓ ${esc(st.ok)}</span>`;
     else resumoEl.textContent = `${dispPlural(grupos.marcados(form).length, 'grupo', 'grupos')} · ${st.tipo === 'enquete' ? 'Enquete' : 'Mensagem'} · ${quandoTxt()}`;
+    pintarAvisos();
   };
 
   dispLigarSeg($('#mg-tipo'), (v) => { st.tipo = v; prever(); atualizar(); });
@@ -1308,9 +1403,15 @@ function paginaDispararMensagem() {
     ta.value = ''; inPrevia.value = ''; st.fotoSeq++; st.foto = null; inFoto.value = ''; pintarFoto();
     inPerg.value = ''; st.opcoes = ['', '']; chkMult.checked = false; pintarOpcoes();
   };
-  btn.onclick = async () => {
+  // "Enviar mesmo assim" (só no "agora" dentro do silêncio) manda ignorar_silencio; o servidor recusa o campo em qualquer outro "quando".
+  const enviar = async (ignorarSilencio = false) => {
     const { erros, corpo } = montar();
     if (dispErros(form, erros)) return;
+    if (st.quando === 'agora' && !ignorarSilencio && dispAgoraNoSilencio()) { // primeiro o aviso, com a saída "Enviar mesmo assim"
+      st.confirmaSil = true; atualizar(); $('[data-silencio="cancelar"]', silEl)?.focus(); return;
+    }
+    st.confirmaSil = false;
+    if (st.quando === 'agora' && ignorarSilencio) corpo.ignorar_silencio = true;
     st.enviando = true; const soltar = dispTravar(form); form.setAttribute('aria-busy', 'true'); atualizar();
     let ok = false;
     try { await dispApi('/envios', { method: 'POST', body: corpo }); ok = true; }
@@ -1326,6 +1427,12 @@ function paginaDispararMensagem() {
     // a contagem de opções e horários decide o que fica desabilitado depois de destravar
     addOpc.disabled = st.opcoes.length >= DISP_MAX_OPCOES; pintarHorarios();
     atualizar();
+  };
+  btn.onclick = () => enviar(false);
+  silEl.onclick = (ev) => {
+    const b = ev.target.closest('button[data-silencio]'); if (!b) return;
+    if (b.dataset.silencio === 'cancelar') { st.confirmaSil = false; atualizar(); btn.focus(); }
+    else if (b.dataset.silencio === 'mesmo-assim') return enviar(true);
   };
 
   // ----- agendadas e histórico (direita) -----
@@ -1345,5 +1452,5 @@ function paginaDispararMensagem() {
 
   grupos.ligar(form, { contador: $('#mg-cont'), aoMudar: atualizar });
   pintarOpcoes(); pintarHorarios(); pintarFoto(); prever(); atualizar(); carregarPainel();
-  dispAcompanhar('disparar-mensagem', carregarPainel);
+  dispAcompanhar('disparar-mensagem', async () => { await carregarPainel(); if (!st.enviando) atualizar(); }); // o estado (silêncio, teto) muda sozinho
 }

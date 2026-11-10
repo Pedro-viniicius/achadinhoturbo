@@ -179,6 +179,10 @@ CREATE TABLE IF NOT EXISTS rotinas (
   group_jids TEXT NOT NULL DEFAULT '[]', repetir TEXT NOT NULL,
   next_run_at INTEGER, last_run_at INTEGER, ultimo_envio_id INTEGER, created_at INTEGER, updated_at INTEGER);
 CREATE INDEX IF NOT EXISTS idx_rotinas_fila ON rotinas (enabled, next_run_at);
+-- Proteção do número (plano anti-banimento): uma linha por mensagem que o número enviou, para o teto por hora em janela
+-- deslizante. Só a hora do envio: sem jid, número nem conteúdo. src/ritmo.js apaga o que passa de 2 h.
+CREATE TABLE IF NOT EXISTS wa_saidas (ts INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_wa_saidas_ts ON wa_saidas (ts);
 `;
 
 // Colunas acrescentadas depois da primeira versão (ALTER TABLE só se faltar).
@@ -196,6 +200,8 @@ const EXTRA_COLUMNS = [
   ['remetente_itens', 'qtd_links', 'INTEGER'],
   // grade de horários da regra (JSON {dias, horarios:[{hora, qtd, template_id}]}); NULL = ritmo por intervalo, o de antes
   ['rules', 'grade', 'TEXT'],
+  // quantos admins o grupo tem (proteção do número: selo "Falta 2º admin"); só a contagem, sem quem são. NULL = desconhecido
+  ['groups', 'admins', 'INTEGER'],
 ];
 
 // "[ … ]" é um pedaço opcional: some sozinho quando algum placeholder dentro dele está vazio (renderTemplate).

@@ -10,12 +10,14 @@ import { createEspelho } from './espelho.js';
 import { agrupar, registrar as registrarRastreio } from './rastreio.js';
 import { createRemetentes } from './remetentes.js';
 import { createRotinas } from './rotinas.js';
+import { createRitmo, pausaGrupoGravada, pausaOfertaGravada } from './ritmo.js';
 import { proximoHorario, horarioDe, resolverVencido, proximoEnvio, qtdDaLinha, templateDaLinha } from './grade.js';
-import { sleep, jitter } from './util.js';
+import { sleep, jitter, inWindow, alignToWindow } from './util.js';
 import { PAUSA_DESCARTADA_H, MOTIVOS_VERIFICADOR, CAUSAS } from './verificador.js';
 
-// Pausas entre mensagens: moram em ./util.js (src/envios.js usa o mesmo ritmo anti-bloqueio); reexportadas aqui.
-export { sleep, jitter };
+// Pausas entre mensagens e horário de funcionamento: moram em ./util.js (src/envios.js usa o mesmo ritmo anti-bloqueio);
+// reexportados aqui.
+export { sleep, jitter, inWindow, alignToWindow };
 
 // Fonte "catalogo" (plano fonte-catalogo-etiqueta, etapa 4)
 const LOJAS_CATALOGO = new Set(['ml', 'amazon', 'shopee']);
@@ -39,8 +41,6 @@ const qtdOfertas = (n) => `${n} ${n === 1 ? 'oferta' : 'ofertas'}`;
 // Verificador (plano verificador-preco-estoque, D6): a oferta descartada fica fora da escolha da regra por um tempo
 const PAUSA_DESCARTADA_MS = PAUSA_DESCARTADA_H * 3600000;
 
-const toMin = (hhmm) => { const [h, m] = String(hhmm).split(':').map(Number); return h * 60 + (m || 0); };
-
 // Grade de horários (plano grade-de-disparos, D3 e D4): textos do Histórico
 const pad2 = (n) => String(n).padStart(2, '0');
 const horaDe = (ts) => { const d = new Date(ts); return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`; };
@@ -52,6 +52,16 @@ const quandoDe = (ts, agora) => {
   return `${horaDe(ts)} de ${pad2(d.getDate())}/${pad2(d.getMonth() + 1)}`;
 };
 const MOTIVO_PULADO = 'o programa estava desligado, o WhatsApp desconectado ou outro envio demorou.';
+
+// Proteção do número (plano anti-banimento, etapa 4): textos do Histórico, todos 'aviso' (nunca 'erro', que alerta)
+const textoAdiadoSilencio = (s, ate) => `Horário de silêncio (${s.de} às ${s.ate}): disparo adiado para as ${horaDe(ate)}.`;
+const textoPuladoSilencio = (horario) => `Horário ${horaDe(horario)} pulado: horário de silêncio.`;
+/** "Enviar agora" barrado antes de começar: o silêncio (frase do plano) ou o teto já cheio. */
+const textoEnviarAgoraBarrado = (r) => (r.motivo === 'silencio'
+  ? `Enviar agora não saiu: horário de silêncio até ${horaDe(r.ate)}.`
+  : `Enviar agora não saiu: limite de ${r.limite} mensagens por hora atingido; há vaga a partir das ${horaDe(r.ate)}.`);
+/** Fim da frase "saíram x de y ofertas" de um horário da grade interrompido pela proteção. */
+const motivoDaParada = (r) => (r.motivo === 'silencio' ? 'começou o horário de silêncio' : `o limite de ${r.limite} mensagens por hora encheu`);
 /**
  * Aviso de horário perdido (CA6): um ou vários pulados e o que vem em seguida. `saiAgora`: o horário seguinte já
  * venceu e vai sair neste tick (com o WhatsApp fora, ele só fica marcado como o próximo).
@@ -61,23 +71,6 @@ function textoPulados(pulados, { seguinte, saiAgora }, agora) {
     : `${pulados.length} horários pulados (${quandoDe(pulados[0], agora)} a ${quandoDe(pulados.at(-1), agora)})`;
   const depois = seguinte == null ? '' : saiAgora ? ` O das ${horaDe(seguinte)} sai agora.` : ` Próximo: ${quandoDe(seguinte, agora)}.`;
   return `${quais}: ${MOTIVO_PULADO}${depois}`;
-}
-
-/** O horário de funcionamento pode virar a noite (ex.: 20:00 até 02:00). */
-export function inWindow(ts, start, end) {
-  const d = new Date(ts); const m = d.getHours() * 60 + d.getMinutes();
-  const s = toMin(start); const e = toMin(end);
-  if (s === e) return true;
-  return s < e ? m >= s && m < e : m >= s || m < e;
-}
-
-/** Se `ts` cai fora do horário, devolve o próximo início de janela. */
-export function alignToWindow(ts, start, end) {
-  if (inWindow(ts, start, end)) return ts;
-  const d = new Date(ts); const s = toMin(start);
-  d.setHours(Math.floor(s / 60), s % 60, 0, 0);
-  if (d.getTime() <= ts) d.setDate(d.getDate() + 1);
-  return d.getTime();
 }
 
 /**
@@ -98,26 +91,35 @@ export function alignToWindow(ts, start, end) {
  * `verificador` (src/verificador.js, createVerificador; plano verificador-preco-estoque D1 e D9): confere preço e
  * estoque de cada oferta da regra logo antes de gerar o link, e vai também à fila de envios. null = nada é conferido.
  */
-export function createScheduler({ db, wa, links, ml = mlDefault, fast = false, dir = null, amazon = null, shopee = null, magalu = null, catalogo = null, catalogoItens = null, verificador = null }) {
+export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast = false, dir = null, amazon = null, shopee = null, magalu = null, catalogo = null, catalogoItens = null, verificador = null, ritmo = null }) {
+  // Proteção do número (plano anti-banimento, ADR-012): todo módulo daqui recebe o `wa` embrulhado, que conta cada
+  // mensagem no teto e espera a pausa mínima entre quaisquer duas (regra, fila, avisos, resposta ao remetente). Teto e
+  // silêncio são perguntados (ritmo.liberado) só por quem manda a grupos: as regras (aqui) e a fila (envios.js).
+  ritmo ??= createRitmo({ db, fast });
+  const wa = ritmo.embrulhar(waBruto);
   const running = new Set();
   let timer = null; let primeiro = null; let ticking = false; let recuperacao = null;
   let acordado = false; // um "agora" chegou com o tick em andamento: ele passa nos envios de novo antes de terminar
   // O "agora" não envia por conta própria: grava pendente e acorda o tick, que manda um envio de cada vez (S14)
-  const envios = createEnvios({ db, wa, links, ml, fast, dir, acordar, amazon, shopee, magalu, verificador });
+  const envios = createEnvios({ db, wa, links, ml, fast, dir, acordar, amazon, shopee, magalu, verificador, ritmo });
   const avisos = createAvisos({ db, wa, estadoBackup: dir && path.join(dir, 'backup-estado.json') });
   // receber() (ouvinte do WhatsApp) e cada envio que o espelho cria chamam acordar(): a oferta sai neste tick
   const espelho = createEspelho({ db, wa, amazon, envios, acordar });
   // idem para a mensagem privada de um remetente cadastrado (receber) e para cada envio que ela cria
   const remetentes = createRemetentes({ db, wa, envios, acordar });
   // rotinas do Grupo vivo: a ocorrência vencida grava um envio 'agora' e acorda o tick (sai no laço "acordado")
-  const rotinas = createRotinas({ db, wa, envios, acordar });
+  // o "Enviar agora" do Grupo vivo é recusado no horário de silêncio (achado R2): a rotina pergunta ao mesmo ritmo
+  const rotinas = createRotinas({ db, wa, envios, acordar, silencio: (now) => ritmo.silencio(now) });
 
   const getRule = (id) => parseRule(db.prepare('SELECT * FROM rules WHERE id = ?').get(id));
+  // presas entre o mínimo e o máximo da proteção também na leitura (achado S2): valor gravado à mão não vale
   const delays = () => fast ? { group: 0, offer: 0 } : {
-    group: Number(getSetting(db, 'delay_group_s', 6)),
-    offer: Number(getSetting(db, 'delay_offer_s', 30)),
+    group: pausaGrupoGravada(getSetting(db, 'delay_group_s', 6)),
+    offer: pausaOfertaGravada(getSetting(db, 'delay_offer_s', 30)),
   };
   const log = (rule, o) => addLog(db, { rule, ...o });
+  // avisarLimite (src/ritmo.js) entrega a linha já pronta ({ rule, level, message }), não o par (rule, o) de log()
+  const logLinha = (linha) => addLog(db, linha);
   const tplOpts = () => ({ tituloMax: Number(getSetting(db, 'titulo_max', 60)) });
 
   function wasSent(rule, key) {
@@ -417,22 +419,58 @@ export function createScheduler({ db, wa, links, ml = mlDefault, fast = false, d
    */
   const comGradeAgora = (id) => { try { return !!getRule(id)?.grade; } catch { return false; } };
 
+  /** Grupos da regra que ainda existem (os mesmos a que a execução manda). */
+  const gruposDa = (rule) => (rule.group_jids || []).map((jid) => db.prepare('SELECT * FROM groups WHERE jid = ?').get(jid)).filter(Boolean);
+  /**
+   * Proteção do número: a próxima oferta da regra pode sair agora? Pede uma vaga por grupo (o ritmo prende o pedido
+   * entre 1 e o teto, ou seja, min(grupos, limite)): a oferta vai a todos os grupos ou espera inteira.
+   */
+  const liberadoPara = (nGrupos, now = Date.now()) => ritmo.liberado(now, { precisa: nGrupos });
+  /** O horário marcado `horario` cai no silêncio, ou o silêncio vale agora: nada da grade sai (P4, é pulado). */
+  const noSilencio = (horario, now) => ritmo.silencio(now).agora || ritmo.silencio(horario).agora;
+
+  /**
+   * Próximo next_run_at de uma regra por intervalo parada pela proteção: no silêncio, o fim dele alinhado ao
+   * "Funciona das/até" da regra (os dois limites se somam); no teto, quando a janela abre as vagas (libera_em).
+   */
+  const depoisDaParada = (rule, r, now) => (r.motivo === 'silencio'
+    ? alignToWindow(r.ate ?? now + 60000, rule.window_start, rule.window_end)
+    : r.ate ?? now + 60000);
+
   /**
    * `horario` (regra com grade, vindo do tick): o horário da grade que esta execução cumpre. `manual` ("Enviar agora"):
    * numa regra com grade, usa a linha do próximo horário e não mexe em next_run_at (CA8).
+   * Teto (achados S1/Q1/Q2): a execução separa as vagas no ritmo (vaga().pedir, síncrono) antes do "Enviar agora", de
+   * cada oferta e de cada grupo; a oferta que fica sem vaga no meio para nos grupos que faltam, e a execução para ali.
+   * `aoBarrar(lib)`: chamado, ANTES do primeiro await, quando o "Enviar agora" é barrado (a rota responde 409).
    */
-  async function runRule(id, { manual = false, horario = null } = {}) {
+  async function runRule(id, { manual = false, horario = null, aoBarrar = null } = {}) {
     const rule = getRule(id);
     if (!rule) throw new Error('Regra não encontrada');
     if (running.has(id)) return { skipped: 'já está em andamento' };
-    const linha = linhaDaGrade(rule, horario, Date.now());
+    const vaga = ritmo.vaga();
+    if (manual) {
+      // "Enviar agora" respeita silêncio e teto: barrado antes de começar, não lê as fontes nem mexe no next_run_at.
+      // Aprovado, as vagas da 1ª oferta ficam separadas: outro "Enviar agora" ou o tick não passam por elas.
+      const lib = vaga.pedir(Date.now(), { precisa: gruposDa(rule).length });
+      if (!lib.ok) {
+        log(rule, { level: 'aviso', message: textoEnviarAgoraBarrado(lib) });
+        if (lib.motivo === 'limite') ritmo.avisarLimite(logLinha, lib);
+        aoBarrar?.(lib);
+        return { offers: 0, messages: 0, errors: 0, revisao: 0, descartadas: 0, parou: lib.motivo };
+      }
+    }
+    // se algo lançar antes do try, as vagas separadas do "Enviar agora" voltam ao teto (R7)
+    const antesDoTry = (f) => { try { return f(); } catch (e) { vaga.soltar(); throw e; } };
+    const linha = antesDoTry(() => linhaDaGrade(rule, horario, Date.now()));
     // começo dos avisos da grade: o horário cumprido ou, no "Enviar agora", o horário cuja linha foi usada
     const prefixo = horario != null ? `Horário ${horaDe(horario)}: `
       : linha ? `Enviar agora (como no horário das ${linha.hora}): ` : '';
     running.add(id);
     const summary = { offers: 0, messages: 0, errors: 0, revisao: 0, descartadas: 0 };
-    const exec = novaExecucao();
+    const exec = antesDoTry(() => novaExecucao());
     let retrySoon = false;
+    let parada = null; // a proteção do número parou a execução no meio: { motivo, ate, limite? } de ritmo.liberado
     try {
       liberarFalhosDoCatalogo(); // envio aprovado sem nenhum grupo ok não conta no "dias sem repetir" (R3)
       if (!wa.isReady()) {
@@ -444,8 +482,7 @@ export function createScheduler({ db, wa, links, ml = mlDefault, fast = false, d
       if (sumiu) {
         log(rule, { level: 'aviso', message: `${prefixo}o template escolhido para este horário não existe mais. As ofertas saíram com o template da regra.` });
       }
-      const groups = rule.group_jids
-        .map((jid) => db.prepare('SELECT * FROM groups WHERE jid = ?').get(jid)).filter(Boolean);
+      const groups = gruposDa(rule);
       // etiqueta do ML só se alguma fonte pode trazer oferta do ML (D8, CA6)
       const problem = !tag && precisaEtiqueta(rule.sources) ? 'escolha uma etiqueta' : !tpl ? 'escolha um template' : !groups.length ? 'escolha ao menos um grupo' : null;
       if (problem) { log(rule, { level: 'erro', message: `Regra incompleta: ${problem}.` }); summary.errors++; return summary; }
@@ -463,6 +500,11 @@ export function createScheduler({ db, wa, links, ml = mlDefault, fast = false, d
       // descarte do verificador (D8): uma linha 'aviso' por oferta, nunca 'erro'; a oferta não é reposta (D6)
       const descartar = (o, c) => { summary.descartadas++; log(rule, { level: 'aviso', offer_title: o.title, message: c.texto }); };
       for (let i = 0; i < picked.length; i++) {
+        // proteção do número antes de cada oferta (nem conferência nem link): sem vaga para os grupos (até o teto), ou
+        // com o silêncio começando, a execução para aqui e o resto não sai (a regra por intervalo volta quando liberar).
+        // As vagas ficam separadas durante a conferência e o link: quem chega depois já as vê ocupadas
+        const lib = vaga.pedir(Date.now(), { precisa: groups.length });
+        if (!lib.ok) { parada = lib; summary.parou = lib.motivo; break; }
         let offer = picked[i]; const etq = tagDaFonte(offer);
         let gerados; // um link por código de rastreio distinto (linksPorCodigo)
         let sufixo = ''; // do verificador, na linha 'ok' de cada grupo (D8)
@@ -533,11 +575,16 @@ export function createScheduler({ db, wa, links, ml = mlDefault, fast = false, d
             log(rule, { level: 'erro', group_name: groups[g].name, offer_title: offer.title, message: 'Link de afiliado não gerado: ' + destino?.falha });
             continue;
           }
+          // uma vaga por grupo (Q1): com mais grupos que o teto, a oferta para no grupo que não tem mais vaga. O silêncio
+          // só é conferido por oferta (acima): a oferta começada vai aos grupos que o teto deixar
+          const vez = vaga.pedir(Date.now(), { precisa: 1, ignorarSilencio: true });
+          if (!vez.ok) { parada = vez; summary.parou = vez.motivo; break; }
           const text = textoDe(destino.link);
           try {
             if (fotoOk) {
               try { await wa.sendImage(groups[g].jid, offer.image, text); } catch { await wa.sendText(groups[g].jid, text); }
             } else await wa.sendText(groups[g].jid, text);
+            vaga.usar(); // a saída já conta em wa_saidas
             okCount++; summary.messages++;
             log(rule, { level: 'ok', group_name: groups[g].name, offer_title: offer.title, message: `${comoSaiu(offer, destino)}${daFonte}${sufixo}` });
             registrarEnvio(rule, offer, groups[g].jid, destino);
@@ -551,7 +598,20 @@ export function createScheduler({ db, wa, links, ml = mlDefault, fast = false, d
           db.prepare('INSERT INTO sent_offers (rule_id, offer_key, sent_at) VALUES (?,?,?)').run(rule.id, offer.key, Date.now());
           if (offer.catalogo) catalogoItens.registrar(rule, offer, 'enviado');
         }
+        vaga.soltar(); // a pausa entre ofertas não segura vagas: a próxima oferta pede de novo
+        if (parada) break;
         if (i < picked.length - 1) await sleep(jitter(d.offer));
+      }
+      if (parada) {
+        if (parada.motivo === 'limite') ritmo.avisarLimite(logLinha, parada); // uma linha por vez que o teto enche (CA3)
+        if (rule.grade) {
+          // o horário da grade se encerra com o que saiu, como quando faltam ofertas (CA7 da grade): nada acumula
+          const frase = `aíram ${summary.offers} de ${want} ofertas; ${motivoDaParada(parada)}.`;
+          log(rule, { level: 'aviso', message: prefixo ? `${prefixo}s${frase}` : `S${frase}` });
+        } else if (parada.motivo === 'silencio') {
+          log(rule, { level: 'aviso', message: textoAdiadoSilencio(ritmo.silencio(Date.now()), depoisDaParada(rule, parada, Date.now())) });
+        }
+        return summary;
       }
       // faltaram ofertas no horário da grade (CA7): sai o que houver, sem acumular para o próximo; as descartadas pelo
       // verificador não são repostas (D6) e entram na frase
@@ -563,6 +623,7 @@ export function createScheduler({ db, wa, links, ml = mlDefault, fast = false, d
       }
       return summary;
     } finally {
+      vaga.soltar(); // as vagas separadas e não usadas (oferta pulada, falha do envio) voltam ao teto
       fecharCatalogo(rule, exec); // avisos de espera e cursor do catálogo, no fim (nunca na pré-visualização)
       const now = Date.now();
       if (rule.grade) fecharGrade(rule, { manual, horario, retrySoon }, now);
@@ -571,7 +632,9 @@ export function createScheduler({ db, wa, links, ml = mlDefault, fast = false, d
         // intervalo não fica gravado, e o tick calcula o próximo horário pela grade nova
         db.prepare('UPDATE rules SET last_run_at = ? WHERE id = ?').run(now, id);
       } else {
-        const next = retrySoon ? now + 60000 : alignToWindow(now + rule.interval_min * 60000, rule.window_start, rule.window_end);
+        // parada pela proteção: volta quando o silêncio acabar ou o teto abrir vaga, não depois do intervalo inteiro
+        const next = retrySoon ? now + 60000 : parada ? depoisDaParada(rule, parada, now)
+          : alignToWindow(now + rule.interval_min * 60000, rule.window_start, rule.window_end);
         db.prepare('UPDATE rules SET last_run_at = ?, next_run_at = ? WHERE id = ?').run(now, next, id);
       }
       running.delete(id);
@@ -613,10 +676,46 @@ export function createScheduler({ db, wa, links, ml = mlDefault, fast = false, d
     // o que vai sair fica gravado: com o WhatsApp fora, ele espera (e vence) como qualquer horário
     const next = res.executar ?? res.proximo;
     if (res.pulados.length) {
-      log(regra, { level: 'aviso', message: textoPulados(res.pulados, { seguinte: next, saiAgora: pronto && res.executar != null }, now) });
+      // "sai agora" só se ele vai mesmo sair: o que cai no silêncio é pulado logo depois (pularNoSilencio)
+      const saiAgora = pronto && res.executar != null && !noSilencio(res.executar, now);
+      log(regra, { level: 'aviso', message: textoPulados(res.pulados, { seguinte: next, saiAgora }, now) });
     }
     if (next !== regra.next_run_at) grava(next);
     return res.executar;
+  }
+
+  /**
+   * Horário da grade que venceu no silêncio (ou com o silêncio valendo agora): pulado com aviso, e o próximo horário
+   * da grade fica gravado (P4). Só se ninguém mexeu no next_run_at no meio (a mesma trava do fecharGrade).
+   */
+  function pularNoSilencio(id, horario) {
+    const regra = getRule(id);
+    if (!regra?.grade) return;
+    const r = db.prepare('UPDATE rules SET next_run_at = ? WHERE id = ? AND next_run_at IS ?').run(proximoHorario(regra.grade, horario), id, horario);
+    if (r.changes) log(regra, { level: 'aviso', message: textoPuladoSilencio(horario) });
+  }
+
+  /**
+   * Teto da proteção no tick (regras com grade ou por intervalo): sem vaga para todos os grupos da regra, ela não roda
+   * e o next_run_at fica como está (a grade continua sujeita à tolerância de 30 min). Uma linha por vez que o teto
+   * enche (avisarLimite), nunca uma por regra nem por tick.
+   */
+  function semVaga(rule, now) {
+    const lib = liberadoPara(gruposDa(rule).length, now);
+    if (lib.ok) return false;
+    if (lib.motivo === 'limite') ritmo.avisarLimite(logLinha, lib);
+    return true;
+  }
+
+  /**
+   * POST /api/rules/:id/run (achado R4): começa a execução manual em segundo plano e diz já se ela foi barrada pelo
+   * silêncio ou pelo teto. O barrado é decidido no trecho síncrono de runRule (antes do primeiro await), então o
+   * `aoBarrar` já rodou quando runRule devolve a promise. → { iniciado: true } ou { barrado: frase do Histórico }
+   */
+  function enviarAgora(id) {
+    let barrado = null;
+    runRule(id, { manual: true, aoBarrar: (lib) => { barrado = lib; } }).catch(() => {});
+    return barrado ? { barrado: textoEnviarAgoraBarrado(barrado) } : { iniciado: true };
   }
 
   async function previewOffers(id) {
@@ -706,7 +805,10 @@ export function createScheduler({ db, wa, links, ml = mlDefault, fast = false, d
           if (running.has(r.id)) continue;
           const pronto = wa.isReady();
           const horario = horarioVencido(r, now, pronto);
-          if (horario == null || !pronto) continue;
+          if (horario == null) continue;
+          // hora marcada no silêncio é pulada, mesmo com o WhatsApp fora (P4): não "sai quando acabar"
+          if (noSilencio(horario, now)) { pularNoSilencio(r.id, horario); continue; }
+          if (!pronto || semVaga(r, now)) continue;
           await runRule(r.id, { horario });
           await passoEspelho();
           await passoRemetentes();
@@ -719,7 +821,16 @@ export function createScheduler({ db, wa, links, ml = mlDefault, fast = false, d
           db.prepare('UPDATE rules SET next_run_at = ? WHERE id = ?').run(alignToWindow(now, r.window_start, r.window_end), r.id);
           continue;
         }
-        if (!wa.isReady()) continue;
+        // silêncio global: a regra por intervalo é adiada para o fim dele, alinhado ao "Funciona das/até" dela (uma
+        // linha por silêncio: com o next_run_at no futuro, os ticks seguintes nem chegam aqui)
+        const sil = ritmo.silencio(now);
+        if (sil.agora) {
+          const next = alignToWindow(sil.ate_ts, r.window_start, r.window_end);
+          db.prepare('UPDATE rules SET next_run_at = ? WHERE id = ?').run(next, r.id);
+          log(r, { level: 'aviso', message: textoAdiadoSilencio(sil, next) });
+          continue;
+        }
+        if (!wa.isReady() || semVaga(r, now)) continue;
         await runRule(r.id);
         await passoEspelho();
         await passoRemetentes();
@@ -736,7 +847,10 @@ export function createScheduler({ db, wa, links, ml = mlDefault, fast = false, d
 
   return {
     // acordar: o "Enviar" aprovado na revisão do catálogo (src/catalogo-itens.js) pede o tick já
-    runRule, previewOffers, tick, acordar, envios, avisos, amazon, shopee, espelho, remetentes, rotinas, catalogo, catalogoItens,
+    runRule, enviarAgora, previewOffers, tick, acordar, envios, avisos, amazon, shopee, espelho, remetentes, rotinas, catalogo, catalogoItens,
+    // proteção do número: `ritmo` (uso do teto e silêncio para o /state) e o `wa` embrulhado, o mesmo dos módulos daqui;
+    // quem manda mensagem fora do agendador usa este `wa`, para contar no teto e respeitar a pausa mínima
+    ritmo, wa,
     start() {
       if (timer) return;
       // o que ficou 'enviando' (envios) ou 'processando' (espelho e remetentes) quando o serviço caiu volta antes do

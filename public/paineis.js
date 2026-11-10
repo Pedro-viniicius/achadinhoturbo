@@ -250,11 +250,21 @@ function formLink(l) {
 }
 
 // ---------- tabela de grupos (página Grupos) ----------
+// Selo "Falta 2º admin" (anti-banimento, etapa 7): grupo com exatamente 1 administrador, segundo `admins` de /api/groups
+// (contado na sincronização; null = não se sabe, sem selo). Só com o WhatsApp aberto: com ele fechado o dado pode estar velho.
+const TEXTOS_ADMIN = {
+  selo: 'Falta 2º admin',
+  titulo: (n) => `${n} ${n === 1 ? 'grupo' : 'grupos'} com só 1 administrador.`,
+  corpo: 'Se esse administrador sair ou for banido, ninguém mais gerencia o grupo e ele pode ficar sem dono. Como resolver: abra o grupo no WhatsApp, toque em Dados do grupo, escolha um membro de confiança e toque em “Tornar admin”. Depois use “Atualizar lista de grupos” aqui.',
+};
+const grupoSemSegundoAdmin = (g) => g?.admins === 1 && S.st?.whatsapp?.status === 'open';
 function tabelaGrupos(groups) {
   const blocoNome = (id) => S.blocks.find((b) => b.id === id)?.name;
   const rastreio = podeEquipe(); // coluna Rastreio: só o Dono (decisão P2)
-  return `<div class="card tabela tab-grupos"><table><thead><tr><th>Grupo</th><th>Membros</th><th>Convite ${q('grupos.convite')}</th>${rastreio ? `<th>Rastreio ${q('rastreio.grupo')}</th>` : ''}</tr></thead><tbody>
-    ${groups.map((g) => `<tr data-jid="${esc(g.jid)}"><td>${esc(g.name)}${g.is_admin ? '<span class="badge-adm">admin</span>' : ''}${rastreioBlocosDoGrupo(g).length ? `<br><small class="dica">${rastreioBlocosDoGrupo(g).map(blocoNome).filter(Boolean).map(esc).join(' · ')}</small>` : ''}</td><td class="c-memb">${g.size ?? ''}</td>
+  const faltaAdmin = groups.filter(grupoSemSegundoAdmin).length;
+  const avisoAdmin = faltaAdmin ? `<div class="aviso-impl" id="aviso-admin"><p><b>${TEXTOS_ADMIN.titulo(faltaAdmin)}</b> ${q('grupos.admin')} ${TEXTOS_ADMIN.corpo}</p></div>` : '';
+  return `${avisoAdmin}<div class="card tabela tab-grupos"><table><thead><tr><th>Grupo</th><th>Membros</th><th>Convite ${q('grupos.convite')}</th>${rastreio ? `<th>Rastreio ${q('rastreio.grupo')}</th>` : ''}</tr></thead><tbody>
+    ${groups.map((g) => `<tr data-jid="${esc(g.jid)}"><td>${esc(g.name)}${g.is_admin ? '<span class="badge-adm">admin</span>' : ''}${grupoSemSegundoAdmin(g) ? `<div class="selo-admin"><span class="estado-pill pendente" aria-describedby="aviso-admin">${TEXTOS_ADMIN.selo}</span></div>` : ''}${rastreioBlocosDoGrupo(g).length ? `<br><small class="dica">${rastreioBlocosDoGrupo(g).map(blocoNome).filter(Boolean).map(esc).join(' · ')}</small>` : ''}</td><td class="c-memb">${g.size ?? ''}</td>
       <td class="c-conv"><div class="conv">${g.invite_code ? `<input readonly value="https://chat.whatsapp.com/${esc(g.invite_code)}">` : '<input data-colar placeholder="https://chat.whatsapp.com/…">'}
         <button data-inv="${g.invite_code ? 'colar' : 'colar'}" title="Salvar o link colado" ${g.invite_code ? 'hidden' : ''}>Salvar</button><button data-inv="buscar" title="Busca o link pelo WhatsApp (precisa ser admin)">${g.invite_code ? 'Atualizar' : 'Buscar convite'}</button></div></td>${rastreio ? `<td class="c-rast" data-rot="Rastreio">${rastreioCelulaGrupo(g)}</td>` : ''}</tr>`).join('')
       || `<tr><td colspan="${rastreio ? 4 : 3}">Nenhum grupo. Toque em “Atualizar lista de grupos”.</td></tr>`}</tbody></table></div>`;

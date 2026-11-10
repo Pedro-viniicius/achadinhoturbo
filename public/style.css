@@ -275,6 +275,18 @@ main.larga { max-width:1180px; }
 .aviso-impl p { margin:0; }
 .aviso-impl b { font-weight:700; }
 
+/* ---------- Proteção do número: uso na última hora (Ajustes e Números) e selo de admin (Grupos) ---------- */
+.pr-uso { display:grid; gap:6px; align-content:start; margin-top:8px; }
+.pr-uso:empty { margin-top:0; }
+#pr-silencio-agora:empty { margin:0; }
+.linha:has(> .chave) { min-height:44px; align-items:center; }
+.pr-uso progress { display:block; width:100%; max-width:280px; height:8px; accent-color:var(--primary); }
+.pr-uso.pr-perto progress { accent-color:var(--warn); }
+.pr-uso .aviso-impl { margin:0; }
+.pr-uso:empty, #pr-silencio-agora:empty { display:none; }
+.selo-admin { margin-top:4px; }
+#aviso-admin { margin-bottom:14px; }
+
 /* ---------- conexões ---------- */
 .conexoes { display:grid; grid-template-columns:repeat(auto-fit,minmax(300px,1fr)); gap:12px; margin-bottom:12px; }
 .conexoes > .card, .conexoes > .conexao { margin-bottom:0; }

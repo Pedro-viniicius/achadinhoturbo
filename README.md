@@ -213,6 +213,7 @@ Em *Disparos → Disparo manual* você manda uma oferta específica sem criar re
 2. Escolha o **template**, a **etiqueta** (só no Mercado Livre) e os grupos.
 3. Envie **agora** ou **agende para hoje** (só o mesmo dia; para repetir, use *Disparar mensagem*).
 4. O histórico mostra o que foi enviado, está na fila ou deu erro (últimos 30 dias nos contadores).
+5. Dentro do **horário de silêncio** de *Ajustes* (padrão 23:00 às 07:00), o envio **agora** mostra um aviso com **Enviar mesmo assim** (que nunca ignora o limite de 40 mensagens por hora); o **agendado** que cai nele é pulado, e o painel avisa antes. Veja [Proteção do número](#proteção-do-número-anti-banimento).
 
 **Hoje o Mercado Livre, a Amazon, a Shopee e a Magalu enviam.** Se o link for do Facebook, o programa reconhece e avisa que a loja **não está conectada** (ainda não implementada), sem enviar nada.
 
@@ -290,6 +291,7 @@ Em *Disparos → Disparar mensagem* você envia texto livre ou uma enquete para 
 - Agendados e repetições **sobrevivem a reinício**: ficam no banco e retomam sozinhos.
 - Todo envio, inclusive o **"agora"**, sai pela **mesma fila** das regras automáticas, com a pausa entre mensagens de *Ajustes*. Por isso pode haver atraso de alguns minutos enquanto uma regra está enviando; os envios entram entre as regras.
 - Repetições e enquetes aumentam o volume de envio e o risco de restrição do número: use com moderação.
+- **Silêncio e limite por hora**: o **"agora"** no horário de silêncio mostra o aviso com **Enviar mesmo assim**; agendado e repetido dentro dele são **pulados** (o painel avisa antes, sem "mesmo assim"). Com o limite por hora cheio, o envio entra na fila e sai quando houver vaga (o que esperar mais de 2 horas é descartado, com aviso). Veja [Proteção do número](#proteção-do-número-anti-banimento).
 
 ## Conferência de preço e estoque antes do envio
 
@@ -329,7 +331,7 @@ Em *Disparo automático → Novo disparo automático → Ritmo de envio*, o **Co
 - **Mexer na lista**: as linhas só se reordenam quando você sai da lista (outro campo ou botão, ou *Enter*, que não salva o disparo); o aviso "Horário 21:00 movido para a posição 27." e um contorno na linha duram até a sua próxima ação. *Copiar* cria a linha logo abaixo da original e *+ Adicionar horário* a põe no fim; a barra com esse botão e *Limpar tudo* fica acima da lista e acompanha a rolagem (em tela estreita, só os avisos acompanham). *Remover* e *Limpar tudo* não pedem confirmação e mostram o aviso com *Desfazer* ("Horário 12:00 removido."), que devolve as linhas com o que estava digitado até a próxima alteração da lista; um clique duplo em *Remover* apaga uma linha só. *Cancelar* e *Esc* com alterações não salvas perguntam "Descartar as alterações?".
 - **Modelos rápidos e Montar…**: "A cada 30 min, 8h às 22h", "A cada hora, 8h às 22h", "Manhã, tarde e noite" e "Horários de pico" preenchem a lista, e *Montar…* faz o mesmo com o seu "De", "Até", "A cada" e "Ofertas em cada". Os modelos rápidos e o *Montar…* incluem o horário final. *Substituir horários* troca a lista; *Acrescentar* soma. Nada é salvo até clicar em *Salvar*.
 - **O ritmo atual vira a grade**: na primeira vez que você troca para *Em horários marcados*, o painel converte o intervalo e a janela em horários. O horário final não entra: "a cada 60 min, das 8h às 22h" vira 14 horários, das 08:00 às 21:00. Se não couber (mais de 48 horários ou menos de 10 min entre eles), a lista começa vazia. Voltar para *A cada X minutos* restaura o ritmo anterior, porque os campos ficam guardados.
-- **A janela não vale**: em horários marcados, o "Funciona das/até" não vale. Os valores ficam guardados.
+- **A janela não vale**: em horários marcados, o "Funciona das/até" não vale. Os valores ficam guardados. O **horário de silêncio** de *Ajustes* vale: um horário marcado que cai nele é pulado, com aviso.
 - **Horário perdido**: o horário sai se atrasou até 30 min (programa desligado, WhatsApp fora, fila ocupada). Passou disso, é pulado, com um aviso no *Histórico*. Se vários venceram, sai só o mais recente. As frases:
   - `Horário 10:00 pulado: o programa estava desligado, o WhatsApp desconectado ou outro envio demorou. Próximo: 12:00.`
   - `3 horários pulados (10:00 a 12:00): o programa estava desligado, o WhatsApp desconectado ou outro envio demorou. Próximo: 13:00.`
@@ -353,12 +355,37 @@ Em *Disparos → Grupo vivo*, rotinas que mandam sozinhas **mensagens** ou **enq
 - **Enviar agora**: manda a rotina já, avança o rodízio e não muda o próximo horário. Para a mesma rotina, só vale um a cada 1 min.
 - **Histórico**: os envios aparecem como `Grupo vivo: nome da rotina`, em *Tudo* (não há tipo próprio). Excluir uma rotina não apaga o que ela já enviou. O Operador pode criar e mudar rotinas, como no Disparo automático.
 - **Fila e pausas**: tudo sai pela mesma fila, com as pausas de *Ajustes*.
+- **Silêncio**: uma rotina cujo horário cai no horário de silêncio de *Ajustes* é **pulada**, com aviso; o *Enviar agora* no silêncio é recusado na hora, com o motivo, sem gravar nada nem andar o rodízio. As mensagens contam no limite por hora. Veja [Proteção do número](#proteção-do-número-anti-banimento).
 
 ### Aviso de volume
 
-O painel soma as mensagens por dia dos disparos e das rotinas ligados e, com mais de 400 mensagens por dia, mostra um aviso no formulário. No *Disparo automático*, quando há outros disparos ou rotinas ligados, o aviso diz "Somando os outros disparos e rotinas ligados, este número…"; quando só o disparo aberto entra na conta, diz "Este número…". É só um aviso: o programa nunca bloqueia. O WhatsApp não publica um limite, então o 400 é uma estimativa prudente.
+O painel soma as mensagens por dia dos disparos e das rotinas ligados e, com mais de 400 mensagens por dia, mostra um aviso no formulário. No *Disparo automático*, quando há outros disparos ou rotinas ligados, o aviso diz "Somando os outros disparos e rotinas ligados, este número…"; quando só o disparo aberto entra na conta, diz "Este número…". É só um aviso: o programa nunca bloqueia por causa dele. O WhatsApp não publica um limite, então o 400 é uma estimativa prudente. O que segura o número de verdade é o limite por hora de *Ajustes → Proteção do número* (veja a seção a seguir).
 
 Honestamente: a grade e o Grupo vivo foram testados com o WhatsApp simulado (`test/grade.test.js`, `test/rotinas.test.js`, `test/grade-painel.test.js`, `test/grupovivo-painel.test.js`); não foi testado contra o WhatsApp real, que exige a sua conta. Confira com uma rotina de teste num grupo seu antes de ligar as de verdade.
+
+## Proteção do número (anti-banimento)
+
+A conexão com o WhatsApp é não oficial: o WhatsApp pode restringir um número que manda muito, rápido demais ou de madrugada. O cartão **Ajustes → Proteção do número** segura o programa antes disso, para **toda** mensagem que o número envia (disparos automáticos, Disparo manual, Disparar mensagem, Grupo vivo, espelhamento, remetente, Catálogo, avisos e *Enviar teste*). Os valores já vêm num padrão seguro; só o **Dono** muda (o Operador vê os valores, com os campos desabilitados) e cada mudança vira um aviso no *Histórico*, com "(por nome)".
+
+| Controle | Padrão | Faixa |
+|---|---|---|
+| Máximo de mensagens por hora | 40 | de 1 a 200 |
+| Horário de silêncio | ligado, das 23:00 às 07:00 (hora do computador) | dois horários diferentes; pode virar a noite |
+| Pausa entre um grupo e outro | 6 s | de 2 a 60 s |
+| Pausa entre uma oferta e a próxima | 30 s | de 5 a 600 s |
+
+- **Limite por hora**: janela deslizante de 60 minutos ("Na última hora: 12 de 40", também em *Números de WhatsApp*). **Mensagem** é um envio a **um** grupo: uma oferta para 5 grupos são 5 mensagens. Toda mensagem conta, mas só o que vai a **grupo** espera; o privado (avisos, *Enviar teste* e a resposta ao remetente) nunca fica preso. Com o limite cheio, nada sai duas vezes e nada se perde sem aviso: o disparo por intervalo volta a rodar quando houver vaga (cada grupo é uma vaga: a oferta que não cabe inteira vai aos grupos que couberam e a execução para ali); o envio da fila volta a pendente e retoma só os grupos que faltam (um grupo cujo envio deu falha não é tentado de novo na mesma vez); o que espera mais de 2 horas atrás do limite é descartado com o aviso `Não enviado: o limite de 40 mensagens por hora ficou cheio por mais de 2 h.` (aviso, não erro); um horário marcado espera dentro dos 30 min de tolerância e depois é pulado; o *Enviar agora* de um disparo automático não sai, o painel mostra o motivo e o *Histórico* ganha um aviso. O *Histórico* ganha **uma** linha de aviso por vez que o limite enche ("Limite de 40 mensagens por hora atingido: o que falta sai a partir das 15:20."), sempre aviso, nunca erro. Não existe "Enviar mesmo assim" para o limite.
+- **Horário de silêncio**: soma com o "Funciona das/até" de cada disparo (sai só o que os dois permitem). O que cai nele:
+  - **disparo a cada X minutos**: adiado para o fim do silêncio;
+  - **com hora marcada** (horários marcados, agendado, repetido e Grupo vivo): **pulado**, com aviso, e não sai quando o silêncio acabar (`Horário 10:00 pulado: horário de silêncio.`), mesmo que só seja visto depois dele (programa desligado de madrugada); uma repetição segue para a próxima ocorrência;
+  - ***Enviar agora* do Grupo vivo**: recusado na hora (`Horário de silêncio até 07:00: o Enviar agora do Grupo vivo não sai agora.`), sem gravar nada nem andar o rodízio;
+  - **"agora"** (Disparo manual, Disparar mensagem, espelhamento, remetente e Catálogo): espera o fim do silêncio, e o tempo em silêncio não conta para as 2 horas de atraso máximo;
+  - ***Enviar agora* de um disparo automático**: não sai; o painel e o *Histórico* dizem `Enviar agora não saiu: horário de silêncio até 07:00.`.
+- **Enviar mesmo assim**: só no envio **"agora"** do *Disparo manual* e do *Disparar mensagem* que cairia no silêncio (aviso com "Enviar mesmo assim" e "Cancelar"). Ele ignora o silêncio, mas nunca o limite por hora. Agendado e repetido dentro do silêncio mostram só o aviso de que serão pulados, e o servidor recusa o pedido (erro 400).
+- **Pausas**: variam ±30% ao acaso em torno do valor de Ajustes (6 s vira de 4 a 8 s) e agora valem entre **quaisquer duas mensagens** do número, de qualquer origem. O cartão mostra a faixa ("Na prática: de 4 a 8 segundos…"). Um valor antigo gravado fora da faixa vale como o mínimo ou o máximo. O cartão antigo "Pausas entre mensagens" virou parte deste.
+- **Grupos**: o selo **Falta 2º admin** aparece em todo grupo com um só administrador (contado na sincronização, a cada 10 minutos e no botão *Atualizar lista de grupos*; o programa guarda só quantos admins há, nunca quem são). Para resolver, abra o grupo no WhatsApp e toque em *Tornar admin* para um membro de confiança.
+- **Fora do programa (com você)**: um 2º admin em cada grupo e combinar quantas ofertas por dia cada grupo recebe (o programa só avisa acima de 400 mensagens por dia). Tenha um segundo chip de reserva, com WhatsApp Business instalado, e deixe esse número também dentro dos seus grupos. Se este número for restringido, você o conecta em *Números de WhatsApp* e continua enviando. Trocar para o chip reserva herda a contagem da última hora.
+- **Desligar**: ponha o limite em 200 e desligue "Não enviar de madrugada".
 
 ## Espelhamento da Amazon
 
@@ -756,6 +783,6 @@ Conferido uma vez contra a Central de Afiliados real (02/11/2026): a lista de pr
 
 ## Cuidados
 
-- A conexão com o WhatsApp é **não oficial**. Há risco de o número ser restringido. Mantenha as pausas em *Ajustes* (padrão de 6 s entre grupos e 30 s entre ofertas, com mínimo de 2 s e de 5 s) e evite volume alto.
+- A conexão com o WhatsApp é **não oficial**. Há risco de o número ser restringido. Mantenha a proteção do número em *Ajustes* (limite de 40 mensagens por hora, horário de silêncio das 23:00 às 07:00 e pausas, com padrão de 6 s entre grupos e 30 s entre ofertas e mínimo de 2 s e de 5 s: veja [Proteção do número](#proteção-do-número-anti-banimento)) e evite volume alto.
 - A pasta `data` guarda a sessão do seu WhatsApp, números de telefone dos avisos, e-mails da equipe, fotos enviadas e segredos das conexões. Não compartilhe nem envie sem criptografia (a cópia do backup no Google Drive só sobe criptografada).
 - O programa só ouve em `127.0.0.1`. Num servidor, quem expõe é o Nginx com HTTPS, e o painel exige login.

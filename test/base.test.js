@@ -112,9 +112,11 @@ test('esquema: banco da versão anterior reabre com os dados intactos e ganha ta
     const db = openDb(dir);
     // A semente "Amazon" entrou em 02/11/2026 (etapa 1 do plano espelhamento-amazon): fora a marca e o template dela, nada muda.
     const semSemente = { settings: " WHERE key <> 'tpl_amazon_seed'", templates: " WHERE name <> 'Amazon'" };
-    for (const t of ['settings', 'tags', 'templates', 'groups']) {
+    for (const t of ['settings', 'tags', 'templates']) {
       assert.deepEqual(linhas(db, `SELECT * FROM ${t}${semSemente[t] || ''} ORDER BY rowid`), antes[t], `${t} intacta (abertura ${abertura})`);
     }
+    // A coluna groups.admins entrou em 10/11/2026 (plano anti-banimento, etapa 1): nula = contagem desconhecida.
+    assert.deepEqual(linhas(db, 'SELECT * FROM groups ORDER BY rowid'), antes.groups.map((g) => ({ ...g, admins: null })), `groups intacta, com admins nulo (abertura ${abertura})`);
     // A coluna rules.grade entrou em 05/11/2026 (plano grade-de-disparos, etapa 1): nula = ritmo por intervalo, como antes.
     assert.deepEqual(linhas(db, 'SELECT * FROM rules ORDER BY rowid'), antes.rules.map((r) => ({ ...r, grade: null })), `rules intacta, com grade nula (abertura ${abertura})`);
     assert.deepEqual(linhas(db, 'SELECT * FROM sessions ORDER BY rowid'), antes.sessions.map((s) => ({ ...s, user_id: null })), `sessão aberta continua, com user_id nulo (abertura ${abertura})`);
@@ -997,6 +999,129 @@ test('grade etapa 1 (CA11): rotinas tem padrões, tipo e ordem só dos valores d
   }
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM rotinas').get().n, 3);
   db.close();
+});
+
+// Anti-banimento (plano anti-banimento, etapa 1): a migração só acrescenta a tabela wa_saidas (só a hora de cada mensagem
+// enviada, para o teto por hora do CA1) com o índice por ts, e groups.admins (só a contagem; NULL = desconhecido).
+const COLUNAS_WA_SAIDAS = [{ name: 'ts', type: 'INTEGER', notnull: 1, dflt_value: null, pk: 0 }];
+const colunaAdmins = { name: 'admins', type: 'INTEGER', notnull: 0, dflt_value: null, pk: 0 };
+const semCid = (db, tabela) => db.prepare(`PRAGMA table_info(${tabela})`).all().map(({ name, type, notnull, dflt_value, pk }) => ({ name, type, notnull, dflt_value, pk }));
+
+function conferirProtecao(db, quando) {
+  assert.ok(existe(db, 'table', 'wa_saidas'), `tabela wa_saidas (${quando})`);
+  assert.deepEqual(semCid(db, 'wa_saidas'), COLUNAS_WA_SAIDAS, `wa_saidas só tem ts, inteiro e obrigatório: sem jid nem número (${quando})`);
+  assert.equal(db.prepare("SELECT tbl_name FROM sqlite_master WHERE type = 'index' AND name = 'idx_wa_saidas_ts'").get()?.tbl_name, 'wa_saidas', `índice por ts (${quando})`);
+  assert.deepEqual(db.prepare('PRAGMA index_info(idx_wa_saidas_ts)').all().map((c) => c.name), ['ts'], `colunas do índice (${quando})`);
+  assert.equal(db.prepare('PRAGMA index_list(wa_saidas)').all().find((i) => i.name === 'idx_wa_saidas_ts')?.unique, 0,
+    `o índice não é único: duas mensagens no mesmo milissegundo contam as duas (${quando})`);
+  assert.deepEqual(objetosDe(db).filter((o) => o.tbl_name === 'wa_saidas').map((o) => o.name).sort(), ['idx_wa_saidas_ts', 'wa_saidas'],
+    `só a tabela e o índice, sem duplicar (${quando})`);
+  const admins = semCid(db, 'groups').filter((c) => c.name === 'admins');
+  assert.deepEqual(admins, [colunaAdmins], `groups.admins existe uma vez, inteiro, aceita nulo e não tem padrão (${quando})`);
+  assert.equal(semCid(db, 'groups').at(-1).name, 'admins', `groups.admins é a última coluna (${quando})`);
+}
+
+test('anti-banimento etapa 1 (CA1): banco novo tem wa_saidas com o índice e groups.admins; reabrir não cria nem altera nada', () => {
+  const dir = tmp();
+  const db1 = openDb(dir);
+  conferirProtecao(db1, 'primeira abertura');
+  assert.equal(db1.prepare('SELECT COUNT(*) AS n FROM wa_saidas').get().n, 0, 'wa_saidas nasce vazia');
+  db1.prepare('INSERT INTO groups (jid, name, size, updated_at) VALUES (?,?,?,?)').run('g1@g.us', 'Grupo 1', 10, 1);
+  assert.equal(db1.prepare("SELECT admins FROM groups WHERE jid = 'g1@g.us'").get().admins, null, 'grupo gravado sem contagem fica com admins nulo');
+  db1.prepare("UPDATE groups SET admins = 1 WHERE jid = 'g1@g.us'").run();
+  const ins = db1.prepare('INSERT INTO wa_saidas (ts) VALUES (?)');
+  ins.run(1000); ins.run(1000); ins.run(2000);
+  assert.throws(() => ins.run(null), /NOT NULL/, 'toda saída tem hora');
+  const esquema = objetosDe(db1);
+  const dados = { groups: linhas(db1, 'SELECT * FROM groups'), wa_saidas: linhas(db1, 'SELECT * FROM wa_saidas ORDER BY rowid') };
+  assert.deepEqual(dados.wa_saidas, [{ ts: 1000 }, { ts: 1000 }, { ts: 2000 }], 'duas saídas no mesmo instante ficam as duas');
+  db1.close();
+
+  const db2 = openDb(dir);
+  conferirProtecao(db2, 'segunda abertura');
+  assert.deepEqual(objetosDe(db2), esquema, 'reabrir não cria nem altera nada');
+  assert.deepEqual(linhas(db2, 'SELECT * FROM groups'), dados.groups, 'groups intacta ao reabrir, com admins = 1');
+  assert.deepEqual(linhas(db2, 'SELECT * FROM wa_saidas ORDER BY rowid'), dados.wa_saidas, 'wa_saidas intacta ao reabrir');
+  db2.close();
+});
+
+test('anti-banimento etapa 1 (CA1): banco da versão anterior abre sem perder nada; groups ganha admins nulo no fim e wa_saidas nasce vazia', () => {
+  const dir = tmp();
+  // Banco como o do serviço antes desta etapa: esquema atual sem wa_saidas e sem groups.admins, com dados.
+  const velho = openDb(dir);
+  velho.exec('DROP TABLE IF EXISTS wa_saidas');
+  if (colunas(velho, 'groups').includes('admins')) velho.exec('ALTER TABLE groups DROP COLUMN admins');
+  velho.exec(`
+    INSERT INTO settings (key, value) VALUES ('delay_group_s', '9'), ('delay_offer_s', '12');
+    INSERT INTO groups (jid, name, size, updated_at, invite_code, is_admin, description)
+      VALUES ('g1@g.us', 'Grupo 1', 250, 1, 'abc', 1, 'Ofertas do dia'), ('g2@g.us', 'Grupo 2', 90, 2, NULL, 0, NULL);
+    INSERT INTO rules (id, name, group_jids, next_run_at, created_at) VALUES (3, 'Regra', '["g1@g.us"]', 1730000000000, 1);
+    INSERT INTO log (ts, rule_id, rule_name, level, group_name, offer_title, message) VALUES (1730000000000, 3, 'Regra', 'ok', 'Grupo 1', 'Fone', 'enviado');
+    INSERT INTO envios (id, tipo, payload, group_jids, quando, status, next_run_at, created_at)
+      VALUES (5, 'mensagem', '{"texto":"oi"}', '["g1@g.us"]', 'agora', 'pendente', 1730000000000, 1);
+  `);
+  assert.ok(!existe(velho, 'table', 'wa_saidas') && !existe(velho, 'index', 'idx_wa_saidas_ts'), 'o banco simulado não tem wa_saidas');
+  assert.ok(!colunas(velho, 'groups').includes('admins'), 'o banco simulado não tem groups.admins');
+  const objetosAntigos = objetosDe(velho);
+  const tabelasAntigas = objetosAntigos.filter((o) => o.type === 'table').map((o) => o.name);
+  const colunasGruposAntes = semCid(velho, 'groups');
+  const antes = {};
+  for (const t of tabelasAntigas) antes[t] = linhas(velho, `SELECT * FROM ${t} ORDER BY rowid`);
+  velho.close();
+
+  for (let abertura = 1; abertura <= 2; abertura++) {
+    const db = openDb(dir);
+    conferirProtecao(db, `abertura ${abertura}`);
+    for (const t of tabelasAntigas.filter((t) => t !== 'groups')) {
+      assert.deepEqual(linhas(db, `SELECT * FROM ${t} ORDER BY rowid`), antes[t], `${t} intacta (abertura ${abertura})`);
+    }
+    assert.deepEqual(linhas(db, 'SELECT * FROM groups ORDER BY rowid'), antes.groups.map((g) => ({ ...g, admins: null })),
+      `grupos intactos, com admins nulo = desconhecido até o próximo sync (abertura ${abertura})`);
+    assert.deepEqual(semCid(db, 'groups'), [...colunasGruposAntes, colunaAdmins], `groups só ganha admins no fim (abertura ${abertura})`);
+    assert.deepEqual(objetosDe(db).filter((o) => o.tbl_name !== 'wa_saidas' && !(o.type === 'table' && o.name === 'groups')),
+      objetosAntigos.filter((o) => !(o.type === 'table' && o.name === 'groups')), `nenhuma outra tabela ou índice muda (abertura ${abertura})`);
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM wa_saidas').get().n, 0, `wa_saidas nasce vazia (abertura ${abertura})`);
+    db.close();
+  }
+});
+
+test('anti-banimento etapa 1 (CA5): jitter varia ±VARIACAO_PAUSA em torno do valor, com o aleatório injetável', (t) => {
+  assert.equal(util.VARIACAO_PAUSA, 0.3, 'variação de ±30%, a mesma que o /state vai expor');
+  // determinístico: as pontas e o meio da faixa
+  assert.equal(util.jitter(10, () => 0), 7000, '0 dá o mínimo (−30%)');
+  assert.equal(util.jitter(10, () => 0.5), 10000, '0,5 dá o valor de Ajustes');
+  assert.equal(util.jitter(10, () => 1), 13000, '1 dá o máximo (+30%)');
+  assert.equal(util.jitter(6, () => 0), 4200);
+  assert.equal(util.jitter(6, () => 0.25), 5100);
+  assert.deepEqual([util.jitter(30, () => 0), util.jitter(30, () => 1)], [21000, 39000], '30 s dá de 21 a 39 s, como na spec');
+  assert.equal(util.jitter(0, () => 0.9), 0, 'pausa 0 continua 0');
+  // aleatório fora da faixa ou que não é número não faz a pausa sumir nem crescer além de ±30%
+  assert.equal(util.jitter(10, () => -5), 7000, 'abaixo de 0 vale 0');
+  assert.equal(util.jitter(10, () => 7), 13000, 'acima de 1 vale 1');
+  for (const ruim of [NaN, undefined, null, 'x', Infinity, -Infinity]) {
+    const j = util.jitter(10, () => ruim);
+    assert.ok(j >= 7000 && j <= 13000, `aleatório ${String(ruim)} dá ${j}, dentro da faixa`);
+  }
+  // sem o segundo argumento, continua usando Math.random (e o agendador reexporta a mesma função)
+  const sorteio = t.mock.method(Math, 'random', () => 0);
+  assert.equal(jitter(10), 7000, 'Math.random = 0 dá o mínimo');
+  sorteio.mock.mockImplementation(() => 0.75);
+  assert.equal(util.jitter(10), 11500);
+  assert.equal(sorteio.mock.callCount(), 2, 'uma sorteada por pausa');
+});
+
+test('anti-banimento etapa 1: inWindow e alignToWindow moram em src/util.js e o agendador só reexporta (padrão R14)', async () => {
+  const sched = await import('../src/scheduler.js');
+  assert.deepEqual([sched.inWindow, sched.alignToWindow], [util.inWindow, util.alignToWindow], 'a mesma função, não uma cópia');
+  assert.equal(typeof util.toMin, 'function');
+  assert.deepEqual(['00:00', '07:00', '23:00', '23:59', '7:5'].map(util.toMin), [0, 420, 1380, 1439, 425]);
+  const at = (h, m = 0) => new Date(2026, 10, 2, h, m).getTime();
+  // o silêncio padrão (23:00 às 07:00) vira a noite: o mesmo cálculo do "Funciona das"
+  assert.deepEqual([at(22, 59), at(23), at(3), at(6, 59), at(7)].map((ts) => util.inWindow(ts, '23:00', '07:00')), [false, true, true, true, false]);
+  assert.equal(util.alignToWindow(at(12), '23:00', '07:00'), at(23), 'fora do período, o próximo início é no mesmo dia');
+  assert.equal(util.alignToWindow(at(7, 30), '07:00', '23:00'), at(7, 30), 'dentro do período, fica onde está');
+  assert.equal(util.alignToWindow(at(23, 30), '07:00', '23:00'), new Date(2026, 10, 3, 7, 0).getTime(), 'depois do fim, vai para o início do dia seguinte');
+  assert.ok(util.inWindow(at(4), '10:00', '10:00'), 'início igual ao fim é o dia todo');
 });
 
 // R1 (docs-do-sistema, rodada 1): a simulação roda o agendador de verdade (encerra agendados vencidos, marca o resumo

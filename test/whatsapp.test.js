@@ -655,6 +655,63 @@ test('meuJid: o número conectado sem o :device; null desconectado e no modo sim
   f3(); db.close();
 });
 
+test('CA8: syncGroups grava em groups.admins só quantos admins cada grupo tem; sem lista de participantes fica null', async (t) => {
+  const dir = tmp(); const db = openDb(dir);
+  const wa = createWhatsApp({ db, dir });
+  const EU = '5535911112222';
+  // números de participantes que não podem aparecer em lugar nenhum do banco nem no console
+  const OUTROS = ['5531977770001', '5531977770002', '5531977770003', '5531977770004', '5531977770005', '5531977770006'];
+  const pn = (n) => `${n}@s.whatsapp.net`;
+  const LID = '99887766554401@lid';
+  let rodada = 1; let chamadas = 0;
+  const grupos = () => ({
+    // nós como superadmin e mais ninguém: 1 (na 2ª rodada um membro vira admin: 2)
+    'g1@g.us': { id: 'g1@g.us', subject: 'Um admin', participants: [
+      { id: pn(EU), admin: 'superadmin' }, { id: pn(OUTROS[0]), admin: rodada === 1 ? null : 'admin' }, { id: pn(OUTROS[1]), admin: null }] },
+    // admin + superadmin (o formato do Baileys 7: admin = attrs.type || null): 2; na 2ª rodada a lista não vem: null
+    'g2@g.us': rodada === 1
+      ? { id: 'g2@g.us', subject: 'Dois admins', participants: [
+        { id: LID, phoneNumber: pn(OUTROS[2]), admin: 'admin' }, { id: pn(OUTROS[3]), admin: 'superadmin' }, { id: pn(EU), admin: null }] }
+      : { id: 'g2@g.us', subject: 'Dois admins', size: 3 },
+    // formato antigo (isAdmin/isSuperAdmin) também conta
+    'g3@g.us': { id: 'g3@g.us', subject: 'Flags', participants: [
+      { id: pn(OUTROS[4]), isAdmin: true }, { id: pn(OUTROS[5]), isSuperAdmin: true }, { id: pn(EU) }] },
+    // valor de tipo desconhecido não é admin
+    'g4@g.us': { id: 'g4@g.us', subject: 'Estranho', participants: [
+      { id: pn(OUTROS[0]), admin: 'member' }, { id: pn(OUTROS[1]), admin: '' }, { id: pn(EU), admin: 'admin' }] },
+    // sem lista ou lista vazia: desconhecido (o painel não mostra selo)
+    'g5@g.us': { id: 'g5@g.us', subject: 'Sem lista', size: 40 },
+    'g6@g.us': { id: 'g6@g.us', subject: 'Lista vazia', participants: [] },
+  });
+  // o socket só tem o que o sync já usava: qualquer chamada nova ao WhatsApp lançaria TypeError
+  wa._usarSocket({ user: { id: `${EU}:7@s.whatsapp.net` }, groupFetchAllParticipating: async () => { chamadas++; return grupos(); } });
+  const consoleUsado = [];
+  for (const m of ['log', 'info', 'warn', 'error', 'debug']) t.mock.method(console, m, (...a) => consoleUsado.push(a));
+
+  const admins = () => Object.fromEntries(db.prepare('SELECT jid, admins, is_admin FROM groups ORDER BY jid').all().map((r) => [r.jid, [r.admins, r.is_admin]]));
+  await wa.syncGroups();
+  assert.equal(chamadas, 1, 'uma leitura só, a que o sync já fazia');
+  assert.deepEqual(admins(), {
+    'g1@g.us': [1, 1], 'g2@g.us': [2, 0], 'g3@g.us': [2, 0], 'g4@g.us': [1, 1], 'g5@g.us': [null, null], 'g6@g.us': [null, null],
+  });
+
+  rodada = 2;
+  await wa.syncGroups();
+  assert.equal(chamadas, 2);
+  const depois = admins();
+  assert.deepEqual(depois['g1@g.us'], [2, 1], 'promoção aparece no sync seguinte');
+  assert.deepEqual(depois['g2@g.us'], [null, null], 'sem a lista, a contagem antiga não fica valendo');
+
+  // LGPD: nenhum número nem LID de participante foi gravado em tabela alguma nem escrito no console
+  const tabelas = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((r) => r.name);
+  const banco = JSON.stringify(tabelas.map((n) => db.prepare(`SELECT * FROM "${n}"`).all()));
+  for (const n of [...OUTROS, '99887766554401']) assert.ok(!banco.includes(n), `participante ${n} gravado no banco`);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM group_events').get().n, 0);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM group_reads').get().n, 0);
+  assert.deepEqual(consoleUsado, [], 'o sync não escreve no console');
+  db.close();
+});
+
 test('R9 (decisão documentada): link sem esquema no texto não impede o link da prévia; os dois saem (a etapa 11 deduplica por ASIN)', () => {
   const canonico = 'https://www.amazon.com.br/dp/B0ABCDEFGH';
   assert.equal(textoDaMensagem({ extendedTextMessage: { text: 'Fone amzn.to/x', canonicalUrl: canonico } }), `Fone amzn.to/x\n${canonico}`);
