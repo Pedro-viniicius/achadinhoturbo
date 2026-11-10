@@ -16,26 +16,19 @@ const ENFEITES = [
 const CORTAR_A_PARTIR = /\b(compat[ií]ve[li]s?\s+(com|c\/)|compat[ií]vel|p\/\s*(iphone|samsung|xiaomi|motorola|android|celular)|para\s+(iphone|samsung|xiaomi|motorola|android)|ideal\s+para|serve\s+(em|para)|indicado\s+para|modelo[s]?:?\s)/i;
 const CONECTORES = new Set(['com', 'c/', 'de', 'da', 'do', 'das', 'dos', 'e', 'para', 'p/', 'em', 'ou', 'sem', 'por', 'no', 'na', '+', '&', '-', '–', ',']);
 
-export function abreviarTitulo(titulo, max = TITULO_MAX_PADRAO) {
-  let t = String(titulo || '').replace(/[*_~]/g, '').replace(/\s+/g, ' ').trim();
-  if (!t) return '';
-  if (!(max > 0)) return t; // 0 = não abreviar
-
-  // 1) segmento principal: antes de " - ", " | ", " / " (quando o que fica ainda descreve o produto)
-  const seg = t.split(/\s+[-–|/]\s+/)[0];
-  if (seg.split(' ').length >= 3) t = seg;
-
-  // 2) corta a partir da lista de compatibilidade
+// Corta a lista de compatibilidade e remove os enfeites. No título inteiro (ou no 1º trecho) o corte só vale depois da 12ª
+// letra; num trecho que vem depois de um separador (`cortarNoInicio`), "Compatível com…" logo no começo apaga o trecho todo.
+function sanear(t, { cortarNoInicio = false } = {}) {
   const m = CORTAR_A_PARTIR.exec(t);
-  if (m && m.index > 12) t = t.slice(0, m.index);
-
-  // 3) remove enfeites (dos mais longos para os mais curtos, só palavra inteira)
+  if (m && (cortarNoInicio ? true : m.index > 12)) t = t.slice(0, m.index);
   for (const e of [...ENFEITES].sort((a, b) => b.length - a.length)) {
     t = t.replace(new RegExp(`(^|\\s)${e.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}(?=\\s|$)`, 'gi'), '$1');
   }
-  t = t.replace(/\s+/g, ' ').replace(/\s+([,.;:])/g, '$1').trim();
+  return t.replace(/\s+/g, ' ').replace(/\s+([,.;:])/g, '$1').trim();
+}
 
-  // 4) limite de tamanho, sem partir palavra; prefere cortar antes de um conector
+// Limite de tamanho, sem partir palavra; prefere cortar antes de um conector; não termina em conector nem em pontuação solta.
+function limitar(t, max) {
   if (t.length > max) {
     const palavras = t.split(' ');
     const cortes = []; let acc = 0;
@@ -50,13 +43,46 @@ export function abreviarTitulo(titulo, max = TITULO_MAX_PADRAO) {
     if (!achou && n > 1 && palavras[n - 1].length <= 3 && !/\d/.test(palavras[n - 1]) && !/\d/.test(palavras[n - 2])) n--; // "500 ml" fica
     t = palavras.slice(0, n).join(' ');
   }
-
-  // 5) não termina em conector nem em pontuação solta
-  let ps = t.split(' ');
+  const ps = t.split(' ');
   while (ps.length > 1 && CONECTORES.has(ps.at(-1).toLowerCase())) ps.pop();
-  t = ps.join(' ').replace(/[,.;:\-–]+$/, '').trim();
+  return ps.join(' ').replace(/[,.;:\-–]+$/, '').trim();
+}
 
-  // 6) palavras GRITADAS longas viram Capitalizadas (siglas curtas como USB, LED, TWS ficam)
+export function abreviarTitulo(titulo, max = TITULO_MAX_PADRAO) {
+  let t = String(titulo || '').replace(/[*_~]/g, '').replace(/\s+/g, ' ').trim();
+  if (!t) return '';
+  if (!(max > 0)) return t; // 0 = não abreviar
+
+  // 1) separadores " - ", " – ", " | ", " / ". O 1º trecho com 5+ palavras já descreve o produto: fica só ele. Com 1 ou 2
+  //    palavras o título fica inteiro ("Fone A | Mouse B"). Com 3 ou 4 (a marca ou a linha: "Lola From Rio", "Pipicat 12 kg")
+  //    entram também os trechos seguintes que descrevem o produto (3+ palavras depois de limpos), porque o tipo do produto
+  //    vem neles: "Lola From Rio - Morte Subita - Condicionador hidratante…". Trecho curto (cor, voltagem, selo) e trecho só
+  //    de enfeite ou de compatibilidade saem; o separador de cada trecho é o original.
+  const partes = t.split(/\s+([-–|/])\s+/); // [trecho, separador, trecho, separador, …]
+  const nPrincipal = partes[0].split(' ').length;
+  if (nPrincipal >= 5) {
+    t = limitar(sanear(partes[0]), max);
+  } else if (nPrincipal >= 3 && partes.length > 1) {
+    const inicio = limitar(sanear(partes[0]), Infinity); // limpa o fim de cada trecho (vírgula, conector) antes de emendar
+    const descricoes = []; // trechos depois do 1º que descrevem o produto
+    for (let i = 2; i < partes.length; i += 2) {
+      const texto = limitar(sanear(partes[i], { cortarNoInicio: true }), Infinity);
+      if (texto.split(' ').length >= 3) descricoes.push({ sep: partes[i - 1], texto });
+    }
+    const junto = descricoes.reduce((acc, d) => (acc ? `${acc} ${d.sep} ${d.texto}` : d.texto), inicio);
+    t = limitar(junto, max);
+    // Um trecho emendado que sobra com menos de 2 palavras depois do limite não ajuda: sai junto com o separador.
+    // ("|" e "/" não são conectores: o corte pode deixar o separador pendurado no fim.)
+    let cortado = t.replace(/\s+[-–|/]$/, '').split(/\s+([-–|/])\s+/);
+    while (cortado.length > 1 && cortado.at(-1).split(' ').length < 2) cortado = cortado.slice(0, -2);
+    t = cortado.join(' ');
+    // Marca + tipo não cabem no máximo: o tipo do produto vale mais do que a marca.
+    if (descricoes.length && t.length <= inicio.length) t = limitar(descricoes[0].texto, max);
+  } else {
+    t = limitar(sanear(t), max);
+  }
+
+  // 2) palavras GRITADAS longas viram Capitalizadas (siglas curtas como USB, LED, TWS ficam)
   t = t.replace(/\b([A-ZÀ-Ü][A-ZÀ-Ü-]{5,})\b/g, (w) => w[0] + w.slice(1).toLowerCase());
   return t;
 }

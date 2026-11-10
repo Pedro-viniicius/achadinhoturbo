@@ -333,6 +333,183 @@ test('título abreviado: corta compatibilidade e enfeites, respeita o limite sem
   assert.equal(t.split('\n')[0], '*Fones De Ouvido Usb-c Tipo C*'); assert.equal(t.split('\n')[1], longo);
 });
 
+// Regressão de 10/11/2026: o condicionador da Lola saiu só como "Lola From Rio" (3 palavras antes do " - "), o tipo do
+// produto ficava nos trechos seguintes, e o grupo achou que era o shampoo reenviado.
+const SHAMPOO_LOLA = 'Lola Cosmetics - Morte Subita - Shampoo hidratante para cabelos secos e danificados que foi quimicamente tratado vegano, livre de crueldade, sem parabenos, sem sulfatos, 250 ml';
+const CONDICIONADOR_LOLA = 'Lola From Rio - Morte Subita - Condicionador hidratante para todos os tipos de cabelos secos e danificados, vegano, sem crueldade, sem parabenos, sem sulfatos, 250 g';
+const CONECTORES_FIM = /(^|\s)(com|c\/|de|da|do|das|dos|e|para|p\/|em|ou|sem|por|no|na|\+|&|-|–|,)$/i;
+
+// Vale para qualquer resultado: cabe no limite, não parte palavra, não termina em conector nem em pontuação solta.
+function assertTituloValido(original, r, max) {
+  assert.ok(r.length > 0, `vazio para "${original}"`);
+  assert.ok(r.length <= max, `passou de ${max} (${r.length}): "${r}"`);
+  assert.ok(!CONECTORES_FIM.test(r), `termina em conector: "${r}"`);
+  assert.ok(!/[,.;:\-–|/]$/.test(r), `termina em pontuação solta: "${r}"`);
+  // a vírgula que fechava a palavra no original ("Adultos,") sai no corte de propósito: compara sem a pontuação do fim
+  const semPontoFinal = (p) => p.replace(/[,.;:]+$/, '');
+  const palavrasOriginais = new Set(original.replace(/[*_~]/g, '').toLowerCase().split(/\s+/).map(semPontoFinal));
+  for (const p of r.toLowerCase().split(/\s+/)) assert.ok(palavrasOriginais.has(semPontoFinal(p)), `palavra partida ou inventada "${p}" em "${r}"`);
+}
+
+test('título abreviado: marca com 3+ palavras antes do " - " não engole o tipo do produto que vem depois (condicionador da Lola)', () => {
+  const r = abreviarTitulo(CONDICIONADOR_LOLA); // CA1
+  assert.match(r, /Condicionador/, `perdeu o tipo do produto: "${r}"`);
+  assertTituloValido(CONDICIONADOR_LOLA, r, 60);
+});
+
+test('título abreviado: shampoo e condicionador da mesma linha geram títulos diferentes, cada um com o tipo', () => {
+  const s = abreviarTitulo(SHAMPOO_LOLA); const c = abreviarTitulo(CONDICIONADOR_LOLA); // CA2
+  assert.match(s, /Shampoo/); assert.match(c, /Condicionador/);
+  assert.notEqual(s, c, 'a mensagem das duas ofertas ficou igual para quem lê');
+  assertTituloValido(SHAMPOO_LOLA, s, 60); assertTituloValido(CONDICIONADOR_LOLA, c, 60);
+});
+
+test('título abreviado: trecho depois do separador que descreve o produto (3+ palavras) não é descartado', () => {
+  const casos = [ // CA3
+    ['Premier Pet Golden Special - Ração para Cães Adultos, Sabor Frango e Carne, 15kg', /Ração/],
+    ['Pipicat 12 kg - Areia Higiênica Multicat para Gatos', /Areia Higiênica/],
+    ['Dias frios (Fall-Winter) – Livro de colorir oficial Bobbie Goods', /Livro de colorir/],
+  ];
+  for (const [titulo, esperado] of casos) {
+    const r = abreviarTitulo(titulo);
+    assert.match(r, esperado, `perdeu o tipo do produto: "${r}" <- "${titulo}"`);
+    assertTituloValido(titulo, r, 60);
+  }
+});
+
+test('título abreviado: marca de 3 palavras com " | " e " / " também não esconde o produto', () => {
+  for (const sep of ['|', '/', '-', '–']) {
+    const titulo = `Marca Famosa Brasil ${sep} Tênis Corrida Masculino Leve`;
+    const r = abreviarTitulo(titulo);
+    assert.match(r, /Tênis Corrida/, `separador "${sep}": "${r}"`);
+    assertTituloValido(titulo, r, 60);
+  }
+});
+
+test('título abreviado: marca que termina em palavra de enfeite ("Nova") não deixa o produto de fora', () => {
+  const titulo = 'Marca Linha Nova - Condicionador Hidratante Cabelos Secos';
+  const r = abreviarTitulo(titulo);
+  assert.match(r, /Condicionador/, `"${r}"`);
+  assertTituloValido(titulo, r, 60);
+});
+
+test('título abreviado: sem regressão nos casos em que o trecho seguinte é só detalhe (cor, medida, selo)', () => {
+  assert.equal(abreviarTitulo('Smartwatch W59 Pro - Preto - Lançamento 2026 - Original'), 'Smartwatch W59 Pro'); // CA4
+  assert.equal(abreviarTitulo('Sanduicheira Elétrica Cadence Click - 127V'), 'Sanduicheira Elétrica Cadence Click');
+  assert.equal(abreviarTitulo('Fone A | Mouse B'), 'Fone A | Mouse B');
+  assert.equal(abreviarTitulo('Cafeteira Elétrica Philco Preta - 110V - Original'), 'Cafeteira Elétrica Philco Preta');
+  assert.equal(abreviarTitulo('Tênis Esportivo Masculino Corrida – Preto'), 'Tênis Esportivo Masculino Corrida');
+  assert.equal(abreviarTitulo('Tênis Esportivo Masculino Corrida / Azul'), 'Tênis Esportivo Masculino Corrida');
+  assert.equal(abreviarTitulo('Garrafa Térmica Inox 1L | Rosa'), 'Garrafa Térmica Inox 1L');
+});
+
+test('título abreviado: com máximos menores (30 e 40) e com 0, o limite vale sempre, sem partir palavra nem terminar em conector', () => {
+  const titulos = [SHAMPOO_LOLA, CONDICIONADOR_LOLA,
+    'Premier Pet Golden Special - Ração para Cães Adultos, Sabor Frango e Carne, 15kg',
+    'Pipicat 12 kg - Areia Higiênica Multicat para Gatos',
+    'Dias frios (Fall-Winter) – Livro de colorir oficial Bobbie Goods',
+    'Marca Famosa Brasil | Tênis Corrida Masculino Leve',
+    'Smartwatch W59 Pro - Preto - Lançamento 2026 - Original'];
+  for (const titulo of titulos) {
+    for (const max of [30, 40, 60]) assertTituloValido(titulo, abreviarTitulo(titulo, max), max); // CA5
+    assert.equal(abreviarTitulo(titulo, 0), titulo, '0 = não abrevia');
+  }
+});
+
+test('título abreviado: varre limites de 20 a 80 caracteres nos títulos com separador e nenhum passa do máximo nem termina em conector', () => {
+  const titulos = [SHAMPOO_LOLA, CONDICIONADOR_LOLA,
+    'Premier Pet Golden Special - Ração para Cães Adultos, Sabor Frango e Carne, 15kg',
+    'Pipicat 12 kg - Areia Higiênica Multicat para Gatos',
+    'Dias frios (Fall-Winter) – Livro de colorir oficial Bobbie Goods',
+    'Marca Famosa Brasil / Tênis de Corrida Masculino com Amortecedor Leve'];
+  for (const titulo of titulos) for (let max = 20; max <= 80; max++) assertTituloValido(titulo, abreviarTitulo(titulo, max), max);
+});
+
+test('título abreviado: quando não cabe tudo, o tipo do produto vale mais do que a marca (máximos pequenos)', () => {
+  assert.equal(abreviarTitulo(CONDICIONADOR_LOLA, 40), 'Lola From Rio - Condicionador hidratante'); // cabe marca e tipo
+  assert.equal(abreviarTitulo(CONDICIONADOR_LOLA, 30), 'Condicionador hidratante'); // marca + tipo não cabem: fica o tipo
+  assert.equal(abreviarTitulo(CONDICIONADOR_LOLA, 20), 'Condicionador');
+});
+
+// Títulos reais do catálogo (rodada 2): o 1º trecho com 5+ palavras já descreve o produto e o resultado é só ele, como sempre foi.
+// Uma versão anterior trocava ou emendava o trecho seguinte ("Com 15 Sachês 85g", "… | Amend", "… Premier").
+test('título abreviado: 1º trecho com 5+ palavras sai sozinho; nenhum trecho seguinte é trocado nem emendado', () => {
+  const casos = [
+    ['Pack Nestlé Purina Friskies Ração Úmida Para Gatos Adultos Frango Ao Molho - Com 15 Sachês 85g', 'Pack Nestlé Purina Friskies Ração Úmida Para Gatos Adultos'],
+    ['Chalesco Tapete Higiênico Premium para Cães 90 x 60 cm – Super Absorção, Controle de Odores e Base Antivazamento | 50 Unidades', 'Chalesco Tapete Higiênico para Cães 90 x 60 cm'],
+    ['Mini Mixer Elétrico Recarregável USB 3 Velocidades – Espumador de Leite Profissional em Aço Inoxidável – Cappuccino', 'Mini Mixer Elétrico Recarregável USB 3 Velocidades'],
+    ['KIT BODY SPLASH MASCULINO BARBARIUS E MIDTOWN 200ML - PRIMACIAL PERFUME FRESCO AMADEIRADO', 'KIT BODY Splash Masculino Barbarius E Midtown 200ML'],
+    ['Do dia para a noite (Day to night) – Livro de colorir oficial Bobbie Goods', 'Do dia para a noite (Day to night)'],
+    ['Máscara Reconstrutora Intensiva com Bio-Amino 300g | Amend', 'Máscara Reconstrutora Intensiva com Bio-Amino 300g'],
+    ['Kit 2 Lâmpadas LED 12W 6500K Branca Fria E27 Bivolt | Baixo', 'Kit 2 Lâmpadas LED 12W 6500K Branca Fria E27 Bivolt'],
+    ['Ração Golden para Gatos Adultos Castrados - 10,1kg Premier', 'Ração Golden para Gatos Adultos Castrados'],
+    ['BODY Splash Masculino Barbarius 200ML - Primacial Perfume', 'BODY Splash Masculino Barbarius 200ML'],
+    ['Cabo USB Samsung Tipo C Carregamento Rápido 1m - Embalagem a granel', 'Cabo USB Samsung Tipo C Carregamento Rápido 1m'],
+  ];
+  for (const [titulo, esperado] of casos) assert.equal(abreviarTitulo(titulo), esperado, titulo);
+});
+
+test('título abreviado: só marca de 3 ou 4 palavras recebe o trecho seguinte, e o plano B do tipo vale só para ela', () => {
+  // 4 palavras: entra o trecho descritivo; com 5 palavras antes do separador o resultado é só o 1º trecho
+  assert.equal(abreviarTitulo('Marca Famosa Brasil Sul | Tênis Corrida Masculino Leve'), 'Marca Famosa Brasil Sul | Tênis Corrida Masculino Leve');
+  assert.equal(abreviarTitulo('Marca Famosa Brasil Sul Nova | Tênis Corrida Masculino Leve'), 'Marca Famosa Brasil Sul');
+  // 5+ palavras com máximo pequeno: nunca começa pelo 2º trecho
+  assert.equal(abreviarTitulo('Marca Famosa Brasil Sul Grande - Tênis Corrida Masculino Leve', 30), 'Marca Famosa Brasil Sul Grande');
+  // 1 ou 2 palavras: continua como antes (título inteiro, sem plano B)
+  assert.equal(abreviarTitulo(SHAMPOO_LOLA, 30), 'Lola Cosmetics - Morte Subita');
+  // marca de 3 palavras + tipo que não cabem juntos: fica o tipo; o separador nunca fica pendurado no fim, com " - ", " | " ou " / "
+  for (const sep of ['-', '|', '/']) {
+    const titulo = `Marca Famosa Brasil ${sep} Tênis Corrida Masculino Leve`;
+    assert.equal(abreviarTitulo(titulo, 21), 'Tênis Corrida');
+    assert.equal(abreviarTitulo(titulo, 28), 'Tênis Corrida Masculino Leve');
+    assert.equal(abreviarTitulo(titulo, 36), `Marca Famosa Brasil ${sep} Tênis Corrida`);
+  }
+  // R2: o corte pode deixar o separador pendurado no fim ("|" e "/" não são conectores): ele sai e fica o tipo
+  assert.equal(abreviarTitulo('Garrafa Inox 500 | Tênis Corrida Masculino Leve', 18), 'Tênis Corrida');
+  // marca toda de enfeite: o resultado começa pelo trecho seguinte (o HEAD devolvia vazio); decisão aceita
+  assert.equal(abreviarTitulo('Original Premium Top - Fone Bluetooth Sem Fio'), 'Fone Bluetooth Sem Fio');
+});
+
+// R1: "Indicado para…", "ideal para…" e "compatível com…" cortam o trecho no meio e deixavam vírgula ou conector no fim de um
+// trecho emendado; quando o limite descartava o trecho seguinte, o título inteiro terminava assim.
+test('título abreviado: o fim de cada trecho emendado também sai sem vírgula nem conector, no meio e no fim do título', () => {
+  const titulos = [
+    'Pipicat 12 kg - Areia Higiênica para Gatos, Indicado para filhotes - Pacote Dez Unidades',
+    'Golden Special Cães | Ração para Cães Adultos, ideal para filhotes | Sabor Frango e Carne',
+    'Lola From Rio / Lâmpada Bulbo Branca Fria e compatível com bocal E27 / Cabo USB Tipo C Turbo',
+  ];
+  for (const titulo of titulos) {
+    for (const max of [50, 55, 60, 70]) {
+      const r = abreviarTitulo(titulo, max);
+      assertTituloValido(titulo, r, max);
+      const trechos = r.split(/\s+[-–|/]\s+/);
+      for (const trecho of trechos) {
+        assert.ok(!/[,;:]$/.test(trecho), `trecho termina em vírgula: "${trecho}" em "${r}"`);
+        assert.ok(!CONECTORES_FIM.test(trecho), `trecho termina em conector: "${trecho}" em "${r}"`);
+      }
+    }
+  }
+  assert.equal(abreviarTitulo(titulos[0], 60), 'Pipicat 12 kg - Areia Higiênica para Gatos');
+  assert.equal(abreviarTitulo(titulos[0], 70), 'Pipicat 12 kg - Areia Higiênica para Gatos - Pacote Dez Unidades');
+  assert.equal(abreviarTitulo(titulos[1], 55), 'Golden Special Cães | Ração para Cães Adultos');
+  assert.equal(abreviarTitulo(titulos[1], 70), 'Golden Special Cães | Ração para Cães Adultos | Sabor Frango e Carne');
+  assert.equal(abreviarTitulo(titulos[2], 50), 'Lola From Rio / Lâmpada Bulbo Branca Fria');
+});
+
+test('título abreviado: trecho depois do separador que é só enfeite, compatibilidade ou detalhe curto continua saindo', () => {
+  assert.equal(abreviarTitulo('Capinha Silicone Anti-impacto - Compatível com iPhone 15 Pro'), 'Capinha Silicone Anti-impacto');
+  assert.equal(abreviarTitulo('Capinha Silicone Anti-impacto - Para iPhone 15 Pro Max'), 'Capinha Silicone Anti-impacto');
+  assert.equal(abreviarTitulo('Mouse Gamer Sem Fio Logitech | Alta Qualidade Premium Original'), 'Mouse Gamer Sem Fio Logitech');
+  assert.equal(abreviarTitulo('Mouse Gamer Sem Fio Logitech - Frete Grátis - Envio Imediato'), 'Mouse Gamer Sem Fio Logitech');
+});
+
+test('título abreviado: o produto que vem depois da marca mantém o separador original e perde o enfeite da marca', () => {
+  assert.equal(abreviarTitulo('Pipicat 12 kg - Areia Higiênica Multicat para Gatos'), 'Pipicat 12 kg - Areia Higiênica Multicat para Gatos');
+  assert.equal(abreviarTitulo('Marca Famosa Brasil | Tênis Corrida Masculino Leve'), 'Marca Famosa Brasil | Tênis Corrida Masculino Leve');
+  assert.equal(abreviarTitulo('Marca Linha Nova - Condicionador Hidratante Cabelos Secos'), 'Marca Linha - Condicionador Hidratante Cabelos Secos'); // Q2
+  assert.equal(abreviarTitulo('Marca Famosa Brasil / Tênis Corrida Masculino Leve - Azul'), 'Marca Famosa Brasil / Tênis Corrida Masculino Leve');
+});
+
 test('etiqueta por fonte: cada oferta sai com a etiqueta da fonte de origem; sem etiqueta própria usa a da regra', async () => {
   const { db, wa, scheduler } = setup(); // etiquetas: 1 = etiquetaA, 2 = etiquetaB
   const sources = [
