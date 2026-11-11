@@ -42,6 +42,57 @@ const qtdOfertas = (n) => `${n} ${n === 1 ? 'oferta' : 'ofertas'}`;
 // Verificador (plano verificador-preco-estoque, D6): a oferta descartada fica fora da escolha da regra por um tempo
 const PAUSA_DESCARTADA_MS = PAUSA_DESCARTADA_H * 3600000;
 
+// Vaga reposta (plano rodar-sozinho-entrega1, decisão 4): a escolhida que cai fora (pulada, descartada ou separada para
+// revisão) dá lugar à próxima candidata, até as vagas da execução ou até TETO_REPOSICAO × as vagas de reposição (no
+// máximo vagas × (1 + TETO_REPOSICAO) escolhidas por execução)
+export const TETO_REPOSICAO = 3;
+/** Por que a escolhida não saiu, na frase "saíram X de Y" (CA1.8). Frases curtas, sem jargão. */
+const PULADA_POR = {
+  parecido: 'produto parecido', filtros: 'preço fora dos filtros', espera: 'loja indisponível agora',
+  revisao_cheia: 'revisão cheia', link: 'link não gerado', envio: 'falha no envio',
+};
+const DESCARTADA_POR = {
+  esgotado: 'esgotada na loja', preco_subiu: 'preço subiu', nao_conferido: 'preço sem conferência',
+  indisponivel: 'indisponível na loja', outro_produto: 'outro produto na página',
+};
+/** "2 descartadas (esgotada na loja)" ou, com motivos diferentes, "2 descartadas (1 esgotada na loja, 1 preço subiu)". */
+function pedacoDeFalta(n, singular, plural, motivos) {
+  const lista = [...motivos];
+  const porque = lista.length === 1 ? lista[0][0] : lista.map(([m, k]) => `${k} ${m}`).join(', ');
+  return `${n} ${n === 1 ? singular : plural} (${porque})`;
+}
+/**
+ * Fim da frase "Saíram X de Y ofertas" (sem o "S", que vem do prefixo da grade): as puladas, as descartadas e as
+ * separadas para revisão (só as que houve, nessa ordem) e, por último, `fim` (a proteção que parou a execução ou a
+ * falta de candidatas), se houver. `faltas` = { pulada: Map(motivo → n), descartada: Map(motivo → n), revisao: n }.
+ */
+function fraseSairam(saidas, want, faltas, fim) {
+  const soma = (m) => [...m.values()].reduce((a, b) => a + b, 0);
+  const pedacos = [];
+  const puladas = soma(faltas.pulada); const descartadas = soma(faltas.descartada);
+  if (puladas) pedacos.push(pedacoDeFalta(puladas, 'pulada', 'puladas', faltas.pulada));
+  if (descartadas) pedacos.push(pedacoDeFalta(descartadas, 'descartada', 'descartadas', faltas.descartada));
+  if (faltas.revisao) pedacos.push(`${faltas.revisao} ${faltas.revisao === 1 ? 'separada' : 'separadas'} para revisão`);
+  return `aíram ${saidas} de ${want} ofertas${pedacos.length ? `; ${pedacos.join(', ')}` : ''}${fim ? `; ${fim}` : ''}.`;
+}
+/**
+ * Linha das candidatas que ficaram de fora antes da escolha (spec, §1), ou null sem nenhuma. `f` = exec.filtradas.
+ * As "já enviadas" do catálogo não entram: ele as tira antes de chegarem aqui.
+ */
+function fraseFiltradas(f) {
+  const total = f.filtros + f.parecidas + f.pausa + f.semConferencia;
+  if (!total) return null;
+  const pedacos = [];
+  if (f.filtros) pedacos.push(`${f.filtros} fora dos filtros da regra`);
+  if (f.parecidas) pedacos.push(`${f.parecidas} ${f.parecidas === 1 ? 'já enviada ou parecida' : 'já enviadas ou parecidas'}`);
+  if (f.pausa) pedacos.push(`${f.pausa} em pausa por descarte`);
+  if (f.semConferencia) pedacos.push(`${f.semConferencia} da Amazon sem como conferir o preço agora`);
+  return `Antes da escolha, ${total} ${total === 1 ? 'oferta ficou' : 'ofertas ficaram'} de fora: ${pedacos.join(', ')}.`;
+}
+const LOJAS_RESUMO = ['ml', 'amazon', 'shopee'];
+/** summary.porLoja (para a entrega 3): o que aconteceu com as escolhidas de cada loja nesta execução. */
+const contadoresPorLoja = () => Object.fromEntries(LOJAS_RESUMO.map((l) => [l, { saiu: 0, pulada: 0, descartada: 0, revisao: 0, esperou: 0 }]));
+
 // Grade de horários (plano grade-de-disparos, D3 e D4): textos do Histórico
 const pad2 = (n) => String(n).padStart(2, '0');
 const horaDe = (ts) => { const d = new Date(ts); return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`; };
@@ -342,11 +393,27 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
    * Estado de uma execução: o que o catálogo leu (para o cursor), o que os filtros da regra recusaram, o que esperou
    * e as chaves que cada fonte trouxe (vistas: o catálogo conta a de outra fonte como tratada, R11). `puladas`: as
    * ofertas barradas por já ter saído (ou estar saindo) uma igual ou parecida (src/parecido.js): { key, title, r } cada uma.
+   * `filtradas`: quantas candidatas a escolha deixou de fora, por quê (a linha "Antes da escolha…"). `conferenciaNaHora`:
+   * o verificador estava ligado no começo (o catálogo pode pedir preços mais velhos, cada oferta é conferida antes de sair).
+   * `porLoja`: o que aconteceu com as escolhidas de cada loja (vai no summary).
    */
-  const novaExecucao = () => ({ paginas: new Map(), recusadas: new Set(), esperando: new Map(), vistas: new Set(), puladas: [] });
+  const novaExecucao = () => ({
+    paginas: new Map(), recusadas: new Set(), esperando: new Map(), vistas: new Set(), puladas: [],
+    filtradas: { filtros: 0, pausa: 0, parecidas: 0, semConferencia: 0 }, conferenciaNaHora: false, porLoja: contadoresPorLoja(),
+  });
   // a regra apagada no meio da execução não grava nada do catálogo: o id pode ser reaproveitado por uma regra nova
   const regraExiste = (id) => !!db.prepare('SELECT 1 FROM rules WHERE id = ?').get(id);
-  const esperar = (exec, motivo) => exec.esperando.set(motivo, (exec.esperando.get(motivo) || 0) + 1);
+  /** Loja da escolhida nos contadores: as fontes antigas são do Mercado Livre. */
+  const lojaDoResumo = (o) => (o?.catalogo ? o.loja : 'ml');
+  const contarNaLoja = (exec, loja, campo) => { if (Object.hasOwn(exec.porLoja, loja ?? '')) exec.porLoja[loja][campo]++; };
+  const esperar = (exec, motivo, loja = null) => {
+    exec.esperando.set(motivo, (exec.esperando.get(motivo) || 0) + 1);
+    contarNaLoja(exec, loja, 'esperou');
+  };
+  /** O verificador está ligado agora? Na dúvida (sem verificador, sem ativo(), erro ao ler os Ajustes), não. */
+  const conferenciaLigada = () => {
+    try { return typeof verificador?.ativo === 'function' && verificador.ativo() === true; } catch { return false; }
+  };
 
   /**
    * Fim da execução de uma regra com catálogo: um aviso por motivo de espera e o cursor de cada fonte "Novidades"
@@ -372,12 +439,14 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
    * A regra usaria esta oferta do catálogo agora? Os mesmos filtros do pickOffers: loja conhecida, filtros de preço e
    * desconto da regra, loja disponível (sem espera) e, se ela iria à revisão, revisão com vaga. Só as utilizáveis
    * contam para o alvo da leitura do catálogo (Q4, Q5): as que seriam recusadas ou esperariam não prendem a leitura
-   * nas primeiras páginas. A revisão cheia é lida uma vez por execução (nada é registrado durante a escolha).
+   * nas primeiras páginas. A revisão cheia é lida uma vez, na leitura do catálogo. Fora da prévia, a Amazon que não teria
+   * como ser conferida agora (semConferenciaAgora) também não conta.
    */
-  function utilizavelNa(rule) {
+  function utilizavelNa(rule, previa = false) {
     let cheia = null;
     return (c) => {
       if (!LOJAS_CATALOGO.has(c?.loja) || ml.rejectReason(c, rule) || esperaDaLoja(c) || pausada(rule, c.key)) return false;
+      if (!previa && semConferenciaAgora(c)) return false;
       if (!motivosDeRevisao(c).length) return true;
       cheia ??= catalogoItens.revisaoCheia(rule.id);
       return !cheia;
@@ -385,82 +454,125 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
   }
 
   /**
-   * Escolhe as próximas ofertas da regra (sem enviar nada nem gravar no banco). `exec` (novaExecucao) recebe o que
-   * o catálogo leu, as recusadas pelos filtros e as que esperam. Oferta do catálogo: já vem completa (sem
-   * resolveOffer) e sem as tratadas, não conta em maxTries; sai com `catalogo: true` e `motivos` de revisão.
-   * `previa`: pré-visualização (o catálogo não faz a primeira leitura até o fim nem escreve avisos, S3).
+   * Amazon do catálogo que hoje não teria como sair (verificador ligado, sem API, releitura pausada e preço visto há
+   * mais de 6 h): fica fora da escolha sem gastar tentativa (src/verificador.js semConfirmacaoAgora). Nunca lança.
+   */
+  function semConferenciaAgora(c) {
+    if (typeof verificador?.semConfirmacaoAgora !== 'function') return false;
+    try { return verificador.semConfirmacaoAgora({ loja: c.loja, precoEm: c.precoEm }) === true; } catch { return false; }
+  }
+
+  /**
+   * Escolha preguiçosa das ofertas da regra (plano rodar-sozinho-entrega1, decisão 4): a lista das fontes é lida uma
+   * vez, no primeiro `proxima()`, e cada `proxima()` devolve a próxima candidata válida (null = acabou). Não envia nada
+   * nem grava no banco. `exec` (novaExecucao) recebe o que o catálogo leu, as recusadas pelos filtros, as que esperam e
+   * a contagem das que ficaram de fora (`exec.filtradas`). Oferta do catálogo: já vem completa (sem resolveOffer) e
+   * sem as tratadas, não conta em maxTries; sai com `catalogo: true` e `motivos` de revisão.
+   * `previa`: pré-visualização (o catálogo não faz a primeira leitura até o fim nem escreve avisos, S3); nela nada muda
+   * com o verificador (sem idade larga do catálogo, sem o filtro da Amazon sem conferência, CA1.11).
    * Cada oferta sai com `lidoEm` (D7, a idade dos dados para a regra do frescor do verificador): o instante de antes da
    * leitura das fontes; null no catálogo e na lista com preço digitado (idade desconhecida). A descartada pelo
    * verificador há menos de PAUSA_DESCARTADA_H fica fora da escolha (D6), como a pulada na conferência (achado Q5).
    * Produto igual ou parecido (plano nao-repetir-produto-parecido, regras 7 e 8): depois dos filtros e das esperas, a
-   * oferta que repete o título de outra enviada pela regra, ou é parecida com ela, vai para `exec.puladas`, a não ser
-   * que seja o mesmo título (nenhuma parecida nas últimas 24 h) e esteja pelo menos DESCONTO_MINIMO_MAIS_BARATA% abaixo
-   * do menor preço dele na janela (D10/D11): então entra com `maisBarata` (a mensagem leva a frase) e o `runRule`
-   * confere o preço de novo depois da conferência na loja. O catálogo que vai à revisão não leva a marca.
+   * oferta que repete o título de outra enviada pela regra, ou é parecida com uma escolhida que não foi devolvida, vai
+   * para `exec.puladas`, a não ser que seja o mesmo título (nenhuma parecida nas últimas 24 h) e esteja pelo menos
+   * DESCONTO_MINIMO_MAIS_BARATA% abaixo do menor preço dele na janela (D10/D11): então entra com `maisBarata` (a mensagem
+   * leva a frase) e o `runRule` confere o preço de novo depois da conferência na loja. O catálogo que vai à revisão não
+   * leva a marca.
    * `saindo` (Map, só no runRule): recebe cada escolhida que vai sair (a que vai à revisão não) na hora em que é
-   * escolhida, para o "Enviar" do Catálogo já vê-la durante as leituras que faltam (achado R1).
+   * escolhida, para o "Enviar" do Catálogo já vê-la durante as leituras que faltam (achado R1); a reposta também.
+   * `devolver(key)`: a escolhida caiu fora e não vai sair; ela sai da trava da rodada (as parecidas dela voltam a valer
+   * nesta execução, CA1.12) e de `saindo` (o "Enviar" do Catálogo deixa de vê-la).
+   * `variasFontes()`: a lista lida traz candidatas de mais de uma fonte (o Histórico diz de qual saiu cada oferta).
    */
-  async function pickOffers(rule, want, exec = novaExecucao(), { previa = false, saindo = null } = {}) {
-    const lidoEm = Date.now();
-    const cands = await ml.candidates(rule, {
-      links, onWarn: (m) => log(rule, { level: 'aviso', message: m }),
-      catalogo: fonteCatalogo, quer: want, paginas: exec.paginas, vistas: exec.vistas, previa,
-      tratada: (c, modo) => catalogoItens.tratada(rule, c, modo),
-      utilizavel: fonteCatalogo ? utilizavelNa(rule) : undefined,
-    });
-    const picked = []; let tried = 0; const maxTries = Math.max(want * 8, 10);
-    const agora = Date.now();
-    // chave exata continua com wasSent/tratada; aqui só o título: o que a regra enviou na janela e o que já está escolhido
-    const trava = criarTrava({
-      enviados: rule.dedupe_days > 0 ? lerEnviados(db, rule.id, agora - rule.dedupe_days * 86400000) : [],
-      agora, dedupeDias: rule.dedupe_days,
-    });
+  function criarEscolha(rule, want, exec = novaExecucao(), { previa = false, saindo = null } = {}) {
+    let cands = null; let pos = 0; let tried = 0; let trava = null; let lidoEm = null;
+    const maxTries = Math.max(want * 8, 10);
+    async function ler() {
+      lidoEm = Date.now();
+      cands = await ml.candidates(rule, {
+        links, onWarn: (m) => log(rule, { level: 'aviso', message: m }),
+        catalogo: fonteCatalogo, quer: want, paginas: exec.paginas, vistas: exec.vistas, previa,
+        // idade larga do catálogo só com o verificador ligado no começo da execução (decisão 5); nunca na prévia
+        conferenciaNaHora: !previa && exec.conferenciaNaHora === true,
+        tratada: (c, modo) => catalogoItens.tratada(rule, c, modo),
+        utilizavel: fonteCatalogo ? utilizavelNa(rule, previa) : undefined,
+      });
+      const agora = Date.now();
+      // chave exata continua com wasSent/tratada; aqui só o título: o que a regra enviou na janela e o que já está escolhido
+      trava = criarTrava({
+        enviados: rule.dedupe_days > 0 ? lerEnviados(db, rule.id, agora - rule.dedupe_days * 86400000) : [],
+        agora, dedupeDias: rule.dedupe_days,
+      });
+    }
     /** Barra (→ o resultado da trava, anotado em `exec.puladas`) ou libera (→ null); `marca` recebe a anterior quando é mais barata. */
     const barrada = (o, marca) => {
       const r = trava.avaliar({ key: o.key, title: o.title, price: o.price });
-      if (r?.acao === 'barrar') { exec.puladas.push({ key: o.key, title: o.title, r }); return r; }
+      if (r?.acao === 'barrar') { exec.puladas.push({ key: o.key, title: o.title, r }); exec.filtradas.parecidas++; return r; }
       if (r?.acao === 'liberar') marca.maisBarata = { title: r.anterior.title, preco: r.anterior.preco, sent_at: r.anterior.sent_at };
       return null;
     };
-    for (const c of cands) {
-      if (picked.length >= want) break;
-      if (doCatalogo(rule, c)) {
-        if (!LOJAS_CATALOGO.has(c.loja)) continue;
-        if (ml.rejectReason(c, rule)) { exec.recusadas.add(c.key); continue; }
-        // pulada na conferência há menos de PAUSA_DESCARTADA_H (achado Q5): fora da escolha, e o cursor passa por ela
-        if (pausada(rule, c.key)) { exec.recusadas.add(c.key); continue; }
-        const espera = esperaDaLoja(c);
-        if (espera) { esperar(exec, espera); continue; }
+    const escolher = (o) => {
+      trava.acrescentar({ key: o.key, title: o.title });
+      if (!o.catalogo || !o.motivos.length) saindo?.set(o.key, { key: o.key, title: o.title });
+      return o;
+    };
+    async function proxima() {
+      if (!cands) await ler();
+      while (pos < cands.length) {
+        const c = cands[pos++];
+        if (doCatalogo(rule, c)) {
+          if (!LOJAS_CATALOGO.has(c.loja)) continue;
+          if (ml.rejectReason(c, rule)) { exec.recusadas.add(c.key); exec.filtradas.filtros++; continue; }
+          // pulada na conferência há menos de PAUSA_DESCARTADA_H (achado Q5): fora da escolha, e o cursor passa por ela
+          if (pausada(rule, c.key)) { exec.recusadas.add(c.key); exec.filtradas.pausa++; continue; }
+          // a Amazon que não teria como ser conferida agora não gasta tentativa; o cursor fica nela, como na espera
+          if (!previa && semConferenciaAgora(c)) { exec.filtradas.semConferencia++; continue; }
+          const espera = esperaDaLoja(c);
+          if (espera) { esperar(exec, espera, c.loja); continue; }
+          const marca = {};
+          // barrada por um envio anterior: tratada como recusada, para o cursor das Novidades não ficar preso nela. A da
+          // mesma rodada não (achado R1): só uma escolhida que saiu de fato barra (a que cai fora é devolvida antes da
+          // próxima escolha), mas a próxima execução a avalia de novo, contra o que está em sent_offers
+          const b = barrada(c, marca);
+          if (b) { if (b.tipo !== 'rodada') exec.recusadas.add(c.key); continue; }
+          const motivos = motivosDeRevisao(c);
+          if (motivos.length && catalogoItens.revisaoCheia(rule.id)) { esperar(exec, 'revisao_cheia', c.loja); continue; }
+          // a que vai à revisão não leva a marca: o "Enviar" decide de novo
+          return escolher({ ...c, catalogo: true, motivos, lidoEm: null, ...(motivos.length ? {} : marca) });
+        }
+        if (tried >= maxTries) continue;
+        if (wasSent(rule, c.key)) continue;
+        if (pausada(rule, c.key)) { exec.filtradas.pausa++; continue; }
+        tried++;
+        let offer;
+        try { offer = await ml.resolveOffer(c); } catch (e) {
+          log(rule, { level: 'aviso', offer_title: c.title || c.url, message: 'Oferta pulada: ' + e.message });
+          continue;
+        }
+        if (ml.rejectReason(offer, rule)) { exec.filtradas.filtros++; continue; }
         const marca = {};
-        // barrada por um envio anterior: tratada como recusada, para o cursor das Novidades não ficar preso nela. A da
-        // mesma rodada não (achado R1): se a escolhida não sair (esgotada, revisão, falha de link, teto), o cursor fica na
-        // página e a próxima execução a avalia de novo, contra o que saiu de fato
-        const b = barrada(c, marca);
-        if (b) { if (b.tipo !== 'rodada') exec.recusadas.add(c.key); continue; }
-        const motivos = motivosDeRevisao(c);
-        if (motivos.length && catalogoItens.revisaoCheia(rule.id)) { esperar(exec, 'revisao_cheia'); continue; }
-        // a que vai à revisão não leva a marca: o "Enviar" decide de novo
-        picked.push({ ...c, catalogo: true, motivos, lidoEm: null, ...(motivos.length ? {} : marca) });
-        trava.acrescentar({ key: c.key, title: c.title });
-        if (!motivos.length) saindo?.set(c.key, { key: c.key, title: c.title });
-        continue;
+        if (barrada(offer, marca)) continue;
+        return escolher({ ...offer, lidoEm: offer.digitado === true ? null : lidoEm, ...marca });
       }
-      if (tried >= maxTries) continue;
-      if (wasSent(rule, c.key)) continue;
-      if (pausada(rule, c.key)) continue;
-      tried++;
-      let offer;
-      try { offer = await ml.resolveOffer(c); } catch (e) {
-        log(rule, { level: 'aviso', offer_title: c.title || c.url, message: 'Oferta pulada: ' + e.message });
-        continue;
-      }
-      const why = ml.rejectReason(offer, rule);
-      if (why) continue;
-      const marca = {};
-      if (barrada(offer, marca)) continue;
-      picked.push({ ...offer, lidoEm: offer.digitado === true ? null : lidoEm, ...marca });
-      trava.acrescentar({ key: offer.key, title: offer.title });
-      saindo?.set(offer.key, { key: offer.key, title: offer.title });
+      return null;
+    }
+    function devolver(key) {
+      trava?.retirar(key);
+      saindo?.delete(key);
+    }
+    const variasFontes = () => new Set((cands ?? []).map((c) => c?.source_index ?? 0)).size > 1;
+    return { proxima, devolver, variasFontes };
+  }
+
+  /** As `want` primeiras ofertas da escolha (a prévia): o laço de proxima(), sem devolver nenhuma. */
+  async function pickOffers(rule, want, exec = novaExecucao(), opcoes = {}) {
+    const escolha = criarEscolha(rule, want, exec, opcoes);
+    const picked = [];
+    while (picked.length < want) {
+      const o = await escolha.proxima();
+      if (!o) break;
+      picked.push(o);
     }
     return picked;
   }
@@ -541,8 +653,9 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
     const prefixo = horario != null ? `Horário ${horaDe(horario)}: `
       : linha ? `Enviar agora (como no horário das ${linha.hora}): ` : '';
     running.add(id);
-    const summary = { offers: 0, messages: 0, errors: 0, revisao: 0, descartadas: 0 };
     const exec = antesDoTry(() => novaExecucao());
+    // puladas: as escolhidas que caíram fora sem descarte nem revisão; porLoja: o mesmo objeto de exec.porLoja
+    const summary = { offers: 0, messages: 0, errors: 0, revisao: 0, descartadas: 0, puladas: 0, porLoja: exec.porLoja };
     let retrySoon = false;
     let parada = null; // a proteção do número parou a execução no meio: { motivo, ate, limite? } de ritmo.liberado
     try {
@@ -563,16 +676,14 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
 
       const want = qtdDa(rule, linha);
       // as que vão sair (a que vai à revisão do Catálogo não) entram em `emEnvio` já na escolha: o "Enviar" do Catálogo
-      // as vê até a gravação (Q1), também durante as leituras da escolha que faltam (R1)
+      // as vê até a gravação (Q1), também a reposta, escolhida no meio da execução (R1); a que cai fora sai na hora
       emEnvio.set(rule.id, new Map());
       // o "Enviar" do Catálogo que passou durante a escolha (antes de a parecida dele ser escolhida) gravou a reserva
       // depois de a trava ler os enviados: cada oferta é conferida de novo contra o que entrou em sent_offers desde
       // aqui (R1). Pelo id, não pelo relógio: uma reserva no mesmo milissegundo do início também conta
       const ultimaReserva = Number(db.prepare('SELECT MAX(id) AS n FROM sent_offers').get()?.n) || 0;
-      let picked;
-      try { picked = await pickOffers(rule, want, exec, { saindo: emEnvio.get(rule.id) }); } catch (e) {
-        log(rule, { level: 'erro', message: 'Não consegui buscar ofertas: ' + e.message }); summary.errors++; return summary;
-      }
+      exec.conferenciaNaHora = conferenciaLigada();
+      const escolha = criarEscolha(rule, want, exec, { saindo: emEnvio.get(rule.id) });
       const gravadas = new Set(); // os ids que esta execução gravou em sent_offers (não contam na conferência abaixo)
       /**
        * Reserva gravada por outro (o "Enviar" do Catálogo) desde o início da escolha que barra a oferta: a mesma chave
@@ -590,46 +701,77 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
         }
         return null;
       };
-      // produto igual ou parecido já enviado (ou escolhido): uma linha por conflito, só 'info' (nunca alerta)
+      // produto igual ou parecido já enviado (ou escolhido): uma linha por conflito, só 'info' (nunca alerta), logo
+      // depois da escolha que o encontrou
       limparPuladasLogadas(Date.now());
-      for (const p of exec.puladas) logarPuladaUmaVez(rule, p, Date.now());
-      if (!picked.length) { log(rule, { level: 'info', message: 'Sem ofertas novas dentro dos filtros desta vez.' }); return summary; }
+      let logadas = 0;
+      const logarPuladas = () => { for (; logadas < exec.puladas.length; logadas++) logarPuladaUmaVez(rule, exec.puladas[logadas], Date.now()); };
 
       const d = delays();
       const tagDaFonte = (o) => (o.tag_id && db.prepare('SELECT * FROM tags WHERE id = ?').get(o.tag_id)) || tag;
       const jids = groups.map((g) => g.jid);
-      // descarte do verificador (D8): uma linha 'aviso' por oferta, nunca 'erro'; a oferta não é reposta (D6)
-      const descartar = (o, c) => { summary.descartadas++; log(rule, { level: 'aviso', offer_title: o.title, message: c.texto }); };
-      for (let i = 0; i < picked.length; i++) {
-        if (i > 0) tirarDoEnvio(rule.id, picked[i - 1].key); // a anterior saiu (já está em sent_offers) ou foi pulada
-        const reservada = reservadaDurante(picked[i]);
+      // por que as escolhidas não saíram, para a frase "saíram X de Y" (CA1.8)
+      const faltas = { pulada: new Map(), descartada: new Map(), revisao: 0 };
+      /** A escolhida `o` caiu fora: `tipo` 'pulada' | 'descartada' | 'revisao'; `naLoja`: o contador de summary.porLoja. */
+      const faltou = (o, tipo, motivo = null, naLoja = tipo) => {
+        if (tipo === 'revisao') faltas.revisao++;
+        else faltas[tipo].set(motivo, (faltas[tipo].get(motivo) || 0) + 1);
+        if (tipo === 'pulada') summary.puladas++;
+        contarNaLoja(exec, lojaDoResumo(o), naLoja);
+      };
+      // descarte do verificador (D8): uma linha 'aviso' por oferta, nunca 'erro'; a vaga é reposta (CA1.7)
+      const descartar = (o, c) => {
+        summary.descartadas++; faltou(o, 'descartada', DESCARTADA_POR[c.motivo] ?? c.motivo);
+        log(rule, { level: 'aviso', offer_title: o.title, message: c.texto });
+      };
+      // vaga reposta (CA1.7): até `want` ofertas saírem, com no máximo want × (1 + TETO_REPOSICAO) escolhidas
+      const tetoEscolhidas = want * (1 + TETO_REPOSICAO);
+      let escolhidas = 0; let saidas = 0; let acabou = false; let pausaAntes = false;
+      // a escolhida em andamento: se não chegar a nenhum grupo, é devolvida (sai da trava da rodada e do "saindo agora")
+      let atual = null;
+      const fecharAtual = () => { if (atual && !atual.saiu) escolha.devolver(atual.key); atual = null; };
+      while (saidas < want && escolhidas < tetoEscolhidas) {
+        fecharAtual();
+        let o;
+        try { o = await escolha.proxima(); } catch (e) {
+          log(rule, { level: 'erro', message: 'Não consegui buscar ofertas: ' + e.message }); summary.errors++; return summary;
+        }
+        logarPuladas();
+        if (!o) { acabou = true; break; }
+        escolhidas++;
+        atual = { key: o.key, saiu: false };
+        // a pausa entre ofertas vem antes da próxima que vai ser tentada (nunca depois da última)
+        if (pausaAntes) { pausaAntes = false; await sleep(jitter(d.offer)); }
+        const reservada = reservadaDurante(o);
         if (reservada) {
           // a reservada pelo Catálogo conta como tratada no cursor das Novidades, como a barrada na escolha
-          if (picked[i].catalogo) exec.recusadas.add(picked[i].key);
+          if (o.catalogo) exec.recusadas.add(o.key);
           // a mesma chave já está na fila do Catálogo: sem linha, como a chave exata (wasSent/tratada)
-          if (!reservada.mesmaChave) logarPuladaUmaVez(rule, { key: picked[i].key, title: picked[i].title, r: reservada }, Date.now());
+          if (!reservada.mesmaChave) logarPuladaUmaVez(rule, { key: o.key, title: o.title, r: reservada }, Date.now());
+          faltou(o, 'pulada', PULADA_POR.parecido);
           continue;
         }
-        // proteção do número antes de cada oferta (nem conferência nem link): sem vaga para os grupos (até o teto), ou
-        // com o silêncio começando, a execução para aqui e o resto não sai (a regra por intervalo volta quando liberar).
-        // As vagas ficam separadas durante a conferência e o link: quem chega depois já as vê ocupadas
+        // proteção do número antes de cada oferta (nem conferência nem link), também na reposta: sem vaga para os grupos
+        // (até o teto), ou com o silêncio começando, a execução para aqui e o resto não sai (a regra por intervalo volta
+        // quando liberar). As vagas ficam separadas durante a conferência e o link: quem chega depois já as vê ocupadas
         const lib = vaga.pedir(Date.now(), { precisa: groups.length });
         if (!lib.ok) { parada = lib; summary.parou = lib.motivo; break; }
-        let offer = picked[i]; const etq = tagDaFonte(offer);
-        // a marca "mais barata" fica em picked[i]: a oferta que volta do verificador é outro objeto, sem ela
-        const maisBarata = picked[i].maisBarata ?? null;
+        let offer = o; const etq = tagDaFonte(offer);
+        // a marca "mais barata" fica em `o`: a oferta que volta do verificador é outro objeto, sem ela
+        const maisBarata = o.maisBarata ?? null;
         // depois da conferência na loja o preço pode ter subido: sem ficar pelo menos DESCONTO_MINIMO_MAIS_BARATA% abaixo do
         // anterior, a frase não vale (regra 8, D11). Preço ilegível conta como não mais barata (achados S2/Q2); sem preço
         // não há o que dizer na linha
-        const naoMaisBarata = (o) => !!maisBarata && !maisBarataOBastante(centavos(o.price), maisBarata.preco);
-        // Fica PAUSA_DESCARTADA_H fora da escolha, como a descartada (achado Q5): a vaga da execução seguinte vai à próxima
-        // candidata. A linha sai uma vez por conflito (a anterior), enquanto ela estiver na janela da regra
-        const puladaNaConferencia = (o) => {
+        const naoMaisBarata = (x) => !!maisBarata && !maisBarataOBastante(centavos(x.price), maisBarata.preco);
+        // Fica PAUSA_DESCARTADA_H fora da escolha, como a descartada (achado Q5): a vaga vai à próxima candidata. A linha
+        // sai uma vez por conflito (a anterior), enquanto ela estiver na janela da regra
+        const puladaNaConferencia = (x) => {
           const agora = Date.now();
-          pausar(rule, picked[i].key);
-          if (centavos(o.price) === null) return;
-          const k = `${rule.id}\0${picked[i].key}\0conferencia\0${maisBarata.sent_at}`;
-          logarUmaVez(rule, k, fimDaJanela(rule, maisBarata.sent_at), o.title, textoConferencia(maisBarata, o.price, agora), agora);
+          pausar(rule, o.key);
+          faltou(o, 'pulada', PULADA_POR.parecido);
+          if (centavos(x.price) === null) return;
+          const k = `${rule.id}\0${o.key}\0conferencia\0${maisBarata.sent_at}`;
+          logarUmaVez(rule, k, fimDaJanela(rule, maisBarata.sent_at), x.title, textoConferencia(maisBarata, x.price, agora), agora);
         };
         let gerados; // um link por código de rastreio distinto (linksPorCodigo)
         let sufixo = ''; // do verificador, na linha 'ok' de cada grupo (D8)
@@ -644,8 +786,8 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
               // o preço conferido pode ter saído dos filtros da regra (Q4): como no pickOffers, é só "fora dos filtros". Nada é
               // registrado no Catálogo (sem aviso de descarte, sem link): em `exec.recusadas` o cursor das Novidades avança
               // por ela e não fica preso, e em outras ordens ela pode voltar a valer se o preço cair
-              if (ml.rejectReason(offer, rule)) { exec.recusadas.add(picked[i].key); continue; }
-              if (naoMaisBarata(offer)) { puladaNaConferencia(offer); exec.recusadas.add(picked[i].key); continue; }
+              if (ml.rejectReason(offer, rule)) { exec.recusadas.add(o.key); faltou(o, 'pulada', PULADA_POR.filtros); continue; }
+              if (naoMaisBarata(offer)) { puladaNaConferencia(offer); exec.recusadas.add(o.key); continue; }
             } else if (c.motivo === 'nao_conferido') {
               motivos = ['nao_conferido'];
               detalhe = c.texto.startsWith(MOTIVOS_VERIFICADOR.nao_conferido) ? c.texto.slice(MOTIVOS_VERIFICADOR.nao_conferido.length) : '';
@@ -657,16 +799,16 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
           }
           if (!motivos.length) {
             const r = await linksPorCodigo(offer, etq, jids);
-            if (r.espera) { esperar(exec, r.espera); continue; }
+            if (r.espera) { esperar(exec, r.espera); faltou(o, 'pulada', PULADA_POR.espera, 'esperou'); continue; }
             if (r.algum) gerados = r;
             else { motivos = ['falha_link']; detalhe = ` (${r.falha})`; }
           }
           if (motivos.length) {
             if (!regraExiste(rule.id)) continue;
             if (catalogoItens.registrar(rule, offer, 'revisao', motivos)) {
-              summary.revisao++;
+              summary.revisao++; faltou(o, 'revisao');
               log(rule, { level: 'aviso', offer_title: offer.title, message: `Separada para revisão: ${motivos.map((m) => TEXTO_MOTIVO[m] || m).join(' e ')}${detalhe}.` });
-            } else esperar(exec, 'revisao_cheia');
+            } else { esperar(exec, 'revisao_cheia'); faltou(o, 'pulada', PULADA_POR.revisao_cheia, 'esperou'); }
             continue;
           }
         } else {
@@ -675,13 +817,13 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
           if (c.acao === 'descartar') { pausar(rule, offer.key); descartar(offer, c); continue; }
           offer = c.oferta; sufixo = c.sufixo ?? '';
           // o preço conferido pode ter saído dos filtros da regra (preço máximo, desconto mínimo): como no pickOffers, é só
-          // "fora dos filtros", sem aviso de descarte e sem link (não é reposta nesta execução)
-          if (verificador && ml.rejectReason(offer, rule)) continue;
+          // "fora dos filtros", sem aviso de descarte e sem link (a vaga vai à próxima candidata)
+          if (verificador && ml.rejectReason(offer, rule)) { faltou(o, 'pulada', PULADA_POR.filtros); continue; }
           if (naoMaisBarata(offer)) { puladaNaConferencia(offer); continue; }
           gerados = await linksPorCodigo(offer, etq, jids);
           if (!gerados.algum) {
             log(rule, { level: 'erro', offer_title: offer.title, message: 'Link de afiliado não gerado: ' + gerados.falha });
-            summary.errors++; continue;
+            summary.errors++; faltou(o, 'pulada', PULADA_POR.link); continue;
           }
         }
         const textos = new Map(); // um texto por link
@@ -696,7 +838,7 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
         for (const aviso of gerados.avisos) log(rule, { level: 'aviso', offer_title: offer.title, message: aviso });
         // foto só do CDN da loja da oferta (D9, CA5); as fontes antigas são do Mercado Livre
         const fotoOk = rule.send_image && imagemPermitida(offer.plataforma || 'mercadolivre', offer.image);
-        const daFonte = picked.some((p) => p.source_index !== offer.source_index) ? ` (fonte ${(offer.source_index ?? 0) + 1})` : '';
+        const daFonte = escolha.variasFontes() ? ` (fonte ${(offer.source_index ?? 0) + 1})` : '';
         for (let g = 0; g < groups.length; g++) {
           const destino = gerados.porJid.get(groups[g].jid);
           if (!destino?.link) {
@@ -724,6 +866,10 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
           }
           if (g < groups.length - 1) await sleep(jitter(d.group));
         }
+        if (okCount) {
+          // chegou a um grupo: ocupa a vaga e fica na trava da rodada (as parecidas dela seguem barradas)
+          atual.saiu = true; saidas++; contarNaLoja(exec, lojaDoResumo(o), 'saiu');
+        } else if (!parada) faltou(o, 'pulada', PULADA_POR.envio);
         if (okCount && !(offer.catalogo && !regraExiste(rule.id))) {
           gravadas.add(Number(db.prepare('INSERT INTO sent_offers (rule_id, offer_key, sent_at, title, price_cents) VALUES (?,?,?,?,?)')
             .run(rule.id, offer.key, Date.now(), tituloParaGuardar(offer.title), centavos(offer.price)).lastInsertRowid));
@@ -731,28 +877,32 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
           if (maisBarata) log(rule, { level: 'info', offer_title: offer.title, message: textoPassou(maisBarata, offer.price, Date.now()) });
         }
         vaga.soltar(); // a pausa entre ofertas não segura vagas: a próxima oferta pede de novo
-        tirarDoEnvio(rule.id, picked[i].key); // gravada em sent_offers (ou sem nenhum grupo ok): não está mais saindo
+        tirarDoEnvio(rule.id, o.key); // gravada em sent_offers (ou sem nenhum grupo ok): não está mais saindo
         if (parada) break;
-        if (i < picked.length - 1) await sleep(jitter(d.offer));
+        pausaAntes = true;
       }
-      if (parada) {
-        if (parada.motivo === 'limite') ritmo.avisarLimite(logLinha, parada); // uma linha por vez que o teto enche (CA3)
-        if (rule.grade) {
-          // o horário da grade se encerra com o que saiu, como quando faltam ofertas (CA7 da grade): nada acumula
-          const frase = `aíram ${summary.offers} de ${want} ofertas; ${motivoDaParada(parada)}.`;
-          log(rule, { level: 'aviso', message: prefixo ? `${prefixo}s${frase}` : `S${frase}` });
-        } else if (parada.motivo === 'silencio') {
-          log(rule, { level: 'aviso', message: textoAdiadoSilencio(ritmo.silencio(Date.now()), depoisDaParada(rule, parada, Date.now())) });
-        }
+      fecharAtual();
+      if (parada?.motivo === 'limite') ritmo.avisarLimite(logLinha, parada); // uma linha por vez que o teto enche (CA3)
+      const deFora = fraseFiltradas(exec.filtradas);
+      if (!escolhidas) {
+        // nenhuma candidata: a contagem das que ficaram de fora substitui a frase de sempre (spec, §1)
+        log(rule, { level: 'info', message: deFora ? `${deFora} Nenhuma sobrou.` : 'Sem ofertas novas dentro dos filtros desta vez.' });
         return summary;
       }
-      // faltaram ofertas no horário da grade (CA7): sai o que houver, sem acumular para o próximo; as descartadas pelo
-      // verificador não são repostas (D6) e entram na frase
-      if (rule.grade && (picked.length < want || summary.descartadas)) {
-        const n = summary.descartadas;
-        const frase = !n ? `aíram ${summary.offers} de ${want} ofertas; não havia mais ofertas novas dentro dos filtros.`
-          : `aíram ${summary.offers} de ${want} ofertas; ${n} ${n === 1 ? 'descartada' : 'descartadas'} na conferência de preço e estoque${picked.length < want ? ' e não havia mais ofertas novas dentro dos filtros' : ''}.`;
-        log(rule, { level: 'aviso', message: prefixo ? `${prefixo}s${frase}` : `S${frase}` });
+      if (saidas < want || parada) {
+        // saiu menos que o pedido, em qualquer regra (CA1.8): o que saiu, por que as outras não saíram e, por último, a
+        // proteção que parou a execução (também no meio dos grupos da última) ou a falta de candidatas. Na grade, o
+        // horário se encerra com o que saiu (nada acumula)
+        // na regra por intervalo parada pelo silêncio, a linha do adiamento (abaixo) já diz o motivo: sem repeti-lo, a
+        // frase só sai se alguma escolhida caiu fora
+        const adiada = parada?.motivo === 'silencio' && !rule.grade;
+        const fim = adiada ? null : parada ? motivoDaParada(parada) : acabou ? 'não havia mais ofertas novas dentro dos filtros' : null;
+        if (!adiada || faltas.revisao || faltas.pulada.size || faltas.descartada.size) {
+          const frase = fraseSairam(saidas, want, faltas, fim);
+          log(rule, { level: 'aviso', message: prefixo ? `${prefixo}s${frase}` : `S${frase}` });
+        }
+        if (!parada && deFora) log(rule, { level: 'info', message: deFora });
+        if (adiada) log(rule, { level: 'aviso', message: textoAdiadoSilencio(ritmo.silencio(Date.now()), depoisDaParada(rule, parada, Date.now())) });
       }
       return summary;
     } finally {

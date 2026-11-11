@@ -482,6 +482,8 @@ test('CA1/CA2: regra do Catálogo com itens do ML: o conferido sai sozinho (não
       ['ok', 'Produto 5257531512', 'Enviado com a etiqueta etiquetaA'],
       ['aviso', 'Produto 2000000002', 'Descartada: esgotado na loja'],
       ['aviso', 'Produto 2000000003', 'Separada para revisão: não deu para conferir o preço (a página não trouxe o preço).'],
+      // a regra pediu 5 (plano rodar-sozinho-entrega1, CA1.8)
+      ['aviso', null, 'Saíram 1 de 5 ofertas; 1 descartada (esgotada na loja), 1 separada para revisão; não havia mais ofertas novas dentro dos filtros.'],
     ]);
     assert.ok(!niveis(s).includes('erro'));
     assert.deepEqual(s.leituras, []);

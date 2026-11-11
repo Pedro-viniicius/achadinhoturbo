@@ -788,6 +788,8 @@ test('C7 CA1/CA2: regra do Catálogo com ML: o conferido sai sozinho, a verifica
       ['ok', 'Enviado com a etiqueta etiquetaA'],
       ['aviso', `Separada para revisão: não deu para conferir o preço (${CAUSAS.ml_verificacao}).`],
       ['aviso', `Separada para revisão: não deu para conferir o preço (${CAUSAS.ml_verificacao}).`],
+      // a regra pediu 5 (plano rodar-sozinho-entrega1, CA1.8)
+      ['aviso', 'Saíram 1 de 5 ofertas; 2 separadas para revisão; não havia mais ofertas novas dentro dos filtros.'],
     ]);
     assert.ok(!linhas.some(([n]) => n === 'erro'));
   });
@@ -805,7 +807,10 @@ test('C8 CA4: regra do Catálogo com a extensão antiga: todos os itens do ML v�
     const r = await s.scheduler.runRule(id);
     assert.deepEqual([r.offers, r.errors, r.revisao], [0, 0, 2]);
     assert.deepEqual(ext.tipos(), []);
-    for (const l of logs(s)) assert.equal(l.message, `Separada para revisão: não deu para conferir o preço (${CAUSAS.extensao_antiga}).`);
+    // a regra pediu 5 e nada saiu: a última linha é a frase "saíram" (plano rodar-sozinho-entrega1, CA1.8)
+    assert.equal(logs(s).at(-1).message, 'Saíram 0 de 5 ofertas; 2 separadas para revisão; não havia mais ofertas novas dentro dos filtros.');
+    for (const l of logs(s).slice(0, -1)) assert.equal(l.message, `Separada para revisão: não deu para conferir o preço (${CAUSAS.extensao_antiga}).`);
+    assert.equal(logs(s).length, 3);
     assert.ok(!logs(s).some((l) => l.level === 'erro'));
   });
 });
@@ -979,6 +984,8 @@ test('R1 CA1/CA2: a regra da Central entrega /p/MLB… sem pdp_filters: com o an
       ['ok', 'Enviado com a etiqueta etiquetaA'],
       ['ok', `Enviado com a etiqueta etiquetaA · preço não conferido (${CAUSAS.varias_versoes})`],
       ['aviso', 'Descartada: preço subiu de R$ 100,00 para R$ 150,00 (+50%, o limite é 5%)'],
+      // a regra pediu 3 (plano rodar-sozinho-entrega1, CA1.8)
+      ['aviso', 'Saíram 2 de 3 ofertas; 1 descartada (preço subiu); não havia mais ofertas novas dentro dos filtros.'],
     ]);
   });
 });

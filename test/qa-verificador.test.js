@@ -545,8 +545,9 @@ test('regra Central: a oferta que subiu dentro do limite sai com o preço novo, 
   const r = await s.scheduler.runRule(id);
   const saiu = s.wa.simulated.map((m) => m.text).filter((x) => x.includes('R$ 73,39'));
   assert.deepEqual(saiu, [], 'o filtro "preço máximo R$ 70" da regra foi violado: saiu a R$ 73,39');
-  // fica "fora dos filtros" (como no pickOffers): nada saiu, nenhum aviso de descarte, nenhum erro
-  assert.deepEqual([s.wa.simulated.length, r.offers, r.descartadas, r.errors], [0, 0, 0, 0]);
+  // fica "fora dos filtros" (como no pickOffers): nenhum aviso de descarte, nenhum erro; a vaga vai à próxima candidata
+  // (plano rodar-sozinho-entrega1, CA1.7), que está dentro do preço máximo
+  assert.deepEqual([s.wa.simulated.length, r.offers, r.descartadas, r.errors, r.puladas], [1, 1, 0, 0, 1]);
   assert.deepEqual(descartes(s.db), []);
   semErroNoLog(s.db, 'fora dos filtros');
 });
@@ -858,9 +859,11 @@ test('Catálogo (regra): o preço máximo da regra também vale depois da confer
     VALUES ('Catálogo', 1, 1, 1, ?, 'list', '{}', ?, 5, 60, '00:00', '23:59', 7, 0, 100, ?)`).run(JSON.stringify([G1]), JSON.stringify([{ type: 'catalogo', tag_id: null, config: { ordem: 'relevancia' } }]), Date.now()).lastInsertRowid);
   const r = await scheduler.runRule(id);
   assert.deepEqual(wa.simulated.filter((m) => m.text.includes('R$ 102,90')), [], 'saiu a R$ 102,90 numa regra com preço máximo de R$ 100');
-  // fora dos filtros: nada saiu, nenhum aviso de descarte nem erro, nada ficou registrado (o item não fica preso nem sai depois)
+  // fora dos filtros: nada saiu, nenhum aviso de descarte nem erro, nada ficou registrado (o item não fica preso nem sai depois);
+  // só a frase da regra que saiu com menos que o pedido (plano rodar-sozinho-entrega1, CA1.8)
   assert.deepEqual([wa.simulated.length, r.offers, r.descartadas, r.errors, r.revisao], [0, 0, 0, 0, 0]);
-  assert.deepEqual(db.prepare("SELECT level, message FROM log WHERE level IN ('aviso','erro')").all().map((l) => ({ ...l })), []);
+  assert.deepEqual(db.prepare("SELECT level, message FROM log WHERE level IN ('aviso','erro')").all().map((l) => ({ ...l })),
+    [{ level: 'aviso', message: 'Saíram 0 de 5 ofertas; 1 pulada (preço fora dos filtros); não havia mais ofertas novas dentro dos filtros.' }]);
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM catalogo_itens').get().n, 0, 'nada registrado no Catálogo');
   // o preço cai de volta para dentro do filtro: a oferta (não registrada) sai na próxima execução
   ml.conferirProduto = async () => ({ price: 99, disponivel: true });

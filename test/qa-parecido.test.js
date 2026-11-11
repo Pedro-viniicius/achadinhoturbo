@@ -616,20 +616,19 @@ test('Novidades (R1): a parecida barrada por RODADA volta na execução seguinte
   assert.equal(s.cursor(), 'c3');
 });
 
-test('Novidades (R1): a escolhida vai à REVISÃO (Shopee) e a parecida pulada na rodada sai na execução seguinte, em vez de ficar perdida', async (t) => {
+// escolha preguiçosa (plano rodar-sozinho-entrega1, B5): a que vai à revisão é devolvida antes da próxima escolha e a
+// vaga é reposta na mesma execução (CA1.7, CA1.12)
+test('Novidades (R1): a escolhida vai à REVISÃO (Shopee) e a parecida sai na mesma execução, em vez de ficar perdida', async (t) => {
   const s = montarNovidades(t, { lojas: ['amazon', 'shopee'] });
   await s.comecar(ofertaCat(2, A, 59.9, 'shopee'), ofertaCat(3, B, 59.9, 'amazon'));
   const r = await s.rodar();
-  assert.deepEqual([r.offers, r.revisao], [0, 1], 'a Shopee espera revisão, não sai');
-  assert.equal(s.wa.simulated.length, 0);
-  assert.equal(s.puladas().length, 1);
-  assert.equal(s.cursor(), 'c1', 'a pulada por rodada não passa o cursor');
-  s.avancar(HORA);
-  const r2 = await s.rodar();
-  assert.equal(r2.offers, 1, 'a B volta e sai: a A está só na revisão, nada parecido saiu de verdade');
+  assert.deepEqual([r.offers, r.revisao], [1, 1], 'a Shopee espera revisão e a B ocupa a vaga');
   assert.equal(s.wa.simulated.length, 1);
   assert.ok(s.textos()[0].startsWith(`*${B}*`));
+  assert.equal(s.puladas().length, 0, 'a A não saiu: não barra a B');
   assert.equal(s.db.prepare("SELECT COUNT(*) AS n FROM sent_offers WHERE rule_id = ?").get(s.id).n, 1, 'a Shopee em revisão não ocupa reserva');
+  s.avancar(HORA);
+  assert.equal((await s.rodar()).offers, 0, 'nada volta: a A espera na revisão e a B já saiu');
 });
 
 test('Novidades (R1): a escolhida fica sem vaga no TETO por hora; a parecida pulada não sai junto e a execução seguinte envia a escolhida uma vez só', async (t) => {
@@ -652,11 +651,11 @@ test('Novidades (R1): a escolhida fica sem vaga no TETO por hora; a parecida pul
 });
 
 // ============================================================================================ 13. rodada 2: R4 (uma linha por conflito)
-test('R4: a pulada da mesma rodada volta a ser dita depois que a janela de 24 h vence (a escolhida segue sem sair)', async (t) => {
+// escolha preguiçosa (plano rodar-sozinho-entrega1, B5): só uma escolhida que saiu barra a da mesma rodada; com
+// "dias sem repetir" = 0 ela sai a cada execução e o mesmo conflito se repete
+test('R4: a pulada da mesma rodada volta a ser dita depois que a janela de 24 h vence (dias = 0: a escolhida sai a cada execução)', async (t) => {
   const s = montar(t);
-  const pedir = s.links.requestLink;
-  s.links.requestLink = async (p) => { if (String(p.url).includes('MLB-1000001')) throw new Error('falha de teste'); return pedir(p); };
-  const id = s.regra([linha(1, A, 59.9), linha(2, B, 49.9), ...Array.from({ length: 3 }, (_, i) => linha(10 + i, unico(i), 20 + i))], { per: 2 });
+  const id = s.regra([linha(1, A, 59.9), linha(2, B, 49.9), ...Array.from({ length: 3 }, (_, i) => linha(10 + i, unico(i), 20 + i))], { per: 2, dedupe: 0 });
   const doConflito = () => s.logs(id).filter((l) => l.message.endsWith('que foi escolhida neste mesmo envio.')).length;
   for (let i = 0; i < 5; i++) { await s.scheduler.runRule(id); s.avancar(HORA); }
   assert.equal(doConflito(), 1, 'dentro das 24 h, uma linha');
@@ -942,7 +941,7 @@ for (const [loja, sai] of [[72.2, true], [72.21, false]]) {
       assert.ok(s.textos()[0].includes('R$ 72,20'), s.textos()[0]);
       assert.match(saiuComo(s, id)[0].message, /por R\$ 76,00 \(".+"\); agora por R\$ 72,20\.$/);
     } else {
-      assert.equal(s.textos().length, 0);
+      assert.equal(s.textos().some((x) => x.includes(POTES)), false, 'os potes não saem (a vaga vai à próxima, rodar-sozinho CA1.7)');
       assert.equal(s.eventos.includes('link 9000001'), false, 'nenhum link gasto');
       assert.match(puladas(s, id)[0], /^Pulada: na conferência o preço ficou em R\$ 72,21, que não é pelo menos 5% menor que o de ".+" \(R\$ 76,00, às \d\d:\d\d\)\.$/);
       assert.equal(saiuComo(s, id).length, 0);
@@ -984,7 +983,9 @@ test('CA5: só a mensagem liberada pela exceção leva a frase: na mesma rodada,
 
 // ---------------------------------------------------------------------------------------------- Q1: "saindo agora"
 for (const dedupe of [7, 0]) {
-  test(`Q1: o "Enviar" no meio de uma rodada recebe 409 "saindo agora", para a que está saindo e para a que espera a vez, mesmo mais barata (dias = ${dedupe}); depois da rodada vale a regra normal`, async (t) => {
+  // escolha preguiçosa (plano rodar-sozinho-entrega1, B5): a A só é escolhida depois que a 1ª sai; a que ainda não foi
+  // escolhida não barra (se o "Enviar" passar antes, a regra pula a dela: R1 em test/parecido-regras.test.js)
+  test(`Q1: o "Enviar" no meio de uma rodada recebe 409 "saindo agora" para a que está saindo, mesmo mais barata (dias = ${dedupe}); depois da rodada vale a regra normal`, async (t) => {
     const s = montar(t);
     const id = s.regra([linha(1, unico(1), 20), linha(2, A, 50)], { per: 2, dedupe });
     const igual = s.revisao(id, ML(2000001, A, 25));      // o mesmo título da que espera a vez, pela metade do preço
@@ -995,15 +996,12 @@ for (const dedupe of [7, 0]) {
     const reais = s.wa.sendText; let chamada = 0;
     s.wa.sendText = async (...a) => {
       chamada++;
-      if (chamada === 1) { await tentar('esperando-igual', igual); await tentar('esperando-parecida', parecida); } // a 1ª está saindo; a A espera a vez
-      if (chamada === 2) await tentar('saindo-igual', igual);                                                    // agora a A está saindo
+      if (chamada === 2) { await tentar('saindo-igual', igual); await tentar('saindo-parecida', parecida); } // a A está saindo
       return reais(...a);
     };
     await s.scheduler.runRule(id);
     assert.equal(chamada, 2);
-    assert.deepEqual(respostas, [
-      ['esperando-igual', `409 ${frase}`], ['esperando-parecida', `409 ${frase}`], ['saindo-igual', `409 ${frase}`],
-    ]);
+    assert.deepEqual(respostas, [['saindo-igual', `409 ${frase}`], ['saindo-parecida', `409 ${frase}`]]);
     assert.equal(s.reservas(id).length, 2, 'só as da regra foram gravadas');
     assert.equal(s.db.prepare('SELECT COUNT(*) AS n FROM envios').get().n, 0, 'e nenhum envio do Catálogo');
     // a rodada terminou: a A está em sent_offers. A parecida (outro título) espera as 24 h; o mesmo título, pela metade do preço, sai
@@ -1055,7 +1053,8 @@ test('Q5 (regra): a oferta que sobe na conferência fica 6 h fora da escolha, é
   const conferencias = () => s.eventos.filter((e) => e === 'conferir 9000001').length;
   const linhasConf = () => puladas(s, id).filter((m) => m.startsWith('Pulada: na conferência')).length;
   await s.scheduler.runRule(id);
-  assert.deepEqual([conferencias(), linhasConf(), s.textos().length], [1, 1, 0], 'rodada 0: conferida, pulada, com 1 linha');
+  assert.deepEqual([conferencias(), linhasConf(), s.textos().length], [1, 1, 1], 'rodada 0: conferida, pulada, com 1 linha; a vaga foi para a próxima (rodar-sozinho CA1.7)');
+  assert.equal(s.textos().some((x) => x.includes(POTES)), false);
   s.avancar(HORA);
   await s.scheduler.runRule(id);
   assert.ok(s.textos().length >= 1, 'a vaga foi para a próxima candidata');
@@ -1077,7 +1076,7 @@ test('Q5 (regra): se na nova conferência a loja voltou a ficar 5% abaixo, a ofe
   const id = regraCentral(s, { per: 1 });
   semear(s, id, 'MLB9999', POTES, 7400, HORA);
   await s.scheduler.runRule(id);
-  assert.equal(s.textos().length, 0);
+  assert.equal(s.textos().some((x) => x.includes(POTES)), false, 'pulada (a vaga foi para a próxima, rodar-sozinho CA1.7)');
   loja[9000001] = { price: 70.3, disponivel: true };
   s.avancar(7 * HORA);
   // por ordem da lista, a Central pode ter outra candidata na frente: roda até a POTES sair

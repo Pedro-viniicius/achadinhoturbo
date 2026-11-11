@@ -134,20 +134,21 @@ test('CA3: preço que caiu, ou subiu dentro do limite, sai com o preço da loja;
 
 // ------------------------------------------------------------------------------------------------- CA2, CA3, D6
 
-test('CA2/CA3/D6: esgotada e mais cara não saem, não pedem link nem são repostas; uma linha aviso por oferta', async () => {
-  const s = montar({ loja: { 9000001: { price: 69.9, disponivel: false }, 9000002: { price: 39.9, disponivel: true }, 9000003: { price: 299.9, disponivel: true } } });
+// a vaga da descartada é reposta pela próxima candidata (plano rodar-sozinho-entrega1, CA1.7; antes, D6 não repunha)
+test('CA2/CA3/D6: esgotada e mais cara não saem nem pedem link; a vaga vai às próximas; uma linha aviso por oferta', async () => {
+  const s = montar({ loja: { 9000001: { price: 69.9, disponivel: false }, 9000002: { price: 39.9, disponivel: true }, 9000003: { price: 299.9, disponivel: true }, 9000004: { price: 59.9, disponivel: true }, 9000005: { price: 89.9, disponivel: true } } });
   const id = regraCentral(s.db, { per: 3, grupos: ['111@g.us', '222@g.us'] });
 
   const r = await s.scheduler.runRule(id);
-  assert.deepEqual([r.offers, r.messages, r.errors, r.descartadas], [1, 2, 0, 2]);
-  assert.deepEqual(s.eventos, ['conferir 9000001', 'conferir 9000002', 'conferir 9000003', 'link 9000003'], 'descartada não pede link');
-  assert.deepEqual(titulos(s.wa), ['*Air Fryer 4L Antiaderente*', '*Air Fryer 4L Antiaderente*'], 'as descartadas não são repostas pela 4ª e 5ª');
+  assert.deepEqual([r.offers, r.messages, r.errors, r.descartadas], [3, 6, 0, 2]);
+  assert.deepEqual(s.eventos, ['conferir 9000001', 'conferir 9000002', 'conferir 9000003', 'link 9000003', 'conferir 9000004', 'link 9000004', 'conferir 9000005', 'link 9000005'], 'descartada não pede link');
+  assert.deepEqual(titulos(s.wa), ['*Air Fryer 4L Antiaderente*', '*Air Fryer 4L Antiaderente*', '*Garrafa Térmica Inox 1L*', '*Garrafa Térmica Inox 1L*', '*Jogo de Toalhas 4 Peças*', '*Jogo de Toalhas 4 Peças*'], 'as descartadas são repostas pela 4ª e 5ª');
   const avisos = logs(s.db, id).filter((l) => l.level === 'aviso');
   assert.deepEqual(avisos, [
     { level: 'aviso', group_name: null, offer_title: 'Kit 10 Potes Herméticos de Vidro', message: 'Descartada: esgotado na loja' },
     { level: 'aviso', group_name: null, offer_title: 'Organizador de Gaveta Dobrável', message: 'Descartada: preço subiu de R$ 29,90 para R$ 39,90 (+33%, o limite é 5%)' },
   ]);
-  assert.deepEqual(enviadas(s.db, id), ['MLB9000003'], 'descartada não entra em sent_offers');
+  assert.deepEqual(enviadas(s.db, id), ['MLB9000003', 'MLB9000004', 'MLB9000005'], 'descartada não entra em sent_offers');
   semErro(s.db, id);
 });
 
@@ -158,23 +159,24 @@ test('D6: a descartada fica 6 h fora da escolha da regra (sem nova leitura da lo
   const outra = regraCentral(s.db, { per: 1 });
 
   await s.scheduler.runRule(id);
-  assert.deepEqual(s.wa.simulated.length, 0, '1ª execução: a única escolhida estava esgotada');
+  assert.deepEqual(s.eventos, ['conferir 9000001', 'conferir 9000002', 'link 9000002'], '1ª execução: a 1ª escolhida estava esgotada e a vaga foi para a próxima');
   s.eventos.length = 0;
 
   t.mock.timers.setTime(dia(2, 10, 0) + PAUSA_DESCARTADA_H * HORA - 60000);
   await s.scheduler.runRule(id);
-  assert.deepEqual(s.eventos, ['conferir 9000002', 'link 9000002'], 'a esgotada nem é lida de novo antes de 6 h');
-  assert.deepEqual(enviadas(s.db, id), ['MLB9000002']);
+  assert.deepEqual(s.eventos, ['conferir 9000003', 'link 9000003'], 'a esgotada nem é lida de novo antes de 6 h');
+  assert.deepEqual(enviadas(s.db, id), ['MLB9000002', 'MLB9000003']);
 
   // a pausa é da regra: outra regra escolhe a mesma oferta e a confere
   s.eventos.length = 0;
   await s.scheduler.runRule(outra);
-  assert.deepEqual(s.eventos, ['conferir 9000001'], 'outra regra confere a oferta de novo');
+  assert.deepEqual(s.eventos.slice(0, 1), ['conferir 9000001'], 'outra regra confere a oferta de novo');
 
   s.eventos.length = 0;
   t.mock.timers.setTime(dia(2, 10, 0) + PAUSA_DESCARTADA_H * HORA + 1000);
   await s.scheduler.runRule(id);
-  assert.deepEqual(s.eventos, ['conferir 9000001'], 'depois de 6 h ela volta à escolha (e segue esgotada)');
+  assert.deepEqual(s.eventos.slice(0, 1), ['conferir 9000001'], 'depois de 6 h ela volta à escolha (e segue esgotada)');
+  assert.deepEqual(s.eventos.slice(1), ['conferir 9000004', 'link 9000004'], 'e a vaga vai à próxima que a regra ainda não enviou');
 });
 
 // ------------------------------------------------------------------------------------------------------- CA4
@@ -208,8 +210,11 @@ test('CA4: lista com preço digitado (idade desconhecida) sem conferência não 
   const r = await s.scheduler.runRule(id);
   assert.deepEqual([r.offers, r.messages, r.errors, r.descartadas], [1, 1, 0, 1]);
   assert.deepEqual(s.eventos, ['conferir 1000001', 'conferir 1000002', 'link 1000002'], 'a lista velha não pede link');
-  assert.deepEqual(logs(s.db, id).filter((l) => l.level === 'aviso').map((l) => [l.offer_title, l.message]),
-    [['Fone A', 'Descartada: não deu para conferir o preço (a loja não respondeu)']]);
+  assert.deepEqual(logs(s.db, id).filter((l) => l.level === 'aviso').map((l) => [l.offer_title, l.message]), [
+    ['Fone A', 'Descartada: não deu para conferir o preço (a loja não respondeu)'],
+    // a regra pediu 3 (rodar-sozinho CA1.8)
+    [null, 'Saíram 1 de 3 ofertas; 1 descartada (preço sem conferência); não havia mais ofertas novas dentro dos filtros.'],
+  ]);
   assert.ok(s.wa.simulated[0].text.includes('R$ 30,00'), 'preço digitado à mão é mantido (CA3)');
   assert.equal(logs(s.db, id).find((l) => l.level === 'ok').message, 'Enviado com a etiqueta etiquetaA');
   assert.deepEqual(enviadas(s.db, id), ['MLB1000002']);
@@ -245,6 +250,7 @@ test('CA4/CA2: catálogo sem conferência vai à revisão (nao_conferido); esgot
     ['Produto 1', 'Separada para revisão: não deu para conferir o preço (a loja não respondeu).'],
     ['Produto 2', 'Descartada: esgotado na loja'],
     ['Produto 3', 'Separada para revisão: não deu para conferir o preço (a API da Amazon não está ligada).'],
+    [null, 'Saíram 1 de 5 ofertas; 1 descartada (esgotada na loja), 2 separadas para revisão; não havia mais ofertas novas dentro dos filtros.'],
   ]);
   assert.deepEqual(titulos(s.wa), ['*Produto 4*']);
   assert.ok(s.wa.simulated[0].text.includes('R$ 95,00') && !s.wa.simulated[0].text.includes('R$ 100,00'), 'sai com o preço conferido');
@@ -260,7 +266,8 @@ test('CA4/CA2: catálogo sem conferência vai à revisão (nao_conferido); esgot
 
 // --------------------------------------------------------------------------------------------- grade (CA7 da grade)
 
-test('grade: a frase "saíram N de M" cita as descartadas pelo verificador (que não são repostas)', async (t) => {
+// a vaga da descartada é reposta (plano rodar-sozinho-entrega1, CA1.7): a frase só sai quando falta oferta (CA1.8)
+test('grade: a descartada pelo verificador é reposta; a frase "saíram N de M" cita as descartadas quando falta', async (t) => {
   t.mock.timers.enable({ apis: ['Date'], now: dia(2, 10, 0) });
   const s = montar({ loja: { 9000001: { price: 69.9, disponivel: false }, 9000002: { price: 29.9, disponivel: true }, 9000003: { price: 299.9, disponivel: true }, 9000004: { price: 59.9, disponivel: true }, 9000005: { price: 89.9, disponivel: true } } });
   const id = regraCentral(s.db, { per: 1 });
@@ -270,15 +277,15 @@ test('grade: a frase "saíram N de M" cita as descartadas pelo verificador (que 
   const avisoDaGrade = () => s.db.prepare("SELECT message FROM log WHERE rule_id = ? AND level = 'aviso' AND message LIKE 'Horário%' ORDER BY id DESC").get(id)?.message;
 
   await s.scheduler.tick();
-  assert.equal(s.wa.simulated.length, 2);
-  assert.equal(avisoDaGrade(), 'Horário 10:00: saíram 2 de 3 ofertas; 1 descartada na conferência de preço e estoque.');
+  assert.equal(s.wa.simulated.length, 3, 'a 4ª ocupou a vaga da esgotada');
+  assert.equal(avisoDaGrade(), undefined, 'saíram as 3: sem a frase');
 
-  // 11:00 pede 8: sobram 2 novas (a esgotada está em pausa), e o motivo das duas faltas aparece
+  // 11:00 pede 8: sobra 1 nova (a esgotada está em pausa), e o motivo da falta aparece
   t.mock.timers.setTime(dia(2, 11, 0));
   s.eventos.length = 0;
   await s.scheduler.tick();
   assert.equal(s.wa.simulated.length, 4);
-  assert.equal(avisoDaGrade(), 'Horário 11:00: saíram 2 de 8 ofertas; não havia mais ofertas novas dentro dos filtros.');
+  assert.equal(avisoDaGrade(), 'Horário 11:00: saíram 1 de 8 ofertas; não havia mais ofertas novas dentro dos filtros.');
 });
 
 test('grade: descartadas e falta de ofertas na mesma frase', async (t) => {
@@ -291,7 +298,7 @@ test('grade: descartadas e falta de ofertas na mesma frase', async (t) => {
   await s.scheduler.tick();
   assert.equal(s.wa.simulated.length, 3);
   const msg = s.db.prepare("SELECT message FROM log WHERE rule_id = ? AND message LIKE 'Horário%'").get(id).message;
-  assert.equal(msg, 'Horário 10:00: saíram 3 de 8 ofertas; 2 descartadas na conferência de preço e estoque e não havia mais ofertas novas dentro dos filtros.');
+  assert.equal(msg, 'Horário 10:00: saíram 3 de 8 ofertas; 2 descartadas (esgotada na loja); não havia mais ofertas novas dentro dos filtros.');
 });
 
 // ------------------------------------------------------------------------------------------------------- D9

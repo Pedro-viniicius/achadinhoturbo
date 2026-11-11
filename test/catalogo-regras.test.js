@@ -330,7 +330,8 @@ test('CA6: catálogo só Amazon/Shopee dispensa a etiqueta do ML; com ML (ou tod
 
 // --------------------------------------------------------------------------------------------------------- CA7
 
-test('CA7: desconto de 100% ou preço antigo ≥ 10× vai à revisão (conta no "por envio"); revisão cheia faz esperar', async (t) => {
+// a separada para revisão não ocupa a vaga: ela é reposta (plano rodar-sozinho-entrega1, CA1.7)
+test('CA7: desconto de 100% ou preço antigo ≥ 10× vai à revisão (a vaga é reposta); revisão cheia faz esperar', async (t) => {
   const s = await montar(t, {
     ofertas: [
       oferta(1, 'amazon', { desconto_pct: 100 }),
@@ -341,13 +342,15 @@ test('CA7: desconto de 100% ou preço antigo ≥ 10× vai à revisão (conta no 
   });
   const id = regra(s.db, { cfg: { ordem: 'relevancia' }, per: 3 });
   const r = await s.scheduler.runRule(id);
-  assert.deepEqual([r.offers, r.revisao], [1, 2], 'as duas suspeitas ocupam vagas do "por envio"');
+  assert.deepEqual([r.offers, r.revisao], [2, 2], 'as duas suspeitas vão à revisão e as vagas vão às seguintes');
   assert.deepEqual(itens(s.db, id).map((i) => [i.chave, i.status, i.motivos]), [
     [`ASIN:${asin(1)}`, 'revisao', ['desconto_100']],
     [`ASIN:${asin(2)}`, 'revisao', ['preco_antigo']],
     [`ASIN:${asin(3)}`, 'enviado', []],
+    [`ASIN:${asin(4)}`, 'enviado', []],
   ]);
-  assert.equal(s.wa.simulated.length, 1);
+  assert.equal(s.wa.simulated.length, 2);
+  assert.ok(logs(s.db, id).some((l) => l.message === 'Saíram 2 de 3 ofertas; 2 separadas para revisão; não havia mais ofertas novas dentro dos filtros.'));
   assert.ok(logs(s.db, id).some((l) => l.message === 'Separada para revisão: desconto de 100%, confira o preço.'));
 
   // revisão cheia (TETO_REVISAO pendentes): a suspeita nova espera, sem entrar nem ocupar a vaga; a normal sai

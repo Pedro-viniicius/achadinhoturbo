@@ -98,10 +98,12 @@ const semear = (db, ruleId, { key, titulo, preco = null, em }) => db.prepare('IN
   .run(ruleId, key, em, titulo, preco);
 
 const logs = (db, id) => db.prepare('SELECT level, group_name, offer_title, message FROM log WHERE rule_id = ? ORDER BY id').all(id).map((l) => ({ ...l }));
-const infos = (db, id) => logs(db, id).filter((l) => l.level === 'info' && l.message !== 'Sem ofertas novas dentro dos filtros desta vez.');
+// as linhas da trava; a contagem das candidatas que ficaram de fora (plano rodar-sozinho-entrega1, B5) fica de fora como a "Sem ofertas"
+const infos = (db, id) => logs(db, id).filter((l) => l.level === 'info' && l.message !== 'Sem ofertas novas dentro dos filtros desta vez.' && !l.message.startsWith('Antes da escolha, '));
 const enviadas = (db, id) => db.prepare('SELECT offer_key, title, price_cents FROM sent_offers WHERE rule_id = ? ORDER BY id').all(id).map((l) => ({ ...l }));
 const textos = (wa) => wa.simulated.map((m) => m.text);
-const semAlerta = (db, id) => assert.deepEqual(logs(db, id).filter((l) => l.level === 'erro' || l.level === 'aviso'), [], 'só linhas info');
+// a frase "Saíram X de Y" (aviso, plano rodar-sozinho-entrega1, B5) é da execução que saiu com menos que o pedido, não da trava
+const semAlerta = (db, id) => assert.deepEqual(logs(db, id).filter((l) => (l.level === 'erro' || l.level === 'aviso') && !l.message.startsWith('Saíram ')), [], 'só linhas info');
 /** CA6: as linhas novas não trazem grupo, número nem JID. */
 const semDadoPessoal = (linhas) => {
   for (const l of linhas) {
@@ -314,16 +316,17 @@ const POTES = 'Kit 10 Potes Herméticos de Vidro';
 // 95% de R$ 74,00 = R$ 70,30: com o anterior a 74,00, os 69,90 da Central passam na escolha
 const PRECO_POTES_ANTES = 7400;
 
-test('regra 8: o verificador sobe o preço (4%) acima do mínimo → pulada, sem link e sem envio', async (t) => {
-  const s = montar(t, { verificar: true, loja: { 9000001: { price: 72.5, disponivel: true } } });
+test('regra 8: o verificador sobe o preço (4%) acima do mínimo → pulada, sem link e sem envio; a vaga vai à próxima candidata', async (t) => {
+  const s = montar(t, { verificar: true, loja: { 9000001: { price: 72.5, disponivel: true }, 9000002: { price: 29.9, disponivel: true } } });
   const id = regraCentral(s.db, { per: 1 });
   semear(s.db, id, { key: 'MLB9999', titulo: POTES, preco: PRECO_POTES_ANTES, em: AGORA - 3 * HORA }); // 69,90 ≤ 70,30: passa na escolha
 
   const r = await s.scheduler.runRule(id);
-  assert.deepEqual([r.offers, r.messages, r.errors, r.descartadas], [0, 0, 0, 0]);
-  assert.deepEqual(s.eventos, ['conferir 9000001'], 'conferiu e não pediu link');
-  assert.equal(s.wa.simulated.length, 0);
-  assert.equal(enviadas(s.db, id).length, 1, 'nada novo em sent_offers');
+  assert.deepEqual([r.offers, r.messages, r.errors, r.descartadas, r.puladas], [1, 1, 0, 0, 1]);
+  assert.deepEqual(s.eventos, ['conferir 9000001', 'conferir 9000002', 'link 9000002'], 'a dos potes foi conferida e não pediu link; a vaga foi reposta (rodar-sozinho CA1.7)');
+  assert.equal(s.wa.simulated.length, 1);
+  assert.equal(textos(s.wa)[0].includes(POTES), false, 'os potes não saíram');
+  assert.deepEqual(enviadas(s.db, id).map((e) => e.offer_key), ['MLB9999', 'MLB9000002'], 'os potes não entram em sent_offers');
   assert.deepEqual(infos(s.db, id).map((l) => [l.offer_title, l.message]), [[POTES,
     `Pulada: na conferência o preço ficou em R$ 72,50, que não é pelo menos 5% menor que o de "${POTES}" (R$ 74,00, às 11:00).`]]);
   semDadoPessoal(infos(s.db, id));
@@ -351,13 +354,14 @@ test('regra 8 (D11): limite exato dos 5% na conferência: R$ 70,30 contra R$ 74,
       const id = regraCentral(s.db, { per: 1 });
       semear(s.db, id, { key: 'MLB9999', titulo: POTES, preco: PRECO_POTES_ANTES, em: AGORA - 3 * HORA });
       const r = await s.scheduler.runRule(id);
-      assert.equal(r.messages, sai ? 1 : 0);
+      assert.equal(r.messages, 1, 'a pulada dá a vaga à próxima candidata (rodar-sozinho CA1.7)');
       if (sai) {
         assert.ok(textos(s.wa)[0].startsWith(`${FRASE_MAIS_BARATA}\n\n*${POTES}*\nR$ 70,30`));
         assert.equal(infos(s.db, id).at(-1).message, `Saiu como oportunidade melhor: o mesmo produto saiu às 11:00 por R$ 74,00 ("${POTES}"); agora por R$ 70,30.`);
       } else {
-        assert.equal(s.wa.simulated.length, 0);
-        assert.deepEqual(s.eventos, ['conferir 9000001'], 'sem link');
+        assert.equal(textos(s.wa)[0].includes(POTES), false, 'os potes não saem');
+        assert.equal(s.eventos[0], 'conferir 9000001');
+        assert.equal(s.eventos.includes('link 9000001'), false, 'sem link para os potes');
         assert.equal(infos(s.db, id).at(-1).message, `Pulada: na conferência o preço ficou em R$ 70,31, que não é pelo menos 5% menor que o de "${POTES}" (R$ 74,00, às 11:00).`);
       }
     });
@@ -548,7 +552,7 @@ test('catálogo (Novidades): a barrada não prende o cursor; as outras seguem', 
   assert.equal(infos(s.db, id).length, 2, 'nada de novo: a 5 não volta mais');
 });
 
-test('catálogo (Novidades), R1: a escolhida da rodada esgota na loja; a parecida pulada sai na execução seguinte', async (t) => {
+test('catálogo (Novidades), R1: a escolhida da rodada esgota na loja; a parecida sai na mesma execução (a que caiu não barra, rodar-sozinho CA1.12)', async (t) => {
   const loja = { 4000000004: { price: 49.9, disponivel: false }, 4000000005: { price: 59.9, disponivel: true } };
   const s = montarCatalogo(t, { verificar: true, loja, ofertas: [oferta(1, D, 10, 'ml')] });
   const cfg = { lojas: ['ml'] };
@@ -557,14 +561,13 @@ test('catálogo (Novidades), R1: a escolhida da rodada esgota na loja; a parecid
   s.estado.ofertas.push(oferta(4, B, 49.9, 'ml'), oferta(5, A, 59.9, 'ml'));
 
   const r = await s.scheduler.runRule(id);
-  assert.deepEqual([r.offers, r.messages, r.descartadas], [0, 0, 1], 'a 4 (escolhida) esgotou na conferência');
-  assert.deepEqual(infos(s.db, id).map((l) => l.message), [`Pulada: parecida com "${B}", que foi escolhida neste mesmo envio.`]);
-
-  t.mock.timers.setTime(AGORA + 60 * 60000);
-  const r2 = await s.scheduler.runRule(id);
-  assert.deepEqual([r2.offers, r2.messages], [1, 1], 'a 5 volta e sai: a 4 não saiu');
+  assert.deepEqual([r.offers, r.messages, r.descartadas], [1, 1, 1], 'a 4 (escolhida) esgotou na conferência e a 5 ocupou a vaga');
+  assert.deepEqual(infos(s.db, id).filter((l) => l.message.startsWith('Pulada')), [], 'a 4 foi devolvida antes da próxima escolha: a 5 não é barrada');
   assert.ok(s.wa.simulated[0].text.startsWith(`*${A}*`), 'sem a frase: nada parecido saiu antes');
   assert.deepEqual(enviadas(s.db, id).map((e) => e.title), [A]);
+
+  t.mock.timers.setTime(AGORA + 60 * 60000);
+  assert.equal((await s.scheduler.runRule(id)).offers, 0, 'a 4 descartada não volta e a 5 já saiu');
 });
 
 // --------------------------------------------------------------------- R4/S1: uma linha "Pulada" por conflito
@@ -595,15 +598,26 @@ test('R4/S1: o mesmo título com outra chave fica barrado pelos dias da regra co
   assert.equal(mesmo.length, 2, 'em 2 dias, uma linha por candidata (as duas chaves)');
 });
 
-test('R4/S1: a pulada da mesma rodada também é dita uma vez (a escolhida não sai: link falha a cada execução)', async (t) => {
+// Com a escolha preguiçosa (plano rodar-sozinho-entrega1, B5), só uma escolhida que saiu barra a da mesma rodada: a que
+// cai fora é devolvida antes da próxima escolha. Com "dias sem repetir" = 0, a mesma escolhida sai a cada execução e
+// barra a parecida de novo, sempre pelo mesmo conflito
+test('R4/S1: a pulada da mesma rodada também é dita uma vez (dias = 0: a escolhida sai a cada execução)', async (t) => {
+  const s = montar(t);
+  const id = regraLista(s.db, [linha(1, A, 59.9), linha(2, B, 49.9)], { per: 2, dedupe: 0 });
+  for (let i = 0; i < 3; i++) { await s.scheduler.runRule(id); t.mock.timers.setTime(Date.now() + HORA); }
+  assert.deepEqual(textos(s.wa).map((x) => x.split('\n')[0]), [`*${A}*`, `*${A}*`, `*${A}*`]);
+  const rodada = infos(s.db, id).filter((l) => l.message.endsWith('que foi escolhida neste mesmo envio.'));
+  assert.deepEqual(rodada.map((l) => l.offer_title), [B], '3 execuções, 1 linha');
+});
+
+test('R4/S1 (rodar-sozinho CA1.12): a escolhida cujo link falha é devolvida; a parecida sai na mesma execução, sem linha de "mesmo envio"', async (t) => {
   const s = montar(t);
   const pedir = s.links.requestLink;
   s.links.requestLink = async (p) => { if (String(p.url).includes('MLB-1000001')) throw new Error('falha de teste'); return pedir(p); };
   const id = regraLista(s.db, [linha(1, A, 59.9), linha(2, B, 49.9)], { per: 2 });
-  for (let i = 0; i < 3; i++) { await s.scheduler.runRule(id); t.mock.timers.setTime(Date.now() + HORA); }
-  assert.equal(s.wa.simulated.length, 0);
-  const rodada = infos(s.db, id).filter((l) => l.message.endsWith('que foi escolhida neste mesmo envio.'));
-  assert.deepEqual(rodada.map((l) => l.offer_title), [B], '3 execuções, 1 linha');
+  await s.scheduler.runRule(id);
+  assert.deepEqual(textos(s.wa).map((x) => x.split('\n')[0]), [`*${B}*`]);
+  assert.deepEqual(infos(s.db, id).filter((l) => l.message.startsWith('Pulada')), []);
 });
 
 // ------------------------------------------------------------------- achado Q1: "Enviar" do Catálogo no meio da execução
@@ -618,23 +632,26 @@ const tentar = (s, item) => s.catalogoItens.enviar(item, {}).then(() => 'enviou'
 const saindoAgora = (titulo) => `409 Não enviada: parecida com "${titulo}", que está saindo agora por este disparo. Tente de novo em alguns minutos.`;
 const D_PARECIDO = 'Liquidificador Philco 900W Velocidades Preto';
 
-test('Q1: no meio da execução, a escolhida que está saindo e a que espera a vez barram o "Enviar" (mesmo mais barata); a pulada não; depois vale sent_offers', async (t) => {
+// Escolha preguiçosa (plano rodar-sozinho-entrega1, B5): a próxima só é escolhida quando a anterior saiu ou caiu fora,
+// então não há mais "a que espera a vez" (a que ainda não foi escolhida não barra; se o "Enviar" passar antes, a regra
+// pula a dela, testes R1 abaixo)
+test('Q1: no meio da execução, a escolhida que está saindo barra o "Enviar" (mesmo mais barata); a que caiu fora não; depois vale sent_offers', async (t) => {
   const s = montarCatalogo(t);
   const pedir = s.links.requestLink;
   s.links.requestLink = async (p) => { if (String(p.url).includes('MLB-1000002')) throw new Error('falha de teste'); return pedir(p); };
-  const id = regraLista(s.db, [linha(1, C, 199.9), linha(2, D, 120), linha(3, A, 50)], { per: 3 });
+  const id = regraLista(s.db, [linha(3, A, 50), linha(2, D, 120), linha(1, C, 199.9)], { per: 3 });
   const b = naRevisao(s, id, itemML(2000001, A, 40)); // o mesmo título, com outra chave
   const liq = naRevisao(s, id, itemML(2000002, D_PARECIDO, 99));
   const reais = s.wa.sendText;
   const durante = [];
   s.wa.sendText = async (...a) => {
-    durante.push(await tentar(s, b)); // 1º envio (C): A espera a vez; 2º (A): A está saindo
-    if (durante.length === 2) durante.push(await tentar(s, liq)); // a D foi pulada (link falhou): não está saindo
+    if (!durante.length) durante.push(await tentar(s, b)); // 1º envio (A): A está saindo
+    else durante.push(await tentar(s, liq)); // 2º (C): a D caiu fora (link falhou) e foi devolvida: não está saindo
     return reais(...a);
   };
   const r = await s.scheduler.runRule(id);
   assert.deepEqual([r.offers, r.messages], [2, 2]);
-  assert.deepEqual(durante, [saindoAgora(A), saindoAgora(A), 'enviou']);
+  assert.deepEqual(durante, [saindoAgora(A), 'enviou']);
   s.wa.sendText = reais;
   assert.equal(await tentar(s, b), 'enviou', 'terminada a execução, a A está em sent_offers por R$ 50,00 e o item (R$ 40,00) está pelo menos 5% abaixo');
   const payload = JSON.parse(s.db.prepare("SELECT payload FROM envios WHERE payload LIKE '%MLB2000001%'").get().payload);
@@ -646,13 +663,11 @@ test('Q1: a execução parada pelo teto no meio não deixa nada "saindo agora" (
   s.db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('wa_limite_hora', '1');
   const id = regraLista(s.db, [linha(1, C, 199.9), linha(3, A, 50)], { per: 2 });
   const b = naRevisao(s, id, itemML(2000001, B, 50));
-  const reais = s.wa.sendText;
-  let durante = null;
-  s.wa.sendText = async (...a) => { durante = await tentar(s, b); return reais(...a); };
+  // a A é escolhida depois que a C sai e para no teto antes da conferência (escolha preguiçosa, rodar-sozinho B5)
   const r = await s.scheduler.runRule(id);
   assert.deepEqual([r.offers, r.parou], [1, 'limite']);
-  assert.equal(durante, saindoAgora(A), 'durante o envio da C, a A esperava a vez');
-  s.wa.sendText = reais;
+  assert.deepEqual(s.db.prepare("SELECT message FROM log WHERE rule_id = ? AND message LIKE 'Saíram%'").all(id).map((l) => l.message),
+    ['Saíram 1 de 2 ofertas; o limite de 1 mensagens por hora encheu.'], 'a A foi escolhida e parou no teto');
   assert.equal(await tentar(s, b), 'enviou', 'a A não saiu nem está saindo: a B passa');
 });
 
@@ -664,13 +679,16 @@ test('Q1: a execução parada pelo teto no meio não deixa nada "saindo agora" (
  */
 const mlComEspera = (antes) => ({ ...mlReal, resolveOffer: async (c, deps) => { await antes(c); return mlReal.resolveOffer(c, deps); } });
 
-test('R1: o "Enviar" no meio da escolha recebe 409 "saindo agora" para a parecida (ou o mesmo título mais barato) de uma escolhida antes; a regra manda a dela', async (t) => {
+// Com a escolha preguiçosa (rodar-sozinho B5), a escolhida sai antes de a próxima candidata ser lida: o "Enviar" que cai
+// entre a escolha e o envio dela (conferência, link) é o que a "saindo agora" barra
+test('R1: o "Enviar" entre a escolha e o envio (conferência, link) recebe 409 "saindo agora" para a parecida (ou o mesmo título mais barato) da escolhida; a regra manda a dela', async (t) => {
   const durante = [];
-  let s = null; let itens = [];
-  // A já foi escolhida quando a regra lê a 2ª candidata (C)
-  s = montarCatalogo(t, { ml: mlComEspera(async (c) => { if (String(c.url).includes('MLB-1000002')) for (const i of itens) durante.push(await tentar(s, i)); }) });
+  const s = montarCatalogo(t);
   const id = regraLista(s.db, [linha(1, A, 50), linha(2, C, 199.9)], { per: 2 });
-  itens = [naRevisao(s, id, itemML(2000001, B, 50)), naRevisao(s, id, itemML(2000002, A, 40))];
+  const itens = [naRevisao(s, id, itemML(2000001, B, 50)), naRevisao(s, id, itemML(2000002, A, 40))];
+  const pedir = s.links.requestLink;
+  // a A já foi escolhida quando a regra pede o link dela
+  s.links.requestLink = async (p) => { if (String(p.url).includes('MLB-1000001')) for (const i of itens) durante.push(await tentar(s, i)); return pedir(p); };
   const r = await s.scheduler.runRule(id);
   assert.deepEqual(durante, [saindoAgora(A), saindoAgora(A)]);
   assert.deepEqual([r.offers, r.messages], [2, 2]);
@@ -787,11 +805,12 @@ test('Q5: no catálogo (Relevância), a pulada na conferência fica fora da esco
   const id = regraCatalogo(s.db, { per: 1 });
   semear(s.db, id, { key: 'MLB4000000009', titulo: A, preco: 5000, em: AGORA - 3 * HORA });
   const r1 = await s.scheduler.runRule(id);
-  assert.deepEqual([r1.offers, s.wa.simulated.length], [0, 0], 'a vaga desta execução ficou com a 1 (pulada)');
+  // vaga reposta na mesma execução (plano rodar-sozinho-entrega1, CA1.7)
+  assert.deepEqual([r1.offers, r1.puladas, s.wa.simulated.length], [1, 1, 1], 'a 1 foi pulada e a vaga foi para a próxima');
+  assert.ok(s.wa.simulated[0].text.includes(`*${C}*`), 'a próxima candidata sai');
   t.mock.timers.setTime(Date.now() + HORA);
   const r2 = await s.scheduler.runRule(id);
-  assert.equal(r2.offers, 1);
-  assert.ok(s.wa.simulated[0].text.includes(`*${C}*`), 'a próxima candidata sai');
+  assert.equal(r2.offers, 0, 'a 1 segue fora da escolha e a 2 já saiu');
   assert.deepEqual(s.eventos.filter((e) => e.startsWith('conferir')), ['conferir 4000000001', 'conferir 4000000002'], 'a 1 não foi conferida de novo');
   assert.equal(infos(s.db, id).filter((l) => l.message.startsWith('Pulada: na conferência')).length, 1);
 });

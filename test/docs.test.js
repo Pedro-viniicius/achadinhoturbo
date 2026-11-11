@@ -1480,15 +1480,18 @@ test('Grade: as frases do Histórico citadas nos Docs e no README são as que o 
     assert.match(txt, new RegExp(`\\d+ horários pulados \\(\\d\\d:\\d\\d a \\d\\d:\\d\\d\\): ${escRe(motivo)}`), `${onde}: vários pulados`);
     assert.match(txt, new RegExp(`\\d+ horários pulados \\(\\d\\d:\\d\\d de \\d\\d/\\d\\d a \\d\\d:\\d\\d\\): ${escRe(motivo)}`), `${onde}: vários pulados desde outro dia`);
     assert.match(txt, /Horário 10:00: saíram 5 de 8 ofertas; não havia mais ofertas novas dentro dos filtros\./, `${onde}: saíram N de M`);
-    assert.match(txt, /Horário 10:00: saíram 4 de 5 ofertas; 1 descartada na conferência de preço e estoque\./, `${onde}: saíram N de M com descartadas do verificador`);
+    assert.match(txt, /Horário 10:00: saíram 4 de 5 ofertas; 1 descartada \(esgotada na loja\); não havia mais ofertas novas dentro dos filtros\./, `${onde}: saíram N de M com descartadas do verificador`);
     assert.match(txt, /Horário 10:00: o template escolhido para este horário não existe mais\. As ofertas saíram com o template da regra\./, `${onde}: template apagado`);
     assert.match(txt, /A regra "[^"]+" usa este template no horário \d\d:\d\d\./, `${onde}: template em uso`);
   }
   // e o código ainda escreve exatamente isso
   assert.ok(sched.includes('Horário ${quandoDe(pulados[0], agora)} pulado')); assert.ok(sched.includes('${pulados.length} horários pulados ('));
   assert.ok(sched.includes('${quandoDe(pulados[0], agora)} a ${quandoDe(pulados.at(-1), agora)})')); assert.ok(sched.includes('return `${horaDe(ts)} de ${pad2(d.getDate())}/${pad2(d.getMonth() + 1)}`;'), 'outro dia: "10:00 de 03/11"');
-  assert.ok(sched.includes('aíram ${summary.offers} de ${want} ofertas; não havia mais ofertas novas dentro dos filtros.'));
-  assert.ok(sched.includes("${n} ${n === 1 ? 'descartada' : 'descartadas'} na conferência de preço e estoque"), 'a frase com as descartadas do verificador');
+  // a frase "saíram X de Y" (plano rodar-sozinho-entrega1, CA1.8): pedaços na ordem pulada, descartada, revisão e o fim
+  assert.ok(sched.includes('return `aíram ${saidas} de ${want} ofertas${pedacos.length ? `; ${pedacos.join(\', \')}` : \'\'}${fim ? `; ${fim}` : \'\'}.`;'));
+  assert.ok(sched.includes("acabou ? 'não havia mais ofertas novas dentro dos filtros'"));
+  assert.ok(sched.includes("pedacoDeFalta(descartadas, 'descartada', 'descartadas', faltas.descartada)"), 'a frase com as descartadas do verificador');
+  assert.ok(sched.includes("esgotado: 'esgotada na loja'"), 'o motivo do exemplo dos Docs');
   assert.ok(sched.includes('o template escolhido para este horário não existe mais. As ofertas saíram com o template da regra.'));
   assert.ok(server.includes('A regra "${naGrade.regra}" usa este template no horário ${naGrade.hora}.'));
 });
