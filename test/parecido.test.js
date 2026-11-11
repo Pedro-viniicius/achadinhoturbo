@@ -396,6 +396,41 @@ test('trava: as escolhidas de uma execução não vazam para outra trava', () =>
   assert.equal(trava([], 7).avaliar({ key: 'K2', title: AREIA_MISTA, price: 1 }), null);
 });
 
+test('trava (CA1.12): retirar libera a parecida da rodada; o resto da rodada continua valendo', () => {
+  const t = trava([], 7);
+  t.acrescentar({ key: 'K1', title: AREIA_FINA });
+  t.acrescentar({ key: 'K5', title: SHAMPOO });
+  assert.equal(t.avaliar({ key: 'K2', title: AREIA_MISTA, price: 10 }).tipo, 'rodada', 'antes: barrada');
+  assert.equal(t.retirar('K1'), true);
+  assert.equal(t.avaliar({ key: 'K2', title: AREIA_MISTA, price: 10 }), null, 'a escolhida que caiu não barra mais a parecida');
+  // a outra escolhida segue barrando as parecidas dela
+  assert.equal(t.avaliar({ key: 'K6', title: SHAMPOO, price: 10 }).tipo, 'rodada');
+  // retirar de novo, chave que não está na rodada, sem argumento e de título curto: não lança e diz que nada saiu
+  assert.equal(t.retirar('K1'), false);
+  assert.equal(t.retirar('K404'), false);
+  assert.equal(t.retirar(), false);
+  t.acrescentar({ key: 'K7', title: 'Fone Bom' });
+  assert.equal(t.retirar('K7'), false, 'título curto nunca foi registrado');
+  // a chave é comparada como texto, como no acrescentar
+  const n = trava([], 7);
+  n.acrescentar({ key: 42, title: AREIA_FINA });
+  assert.equal(n.retirar(42), true);
+  assert.equal(n.avaliar({ key: 'K2', title: AREIA_MISTA, price: 10 }), null);
+  // a mesma oferta escolhida de novo depois de retirada volta a barrar
+  n.acrescentar({ key: 'K1', title: AREIA_FINA });
+  assert.equal(n.avaliar({ key: 'K2', title: AREIA_MISTA, price: 10 }).tipo, 'rodada');
+});
+
+test('trava (CA1.12): retirar mexe só na rodada; o histórico de enviados continua barrando', () => {
+  const t = trava([envio('K0', AREIA_FINA, 4990, AGORA - 2 * H)], 7);
+  t.acrescentar({ key: 'K1', title: AREIA_FINA_2 });
+  assert.equal(t.retirar('K1'), true);
+  assert.equal(t.retirar('K0'), false, 'K0 é do histórico, não da rodada');
+  const r = t.avaliar({ key: 'K2', title: AREIA_MISTA, price: 49.9 });
+  assert.equal(r.acao, 'barrar');
+  assert.equal(r.tipo, 'parecido');
+});
+
 test('trava: limiar e horas são ajustáveis', () => {
   const enviados = [envio('K1', AREIA_FINA, 4990, AGORA - 30 * H)];
   assert.equal(trava(enviados, 7).avaliar({ key: 'K2', title: AREIA_MISTA, price: 60 }), null);

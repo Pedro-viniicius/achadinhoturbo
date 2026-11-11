@@ -98,7 +98,8 @@ export function lerEnviados(db, ruleId, desde) {
  *                                                            DESCONTO_MINIMO_MAIS_BARATA% mais barato, só entre
  *                                                            rodadas e só se nenhum conflito for 'parecido' (D10).
  * `anterior.preco` em centavos (null se desconhecido); na 'rodada', `preco` e `sent_at` são null.
- * `acrescentar` registra a oferta escolhida nesta execução (a "mesma rodada").
+ * `acrescentar` registra a oferta escolhida nesta execução (a "mesma rodada"); `retirar(key)` desfaz isso quando a
+ * escolhida caiu fora (descartada, pulada) e não vai sair.
  */
 export function criarTrava({ enviados = [], agora, dedupeDias, limiar = LIMIAR_PARECIDO, horas = HORAS_ENTRE_PARECIDOS } = {}) {
   const dias = Number(dedupeDias);
@@ -158,6 +159,16 @@ export function criarTrava({ enviados = [], agora, dedupeDias, limiar = LIMIAR_P
     acrescentar({ key, title } = {}) {
       const pw = palavras(title);
       if (pw.length >= MIN_PALAVRAS) escolhidas.push({ key: String(key), title: String(title), palavras: pw });
+    },
+    /** Tira a oferta das escolhidas da rodada (ela caiu fora e não vai sair): as parecidas dela deixam de ser barradas. → true se havia. */
+    retirar(key) {
+      if (key === undefined || key === null) return false;
+      const k = String(key);
+      let tirou = false;
+      for (let i = escolhidas.length - 1; i >= 0; i--) {
+        if (escolhidas[i].key === k) { escolhidas.splice(i, 1); tirou = true; }
+      }
+      return tirou;
     },
   };
 }
