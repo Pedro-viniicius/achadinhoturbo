@@ -18,8 +18,11 @@
 // "Esta oferta já foi tratada.".
 // Envio aprovado que termina (concluido, erro ou cancelado) sem NENHUM grupo ok (R3): a oferta não fica "queimada".
 // liberarFalhos() (o agendador chama depois de cada passada da fila e no começo de cada regra) tira a reserva de
-// `sent_offers`; a lista mostra `pode_reenviar: true` e o "Enviar" aceita o item de novo (mesma trava, mesmo 409,
-// mesmas regras de preço).
+// `sent_offers` e, na mesma transação, devolve o item à revisão (CA2.8 do plano rodar-sozinho-entrega2: `decidido_em`
+// NULL, `envio_id` mantido); a lista diz `ultimo_envio_falhou` e os erros por grupo. Até ele passar, o item segue
+// 'enviado' com `pode_reenviar: true` e o "Enviar" aceita o item de novo (mesma trava, mesmo 409, mesmas regras de preço).
+// "Enviar" de oferta do ML com o Mercado Livre em espera (links.central().estado 'em_espera', src/links.js) recusa com
+// frase fixa, sem gravar nada: o link sairia da fila só para ser recusado pela espera.
 // Nenhum link comum (CA4): ML só com links em modo extensão/simulação e etiqueta; Amazon só com a tag de Conexões
 // (o link é montado na hora do envio); Shopee só com o link do catálogo conferido por LINK_SHOPEE.
 // Rastreio por grupo (plano dashboard-ganhos, etapa 7): ML e Amazon seguem o código de cada grupo no envio
@@ -53,7 +56,9 @@ import { centavos, criarTrava, lerEnviados, textoConflito, tituloParaGuardar } f
 
 const DIA = 86400000;
 export const TETO_REVISAO = 50;             // pendentes por regra (P5): acima, as novas esperam sem entrar
-export const MOTIVOS = Object.freeze(['shopee', 'desconto_100', 'preco_antigo', 'falha_link', 'nao_conferido']);
+// `falha_link` e `nao_conferido` só para ler itens antigos (as migrações de src/db.js tiraram os que estavam só por eles);
+// `queda_preco` (preço conferido muito abaixo da lista) e `falhas_repetidas` (3ª falha do ML) são da entrega 2
+export const MOTIVOS = Object.freeze(['shopee', 'desconto_100', 'preco_antigo', 'falha_link', 'nao_conferido', 'queda_preco', 'falhas_repetidas']);
 const STATUS = ['revisao', 'enviado', 'descartado'];
 // motivos do verificador que descartam a oferta do catálogo (o `nao_conferido` nunca descarta). `indisponivel` e
 // `outro_produto` vêm da releitura da Amazon pelo Etiqueta (plano rodar-sozinho-entrega1). O `nao_conferido` segue em
@@ -87,6 +92,7 @@ const PRECO_SUSPEITO = 'Corrija o preço ou apague o preço antigo para enviar.'
 const LINK_SHOPEE_FORA = 'O link da Shopee desta oferta está fora do esperado. Descarte a oferta.';
 const ML_DIRETO = 'Os links do Mercado Livre estão no modo direto, sem comissão: ofertas do catálogo não saem assim. Volte ao modo da extensão em Ajustes.';
 const ML_SEM_EXTENSAO = 'A extensão do Chrome não está conectada: abra o Chrome com a extensão para gerar o link de afiliado.';
+const ML_EM_ESPERA = 'O Mercado Livre está em espera: a Central de Afiliados não está respondendo. O programa testa de novo sozinho; envie quando ela voltar.';
 const SEM_ETIQUETA = 'A etiqueta desta oferta foi apagada. Escolha uma etiqueta na regra.';
 const SEM_AMAZON = 'A integração com a Amazon não está disponível neste servidor.';
 const SEM_TAG = 'Falta a tag de associado da Amazon. Cadastre em Conexões → Amazon antes de enviar.';
@@ -287,18 +293,28 @@ export function createCatalogoItens({ db, wa = null, links = null, amazon = null
     return !!db.prepare(`SELECT 1 FROM envios v WHERE v.id = ? AND ${SQL_ENVIO_FALHOU}`).get(envioId);
   }
 
+  const SQL_FALHOS = `SELECT i.id, i.rule_id, i.chave, i.envio_id, i.decidido_em FROM catalogo_itens i JOIN envios v ON v.id = i.envio_id
+      WHERE i.status = 'enviado' AND i.envio_id IS NOT NULL AND ${SQL_ENVIO_FALHOU}`;
+
   /**
-   * Tira de `sent_offers` a reserva dos envios aprovados que terminaram sem nenhum grupo ok (R3): a oferta volta a
-   * valer no "dias sem repetir" das regras. A reserva é a linha que o "Enviar" gravou (mesma regra, chave e
-   * instante). Idempotente. → quantas reservas saíram.
+   * Envios aprovados que terminaram sem nenhum grupo ok (R3, CA2.8): tira de `sent_offers` a reserva (a linha que o
+   * "Enviar" gravou: mesma regra, chave e instante) e devolve o item à revisão (`decidido_em` NULL, `envio_id` mantido
+   * para a lista mostrar os erros), tudo numa transação só: ou os dois, ou nenhum. A oferta volta a valer no "dias sem
+   * repetir" e o Dono decide de novo. Envio já apagado pela retenção: não se sabe, o item fica. Idempotente.
+   * → quantos itens voltaram à revisão.
    */
   function liberarFalhos() {
-    const linhas = db.prepare(`SELECT i.rule_id, i.chave, i.decidido_em FROM catalogo_itens i JOIN envios v ON v.id = i.envio_id
-      WHERE i.status = 'enviado' AND i.envio_id IS NOT NULL AND ${SQL_ENVIO_FALHOU}`).all();
-    let n = 0;
-    const apagar = db.prepare('DELETE FROM sent_offers WHERE rule_id = ? AND offer_key = ? AND sent_at = ?');
-    for (const l of linhas) if (l.decidido_em != null) n += Number(apagar.run(l.rule_id, l.chave, l.decidido_em).changes);
-    return n;
+    if (!db.prepare(`${SQL_FALHOS} LIMIT 1`).get()) return 0; // o caso comum (a cada tick): sem abrir transação
+    return transacao(() => {
+      const apagar = db.prepare('DELETE FROM sent_offers WHERE rule_id = ? AND offer_key = ? AND sent_at = ?');
+      const devolver = db.prepare("UPDATE catalogo_itens SET status = 'revisao', decidido_em = NULL WHERE id = ? AND status = 'enviado' AND envio_id = ?");
+      let n = 0;
+      for (const l of db.prepare(SQL_FALHOS).all()) {
+        if (l.decidido_em != null) apagar.run(l.rule_id, l.chave, l.decidido_em);
+        n += Number(devolver.run(l.id, l.envio_id).changes);
+      }
+      return n;
+    });
   }
 
   /** Pendentes por regra (só as que têm algum): [{ rule_id, regra, para_revisar, cheia }] e o total. */
@@ -326,7 +342,10 @@ export function createCatalogoItens({ db, wa = null, links = null, amazon = null
    * `proximo` é o par do último item devolvido quando há mais, senão null.
    * `grupos`: os do envio, com ok true/false (null enquanto ele está na fila); para o item em revisão, os grupos da
    * regra (ok null), que é para onde o "Enviar" manda. `pode_reenviar`: item 'enviado' pela revisão cujo envio
-   * terminou (erro, cancelado ou concluído) sem nenhum grupo ok; o "Enviar" aceita de novo (R3). `contadores_24h`:
+   * terminou (erro, cancelado ou concluído) sem nenhum grupo ok; o "Enviar" aceita de novo (R3). `ultimo_envio_falhou`
+   * (CA2.8): o envio do item (`envio_id`) terminou sem nenhum grupo ok, seja o item 'enviado' (antes do liberarFalhos)
+   * ou de volta à revisão; `ultimo_envio_erros`: [{ nome, erro }] dos grupos desse envio (vazio quando não falhou ou o
+   * envio já foi apagado pela retenção). `contadores_24h`:
    * enviadas e descartadas nas últimas 24 h e todas as que esperam revisão (a fila não vence), com o filtro de regra
    * se houver.
    */
@@ -358,21 +377,23 @@ export function createCatalogoItens({ db, wa = null, links = null, amazon = null
     const itens = linhas.map((l) => {
       const info = lerChave(l.chave) ?? { loja: l.loja, url: null };
       const o = lerJson(l.oferta, {});
-      let grupos = []; let podeReenviar = false;
+      let grupos = []; let falhou = false; let doEnvio = [];
       if (l.envio_id != null && l.envio_grupos != null) {
         const todos = resultados.all(l.envio_id);
         const ultimo = new Map(todos.map((r) => [r.jid, r]));
         const encerrado = !ENVIO_ATIVO.includes(l.envio_status);
-        podeReenviar = l.status === 'enviado' && ENVIO_FIM.includes(l.envio_status) && !todos.some((r) => r.ok);
+        falhou = ENVIO_FIM.includes(l.envio_status) && !todos.some((r) => r.ok);
         const motivo = encerrado ? motivoDoEnvio(l.envio_status, l.envio_resultado) : null;
-        grupos = listaDeTexto(l.envio_grupos).map((jid) => {
+        doEnvio = listaDeTexto(l.envio_grupos).map((jid) => {
           const r = ultimo.get(jid); const nome = r?.group_name || nomes.get(jid) || '(grupo removido)';
           if (!r) return encerrado ? { nome, ok: false, erro: motivo } : { nome, ok: null, erro: null };
           return { nome, ok: !!r.ok, erro: r.ok ? null : r.erro };
         });
-      } else if (l.status === 'revisao') {
-        grupos = listaDeTexto(l.regra_grupos).filter((j) => nomes.has(j)).map((jid) => ({ nome: nomes.get(jid), ok: null, erro: null }));
       }
+      // em revisão (também a que voltou de um envio que falhou, CA2.8): os grupos da regra, para onde o "Enviar" manda
+      if (l.status === 'revisao') grupos = listaDeTexto(l.regra_grupos).filter((j) => nomes.has(j)).map((jid) => ({ nome: nomes.get(jid), ok: null, erro: null }));
+      else grupos = doEnvio;
+      const podeReenviar = l.status === 'enviado' && falhou;
       return {
         id: l.id, rule_id: l.rule_id, regra: l.regra ?? null, loja: l.loja, status: l.status,
         motivos: listaDeTexto(l.motivos).filter((m) => MOTIVOS.includes(m)),
@@ -385,6 +406,8 @@ export function createCatalogoItens({ db, wa = null, links = null, amazon = null
           link: linkParaConferir(info, o),
         },
         grupos, envio_id: l.envio_id ?? null, envio_status: l.envio_status ?? null, pode_reenviar: podeReenviar,
+        ultimo_envio_falhou: falhou,
+        ultimo_envio_erros: falhou ? doEnvio.filter((g) => g.ok === false).map((g) => ({ nome: g.nome, erro: g.erro })) : [],
         criado_em: l.criado_em, decidido_em: l.decidido_em ?? null,
       };
     });
@@ -402,6 +425,19 @@ export function createCatalogoItens({ db, wa = null, links = null, amazon = null
   }
 
   // ------------------------------------------------------------------------------------------- revisão (Dono)
+
+  /**
+   * O Mercado Livre está em espera (src/links.js `central()`, entrega 2)? Só lê o estado, sem gastar o teste da espera.
+   * Serviço de links sem `central()` (de antes da entrega 2) ou que lança: não recusa aqui; a fila de envios ainda passa
+   * pela espera ao pedir o link. No console só o nome do erro.
+   */
+  function mlEmEspera() {
+    if (typeof links?.central !== 'function') return false;
+    try { return links.central()?.estado === 'em_espera'; } catch (e) {
+      console.error('[catalogo] estado da Central:', e?.name || 'erro');
+      return false;
+    }
+  }
 
   /**
    * Ajustes do "Revisar" (os mesmos do "Completar": validarAjustesOferta de src/espelho.js, R9), com o erro daqui e
@@ -434,15 +470,16 @@ export function createCatalogoItens({ db, wa = null, links = null, amazon = null
     const etq = Number.isInteger(tagId) ? db.prepare('SELECT id, name FROM tags WHERE id = ?').get(tagId) : null;
     if (!etq) throw new ErroCatalogoItem(400, SEM_ETIQUETA);
     if (modo === 'extension' && links?.status?.()?.online !== true) throw new ErroCatalogoItem(400, ML_SEM_EXTENSAO);
+    if (mlEmEspera()) throw new ErroCatalogoItem(400, ML_EM_ESPERA);
     return { tag_id: etq.id, etiqueta: etq.name };
   }
 
   /**
    * POST /api/catalogo/itens/:id/enviar { ajustes } → { envio_id }. Item em 'revisao', ou 'enviado' cujo envio
    * aprovado terminou sem nenhum grupo ok (pode_reenviar, R3); senão 409. Preço ainda suspeito depois dos ajustes →
-   * 400 com frase fixa. Grupos, template e "enviar foto" são os da regra. Igual (outra chave) ou parecida com uma
-   * oferta enviada pela regra na janela, sem a exceção do mais barato (só o mesmo título, DESCONTO_MINIMO_MAIS_BARATA%
-   * abaixo) → 409 "Não enviada: …" (src/parecido.js). A mesma oferta (mesma chave), igual ou parecida com uma que a
+   * 400 com frase fixa. Oferta do ML com o Mercado Livre em espera → 400 com frase fixa, sem gravar nada. Grupos,
+   * template e "enviar foto" são os da regra. Igual (outra chave) ou parecida com uma oferta enviada pela regra na
+   * janela, sem a exceção do mais barato (só o mesmo título, DESCONTO_MINIMO_MAIS_BARATA% abaixo) → 409 "Não enviada: …" (src/parecido.js). A mesma oferta (mesma chave), igual ou parecida com uma que a
    * regra está mandando agora (usarEmEnvio) → 409 "…que está saindo agora…", mesmo se mais barata.
    */
   async function enviar(itemId, corpo, { userId = null } = {}) {
@@ -518,10 +555,12 @@ export function createCatalogoItens({ db, wa = null, links = null, amazon = null
       for (const o of naRegra) saindo.acrescentar(o);
       const s = saindo.avaliar({ key: item.chave, title: oferta.title, price: oferta.price });
       if (s?.acao === 'barrar') throw new ErroCatalogoItem(409, textoConflito({ ...s, tipo: 'saindo' }, now, { prefixo: 'Não enviada' }));
-      // a trava: só um "Enviar" muda o item de 'revisao' (ou do envio que falhou); o segundo vê 0 linhas e recebe 409
+      // a trava: só um "Enviar" muda o item de 'revisao' (ou do envio que falhou); o segundo vê 0 linhas e recebe 409.
+      // No reenvio, o liberarFalhos pode ter devolvido o item à revisão enquanto este "Enviar" esperava (CA2.8): vale igual.
       const r = reenvio
-        ? db.prepare(`UPDATE catalogo_itens SET oferta = ?, decidido_em = ? WHERE id = ? AND status = 'enviado' AND envio_id = ?
-            AND EXISTS (SELECT 1 FROM envios v WHERE v.id = ? AND ${SQL_ENVIO_FALHOU})`).run(guardar, now, id, item.envio_id, item.envio_id)
+        ? db.prepare(`UPDATE catalogo_itens SET status = 'enviado', oferta = ?, decidido_em = ? WHERE id = ? AND (status = 'revisao'
+            OR (status = 'enviado' AND envio_id = ? AND EXISTS (SELECT 1 FROM envios v WHERE v.id = ? AND ${SQL_ENVIO_FALHOU})))`)
+          .run(guardar, now, id, item.envio_id, item.envio_id)
         : db.prepare("UPDATE catalogo_itens SET status = 'enviado', oferta = ?, decidido_em = ? WHERE id = ? AND status = 'revisao'").run(guardar, now, id);
       if (r.changes !== 1) throw new ErroCatalogoItem(409, JA_TRATADA);
       // a reserva do envio que falhou (se o agendador ainda não a tirou)

@@ -11,7 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import express from 'express';
-import { openDb, getSetting, MARCA_MIGRACAO_E1, textoMigracaoE1 } from '../src/db.js';
+import { openDb, getSetting, MARCA_MIGRACAO_E1, textoMigracaoE1, MARCA_MIGRACAO_E2, textoMigracaoE2 } from '../src/db.js';
 import { createWhatsApp } from '../src/whatsapp.js';
 import { createLinkService } from '../src/links.js';
 import { createEnvios } from '../src/envios.js';
@@ -112,7 +112,20 @@ test('CA7 precoSuspeito: desconto ≥ 100% ou preço antigo ≥ 10× o preço', 
   assert.equal(precoSuspeito({ price: 10, oldPrice: null, discountPct: 100 }), true);
   assert.equal(precoSuspeito({ price: 10, oldPrice: null, discountPct: 99 }), false);
   assert.equal(precoSuspeito({ price: 10, oldPrice: null, discountPct: null }), false);
-  assert.deepEqual([...MOTIVOS], ['shopee', 'desconto_100', 'preco_antigo', 'falha_link', 'nao_conferido'], 'os nomes da spec e do plano do verificador');
+  // `falha_link` e `nao_conferido` ficam só para ler itens antigos (migrações de src/db.js); `queda_preco` e
+  // `falhas_repetidas` são da entrega 2 do rodar-sozinho
+  assert.deepEqual([...MOTIVOS], ['shopee', 'desconto_100', 'preco_antigo', 'falha_link', 'nao_conferido', 'queda_preco', 'falhas_repetidas'], 'os nomes da spec e dos planos');
+});
+
+test('rodar-sozinho E2: os motivos queda_preco e falhas_repetidas são aceitos, vão à revisão e voltam na listagem', () => {
+  const s = montar();
+  const regra = s.regra();
+  const a = s.revisao(regra, ML(7), ['queda_preco']);
+  const b = s.revisao(regra, ML(8), ['falhas_repetidas', 'desconto_100']);
+  assert.deepEqual([s.item(a).motivos, s.item(b).motivos], [['queda_preco'], ['falhas_repetidas', 'desconto_100']]);
+  const l = s.itens.listar({ status: 'revisao' });
+  assert.deepEqual(l.itens.map((i) => i.motivos).sort(), [['falhas_repetidas', 'desconto_100'], ['queda_preco']]);
+  assert.equal(s.itens.registrar(regra, ML(9), 'revisao', ['motivo_inventado']), false, 'motivo fora da lista continua recusado');
 });
 
 // ------------------------------------------------------------------------------------------------ tratada (D6)
@@ -264,11 +277,12 @@ test('CA1.4 (rodar sozinho): indisponivel e outro_produto, descartes novos do ve
 /**
  * Banco "da versão anterior": aberto pela versão nova (o esquema é o mesmo), mas sem a marca da migração, com os itens
  * gravados como o registrar de antes gravava. Fecha o banco: quem testa reabre com openDb (é aí que a migração roda).
+ * `marcas`: as migrações que ainda não rodaram (as outras ficam marcadas, como num banco que já passou por elas).
  */
-function bancoAntesDaMigracao(montarItens) {
+function bancoAntesDaMigracao(montarItens, marcas = [MARCA_MIGRACAO_E1]) {
   const dir = tmp();
   const db = openDb(dir);
-  db.prepare('DELETE FROM settings WHERE key = ?').run(MARCA_MIGRACAO_E1);
+  for (const m of marcas) db.prepare('DELETE FROM settings WHERE key = ?').run(m);
   db.prepare('DELETE FROM log').run();
   const regra = (nome) => ({ id: Number(db.prepare("INSERT INTO rules (name, group_jids, created_at) VALUES (?, '[]', 1)").run(nome).lastInsertRowid), name: nome });
   const itens = createCatalogoItens({ db, agora: () => 1_000 });
@@ -366,6 +380,117 @@ test('CA1.10: falha no meio da migração desfaz tudo (nada apagado, sem marca, 
   db.close();
 });
 
+// --------------------------------------------------------------------- migração do falha_link (CA2.17)
+
+test('CA2.17: a migração tira da revisão só os itens com motivos exatamente ["falha_link"], uma vez, e grava a contagem no Histórico', () => {
+  const dir = bancoAntesDaMigracao(({ itens, regra, cru }) => {
+    const r1 = regra('Regra 1'); const r2 = regra('Regra 2');
+    assert.equal(itens.registrar(r1, ML(1), 'revisao', ['falha_link']), true);                // sai
+    assert.equal(itens.registrar(r2, ML(1), 'revisao', ['falha_link']), true);                // sai (outra regra, mesma chave)
+    assert.equal(itens.registrar(r2, ML(2), 'revisao', ['falha_link']), true);                // sai
+    assert.equal(itens.registrar(r1, ML(3), 'revisao', ['falha_link', 'desconto_100']), true);
+    assert.equal(itens.registrar(r1, ML(4), 'revisao', ['nao_conferido']), true);              // a E1 já rodou neste banco
+    assert.equal(itens.registrar(r1, ML(5), 'revisao', ['falhas_repetidas']), true);
+    cru(r1, 'MLB6', 'revisao', '["falha_link","outro"]');
+    cru(r1, 'MLB7', 'revisao', '["outro","falha_link"]');
+    cru(r1, 'MLB8', 'descartado', '["falha_link"]');
+    cru(r1, 'MLB9', 'enviado', '["falha_link"]');
+    cru(r1, 'MLB10', 'revisao', '[ "falha_link" ]');                                             // não é o JSON do registrar: fica
+    cru(r1, 'MLB11', 'revisao', '[]');
+  }, [MARCA_MIGRACAO_E2]);
+  const ficam = [
+    { rule_id: 1, chave: 'MLB3', status: 'revisao', motivos: '["falha_link","desconto_100"]' },
+    { rule_id: 1, chave: 'MLB4', status: 'revisao', motivos: '["nao_conferido"]' },
+    { rule_id: 1, chave: 'MLB5', status: 'revisao', motivos: '["falhas_repetidas"]' },
+    { rule_id: 1, chave: 'MLB6', status: 'revisao', motivos: '["falha_link","outro"]' },
+    { rule_id: 1, chave: 'MLB7', status: 'revisao', motivos: '["outro","falha_link"]' },
+    { rule_id: 1, chave: 'MLB8', status: 'descartado', motivos: '["falha_link"]' },
+    { rule_id: 1, chave: 'MLB9', status: 'enviado', motivos: '["falha_link"]' },
+    { rule_id: 1, chave: 'MLB10', status: 'revisao', motivos: '[ "falha_link" ]' },
+    { rule_id: 1, chave: 'MLB11', status: 'revisao', motivos: '[]' },
+  ];
+
+  let db = openDb(dir);
+  assert.deepEqual(linhasItens(db), ficam, 'saíram só os três "só falha_link" em revisão');
+  assert.equal(getSetting(db, MARCA_MIGRACAO_E2), '1');
+  assert.equal(MARCA_MIGRACAO_E2, 'migracao_e2_falha_link');
+  const linha = { rule_id: null, rule_name: null, level: 'info', group_name: null, offer_title: null, message: textoMigracaoE2(3) };
+  assert.deepEqual(linhasLog(db), [linha], 'uma linha info, sem regra nem oferta (a E1 não roda de novo)');
+  assert.match(linha.message, /\b3 ofertas\b/, 'a contagem vai no texto');
+  assert.ok(MOTIVOS.includes('falha_link'), 'o motivo continua legível nas linhas que ficaram');
+  assert.deepEqual(createCatalogoItens({ db }).listar({ status: 'revisao' }).itens.find((i) => i.motivos.includes('desconto_100')).motivos, ['falha_link', 'desconto_100']);
+
+  // roda uma vez só: um item novo "só falha_link" (código de antes, rollback) não sai na próxima abertura
+  createCatalogoItens({ db }).registrar({ id: 1, name: 'Regra 1' }, ML(12), 'revisao', ['falha_link']);
+  db.close();
+  db = openDb(dir);
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM catalogo_itens WHERE chave = 'MLB12' AND status = 'revisao'").get().n, 1, 'segunda abertura não apaga');
+  assert.equal(linhasLog(db).length, 1, 'nem grava outra linha');
+  db.close();
+});
+
+test('CA2.17: textos da contagem (1, várias, nenhuma) como na spec; banco novo marca sem linha; com catálogo e nada a tirar, a linha diz que nada saiu', () => {
+  assert.equal(textoMigracaoE2(1), 'Revisão do Catálogo: 1 oferta que esperava revisão só porque o link não foi gerado saiu da fila. Ela volta se o catálogo a trouxer de novo.');
+  assert.equal(textoMigracaoE2(28), 'Revisão do Catálogo: 28 ofertas que esperavam revisão só porque o link não foi gerado saíram da fila. Elas voltam se o catálogo as trouxer de novo.');
+  assert.equal(textoMigracaoE2(0), 'Revisão do Catálogo: nenhuma oferta esperava revisão só porque o link não foi gerado.');
+  for (const n of [0, 1, 28]) assert.doesNotMatch(textoMigracaoE2(n), /Separada para revisão|falha_link/);
+
+  const novo = openDb(tmp());
+  assert.equal(getSetting(novo, MARCA_MIGRACAO_E2), '1');
+  assert.deepEqual(linhasLog(novo), []);
+  novo.close();
+
+  const dir = bancoAntesDaMigracao(({ itens, regra }) => { assert.equal(itens.registrar(regra('R'), ML(1), 'revisao', ['shopee']), true); }, [MARCA_MIGRACAO_E2]);
+  const db = openDb(dir);
+  assert.equal(linhasItens(db).length, 1);
+  assert.deepEqual(linhasLog(db).map((l) => [l.level, l.message]), [['info', textoMigracaoE2(0)]]);
+  db.close();
+
+  // banco sem catálogo em uso: marca sem linha
+  const vazio = bancoAntesDaMigracao(() => {}, [MARCA_MIGRACAO_E2]);
+  const dbv = openDb(vazio);
+  assert.equal(getSetting(dbv, MARCA_MIGRACAO_E2), '1');
+  assert.deepEqual(linhasLog(dbv), []);
+  dbv.close();
+});
+
+test('CA2.17: banco de antes da entrega 1 passa pelas duas migrações na mesma abertura, cada uma com a sua linha, na ordem', () => {
+  const dir = bancoAntesDaMigracao(({ itens, regra }) => {
+    const r = regra('R');
+    assert.equal(itens.registrar(r, ML(1), 'revisao', ['nao_conferido']), true);
+    assert.equal(itens.registrar(r, ML(2), 'revisao', ['falha_link']), true);
+    assert.equal(itens.registrar(r, ML(3), 'revisao', ['falha_link']), true);
+    assert.equal(itens.registrar(r, ML(4), 'revisao', ['shopee']), true);
+  }, [MARCA_MIGRACAO_E1, MARCA_MIGRACAO_E2]);
+  const db = openDb(dir);
+  assert.deepEqual(linhasItens(db).map((l) => l.chave), ['MLB4']);
+  assert.deepEqual(linhasLog(db).map((l) => l.message), [textoMigracaoE1(1), textoMigracaoE2(2)]);
+  assert.deepEqual([getSetting(db, MARCA_MIGRACAO_E1), getSetting(db, MARCA_MIGRACAO_E2)], ['1', '1']);
+  db.close();
+});
+
+test('CA2.17: falha no meio da migração desfaz tudo (nada apagado, sem marca, sem linha), não derruba o openDb nem vaza a mensagem do banco; a próxima abertura migra', (t) => {
+  const dir = bancoAntesDaMigracao(({ db, itens, regra }) => {
+    assert.equal(itens.registrar(regra('R'), ML(1), 'revisao', ['falha_link']), true);
+    db.exec("CREATE TRIGGER falha_no_log BEFORE INSERT ON log BEGIN SELECT RAISE(ABORT, 'dado 5511999990000'); END");
+  }, [MARCA_MIGRACAO_E2]);
+  const erros = [];
+  t.mock.method(console, 'error', (...a) => { erros.push(a.map(String).join(' ')); });
+  let db = openDb(dir);
+  assert.equal(linhasItens(db).length, 1, 'nada apagado');
+  assert.equal(getSetting(db, MARCA_MIGRACAO_E2), null, 'sem marca: tenta de novo na próxima abertura');
+  assert.deepEqual(linhasLog(db), []);
+  assert.equal(erros.length, 1);
+  assert.doesNotMatch(erros[0], /5511999990000/, 'a mensagem do banco não vai ao console');
+  db.exec('DROP TRIGGER falha_no_log');
+  db.close();
+  db = openDb(dir);
+  assert.equal(linhasItens(db).length, 0);
+  assert.equal(getSetting(db, MARCA_MIGRACAO_E2), '1');
+  assert.deepEqual(linhasLog(db).map((l) => l.message), [textoMigracaoE2(1)]);
+  db.close();
+});
+
 test('P5: teto de 50 pendentes por regra; a 51ª não entra; contar e listar dizem quantas e se a fila está cheia', () => {
   const s = montar();
   const regra = s.regra();
@@ -421,7 +546,7 @@ test('listar: filtros, link para conferir por loja, grupos da regra na revisão,
     id: idS, rule_id: regra.id, regra: 'Perfumes do catálogo', loja: 'shopee', status: 'revisao', motivos: ['shopee'],
     oferta: { title: 'Perfume Floral', price: 59.9, oldPrice: null, discountPct: 30, sold: 50, freeShipping: true, coupon: null, image: IMG_SHOPEE, categoria: 'Perfumes', link: LINK_SHOPEE_OK },
     grupos: [{ nome: 'Achadinhos', ok: null, erro: null }, { nome: 'Tech', ok: null, erro: null }],
-    envio_id: null, envio_status: null, pode_reenviar: false, criado_em: s.relogio.t - 30, decidido_em: null,
+    envio_id: null, envio_status: null, pode_reenviar: false, ultimo_envio_falhou: false, ultimo_envio_erros: [], criado_em: s.relogio.t - 30, decidido_em: null,
   });
   assert.equal(tudo.itens.find((i) => i.id === idA).oferta.link, `https://www.amazon.com.br/dp/${ASIN}`, 'Amazon sem tag');
   assert.equal(tudo.itens.find((i) => i.status === 'enviado').oferta.link, 'https://produto.mercadolivre.com.br/MLB-5', 'ML: página do produto');
@@ -789,9 +914,10 @@ test('R3: envio aprovado que termina sem nenhum grupo ok não fica "queimado": s
   assert.equal(s.itens.liberarFalhos(), 1);
   assert.equal(s.itens.liberarFalhos(), 0, 'idempotente');
   assert.equal(reservas(s, regra, chave), 0, 'não conta no "dias sem repetir"');
-  assert.equal(s.itens.tratada(regra, SHP('1'), 'relevancia'), false, 'nas outras ordens a regra pode trazer de novo');
-  assert.equal(s.itens.tratada(regra, SHP('1'), 'atualizacao'), true, 'em Novidades, o caminho é o "Enviar de novo"');
-  assert.throws(() => s.itens.descartar(id), { status: 409, message: JA_TRATADA });
+  // CA2.8 (rodar-sozinho E2): o item volta à revisão; quem decide é o Dono, e a regra não o traz em nenhuma ordem
+  assert.deepEqual([daLista(s, id).status, daLista(s, id).pode_reenviar, daLista(s, id).ultimo_envio_falhou], ['revisao', false, true]);
+  assert.equal(s.itens.tratada(regra, SHP('1'), 'relevancia'), true, 'em revisão: a regra não traz de novo');
+  assert.equal(s.itens.tratada(regra, SHP('1'), 'atualizacao'), true, 'em Novidades, o caminho é o "Enviar" da revisão');
 
   // "Enviar de novo": mesma trava (dois juntos geram um envio só), mesmas regras de preço, a oferta ajustada fica
   quebrarWhatsApp(s, false);
@@ -832,15 +958,195 @@ test('R3: um grupo ok basta para valer como enviado; cancelado sem grupo ok libe
   await s.envios.cancelar(rB.envio_id);
   assert.equal(daLista(s, idB).pode_reenviar, true);
   assert.equal(s.itens.liberarFalhos(), 1);
+  assert.equal(daLista(s, idB).status, 'revisao', 'cancelado sem grupo ok volta à revisão (CA2.8)');
   // enviada sozinha pela regra (sem envio da fila): nunca reenvia
   assert.equal(s.itens.registrar(regra, SHP('3'), 'enviado'), true);
   const idC = s.db.prepare("SELECT id FROM catalogo_itens WHERE chave = 'SHOPEE:111.3'").get().id;
   assert.equal(daLista(s, idC).pode_reenviar, false);
+  assert.equal(s.itens.liberarFalhos(), 0, 'nem volta à revisão');
   await recusa(s.itens.enviar(idC, {}), 409, JA_TRATADA);
-  // o envio que falhou foi apagado pela retenção: não se sabe mais, não reenvia
+  // o envio que falhou foi apagado pela retenção antes do liberarFalhos: não se sabe mais, não reenvia nem volta
+  const idD = s.revisao(regra, SHP('4'), ['shopee']);
+  const rD = await s.itens.enviar(idD, {});
+  await s.envios.cancelar(rD.envio_id);
+  s.db.prepare('DELETE FROM envios WHERE id = ?').run(rD.envio_id);
+  assert.deepEqual([daLista(s, idD).pode_reenviar, daLista(s, idD).ultimo_envio_falhou], [false, false]);
+  assert.equal(s.itens.liberarFalhos(), 0);
+  assert.equal(daLista(s, idD).status, 'enviado');
+  await recusa(s.itens.enviar(idD, {}), 409, JA_TRATADA);
+  // o item que já voltou à revisão segue na revisão quando a retenção apaga o envio antigo (só não sabe mais os erros)
   s.db.prepare('DELETE FROM envios WHERE id = ?').run(rB.envio_id);
-  assert.equal(daLista(s, idB).pode_reenviar, false);
-  await recusa(s.itens.enviar(idB, {}), 409, JA_TRATADA);
+  assert.deepEqual([daLista(s, idB).status, daLista(s, idB).ultimo_envio_falhou, daLista(s, idB).ultimo_envio_erros], ['revisao', false, []]);
+});
+
+// ------------------------------------------------------------------- "Enviar" que falha volta à revisão (CA2.8)
+
+test('CA2.8: "Enviar" que falha em todos os grupos volta à revisão sem reserva; o "Enviar" seguinte funciona', async () => {
+  const s = montar();
+  const regra = s.regra({ dedupe_days: 7 });
+  const id = s.revisao(regra, ML(4242), ['falhas_repetidas']);
+  const antes = s.item(id);
+  quebrarWhatsApp(s);
+  const r1 = await s.itens.enviar(id, {});
+  assert.equal(s.item(id).status, 'enviado');
+  await s.envios.runEnvio(r1.envio_id);
+  assert.equal(s.envio(r1.envio_id).status, 'erro');
+  assert.equal(reservas(s, regra, 'MLB4242'), 1, 'antes do liberarFalhos a reserva ainda está lá');
+
+  assert.equal(s.itens.liberarFalhos(), 1, 'um item voltou');
+  const item = s.item(id);
+  assert.deepEqual([item.status, item.decidido_em, item.envio_id, item.motivos], ['revisao', null, r1.envio_id, ['falhas_repetidas']],
+    'revisão, sem decisão, com o envio que falhou e os mesmos motivos');
+  assert.equal(item.criado_em, antes.criado_em);
+  assert.equal(reservas(s, regra, 'MLB4242'), 0, 'a reserva saiu');
+  assert.equal(s.itens.liberarFalhos(), 0, 'idempotente');
+
+  // a lista: os grupos são os da regra (para onde o próximo "Enviar" vai) e os erros do último envio vêm à parte
+  const l = daLista(s, id);
+  assert.deepEqual([l.status, l.pode_reenviar, l.ultimo_envio_falhou, l.envio_id, l.envio_status], ['revisao', false, true, r1.envio_id, 'erro']);
+  assert.deepEqual(l.grupos, [{ nome: 'Achadinhos', ok: null, erro: null }, { nome: 'Tech', ok: null, erro: null }]);
+  assert.equal(l.ultimo_envio_erros.length, 2);
+  assert.deepEqual(l.ultimo_envio_erros.map((e) => e.nome), ['Achadinhos', 'Tech']);
+  assert.ok(l.ultimo_envio_erros.every((e) => typeof e.erro === 'string' && e.erro.length > 0), JSON.stringify(l.ultimo_envio_erros));
+  assert.deepEqual(Object.keys(l.ultimo_envio_erros[0]).sort(), ['erro', 'nome']);
+  const contadores = s.itens.listar().contadores_24h;
+  assert.deepEqual([contadores.enviadas, contadores.para_revisar], [0, 1], 'não conta como enviada');
+
+  // o "Enviar" seguinte funciona e sai nos dois grupos
+  quebrarWhatsApp(s, false);
+  s.relogio.t = Date.now();
+  const r2 = await s.itens.enviar(id, {});
+  assert.notEqual(r2.envio_id, r1.envio_id);
+  assert.deepEqual([s.item(id).status, s.item(id).envio_id, s.item(id).decidido_em], ['enviado', r2.envio_id, s.relogio.t]);
+  assert.equal(reservas(s, regra, 'MLB4242'), 1);
+  await s.envios.runEnvio(r2.envio_id);
+  assert.equal(s.enviados().length, 2);
+  const depois = daLista(s, id);
+  assert.deepEqual([depois.status, depois.ultimo_envio_falhou, depois.ultimo_envio_erros, depois.grupos.map((g) => g.ok)], ['enviado', false, [], [true, true]]);
+  assert.equal(s.itens.liberarFalhos(), 0, 'com grupo ok o item fica enviado');
+  assert.equal(s.item(id).status, 'enviado');
+});
+
+test('CA2.8: o item que voltou à revisão pode ser descartado; item em revisão sem envio não tem ultimo_envio_falhou', async () => {
+  const s = montar();
+  const regra = s.regra();
+  const id = s.revisao(regra, SHP('1'), ['shopee']);
+  assert.deepEqual([daLista(s, id).ultimo_envio_falhou, daLista(s, id).ultimo_envio_erros], [false, []]);
+  const r = await s.itens.enviar(id, {});
+  assert.deepEqual([daLista(s, id).ultimo_envio_falhou, daLista(s, id).ultimo_envio_erros], [false, []], 'na fila: ainda não falhou');
+  await s.envios.cancelar(r.envio_id);
+  assert.equal(s.itens.liberarFalhos(), 1);
+  const l = daLista(s, id);
+  assert.deepEqual([l.status, l.ultimo_envio_falhou], ['revisao', true]);
+  assert.deepEqual(l.ultimo_envio_erros, [{ nome: 'Achadinhos', erro: 'o envio foi cancelado' }, { nome: 'Tech', erro: 'o envio foi cancelado' }]);
+  assert.deepEqual(s.itens.descartar(id), { ok: true });
+  assert.equal(s.item(id).status, 'descartado');
+});
+
+test('CA2.8: a volta à revisão e a saída da reserva são uma transação só (falha em qualquer passo desfaz os dois)', async (t) => {
+  const s = montar();
+  const regra = s.regra();
+  const id = s.revisao(regra, SHP('1'), ['shopee']);
+  const r = await s.itens.enviar(id, {});
+  await s.envios.cancelar(r.envio_id);
+  const decidido = s.item(id).decidido_em;
+  // falha no último passo (a volta do item), depois de apagar a reserva
+  s.db.exec("CREATE TRIGGER falha_item BEFORE UPDATE OF status ON catalogo_itens WHEN NEW.status = 'revisao' BEGIN SELECT RAISE(ABORT, 'falhou'); END");
+  assert.throws(() => s.itens.liberarFalhos(), /falhou/);
+  assert.deepEqual([s.item(id).status, s.item(id).decidido_em, reservas(s, regra, 'SHOPEE:111.1')], ['enviado', decidido, 1], 'nada mudou');
+  s.db.exec('DROP TRIGGER falha_item');
+  // falha ao apagar a reserva: o item não volta
+  s.db.exec("CREATE TRIGGER falha_reserva BEFORE DELETE ON sent_offers BEGIN SELECT RAISE(ABORT, 'falhou'); END");
+  assert.throws(() => s.itens.liberarFalhos(), /falhou/);
+  assert.equal(s.item(id).status, 'enviado');
+  s.db.exec('DROP TRIGGER falha_reserva');
+  assert.doesNotThrow(() => s.db.exec('BEGIN IMMEDIATE; COMMIT'), 'nenhuma transação ficou aberta');
+  assert.equal(s.itens.liberarFalhos(), 1);
+  assert.deepEqual([s.item(id).status, reservas(s, regra, 'SHOPEE:111.1')], ['revisao', 0]);
+});
+
+test('CA2.8: "Enviar de novo" de um item enviado que falhou não recebe 409 quando o liberarFalhos o devolve à revisão no meio', async () => {
+  const s = montar();
+  const regra = s.regra();
+  const id = s.revisao(regra, SHP('1'), ['shopee']);
+  const r1 = await s.itens.enviar(id, {});
+  await s.envios.cancelar(r1.envio_id);
+  assert.equal(daLista(s, id).pode_reenviar, true, 'enviado, com o envio que falhou');
+  // o "Enviar" espera os links com Sub_id da Shopee; nesse meio tempo o agendador passa e devolve o item à revisão
+  let devolvidos = null;
+  s.envios.linksRastreioShopee = async () => { devolvidos = s.itens.liberarFalhos(); return {}; };
+  const r2 = await s.itens.enviar(id, {});
+  assert.equal(devolvidos, 1);
+  assert.notEqual(r2.envio_id, r1.envio_id);
+  assert.deepEqual([s.item(id).status, s.item(id).envio_id], ['enviado', r2.envio_id]);
+  assert.equal(reservas(s, regra, 'SHOPEE:111.1'), 1, 'uma reserva só (a do envio novo)');
+  assert.equal(s.contar('SELECT COUNT(*) AS n FROM envios'), 2);
+});
+
+// ------------------------------------------------------------- "Enviar" com o Mercado Livre em espera (etapa 5)
+
+const ML_EM_ESPERA = 'O Mercado Livre está em espera: a Central de Afiliados não está respondendo. O programa testa de novo sozinho; envie quando ela voltar.';
+
+test('E2 etapa 5: "Enviar" de oferta do ML com o Mercado Livre em espera recusa com frase fixa, sem pedido nem gravação', async () => {
+  const s = montar({ modo: 'extension' });
+  const regra = s.regra({ dedupe_days: 0 }); // vários "Fone Bom": sem a trava de parecidos
+  const id = s.revisao(regra, ML(1), ['falhas_repetidas']);
+  const pedidos = [];
+  const estado = { central: { estado: 'em_espera', falhasSeguidas: 3, testeLiberado: false } };
+  s.links.status = () => ({ online: true });
+  s.links.central = () => estado.central;
+  s.links.requestLink = async (...a) => { pedidos.push(a); return 'https://meli.la/xyz'; };
+  s.links.requestProduto = async (...a) => { pedidos.push(a); return {}; };
+  await recusa(s.itens.enviar(id, {}), 400, ML_EM_ESPERA);
+  // o teste liberado não muda a resposta: o "Enviar" não é o teste da espera
+  estado.central = { ...estado.central, testeLiberado: true };
+  await recusa(s.itens.enviar(id, {}), 400, ML_EM_ESPERA);
+  assert.deepEqual(pedidos, []);
+  assert.equal(s.contar('SELECT COUNT(*) AS n FROM envios'), 0);
+  assert.equal(s.contar('SELECT COUNT(*) AS n FROM sent_offers'), 0);
+  assert.deepEqual([s.item(id).status, s.item(id).decidido_em], ['revisao', null]);
+  assert.equal(s.acordou.n, 0);
+
+  // a Amazon e a Shopee não dependem da Central
+  const idS = s.revisao(regra, SHP('1'), ['shopee']);
+  assert.ok((await s.itens.enviar(idS, {})).envio_id);
+  const idA = s.revisao(regra, AMZ(), ['preco_antigo']);
+  assert.ok((await s.itens.enviar(idA, {})).envio_id);
+
+  // os outros estados da Central deixam sair
+  for (const e of ['respondendo', 'falhando', 'sem_teste']) {
+    estado.central = { estado: e, testeLiberado: false };
+    const idM = s.revisao(regra, ML(100 + e.length), ['falhas_repetidas']);
+    assert.ok((await s.itens.enviar(idM, {})).envio_id, e);
+  }
+  assert.deepEqual(pedidos, [], 'o "Enviar" só grava o envio; o link é da fila');
+});
+
+test('E2 etapa 5: extensão desconectada e modo direto vêm antes da espera; serviço de links sem central() (ou que lança) não recusa', async (t) => {
+  const s = montar({ modo: 'extension' });
+  const regra = s.regra({ dedupe_days: 0 });
+  const id = s.revisao(regra, ML(1), ['falhas_repetidas']);
+  s.links.central = () => ({ estado: 'em_espera' });
+  await recusa(s.itens.enviar(id, {}), 400, 'A extensão do Chrome não está conectada: abra o Chrome com a extensão para gerar o link de afiliado.');
+  s.estado.modo = 'direct';
+  await recusa(s.itens.enviar(id, {}), 400, 'Os links do Mercado Livre estão no modo direto, sem comissão: ofertas do catálogo não saem assim. Volte ao modo da extensão em Ajustes.');
+  // modo de simulação: a espera também vale (é o estado que o serviço de links informa)
+  s.estado.modo = 'fake';
+  await recusa(s.itens.enviar(id, {}), 400, ML_EM_ESPERA);
+
+  // serviço de links de antes da entrega 2: sem central(), o "Enviar" segue como antes
+  s.links.central = undefined;
+  const r = await s.itens.enviar(id, {});
+  assert.ok(r.envio_id);
+
+  // central() que lança não derruba o "Enviar" (a fila de envios ainda passa pela espera ao pedir o link)
+  const erros = [];
+  t.mock.method(console, 'error', (...a) => { erros.push(a.map(String).join(' ')); });
+  const id2 = s.revisao(regra, ML(2), ['falhas_repetidas']);
+  s.links.central = () => { throw new Error('estado 5511999990000'); };
+  assert.ok((await s.itens.enviar(id2, {})).envio_id);
+  assert.equal(erros.length, 1);
+  assert.doesNotMatch(erros[0], /5511999990000/);
 });
 
 test('R5: no "Revisar oferta" o cupom vai até 100 caracteres (o do espelho segue 30)', async () => {

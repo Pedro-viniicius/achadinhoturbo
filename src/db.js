@@ -271,6 +271,7 @@ export function openDb(dir) {
   }
   semearTemplateAmazon(db);
   migrarNaoConferido(db);
+  migrarFalhaLink(db);
   if (!getSetting(db, 'ext_token')) setSetting(db, 'ext_token', crypto.randomBytes(24).toString('hex'));
   return db;
 }
@@ -311,28 +312,55 @@ export function textoMigracaoE1(n) {
   return `${base} nenhuma oferta esperava revisão ${motivo}.`;
 }
 
-/**
- * Migração do `nao_conferido` (CA1.10): DELETE restrito a status 'revisao' e motivos exatamente ["nao_conferido"], a
- * marca e a linha do Histórico na mesma transação. A linha só sai em banco com catálogo em uso (instalação nova não
- * ganha linha). Falha desfaz tudo, sem marca: tenta de novo na próxima abertura e não impede o programa de subir.
- */
+// Rodar sozinho, entrega 2 (plano rodar-sozinho-entrega2, decisão 9 e CA2.17): o link que falha deixa de mandar a oferta
+// do catálogo para a revisão (a falha passageira é pulada; na 3ª, `falhas_repetidas`). Uma vez por banco, os itens que
+// esperam revisão SÓ por `falha_link` saem da fila, no mesmo molde da migração da entrega 1. `falha_link` segue em
+// MOTIVOS (src/catalogo-itens.js) só para ler as linhas que ficaram.
+export const MARCA_MIGRACAO_E2 = 'migracao_e2_falha_link';
+const SO_FALHA_LINK = '["falha_link"]'; // como o registrar de src/catalogo-itens.js grava (JSON.stringify)
+
+/** Linha `info` do Histórico com quantos itens a migração da entrega 2 tirou da revisão (texto da spec). Só a contagem. */
+export function textoMigracaoE2(n) {
+  const base = 'Revisão do Catálogo:';
+  const motivo = 'só porque o link não foi gerado';
+  if (n === 1) return `${base} 1 oferta que esperava revisão ${motivo} saiu da fila. Ela volta se o catálogo a trouxer de novo.`;
+  if (n > 1) return `${base} ${n} ofertas que esperavam revisão ${motivo} saíram da fila. Elas voltam se o catálogo as trouxer de novo.`;
+  return `${base} nenhuma oferta esperava revisão ${motivo}.`;
+}
+
+/** Migração do `nao_conferido` (CA1.10). */
 function migrarNaoConferido(db) {
-  if (getSetting(db, MARCA_MIGRACAO_E1) !== null) return;
+  tirarDaRevisaoSo(db, { marca: MARCA_MIGRACAO_E1, motivos: SO_NAO_CONFERIDO, texto: textoMigracaoE1, quais: 'só não conferidas' });
+}
+
+/** Migração do `falha_link` (CA2.17). */
+function migrarFalhaLink(db) {
+  tirarDaRevisaoSo(db, { marca: MARCA_MIGRACAO_E2, motivos: SO_FALHA_LINK, texto: textoMigracaoE2, quais: 'só com o link não gerado' });
+}
+
+/**
+ * Miolo das migrações únicas da revisão do Catálogo: DELETE restrito a status 'revisao' e `motivos` exatamente igual a
+ * `motivos` (o texto JSON do registrar), a marca e a linha do Histórico na mesma transação. A linha só sai em banco com
+ * catálogo em uso (instalação nova não ganha linha). Falha desfaz tudo, sem marca: tenta de novo na próxima abertura e
+ * não impede o programa de subir.
+ */
+function tirarDaRevisaoSo(db, { marca, motivos, texto, quais }) {
+  if (getSetting(db, marca) !== null) return;
   let aberta = false;
   try {
     db.exec('BEGIN IMMEDIATE');
     aberta = true;
-    if (getSetting(db, MARCA_MIGRACAO_E1) === null) {
+    if (getSetting(db, marca) === null) {
       const comCatalogo = !!db.prepare('SELECT 1 FROM catalogo_itens LIMIT 1').get();
-      const { changes } = db.prepare("DELETE FROM catalogo_itens WHERE status = 'revisao' AND motivos = ?").run(SO_NAO_CONFERIDO);
-      setSetting(db, MARCA_MIGRACAO_E1, '1');
-      if (comCatalogo) addLog(db, { level: 'info', message: textoMigracaoE1(Number(changes)) });
+      const { changes } = db.prepare("DELETE FROM catalogo_itens WHERE status = 'revisao' AND motivos = ?").run(motivos);
+      setSetting(db, marca, '1');
+      if (comCatalogo) addLog(db, { level: 'info', message: texto(Number(changes)) });
     }
     db.exec('COMMIT');
   } catch (e) {
     if (aberta) { try { db.exec('ROLLBACK'); } catch { /* a transação já foi desfeita */ } }
     // sem e.message: a mensagem do banco pode trazer dados. Os itens ficam na revisão até a próxima abertura.
-    console.error('[db] não consegui tirar da revisão as ofertas só não conferidas:', e?.code || e?.name || 'erro');
+    console.error(`[db] não consegui tirar da revisão as ofertas ${quais}:`, e?.code || e?.name || 'erro');
   }
 }
 
