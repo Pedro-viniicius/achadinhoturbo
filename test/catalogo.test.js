@@ -15,7 +15,7 @@ import { openDb, addLog, getSetting } from '../src/db.js';
 import {
   createCatalogo, paraCandidato, motivosDeRevisao, limparFonteCatalogo, precisaEtiqueta, filtroDe,
   enderecoValido, caminhoValido, ErroCatalogo, MENSAGENS_CATALOGO, ERROS_FONTE, fraseDoTeste, emCentavos,
-  lerPrecoEm, IDADE_CATALOGO_CONFERIDO_H,
+  lerPrecoEm, IDADE_CATALOGO_CONFERIDO_H, QUEDA_REVISAO_PCT, quedaDePreco,
 } from '../src/catalogo.js';
 import { candidatesFor } from '../src/ml.js';
 
@@ -337,6 +337,53 @@ test('motivosDeRevisao (D5, CA4, CA7): Shopee, desconto 100% e preço antigo ≥
   assert.deepEqual(motivosDeRevisao(paraCandidato(oferta(1, 'amazon', { preco: 10, preco_antigo: 99.99, desconto_pct: 90 }))), []);
   assert.deepEqual(motivosDeRevisao(paraCandidato(oferta(1, 'shopee', { desconto_pct: 100 }))), ['shopee', 'desconto_100']);
   assert.deepEqual(motivosDeRevisao(null), []);
+});
+
+test('quedaDePreco e QUEDA_REVISAO_PCT (CA2.11): % inteira, truncada; null quando não há queda a medir', () => {
+  assert.equal(QUEDA_REVISAO_PCT, 50);
+  assert.equal(quedaDePreco(100, 50), 50);
+  assert.equal(quedaDePreco(199, 99.5), 50);
+  assert.equal(quedaDePreco(100, 51), 49);
+  assert.equal(quedaDePreco('100', '25'), 75);
+  assert.equal(quedaDePreco(100, 100), 0);
+  assert.equal(quedaDePreco(100, 0), 100);
+  // a % devolvida é o piso do valor exato: 49,6% não vira 50 por arredondamento
+  assert.equal(quedaDePreco(100, 50.4), 49);
+  assert.equal(quedaDePreco(1000, 504), 49);
+  assert.equal(quedaDePreco(100, 49.99), 50);
+  assert.equal(quedaDePreco(100, 50.01), 49);
+  assert.equal(quedaDePreco(0.33, 0.1), 69);
+  // sem queda a medir
+  assert.equal(quedaDePreco(100, 120), null, 'o preço subiu');
+  assert.equal(quedaDePreco(100, 100.01), null);
+  for (const ruim of [undefined, null, '', 0, -10, 'abc', NaN, Infinity, true, {}, []]) {
+    assert.equal(quedaDePreco(ruim, 50), null, `lista ${String(ruim)}`);
+  }
+  for (const ruim of [undefined, null, '', -1, 'abc', NaN, Infinity, true, {}, []]) {
+    assert.equal(quedaDePreco(100, ruim), null, `conferido ${String(ruim)}`);
+  }
+});
+
+test('motivosDeRevisao com precoLista (CA2.11): queda de 50% vai com queda_preco, 49% sai', () => {
+  const c = (preco) => paraCandidato(oferta(1, 'ml', { preco, preco_antigo: undefined, desconto_pct: undefined }));
+  assert.deepEqual(motivosDeRevisao(c(50), { precoLista: 100 }), ['queda_preco']);
+  assert.deepEqual(motivosDeRevisao(c(25), { precoLista: 100 }), ['queda_preco']);
+  assert.deepEqual(motivosDeRevisao(c(51), { precoLista: 100 }), []);
+  assert.deepEqual(motivosDeRevisao(c(50.4), { precoLista: 100 }), [], '49,6% não é 50%');
+  assert.deepEqual(motivosDeRevisao(c(50), { precoLista: 99.99 }), [], '49,995%: não vira 50');
+  assert.deepEqual(motivosDeRevisao(c(50), { precoLista: 100.01 }), ['queda_preco'], '50,005%');
+  // sem precoLista, lista inválida ou preço que subiu: nenhum motivo
+  assert.deepEqual(motivosDeRevisao(c(10)), []);
+  assert.deepEqual(motivosDeRevisao(c(10), {}), []);
+  assert.deepEqual(motivosDeRevisao(c(10), { precoLista: null }), []);
+  for (const ruim of [0, -5, 'abc', NaN, Infinity]) assert.deepEqual(motivosDeRevisao(c(10), { precoLista: ruim }), []);
+  assert.deepEqual(motivosDeRevisao(c(100), { precoLista: 50 }), []);
+  assert.deepEqual(motivosDeRevisao({ loja: 'ml' }, { precoLista: 100 }), [], 'sem preço conferido');
+  assert.deepEqual(motivosDeRevisao(null, { precoLista: 100 }), []);
+  // ordem: os motivos de sempre primeiro, queda_preco por último
+  const shopee = paraCandidato(oferta(1, 'shopee', { preco: 10, preco_antigo: 100, desconto_pct: 90 }));
+  assert.deepEqual(motivosDeRevisao(shopee, { precoLista: 100 }), ['shopee', 'preco_antigo', 'queda_preco']);
+  assert.deepEqual(motivosDeRevisao(shopee), ['shopee', 'preco_antigo']);
 });
 
 // ============================================================================================ token e conexão

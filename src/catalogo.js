@@ -61,7 +61,7 @@
 //     plano rodar-sozinho-entrega1). Nunca lança; resultados e causas no comentário da função. Fila única, sem
 //     corpo, só Authorization, redirect:'error', timeout por pedido, corpo até 4 KiB. Não muda situacao(). O freio
 //     curto do Etiqueta (429 `intervalo`/`ocupado`) é esperado dentro da fila e o pedido é refeito.
-// - Puros: paraCandidato(oferta), motivosDeRevisao(c), emCentavos(v), limparFonteCatalogo(config), precisaEtiqueta(sources),
+// - Puros: paraCandidato(oferta), motivosDeRevisao(c, { precoLista }), quedaDePreco(lista, conferido), emCentavos(v), limparFonteCatalogo(config), precisaEtiqueta(sources),
 //   filtroDe(config), enderecoValido(v), caminhoValido(v), fraseDoTeste(resultado, dados), lerPrecoEm(texto).
 // - settings.catalogo_verificacao (contrato com src/conexoes.js, etapa 3): { verificado_em, total,
 //   categorias:[{ nome, total, lojas:{ amazon, ml, shopee } }] }, o formato de GET /api/catalogo/categorias, mais
@@ -356,14 +356,38 @@ export function emCentavos(v) {
   return v != null && v !== '' && Number.isFinite(n) ? Math.round(n * 100) : null;
 }
 
-/** Por que o candidato espera revisão (D5, CA4, CA7): 'shopee', 'desconto_100', 'preco_antigo'. Lista vazia = pode sair. */
-export function motivosDeRevisao(c) {
+/** Queda de preço (%, inteira) a partir da qual o preço conferido vai à revisão (D5 da entrega 2, 11/11/2026). 100 desliga. */
+export const QUEDA_REVISAO_PCT = 50;
+
+/**
+ * Quanto o preço conferido caiu em relação ao da lista, em % inteira (CA2.11). null quando não há queda a medir:
+ * preço da lista ausente, zero, negativo ou não numérico, preço conferido ausente, negativo ou não numérico, ou preço
+ * que subiu. Preço igual dá 0. Conferido zero dá 100.
+ * Arredondamento: a conta é em centavos inteiros e a % devolvida é o PISO do valor exato (49,6% → 49, nunca 50);
+ * como o limite é inteiro, `quedaDePreco(...) >= QUEDA_REVISAO_PCT` equivale à comparação exata.
+ */
+export function quedaDePreco(lista, conferido) {
+  const tipoOk = (v) => typeof v === 'number' || typeof v === 'string';
+  if (!tipoOk(lista) || !tipoOk(conferido)) return null;
+  const l = emCentavos(lista);
+  const c = emCentavos(conferido);
+  if (l == null || c == null || l <= 0 || c < 0 || c > l) return null;
+  return Math.floor(((l - c) * 100) / l);
+}
+
+/**
+ * Por que o candidato espera revisão (D5, CA4, CA7): 'shopee', 'desconto_100', 'preco_antigo' e, só com
+ * `opcoes.precoLista` (preço da lista, quando o chamador o tem), 'queda_preco' (CA2.11). Lista vazia = pode sair.
+ */
+export function motivosDeRevisao(c, opcoes = {}) {
   const motivos = [];
   if (c?.loja === 'shopee') motivos.push('shopee');
   if (Number(c?.discountPct) >= 100) motivos.push('desconto_100');
   const preco = emCentavos(c?.price);
   const antigo = emCentavos(c?.oldPrice);
   if (preco != null && antigo != null && preco > 0 && antigo >= 10 * preco) motivos.push('preco_antigo');
+  const queda = opcoes?.precoLista == null ? null : quedaDePreco(opcoes.precoLista, c?.price);
+  if (queda != null && queda >= QUEDA_REVISAO_PCT) motivos.push('queda_preco');
   return motivos;
 }
 
