@@ -1,11 +1,11 @@
 // Fonte "catalogo": cliente da API de ofertas do Etiqueta (plano fonte-catalogo-etiqueta, etapa 1; ADR-004).
-// Contrato da API (só leitura): ~/Documentos/mensagensParaEnviar/docs/produto/referencias/api-ofertas.md.
+// Contrato da API (só leitura, exceto a confirmação de preço da Amazon): ~/Documentos/mensagensParaEnviar/docs/produto/referencias/api-ofertas.md.
 //
 // Contrato do módulo:
 //
 // - createCatalogo({ db, fetch, lerConexao, agora, timeoutMs }) →
 //   { testar(), situacao(), ultimaVerificacao(), candidatos(cfg, ctx), avancar(ruleId, paginas, tratada),
-//     recomecar(ruleId), esquecerRegra(ruleId) }
+//     recomecar(ruleId), esquecerRegra(ruleId), confirmarPreco(asin) }
 //   - Conexão lida a cada chamada: `lerConexao()` → { endereco, caminho_token } (o servidor passa
 //     `() => segredosDe(db, 'catalogo')`); sem ele, a linha 'catalogo' de `conexoes` (config).
 //   - Endereço (D3): só `http://localhost:<porta>` ou `http://127.0.0.1:<porta>`, conferido de novo a cada
@@ -31,7 +31,7 @@
 //   - ultimaVerificacao() → { resultado, verificado_em, total, categorias } | null (sem rede; para a regra).
 //   - candidatos(cfg, ctx) → lista de candidatos (paraCandidato) ainda não tratados, na ordem do Etiqueta.
 //     ctx = { rule, fonteIndex, quer, tratada(c, modo) → bool, utilizavel(c) → bool, vistas: Set, paginas: Map,
-//     onWarn(msg), previa }. modo é a ordem da fonte (config.ordem), como em catalogoItens.tratada(rule, c, modo):
+//     onWarn(msg), previa, conferenciaNaHora }. modo é a ordem da fonte (config.ordem), como em catalogoItens.tratada(rule, c, modo):
 //     'atualizacao' (Novidades: tratada = já passou pela regra, sem prazo) ou outra (prazo de repetição da regra).
 //     utilizavel(c): a regra usaria a oferta agora (filtros de preço e desconto, loja disponível, revisão com
 //     vaga; o agendador monta); só as utilizáveis contam para o alvo da leitura (Q4, Q5). vistas: chaves que outra
@@ -45,6 +45,9 @@
 //       { modo: 'primeira_leitura' } em ctx.paginas; não chama onWarn.
 //     - Demais ordens (D7): páginas do início até achar max(quer × 4, 20) ofertas utilizáveis não tratadas, no
 //       máximo 10.
+//     - conferenciaNaHora === true (cada oferta será conferida antes do envio: verificador ligado) e lojas da fonte
+//       só ml e/ou amazon (lista não vazia): todo pedido leva preco_max_horas=IDADE_CATALOGO_CONFERIDO_H (72);
+//       fora disso, nada (vale a validade do Etiqueta). O filtroDe (chave do cursor) não muda com isso.
 //     - Sempre limite=200. Orçamento de ORCAMENTO_PADRAO (30 s) para a chamada inteira, compartilhado pelas
 //       páginas: esgotado depois da primeira página, devolve o que leu (o resto fica para a próxima execução);
 //       antes dela, fora_do_ar. Falha → ErroCatalogo (frase fixa "Catálogo do Etiqueta indisponível…").
@@ -54,8 +57,11 @@
 //     nesta execução); vazio com proximo:null não muda nada. → [{ fonteIndex, filtro, paginas_avancadas, pronto }]
 //   - recomecar(ruleId): cursor nulo com pronto=1 em toda fonte Novidades da regra (varredura do zero). → nº de fontes.
 //   - esquecerRegra(ruleId): apaga os cursores da regra.
+//   - confirmarPreco(asin): POST /api/v1/amazon/<ASIN>/confirmar-preco (o Etiqueta relê a página e grava o preço;
+//     plano rodar-sozinho-entrega1). Nunca lança; resultados e causas no comentário da função. Fila única, sem
+//     corpo, só Authorization, redirect:'error', timeout por pedido, corpo até 4 KiB. Não muda situacao().
 // - Puros: paraCandidato(oferta), motivosDeRevisao(c), emCentavos(v), limparFonteCatalogo(config), precisaEtiqueta(sources),
-//   filtroDe(config), enderecoValido(v), caminhoValido(v), fraseDoTeste(resultado, dados).
+//   filtroDe(config), enderecoValido(v), caminhoValido(v), fraseDoTeste(resultado, dados), lerPrecoEm(texto).
 // - settings.catalogo_verificacao (contrato com src/conexoes.js, etapa 3): { verificado_em, total,
 //   categorias:[{ nome, total, lojas:{ amazon, ml, shopee } }] }, o formato de GET /api/catalogo/categorias, mais
 //   `resultado` e `impressao` (sha256 de endereço + caminho, 16 hex) para a situacao().
@@ -63,7 +69,8 @@
 // Candidato: { key, loja:'ml'|'amazon'|'shopee' (como no Etiqueta e em catalogo_itens), plataforma
 // ('mercadolivre'|'amazon'|'shopee', o id das lojas do painel: imagemPermitida, envios), url, title, price,
 // oldPrice, discountPct (o do contrato), sold, freeShipping, coupon, image (só do CDN da loja), categoria,
-// asin (Amazon), link (só Shopee) }. O link do ML e o da Amazon que vêm do Etiqueta não são usados: o ML é
+// precoEm (preco_em do Etiqueta em ms, hora local; null se ausente ou inválido), asin (Amazon), link (só Shopee) }.
+// O link do ML e o da Amazon que vêm do Etiqueta não são usados: o ML é
 // gerado de novo com a etiqueta e a Amazon é remontada com a tag de Conexões (D4).
 //
 // As regras do endereço e do caminho e a foto por CDN são as de src/lojas.js (o PUT de Conexões usa as mesmas);
@@ -92,6 +99,13 @@ const PAGINAS_FIM = 20;          // primeira leitura de Novidades: páginas por 
 const PAGINAS_LEITURA = 10;      // demais leituras
 const MAX_CURSOR = 500;
 const MAX_CATEGORIAS_RESPOSTA = 1000;
+const MAX_CORPO_CONFIRMAR = 4096; // a resposta da confirmação de preço tem algumas dezenas de bytes
+/**
+ * Idade máxima do preço (h) pedida ao Etiqueta quando toda oferta da fonte é conferida na hora (verificador
+ * ligado, só ML e/ou Amazon). Fora disso, vale a validade do próprio Etiqueta (48 h).
+ */
+export const IDADE_CATALOGO_CONFERIDO_H = 72;
+const LOJAS_CONFERIDAS_NA_HORA = Object.freeze(['ml', 'amazon']);
 export const LOJAS = Object.freeze(['amazon', 'ml', 'shopee']);
 export const ORDENS = Object.freeze(['atualizacao', 'relevancia', 'desconto', 'menor_preco', 'maior_preco', 'cupom', 'recentes']);
 /** Loja do Etiqueta → id da loja no painel (src/lojas.js). */
@@ -257,6 +271,25 @@ const MAX_CUPOM = 200;
 
 const inteiroNaoNegativo = (v) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? Math.floor(v) : 0);
 
+const RE_PRECO_EM = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})$/;
+
+/**
+ * `preco_em` do Etiqueta ("AAAA-MM-DDTHH:MM:SS", hora local, sem fuso) → ms, ou null quando está fora do formato
+ * ou a data não existe (31/04, 29/02 fora de ano bissexto, 24:00…): a ida e volta pelo Date precisa dar os mesmos
+ * campos. Pura.
+ */
+export function lerPrecoEm(texto) {
+  if (typeof texto !== 'string') return null;
+  const m = RE_PRECO_EM.exec(texto);
+  if (!m) return null;
+  const [a, mes, d, h, mi, s] = m.slice(1).map(Number);
+  const dt = new Date(a, mes - 1, d, h, mi, s); // anos 0000-0099 viram 19xx e não voltam iguais: null
+  if (dt.getFullYear() !== a || dt.getMonth() !== mes - 1 || dt.getDate() !== d
+    || dt.getHours() !== h || dt.getMinutes() !== mi || dt.getSeconds() !== s) return null;
+  const ms = dt.getTime();
+  return Number.isFinite(ms) ? ms : null;
+}
+
 /**
  * Oferta do Etiqueta → candidato do Turbo, ou null quando não fecha (loja, código do produto, título, preço > 0,
  * link da Shopee fora de LINK_SHOPEE) ou quando título, cupom ou categoria têm cara de link ou de menção (S2: o
@@ -303,7 +336,8 @@ export function paraCandidato(o) {
   return {
     key, loja, plataforma: PLATAFORMA_DA_LOJA[loja], url, title, price, oldPrice, discountPct,
     sold: inteiroNaoNegativo(o.vendas), freeShipping: o.frete_gratis === true, coupon: coupon || null,
-    image: imagemPermitida(PLATAFORMA_DA_LOJA[loja], o.imagem) ? o.imagem : null, categoria, ...extra,
+    image: imagemPermitida(PLATAFORMA_DA_LOJA[loja], o.imagem) ? o.imagem : null, categoria,
+    precoEm: lerPrecoEm(o.preco_em), ...extra,
   };
 }
 
@@ -538,6 +572,81 @@ export function createCatalogo({ db, fetch: f, lerConexao, agora = Date.now, tim
     };
   }
 
+  // ------------------------------------------------------------------------ confirmação de preço (Amazon)
+
+  const falhaConfirmar = (causa) => ({ resultado: 'falha', causa });
+
+  /** Corpo do 200 da confirmação → resultado do confirmarPreco; fora do contrato → resposta_inesperada. */
+  function lerConfirmacao(json) {
+    if (!json || typeof json !== 'object' || Array.isArray(json) || json.versao !== 1) return falhaConfirmar('resposta_inesperada');
+    switch (json.resultado) {
+      case 'sem_preco': case 'outro_produto': return { resultado: json.resultado };
+      case 'bloqueado': case 'falha_rede': return falhaConfirmar(json.resultado);
+      case 'confirmado': break;
+      default: return falhaConfirmar('resposta_inesperada');
+    }
+    const positivo = (v) => typeof v === 'number' && Number.isFinite(v) && v > 0;
+    const { preco, preco_antigo: antigo, desconto_pct: desconto } = json;
+    const precoEm = lerPrecoEm(json.preco_em);
+    if (!positivo(preco) || precoEm == null) return falhaConfirmar('resposta_inesperada');
+    if (antigo != null && !positivo(antigo)) return falhaConfirmar('resposta_inesperada');
+    if (desconto != null && !(typeof desconto === 'number' && Number.isFinite(desconto) && desconto >= 0 && desconto <= 100)) {
+      return falhaConfirmar('resposta_inesperada');
+    }
+    return {
+      resultado: 'confirmado', preco,
+      precoAntigo: antigo != null && antigo > preco ? antigo : null, // como no paraCandidato: só o maior que o preço
+      descontoPct: desconto != null ? Math.round(desconto) : null,
+      precoEm,
+    };
+  }
+
+  /**
+   * Pede ao Etiqueta para reler a página de um produto da Amazon (POST /api/v1/amazon/<ASIN>/confirmar-preco).
+   * → { resultado:'confirmado', preco, precoAntigo|null, descontoPct|null, precoEm } | { resultado:'sem_preco' } |
+   * { resultado:'outro_produto' } | { resultado:'falha', causa }. causa: bloqueado | falha_rede (o Etiqueta não
+   * leu a Amazon) | freio (429) | nao_encontrado (404, ou ASIN fora de [A-Z0-9]{10}, que o Etiqueta recusaria
+   * com 404) | fora_do_ar (rede, tempo, 5xx) | token_recusado (401) | desligada (503) | resposta_inesperada
+   * (3xx, 400/403/405, JSON fora do contrato) | nao_configurada (sem endereço e caminho válidos, ou sem token
+   * legível no arquivo). Nunca lança. Na fila única, POST sem corpo, só Authorization, redirect:'error', mesmo
+   * timeout por pedido e corpo limitado. Não muda situacao(): ela fala da lista de ofertas, não da releitura.
+   * O token só existe dentro desta função.
+   */
+  async function confirmarPreco(asin) {
+    try {
+      if (typeof asin !== 'string' || !RE_ASIN.test(asin)) return falhaConfirmar('nao_encontrado');
+      const c = conexao();
+      if (!c.configurada) return falhaConfirmar('nao_configurada');
+      return await naFila(async () => {
+        const lido = await lerToken(c.caminho);
+        if (!lido.token) return falhaConfirmar('nao_configurada');
+        const url = new URL(`/api/v1/amazon/${asin}/confirmar-preco`, `${c.endereco}/`);
+        let r;
+        try {
+          r = await doFetch(url.href, {
+            method: 'POST', redirect: 'error', signal: AbortSignal.timeout(timeoutMs),
+            headers: { Authorization: `Bearer ${lido.token}` },
+          });
+        } catch { return falhaConfirmar('fora_do_ar'); }
+        const status = Number(r?.status) || 0;
+        if (status !== 200) {
+          try { await r?.body?.cancel?.(); } catch { /* corpo já fechado */ }
+          if (status === 401) return falhaConfirmar('token_recusado');
+          if (status === 503) return falhaConfirmar('desligada');
+          if (status === 404) return falhaConfirmar('nao_encontrado');
+          if (status === 429) return falhaConfirmar('freio');
+          if (status >= 500 || status === 0) return falhaConfirmar('fora_do_ar');
+          return falhaConfirmar('resposta_inesperada');
+        }
+        const { json, recusado } = await lerCorpoLimitado(r, MAX_CORPO_CONFIRMAR);
+        if (recusado || !json) return falhaConfirmar('resposta_inesperada');
+        return lerConfirmacao(json);
+      });
+    } catch {
+      return falhaConfirmar('resposta_inesperada');
+    }
+  }
+
   // --------------------------------------------------------------------------------------- cursores
 
   const cursorDe = (ruleId, filtro) => db.prepare('SELECT cursor, pronto FROM catalogo_cursores WHERE rule_id = ? AND filtro = ?').get(ruleId, filtro) ?? null;
@@ -547,12 +656,14 @@ export function createCatalogo({ db, fetch: f, lerConexao, agora = Date.now, tim
       .run(ruleId, filtro, cursor, pronto ? 1 : 0, agora());
   }
 
+  /** cfg.preco_max_horas não é campo da fonte: candidatos() o põe numa cópia (nunca entra no filtroDe). */
   function parametros(cfg, cursor) {
     const p = [];
     for (const x of cfg.categorias) p.push(['cat', x]);
     for (const x of cfg.lojas) p.push(['loja', x]);
     if (cfg.q) p.push(['q', cfg.q]);
     if (cfg.desconto_min != null) p.push(['desconto_min', cfg.desconto_min]);
+    if (cfg.preco_max_horas != null) p.push(['preco_max_horas', cfg.preco_max_horas]);
     p.push(['ordem', cfg.ordem], ['limite', LIMITE]);
     if (cursor != null) p.push(['cursor', cursor]);
     return p;
@@ -587,7 +698,11 @@ export function createCatalogo({ db, fetch: f, lerConexao, agora = Date.now, tim
   }
 
   async function candidatos(config, ctx = {}) {
-    const cfg = limparFonteCatalogo(config);
+    const cfg = limparFonteCatalogo(config); // cópia nova: o campo abaixo não volta para a regra
+    // idade larga só quando cada oferta da fonte será conferida na hora (CA1.11); filtroDe(cfg) a ignora
+    if (ctx.conferenciaNaHora === true && cfg.lojas.length && cfg.lojas.every((l) => LOJAS_CONFERIDAS_NA_HORA.includes(l))) {
+      cfg.preco_max_horas = IDADE_CATALOGO_CONFERIDO_H;
+    }
     const c = conexao();
     if (!c.configurada) throw new ErroCatalogo('nao_configurada');
     const ruleId = ctx.rule?.id;
@@ -744,5 +859,5 @@ export function createCatalogo({ db, fetch: f, lerConexao, agora = Date.now, tim
     db.prepare('DELETE FROM catalogo_cursores WHERE rule_id = ?').run(ruleId);
   }
 
-  return { testar, situacao, ultimaVerificacao, candidatos, primeiraLeitura, avancar, recomecar, esquecerRegra };
+  return { testar, situacao, ultimaVerificacao, candidatos, primeiraLeitura, avancar, recomecar, esquecerRegra, confirmarPreco };
 }

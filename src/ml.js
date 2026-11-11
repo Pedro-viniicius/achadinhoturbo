@@ -661,8 +661,10 @@ export async function searchOffers({ query, sort = 'relevance', limit = 50 }, { 
 /**
  * Candidatos de uma fonte ({ type, config }), sem baixar detalhes ainda.
  * A fonte "catalogo" (API de ofertas do Etiqueta) delega a deps.catalogo.candidatos (src/catalogo.js) com
- * { rule, fonteIndex, quer, tratada, utilizavel, vistas, paginas, onWarn, previa }, que vêm de candidates() e do
- * agendador. Sem deps.catalogo (servidor sem o cliente do Etiqueta), a fonte falha como indisponível.
+ * { rule, fonteIndex, quer, tratada, utilizavel, vistas, paginas, onWarn, previa, conferenciaNaHora }, que vêm de
+ * candidates() e do agendador. conferenciaNaHora (só true conta): cada oferta será conferida antes do envio, e o
+ * catálogo pode pedir preços mais antigos ao Etiqueta (src/catalogo.js, IDADE_CATALOGO_CONFERIDO_H). Sem
+ * deps.catalogo (servidor sem o cliente do Etiqueta), a fonte falha como indisponível.
  */
 export async function candidatesFor({ type, config }, deps = {}) {
   const cfg = config || {};
@@ -671,6 +673,7 @@ export async function candidatesFor({ type, config }, deps = {}) {
     return deps.catalogo.candidatos(cfg, {
       rule: deps.rule, fonteIndex: deps.fonteIndex, quer: deps.quer, tratada: deps.tratada, utilizavel: deps.utilizavel,
       vistas: deps.vistas, paginas: deps.paginas, onWarn: deps.onWarn, previa: deps.previa === true,
+      conferenciaNaHora: deps.conferenciaNaHora === true,
     });
   }
   if (type === 'afiliados') {

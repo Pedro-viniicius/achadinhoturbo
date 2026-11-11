@@ -15,7 +15,9 @@ import { openDb, addLog, getSetting } from '../src/db.js';
 import {
   createCatalogo, paraCandidato, motivosDeRevisao, limparFonteCatalogo, precisaEtiqueta, filtroDe,
   enderecoValido, caminhoValido, ErroCatalogo, MENSAGENS_CATALOGO, ERROS_FONTE, fraseDoTeste, emCentavos,
+  lerPrecoEm, IDADE_CATALOGO_CONFERIDO_H,
 } from '../src/catalogo.js';
+import { candidatesFor } from '../src/ml.js';
 
 // ------------------------------------------------------------------------------- rede só para os servidores locais
 const fetchOriginal = globalThis.fetch;
@@ -1134,6 +1136,278 @@ test('S3: com vários pedidos esperando na fila, a pré-visualização é recusa
   assert.deepEqual([cat.situacao().estado, cat.situacao().falha_desde], ['conectada', null]);
   assert.equal((await cat.candidatos({ ordem: 'relevancia' }, ctxDe(ruleId, { previa: true }))).length, 1, 'fila vazia: a prévia lê');
   assert.equal(fraseDoTeste('ocupado'), 'Há pedidos demais esperando o Etiqueta. Tente de novo em instantes.');
+});
+
+// ======================================================= rodar sozinho, entrega 1, etapa B1 (CA1.3, CA1.5, CA1.11)
+
+const local = (a, m, d, h = 0, mi = 0, s = 0) => new Date(a, m - 1, d, h, mi, s).getTime();
+
+test('CA1.5: lerPrecoEm lê AAAA-MM-DDTHH:MM:SS na hora local; fora do formato, data inexistente ou ausente vira null', () => {
+  assert.equal(lerPrecoEm('2026-11-11T08:30:05'), local(2026, 11, 11, 8, 30, 5));
+  assert.equal(lerPrecoEm('2026-01-01T00:00:00'), local(2026, 1, 1));
+  assert.equal(lerPrecoEm('2026-12-31T23:59:59'), local(2026, 12, 31, 23, 59, 59));
+  assert.equal(lerPrecoEm('2024-02-29T12:00:00'), local(2024, 2, 29, 12), 'ano bissexto');
+  for (const v of [
+    '2026-02-29T12:00:00', '2026-02-30T10:00:00', '2026-04-31T10:00:00', '2026-13-01T10:00:00', '2026-00-10T10:00:00',
+    '2026-11-00T10:00:00', '2026-11-11T24:00:00', '2026-11-11T23:60:00', '2026-11-11T23:59:60',
+    '2026-11-11T10:60:00', '2026-11-11T10:30:60', '2026-11-11T10:99:00', '0050-01-01T00:00:00',
+    '2026-11-11 08:30:00', '2026-11-11T08:30:00Z', '2026-11-11T08:30:00-03:00', '2026-11-11T08:30:00.000', '2026-11-11T08:30',
+    '2026-11-11', ' 2026-11-11T08:30:00', '2026-11-11T08:30:00\n', '26-11-11T08:30:00', '2026-1-11T08:30:00', '２０２６-11-11T08:30:00',
+    '', null, undefined, 1762860600000, {}, [], true,
+  ]) assert.equal(lerPrecoEm(v), null, JSON.stringify(v) ?? String(v));
+});
+
+test('CA1.5: paraCandidato carrega preco_em como precoEm (ms); inválido ou ausente vira null sem descartar a oferta', () => {
+  for (const loja of ['amazon', 'ml', 'shopee']) {
+    assert.equal(paraCandidato(oferta(1, loja, { preco_em: '2026-11-10T21:15:00' })).precoEm, local(2026, 11, 10, 21, 15), loja);
+  }
+  const semData = paraCandidato(oferta(1));
+  assert.ok(semData, 'oferta sem preco_em continua candidata');
+  assert.equal(semData.precoEm, null);
+  for (const v of ['2026-02-30T10:00:00', '2026-11-10 21:15:00', 'ontem', 1762860600000, null]) {
+    const c = paraCandidato(oferta(1, 'amazon', { preco_em: v }));
+    assert.ok(c, String(v));
+    assert.equal(c.precoEm, null, String(v));
+  }
+});
+
+test('CA1.11: preco_max_horas=72 só com a conferência na hora ligada e lojas ⊆ {ml, amazon}, lista não vazia', async () => {
+  assert.equal(IDADE_CATALOGO_CONFERIDO_H, 72);
+  const { db } = banco();
+  const ruleId = criarRegra(db, [{ type: 'catalogo', config: { ordem: 'relevancia' } }]);
+  const estado = { ofertas: [oferta(1), oferta(2, 'ml')] };
+  const { cat } = cliente({ db, fetch: fetchDe(etiqueta(estado)), caminho: arquivoToken() });
+  const idade = async (lojas, conferenciaNaHora) => {
+    estado.pedidos.length = 0;
+    const ctx = ctxDe(ruleId);
+    if (conferenciaNaHora !== undefined) ctx.conferenciaNaHora = conferenciaNaHora;
+    await cat.candidatos({ lojas, ordem: 'relevancia' }, ctx);
+    assert.equal(estado.pedidos.length, 1);
+    return estado.pedidos[0].params.filter(([k]) => k === 'preco_max_horas').map(([, v]) => v);
+  };
+  for (const lojas of [['ml'], ['amazon'], ['ml', 'amazon'], ['amazon', 'ml']]) {
+    assert.deepEqual(await idade(lojas, true), ['72'], `ligado, ${lojas}`);
+  }
+  for (const lojas of [[], ['shopee'], ['amazon', 'shopee'], ['ml', 'amazon', 'shopee'], undefined]) {
+    assert.deepEqual(await idade(lojas, true), [], `ligado, ${lojas}: validade do Etiqueta`);
+  }
+  for (const flag of [false, undefined, null, 'sim', 1, {}]) {
+    assert.deepEqual(await idade(['ml', 'amazon'], flag), [], `conferência ${JSON.stringify(flag)}`);
+  }
+  // a ordem e o resto dos parâmetros não mudam; o parâmetro vem antes da ordem
+  estado.pedidos.length = 0;
+  await cat.candidatos({ lojas: ['amazon'], desconto_min: 30, ordem: 'relevancia' }, ctxDe(ruleId, { conferenciaNaHora: true }));
+  assert.deepEqual(estado.pedidos[0].params, [['loja', 'amazon'], ['desconto_min', '30'], ['preco_max_horas', '72'], ['ordem', 'relevancia'], ['limite', '200']]);
+});
+
+test('CA1.11: Novidades pede a mesma idade em todas as páginas (primeira leitura e cursor) e o filtro do cursor não muda', async () => {
+  const { db } = banco();
+  const cfg = { lojas: ['amazon'], ordem: 'atualizacao' };
+  const ruleId = criarRegra(db, [{ type: 'catalogo', config: cfg }]);
+  const estado = { ofertas: Array.from({ length: 450 }, (_, i) => oferta(i + 1)) };
+  const { cat } = cliente({ db, fetch: fetchDe(etiqueta(estado)), caminho: arquivoToken() });
+  const ctx = ctxDe(ruleId, { conferenciaNaHora: true });
+  assert.deepEqual(await cat.candidatos(cfg, ctx), []);
+  cat.avancar(ruleId, ctx.paginas, () => false);
+  assert.deepEqual(cursorSalvo(db, ruleId), [{ filtro: filtroDe(cfg), cursor: 'c450', pronto: 1 }], 'mesma chave de filtro com ou sem a idade');
+  estado.ofertas.push(oferta(451));
+  assert.equal((await cat.candidatos(cfg, ctxDe(ruleId, { conferenciaNaHora: true }))).length, 1);
+  assert.ok(estado.pedidos.length >= 4);
+  for (const p of estado.pedidos) assert.equal(new URLSearchParams(p.params).get('preco_max_horas'), '72', p.url);
+});
+
+test('CA1.11: ml.candidatesFor repassa conferenciaNaHora (só true) ao catálogo', async () => {
+  const vistos = [];
+  const catalogo = { candidatos: async (cfg, ctx) => { vistos.push(ctx.conferenciaNaHora); return []; } };
+  for (const v of [true, false, undefined, 'sim']) await candidatesFor({ type: 'catalogo', config: {} }, { catalogo, conferenciaNaHora: v });
+  assert.deepEqual(vistos, [true, false, false, false]);
+  // de ponta a ponta, pelo cliente de verdade
+  const { db } = banco();
+  const ruleId = criarRegra(db, [{ type: 'catalogo', config: { lojas: ['ml'], ordem: 'relevancia' } }]);
+  const estado = { ofertas: [oferta(1, 'ml')] };
+  const { cat } = cliente({ db, fetch: fetchDe(etiqueta(estado)), caminho: arquivoToken() });
+  const out = await candidatesFor({ type: 'catalogo', config: { lojas: ['ml'], ordem: 'relevancia' } }, { catalogo: cat, rule: { id: ruleId }, fonteIndex: 0, quer: 1, conferenciaNaHora: true });
+  assert.equal(out.length, 1);
+  assert.equal(new URLSearchParams(estado.pedidos[0].params).get('preco_max_horas'), '72');
+});
+
+const ASIN_OK = 'B0ABCDEF12';
+const ROTA_CONFIRMAR = `/api/v1/amazon/${ASIN_OK}/confirmar-preco`;
+const CONFIRMADO = { versao: 1, resultado: 'confirmado', preco: 89.9, preco_antigo: 119.9, desconto_pct: 25, preco_em: '2026-11-11T09:41:07' };
+
+test('CA1.3: confirmarPreco faz POST sem corpo, só Authorization, redirect:error, e devolve o preço lido', async () => {
+  const { db } = banco();
+  const f = fetchDe(() => ({ status: 200, corpo: CONFIRMADO }));
+  const { cat } = cliente({ db, fetch: f, caminho: arquivoToken() });
+  const r = await cat.confirmarPreco(ASIN_OK);
+  assert.deepEqual(r, { resultado: 'confirmado', preco: 89.9, precoAntigo: 119.9, descontoPct: 25, precoEm: local(2026, 11, 11, 9, 41, 7) });
+  assert.equal(f.chamadas.length, 1);
+  const { url, init } = f.chamadas[0];
+  assert.equal(url, `http://127.0.0.1:8765${ROTA_CONFIRMAR}`);
+  assert.equal(init.method, 'POST');
+  assert.equal(init.redirect, 'error');
+  assert.equal(init.body, undefined);
+  assert.ok(init.signal instanceof AbortSignal);
+  assert.deepEqual(Object.keys(init.headers), ['Authorization']);
+  assert.equal(init.headers.Authorization, `Bearer ${TOKEN}`);
+  assert.ok(!url.includes(TOKEN));
+  // preço antigo e desconto opcionais; antigo que não é maior que o preço não vale (como no paraCandidato)
+  for (const [mais, esperado] of [
+    [{ preco_antigo: null, desconto_pct: null }, { precoAntigo: null, descontoPct: null }],
+    [{ preco_antigo: undefined, desconto_pct: undefined }, { precoAntigo: null, descontoPct: null }],
+    [{ preco_antigo: 89.9, desconto_pct: 0 }, { precoAntigo: null, descontoPct: 0 }],
+    [{ preco_antigo: 50 }, { precoAntigo: null, descontoPct: 25 }],
+    [{ desconto_pct: 33.4 }, { precoAntigo: 119.9, descontoPct: 33 }],
+  ]) {
+    const g = fetchDe(() => ({ status: 200, corpo: { ...CONFIRMADO, ...mais } }));
+    const x = await cliente({ db, fetch: g, caminho: arquivoToken() }).cat.confirmarPreco(ASIN_OK);
+    assert.deepEqual(x, { resultado: 'confirmado', preco: 89.9, precoEm: local(2026, 11, 11, 9, 41, 7), ...esperado }, JSON.stringify(mais));
+  }
+});
+
+test('CA1.3: confirmarPreco, resultados do 200: sem_preco, outro_produto, bloqueado, falha_rede e o que foge do contrato', async () => {
+  const casos = [
+    [{ versao: 1, resultado: 'sem_preco' }, { resultado: 'sem_preco' }],
+    [{ versao: 1, resultado: 'outro_produto' }, { resultado: 'outro_produto' }],
+    [{ versao: 1, resultado: 'bloqueado' }, { resultado: 'falha', causa: 'bloqueado' }],
+    [{ versao: 1, resultado: 'falha_rede' }, { resultado: 'falha', causa: 'falha_rede' }],
+    [{ versao: 1, resultado: 'freio' }, { resultado: 'falha', causa: 'resposta_inesperada' }],
+    [{ versao: 1, resultado: 'outra_coisa' }, { resultado: 'falha', causa: 'resposta_inesperada' }],
+    [{ versao: 1 }, { resultado: 'falha', causa: 'resposta_inesperada' }],
+    [{ versao: 2, resultado: 'sem_preco' }, { resultado: 'falha', causa: 'resposta_inesperada' }],
+    [{ resultado: 'sem_preco' }, { resultado: 'falha', causa: 'resposta_inesperada' }],
+    [{ ...CONFIRMADO, versao: '1' }, { resultado: 'falha', causa: 'resposta_inesperada' }],
+    [[CONFIRMADO], { resultado: 'falha', causa: 'resposta_inesperada' }],
+    [null, { resultado: 'falha', causa: 'resposta_inesperada' }],
+    // números e preco_em validados
+    ...[
+      { preco: 0 }, { preco: -1 }, { preco: '89.9' }, { preco: null }, { preco: undefined }, { preco: true }, { preco: 1e400 },
+      { preco_antigo: '119.9' }, { preco_antigo: -5 }, { preco_antigo: 0 }, { preco_antigo: {} },
+      { desconto_pct: -1 }, { desconto_pct: 101 }, { desconto_pct: '25' }, { desconto_pct: [] },
+      { preco_em: null }, { preco_em: undefined }, { preco_em: '2026-02-30T10:00:00' }, { preco_em: '2026-11-11 09:41:07' }, { preco_em: 1762860600000 },
+    ].map((mais) => [{ ...CONFIRMADO, ...mais }, { resultado: 'falha', causa: 'resposta_inesperada' }]),
+  ];
+  for (const [corpo, esperado] of casos) {
+    const f = fetchDe(() => ({ status: 200, corpo }));
+    const r = await cliente({ fetch: f, caminho: arquivoToken() }).cat.confirmarPreco(ASIN_OK);
+    assert.deepEqual(r, esperado, JSON.stringify(corpo));
+  }
+});
+
+test('CA1.3: confirmarPreco, códigos HTTP, rede, tempo e corpo grande viram causa fixa; nunca lança', async (t) => {
+  const casos = [
+    ['401', () => ({ status: 401, corpo: { error: 'x' } }), 'token_recusado'],
+    ['503', () => ({ status: 503, corpo: { error: 'x' } }), 'desligada'],
+    ['404', () => ({ status: 404, corpo: { error: 'oferta da Amazon não encontrada' } }), 'nao_encontrado'],
+    ['429', () => ({ status: 429, corpo: { versao: 1, resultado: 'freio', motivo: 'intervalo', tentar_em_s: 3 } }), 'freio'],
+    ['429 sem corpo', () => ({ status: 429, corpo: null }), 'freio'],
+    ['405 (Etiqueta antigo)', () => ({ status: 405, corpo: { error: 'a API v1 só aceita GET' } }), 'resposta_inesperada'],
+    ['403', () => ({ status: 403, corpo: { error: 'x' } }), 'resposta_inesperada'],
+    ['400', () => ({ status: 400, corpo: { error: 'esta rota não aceita corpo' } }), 'resposta_inesperada'],
+    ['302', () => ({ status: 302, corpo: null }), 'resposta_inesperada'],
+    ['204', () => ({ status: 204, corpo: null }), 'resposta_inesperada'],
+    ['500', () => ({ status: 500, corpo: { error: 'x' } }), 'fora_do_ar'],
+    ['502', () => ({ status: 502, corpo: null }), 'fora_do_ar'],
+    ['rede', () => { throw new Error('ECONNREFUSED'); }, 'fora_do_ar'],
+  ];
+  for (const [nome, resp, causa] of casos) {
+    const f = fetchDe(async () => resp());
+    const r = await cliente({ fetch: f, caminho: arquivoToken() }).cat.confirmarPreco(ASIN_OK);
+    assert.deepEqual(r, { resultado: 'falha', causa }, nome);
+    assert.equal(f.chamadas.length, 1, nome);
+  }
+  // fetch que lança algo que nem é Error, e Response sem corpo legível: falha, sem lançar
+  const estranho = cliente({ fetch: async () => { throw 'texto'; }, caminho: arquivoToken() }).cat;
+  assert.deepEqual(await estranho.confirmarPreco(ASIN_OK), { resultado: 'falha', causa: 'fora_do_ar' });
+  const semResposta = cliente({ fetch: async () => undefined, caminho: arquivoToken() }).cat;
+  assert.deepEqual(await semResposta.confirmarPreco(ASIN_OK), { resultado: 'falha', causa: 'fora_do_ar' });
+
+  // servidor de verdade: tempo esgotado, JSON quebrado, corpo grande e redirecionamento (não seguido)
+  const parado = await servidor(() => 'manual');
+  t.after(parado.fechar);
+  assert.deepEqual(await cliente({ endereco: parado.endereco, caminho: arquivoToken(), timeoutMs: 150 }).cat.confirmarPreco(ASIN_OK), { resultado: 'falha', causa: 'fora_do_ar' });
+  for (const [nome, bruto] of [['JSON quebrado', '{"versao": 1, "resul'], ['corpo grande', JSON.stringify({ ...CONFIRMADO, x: 'a'.repeat(64 * 1024) })]]) {
+    const srv = await servidor(() => ({ status: 200, bruto }));
+    try {
+      assert.deepEqual(await cliente({ endereco: srv.endereco, caminho: arquivoToken() }).cat.confirmarPreco(ASIN_OK), { resultado: 'falha', causa: 'resposta_inesperada' }, nome);
+    } finally { await srv.fechar(); }
+  }
+  const alvo = [];
+  const desvio = await servidor((url, headers, req) => {
+    if (req.url.startsWith('/destino')) { alvo.push(headers.authorization ?? null); return { status: 200, corpo: CONFIRMADO }; }
+    return { status: 307, corpo: {}, headers: { location: '/destino' } };
+  });
+  t.after(desvio.fechar);
+  assert.deepEqual(await cliente({ endereco: desvio.endereco, caminho: arquivoToken() }).cat.confirmarPreco(ASIN_OK), { resultado: 'falha', causa: 'fora_do_ar' });
+  assert.deepEqual(alvo, [], 'o token nunca vai a outro endereço');
+});
+
+test('CA1.3: confirmarPreco sem conexão, sem token ou com ASIN fora do formato: falha sem rede', async () => {
+  const f = fetchDe(() => ({ status: 200, corpo: CONFIRMADO }));
+  const semConexao = createCatalogo({ db: banco().db, fetch: f, lerConexao: () => ({ endereco: 'http://127.0.0.1:8765' }) });
+  assert.deepEqual(await semConexao.confirmarPreco(ASIN_OK), { resultado: 'falha', causa: 'nao_configurada' });
+  const quebrada = createCatalogo({ db: banco().db, fetch: f, lerConexao: () => { throw new Error('banco'); } });
+  assert.deepEqual(await quebrada.confirmarPreco(ASIN_OK), { resultado: 'falha', causa: 'nao_configurada' });
+  const semArquivo = cliente({ fetch: f, caminho: path.join(pastaTemp('vazia'), 'api_token.txt') }).cat;
+  assert.deepEqual(await semArquivo.confirmarPreco(ASIN_OK), { resultado: 'falha', causa: 'nao_configurada' });
+  const tokenRuim = cliente({ fetch: f, caminho: arquivoToken('curto') }).cat;
+  assert.deepEqual(await tokenRuim.confirmarPreco(ASIN_OK), { resultado: 'falha', causa: 'nao_configurada' });
+  const { cat } = cliente({ fetch: f, caminho: arquivoToken() });
+  for (const a of ['b0abcdef12', 'B0ABC', 'B0ABCDEF123', 'B0ABCDEF1/', '../x/aaaaa', 'B0ABCDEF1%', ` ${ASIN_OK}`, '', null, undefined, 12345678901, {}]) {
+    assert.deepEqual(await cat.confirmarPreco(a), { resultado: 'falha', causa: 'nao_encontrado' }, String(a));
+  }
+  assert.equal(f.chamadas.length, 0);
+});
+
+test('CA1.3: confirmarPreco não muda a situação do catálogo e o token não vaza no resultado', async () => {
+  const { db } = banco();
+  let relogio = 100;
+  const respostas = [
+    async (url, init) => new Response(JSON.stringify({ error: `token ${init.headers.Authorization}` }), { status: 401 }),
+    async (url, init) => new Response(JSON.stringify({ error: `token ${init.headers.Authorization}` }), { status: 503 }),
+    async (url, init) => new Response(`{"versao":1, ${init.headers.Authorization}`, { status: 200 }),
+    async (url, init) => new Response(JSON.stringify({ versao: 1, resultado: init.headers.Authorization }), { status: 200 }),
+    async (url, init) => new Response(JSON.stringify({ ...CONFIRMADO, preco_em: init.headers.Authorization }), { status: 200 }),
+    async (url, init) => { throw new Error(`falhou: ${init.headers.Authorization}`); },
+    async () => new Response(JSON.stringify(CONFIRMADO), { status: 200 }),
+  ];
+  let i = 0;
+  const f = async (...a) => respostas[i++](...a);
+  const { cat } = cliente({ db, fetch: f, caminho: arquivoToken(), agora: () => relogio });
+  const antes = cat.situacao();
+  assert.deepEqual(antes, { estado: 'salva', resultado: null, verificado_em: null, falha_desde: null });
+  const saidas = [];
+  for (let k = 0; k < respostas.length; k++) { relogio += 100; saidas.push(await cat.confirmarPreco(ASIN_OK)); }
+  assert.deepEqual(saidas.map((s) => s.causa ?? s.resultado), ['token_recusado', 'desligada', 'resposta_inesperada', 'resposta_inesperada', 'resposta_inesperada', 'fora_do_ar', 'confirmado']);
+  assert.deepEqual(cat.situacao(), antes, 'nem a falha nem o sucesso mudam a situação');
+  assert.equal(getSetting(db, 'catalogo_verificacao', null), null, 'nada gravado');
+  assert.ok(!JSON.stringify(saidas).includes(TOKEN.slice(8, 30)));
+});
+
+test('CA1.3: confirmarPreco entra na fila única: nunca dois pedidos ao mesmo tempo no Etiqueta', async (t) => {
+  const estado = { ofertas: [oferta(1)] };
+  const ofertas = etiqueta(estado);
+  const srv = await servidor((url, headers, req) => {
+    if (req.method === 'POST') return { status: 200, corpo: CONFIRMADO };
+    return ofertas(url, headers);
+  }, { atraso: 40 });
+  t.after(srv.fechar);
+  const { db } = banco();
+  const ruleId = criarRegra(db, [{ type: 'catalogo', config: { ordem: 'relevancia' } }]);
+  const { cat } = cliente({ db, endereco: srv.endereco, caminho: arquivoToken() });
+  const [a, b, c, d] = await Promise.all([
+    cat.confirmarPreco(ASIN_OK), cat.candidatos({ ordem: 'relevancia' }, ctxDe(ruleId)), cat.confirmarPreco(ASIN_OK), cat.testar(),
+  ]);
+  assert.equal(a.resultado, 'confirmado');
+  assert.equal(b.length, 1);
+  assert.equal(c.resultado, 'confirmado');
+  assert.equal(d.resultado, 'ok');
+  assert.equal(srv.cabecalhos.length, 4);
+  assert.equal(srv.maxEmVoo, 1);
+  // pelo servidor de verdade: sem Origin, sem cookie e sem corpo
+  const posts = srv.cabecalhos.filter((h) => h['content-length'] != null && h['content-length'] !== '0');
+  assert.deepEqual(posts, [], 'nenhum pedido com corpo');
+  for (const h of srv.cabecalhos) { assert.equal(h.origin, undefined); assert.equal(h.cookie, undefined); }
 });
 
 test('nenhum teste chamou a rede de fora (fetch global bloqueado para o resto)', () => {
