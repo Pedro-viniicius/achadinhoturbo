@@ -8,7 +8,7 @@ import path from 'node:path';
 import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 import { MOTIVOS } from '../src/catalogo-itens.js';
-import { MOTIVOS_VERIFICADOR, CAUSAS } from '../src/verificador.js';
+import { MOTIVOS_VERIFICADOR, CAUSAS, RESERVA_AMAZON_H } from '../src/verificador.js';
 import { PLACEHOLDERS } from '../src/template.js';
 import { pastaDeDados } from '../src/config.js';
 import { REMOTO_PADRAO } from '../scripts/backup.js';
@@ -809,6 +809,10 @@ const FATOS = [
   { nome: 'horas da oferta descartada fora da escolha do disparo automático', valor: 6, texto: (v) => new RegExp(`não volta a ser escolhida por ${v} horas`), codigo: [['src/verificador.js', /export const PAUSA_DESCARTADA_H = (\d+);/]] },
   // a parecida que sobe na conferência usa a mesma pausa (achado Q5 do não repetir parecido)
   { nome: 'horas da parecida pulada na conferência fora da escolha', valor: 6, texto: (v) => new RegExp(`fica ${v} horas fora da escolha`), codigo: [['src/verificador.js', /export const PAUSA_DESCARTADA_H = (\d+);/]] },
+  // Rodar sozinho, entrega 1 (plano rodar-sozinho-entrega1, B9, CA1.13). Há dois "6 h" que não são a mesma coisa: a PAUSA do
+  // descarte (as duas linhas acima, "não volta a ser escolhida por 6 horas") e a RESERVA do preço (esta, "reserva de 6 horas" ou
+  // "preço visto há até 6 horas"): cada fato tem um texto montado que o outro não casa, e as duas constantes são lidas à parte.
+  { nome: 'horas em que o preço visto da Amazon vale quando a leitura na hora falha (reserva do preço)', valor: 6, texto: (v) => new RegExp(`(?:reserva de|preço visto há até) ${v} h(?:oras)?\\b`), codigo: [['src/verificador.js', /export const RESERVA_AMAZON_H = (\d+);/]] },
   // Mercado Livre conferido pela extensão (plano verificador-ml-extensao, etapa 6, CA6/CA3/CA5)
   { nome: 'conferências do Mercado Livre por hora pela extensão', valor: 120, texto: (v) => new RegExp(`no máximo ${v} conferências por hora`), codigo: [['src/links.js', /export const LIMITE_PRODUTO_HORA = (\d+);/]] },
   { nome: 'minutos sem pedir ao Mercado Livre depois de uma verificação', valor: 30, texto: (v) => new RegExp(`para de pedir por ${v} min`), codigo: [['src/links.js', /export const PAUSA_VERIFICACAO_MIN = (\d+);/]] },
@@ -844,6 +848,25 @@ test('FATOS: o texto montado do valor não casa com outro valor (a tabela de fat
   for (const f of FATOS) {
     const outro = f.texto(f.valor + 1);
     assert.doesNotMatch(README + '\n' + TEXTO_DOCS, outro, `${f.nome}: ${outro} também casa; o texto não prova o valor`);
+  }
+});
+
+// Os dois "6 h" do verificador (rodar-sozinho, entrega 1): a pausa do descarte e a reserva do preço valem 6 hoje, mas são
+// constantes e frases diferentes. Se um texto montado casasse a frase do outro, a tabela não provaria o valor de nenhum dos dois.
+test('FATOS: a reserva do preço e a pausa do descarte são dois fatos, cada um com a sua constante e o seu texto', () => {
+  const reserva = FATOS.filter((f) => f.codigo.some(([, re]) => /RESERVA_AMAZON_H/.test(re.source)));
+  const pausa = FATOS.filter((f) => f.codigo.some(([, re]) => /PAUSA_DESCARTADA_H/.test(re.source)));
+  assert.equal(reserva.length, 1, 'um fato para RESERVA_AMAZON_H');
+  assert.ok(pausa.length >= 2, 'a pausa do descarte (Disparo automático e parecida) segue na tabela');
+  const FRASES_RESERVA = ['a reserva de 6 horas', 'vale o preço visto há até 6 horas'];
+  const FRASES_PAUSA = ['não volta a ser escolhida por 6 horas', 'Fica 6 horas fora da escolha desta regra'.toLowerCase()];
+  for (const frase of FRASES_RESERVA) {
+    assert.match(frase, reserva[0].texto(6), frase);
+    for (const f of pausa) assert.doesNotMatch(frase, f.texto(6), `${f.nome} casa a frase da reserva: ${frase}`);
+  }
+  for (const frase of FRASES_PAUSA) {
+    assert.doesNotMatch(frase, reserva[0].texto(6), `a reserva casa a frase da pausa: ${frase}`);
+    assert.ok(pausa.some((f) => f.texto(6).test(frase)), `nenhum fato da pausa casa: ${frase}`);
   }
 });
 
@@ -1073,11 +1096,13 @@ test('referencia/estados: todo selo citado existe literalmente em public/conexoe
   for (const s of selos) assert.ok(["'", '"', '`'].some((q) => src.includes(q + s + q)), `selo “${s}” não existe em public/conexoes.js`);
 });
 
-test('referencia/motivos: a primeira tabela cobre exatamente os MOTIVOS de src/catalogo-itens.js, com o rótulo do Histórico', () => {
+test('referencia/motivos: a primeira tabela cobre os MOTIVOS de src/catalogo-itens.js que mandam para a revisão, com o rótulo do Histórico', () => {
   assert.equal(MOTIVOS.length, 5);
   const bloco = /motivos: \{([^}]*)\}/.exec(fonte('espelhamento.js'));
   assert.ok(bloco, 'não achei o mapa de rótulos dos motivos em public/espelhamento.js');
-  const rotulos = MOTIVOS.map((m) => { const r = new RegExp(`\\b${m}: '([^']+)'`).exec(bloco[1]); assert.ok(r, `motivo ${m} sem rótulo em public/espelhamento.js`); return r[1]; });
+  // `nao_conferido` continua em MOTIVOS (um item antigo ou um rollback ainda pode trazê-lo), mas a conferência que falha agora pula a
+  // oferta em vez de mandá-la à revisão (rodar-sozinho, entrega 1): o dono não o vê, e a tabela não o cita
+  const rotulos = MOTIVOS.filter((m) => m !== 'nao_conferido').map((m) => { const r = new RegExp(`\\b${m}: '([^']+)'`).exec(bloco[1]); assert.ok(r, `motivo ${m} sem rótulo em public/espelhamento.js`); return r[1]; });
   const tabela = CAPS.referencia.secoes.find((s) => s.id === 'motivos').blocos.find((b) => b.tabela).tabela;
   assert.deepEqual(tabela.linhas.map((l) => l[0]).sort(), [...rotulos].sort());
 });
@@ -1597,30 +1622,39 @@ test('Verificador (rodada 1): as frases de R1, Q2 e S2 e a regra do descarte no 
   assert.match(README, /nas fontes antigas[^.]*6 horas[\s\S]*No \*?Catálogo\*? o descarte é definitivo/);
   assert.match(TEXTO_DOCS, /nas fontes antigas, a oferta que o Disparo automático descartou não volta a ser escolhida por 6 horas \(no Catálogo o descarte é definitivo\)/);
   assert.match(TEXTO_DOCS, /No Catálogo o descarte é definitivo/);
-  assert.ok((TEXTO_DOCS.match(/não t[eê]m idade conhecida[^.]{0,40}qualquer falha de leitura/g) || []).length >= 2, 'R3b: Referência e Amazon na revisão dizem que o motivo do Catálogo é qualquer falha de leitura');
+  // R3b (aposentada pela entrega 1 de "Rodar sozinho"): no Catálogo a falha de leitura não leva mais à revisão (a Amazon é relida
+  // na hora, com reserva de 6 h; sem preço que valha, a oferta é pulada). Nem os Docs nem o README podem seguir dizendo o contrário.
+  for (const [onde, txt] of [['Docs', TEXTO_DOCS], ['README', README]]) assert.doesNotMatch(txt, /qualquer falha de leitura (?:leva|vai|manda)/, `${onde}: texto antigo da revisão por falha de leitura`);
 });
 
-test('Verificador: a 3ª tabela de "motivos" de Referência cobre MOTIVOS_VERIFICADOR, com o texto do Histórico', () => {
-  assert.deepEqual(Object.keys(MOTIVOS_VERIFICADOR).sort(), ['esgotado', 'nao_conferido', 'preco_subiu']);
+test('Verificador: a tabela de "motivos" de Referência que fala da conferência cobre MOTIVOS_VERIFICADOR, com o texto do Histórico', () => {
+  // esgotado, preço subiu e não conferido já existiam; indisponível e outro produto vêm da releitura da Amazon pelo Etiqueta
+  assert.deepEqual(Object.keys(MOTIVOS_VERIFICADOR).sort(), ['esgotado', 'indisponivel', 'nao_conferido', 'outro_produto', 'preco_subiu']);
   const tabelas = blocosDe('referencia', 'motivos').filter((b) => b.tabela).map((b) => b.tabela);
-  assert.equal(tabelas.length, 4, 'Catálogo, Espelhamento, Verificador e Produto repetido ou parecido');
-  assert.deepEqual(tabelas[2].colunas, ['Resultado', 'Quando acontece', 'O que fazer']);
-  const primeira = tabelas[2].linhas.map((l) => l[0]);
+  // a tabela da conferência é a que traz a linha "Descartada: esgotado na loja" (a seção tem mais tabelas e a ordem pode mudar)
+  const doVerificador = tabelas.filter((t) => t.linhas.some((l) => l[0].startsWith(MOTIVOS_VERIFICADOR.esgotado)));
+  assert.equal(doVerificador.length, 1, 'uma só tabela com a linha “Descartada: esgotado na loja”');
+  const tabela = doVerificador[0];
+  assert.deepEqual(tabela.colunas, ['Resultado', 'Quando acontece', 'O que fazer']);
+  const primeira = tabela.linhas.map((l) => l[0]);
   for (const [chave, texto] of Object.entries(MOTIVOS_VERIFICADOR)) {
     assert.equal(primeira.filter((c) => c.startsWith(texto)).length, 1, `${chave}: uma linha que começa com “${texto}”`);
   }
-  for (const l of tabelas[2].linhas) assert.ok(l.every((c) => typeof c === 'string' && c.trim() !== ''), `linha sem coluna: ${l[0]}`);
+  for (const l of tabela.linhas) assert.ok(l.every((c) => typeof c === 'string' && c.trim() !== ''), `linha sem coluna: ${l[0]}`);
   assert.match(CAPS.referencia.secoes.find((x) => x.id === 'motivos').onde, /\[\[Histórico\]\]/);
-  // o motivo do Catálogo que nasce do verificador está na 1ª tabela (ver o teste dos MOTIVOS) e a seção da revisão conta os cinco
+  // o motivo do Catálogo `nao_conferido` segue em MOTIVOS (item antigo), mas deixou de mandar oferta para a revisão: a seção da
+  // revisão conta quatro motivos e o dono não vê mais a linha "Não deu para conferir o preço: confira na loja"
   assert.ok(MOTIVOS.includes('nao_conferido'));
-  assert.match(secaoTxt('revisao', 'motivos'), /Cinco motivos mandam a oferta para a revisão/);
-  assert.equal(blocosDe('revisao', 'motivos').find((b) => b.tabela).tabela.linhas.length, 5);
-  assert.doesNotMatch(TEXTO_DOCS, /\b(?:Quatro|quatro|4) motivos\b/);
+  assert.match(secaoTxt('revisao', 'motivos'), /Quatro motivos mandam a oferta para a revisão/);
+  assert.equal(blocosDe('revisao', 'motivos').find((b) => b.tabela).tabela.linhas.length, 4);
+  assert.doesNotMatch(TEXTO_DOCS, /\b(?:Cinco|cinco|5) motivos\b/);
+  assert.doesNotMatch(TEXTO_DOCS, /Não deu para conferir o preço: confira na loja/, 'a linha da revisão que ficou sem uso');
 });
 
 test('Verificador: toda causa de CAUSAS e as frases fixas do código aparecem nos Docs e no README', () => {
   const ver = lerRaiz('src/verificador.js'); const server = lerRaiz('src/server.js'); const sched = lerRaiz('src/scheduler.js');
-  assert.equal(Object.keys(CAUSAS).length, 12);
+  // as doze de antes mais as três do Etiqueta (o Etiqueta não respondeu, a Amazon bloqueou a leitura, a oferta saiu do Etiqueta)
+  assert.equal(Object.keys(CAUSAS).length, 15);
   for (const causa of Object.values(CAUSAS)) {
     assert.ok(TEXTO_DOCS.includes(causa), `Docs: causa “${causa}”`);
     assert.ok(README.includes(causa), `README: causa “${causa}”`);
@@ -1633,15 +1667,69 @@ test('Verificador: toda causa de CAUSAS e as frases fixas do código aparecem no
   }
   assert.ok(server.includes("export const AVISO_VERIFICADOR_DESLIGADO = 'Verificador desligado em Ajustes';"));
   assert.ok(TEXTO_DOCS.includes('Verificador desligado em Ajustes') && README.includes('Verificador desligado em Ajustes'));
-  // revisão do Catálogo: "Separada para revisão: <motivo> (<causa>)."
+  // revisão do Catálogo: "Separada para revisão: <motivo>." continua para Shopee, desconto de 100%, preço antigo e link que falhou.
+  // A falha de conferência não vai mais à revisão (entrega 1 de "Rodar sozinho"): TEXTO_MOTIVO perdeu o `nao_conferido`, e nem o código
+  // nem os Docs nem o README podem ter a linha "Separada para revisão: não deu para conferir o preço".
   assert.ok(sched.includes('Separada para revisão: ${motivos.map((m) => TEXTO_MOTIVO[m] || m).join(\' e \')}${detalhe}.'));
-  assert.ok(sched.includes("nao_conferido: 'não deu para conferir o preço'"));
-  const frase = /Separada para revisão: não deu para conferir o preço \(a loja não respondeu\)\./;
-  assert.match(secaoTxt('revisao', 'motivos'), frase, 'Docs: frase da revisão'); assert.match(README, frase, 'README: frase da revisão');
+  assert.ok(!sched.includes("nao_conferido: 'não deu para conferir o preço'"), 'TEXTO_MOTIVO ainda tem o nao_conferido');
+  const frase = /Separada para revisão: não deu para conferir o preço/;
+  assert.doesNotMatch(TEXTO_DOCS, frase, 'Docs: frase antiga da revisão'); assert.doesNotMatch(README, frase, 'README: frase antiga da revisão');
   // texto do descarte com preço: "Descartada: preço subiu de R$ X para R$ Y (+N%, o limite é L%)"
   assert.ok(ver.includes('${MOTIVOS_VERIFICADOR.preco_subiu} de ${brl(ref)} para ${brl(atual)} (+${alta}%, o limite é ${limite}%)'));
   const subiu = /Descartada: preço subiu de R\$ 89,90 para R\$ 99,90 \(\+11%, o limite é 5%\)/;
   assert.match(TEXTO_DOCS, subiu); assert.match(README, subiu);
+});
+
+// Rodar sozinho, entrega 1 (plano rodar-sozinho-entrega1, B9, CA1.13; spec §1, §4 e §5): o que a releitura da Amazon pelo Etiqueta, a
+// "pulada" e a reposição da vaga escrevem no Histórico está nos Docs e no README como o código o escreve. Cada par é
+// [trecho literal em src/, trecho que os Docs (Referência) e, quando `readme`, o README precisam ter]; mudar só um lado derruba o teste.
+test('Verificador, Rodar sozinho (entrega 1): descartes novos, reserva, pulada, "Saíram X de Y", candidatas filtradas e "Verificador ligado" nos Docs e no README', () => {
+  const ver = lerRaiz('src/verificador.js'); const server = lerRaiz('src/server.js'); const sched = lerRaiz('src/scheduler.js');
+  const REF = secaoTxt('referencia', 'motivos');
+  const R = RESERVA_AMAZON_H;
+  // 1. os dois descartes novos da Amazon: o texto do motivo e o detalhe entre parênteses, na Referência e no README
+  for (const [chave, detalhe] of [['indisponivel', 'a página não mostra preço nem estoque'], ['outro_produto', 'o código não confere com a oferta']]) {
+    assert.ok(ver.includes(`${chave}: '${detalhe}'`), `src/verificador.js: o detalhe de ${chave}`);
+    const frase = `${MOTIVOS_VERIFICADOR[chave]} (${detalhe})`;
+    assert.ok(REF.includes(frase), `Docs (Referência): ${frase}`);
+    assert.ok(README.includes(frase), `README: ${frase}`);
+  }
+  // 2. a reserva do preço: o sufixo da linha do envio, nos Docs e no README
+  for (const trecho of ['· preço visto às ', ', não conferido agora (']) {
+    assert.ok(ver.includes(trecho), `src/verificador.js: ${trecho}`);
+    assert.ok(REF.includes(trecho), `Docs (Referência): ${trecho}`);
+    assert.ok(README.includes(trecho), `README: ${trecho}`);
+  }
+  // 3. a pulada: as frases de textoPuladaSemConferencia (src/scheduler.js) e a do verificador desligado no meio do envio
+  const pulada = [
+    ['Pulada: o preço visto às ${quandoDe(offer.precoEm, agora)} tem mais de ${RESERVA_AMAZON_H} h e não deu para conferir agora (', `Pulada: o preço visto às 02:10 de 10/11 tem mais de ${R} h e não deu para conferir agora (`, true],
+    [') e a oferta não diz quando o preço foi visto.', ') e a oferta não diz quando o preço foi visto.', false],
+    ['Pulada: não deu para conferir o preço (${porque}). O Mercado Livre não sai sem conferir; tenta de novo no próximo envio.', 'O Mercado Livre não sai sem conferir; tenta de novo no próximo envio.', false],
+    ['Pulada: não dá para saber o preço (${porque}). Fica ${PAUSA_DESCARTADA_H} h fora da escolha desta regra.', 'Pulada: não dá para saber o preço (a página não trouxe o preço). Fica 6 h fora da escolha desta regra.', false],
+    ['Pulada: o verificador foi desligado durante este envio e o preço não foi conferido.', 'Pulada: o verificador foi desligado durante este envio e o preço não foi conferido.', false],
+  ];
+  for (const [noCodigo, citada, noReadme] of pulada) {
+    assert.ok(sched.includes(noCodigo), `src/scheduler.js não escreve mais: ${noCodigo}`);
+    assert.ok(REF.includes(citada), `Docs (Referência) não citam: ${citada}`);
+    if (noReadme) assert.ok(README.includes(citada), `README não cita: ${citada}`);
+  }
+  // 4. "Saíram X de Y ofertas; …" e a linha das candidatas que ficaram de fora (spec §1): o molde e os pedaços vêm do código
+  assert.ok(sched.includes('aíram ${saidas} de ${want} ofertas'));
+  assert.ok(sched.includes("conferencia: 'preço sem conferência'") && sched.includes("esgotado: 'esgotada na loja'"));
+  const saíram = 'Saíram 2 de 3 ofertas; 1 pulada (preço sem conferência), 1 descartada (esgotada na loja).';
+  assert.ok(REF.includes(saíram), 'Docs (Referência): a frase "Saíram X de Y"'); assert.ok(README.includes(saíram), 'README: a frase "Saíram X de Y"');
+  assert.ok(sched.includes('Antes da escolha, ${total}'));
+  for (const pedaco of ['fora dos filtros da regra', 'já enviadas ou parecidas', 'em pausa por descarte']) {
+    assert.ok(sched.includes(pedaco), `src/scheduler.js: ${pedaco}`); assert.ok(REF.includes(pedaco), `Docs (Referência): ${pedaco}`);
+  }
+  assert.match(REF, /Antes da escolha, \d+ ofertas ficaram de fora: \d+ fora dos filtros da regra/);
+  // 5. ligar o verificador também deixa linha (CA1.9), como desligar
+  assert.ok(server.includes("export const AVISO_VERIFICADOR_LIGADO = 'Verificador ligado em Ajustes';"));
+  assert.ok(TEXTO_DOCS.includes('Verificador ligado em Ajustes'), 'Docs: Verificador ligado em Ajustes'); assert.ok(README.includes('Verificador ligado em Ajustes'), 'README: Verificador ligado em Ajustes');
+  // 6. o vocabulário (spec §1): três destinos e as três palavras definidas no glossário
+  const glossario = CAPS.referencia.secoes.find((x) => x.id === 'glossario').blocos.filter((x) => x.termos).flatMap((x) => x.termos).map(([nome]) => nome);
+  for (const palavra of ['Pulada', 'Descartada']) assert.ok(glossario.includes(palavra), `glossário sem o verbete “${palavra}”`);
+  assert.match(REF, /Pulada, descartada e separada para revisão/);
 });
 
 test('Verificador, ML pela extensão: as quatro causas novas, a versão 1.5.0 e o que ainda lê pelo servidor estão nos Docs, no README e no TIPS', () => {
@@ -1652,7 +1740,7 @@ test('Verificador, ML pela extensão: as quatro causas novas, a versão 1.5.0 e 
     assert.ok(Object.hasOwn(CAUSAS, k), `CAUSAS.${k}`);
     for (const [onde, txt] of secoes) assert.ok(txt.includes(CAUSAS[k]), `${onde}: causa “${CAUSAS[k]}”`);
   }
-  // a lista "Entre parênteses…" de cada lugar traz as doze causas (a causa também aparece em outros parágrafos: não basta achar a frase na seção)
+  // a lista "Entre parênteses…" de cada lugar traz as quinze causas (a causa também aparece em outros parágrafos: não basta achar a frase na seção)
   const listas = [
     ['Docs: manutencao/verificador', strings(CAPS.manutencao.secoes.find((x) => x.id === 'verificador').blocos).find((t) => t.includes('a causa pode ser'))],
     ['Docs: referencia/motivos', strings(CAPS.referencia.secoes.find((x) => x.id === 'motivos').blocos).find((t) => t.includes('Entre parênteses vai a causa'))],
@@ -1727,7 +1815,7 @@ test('Verificador: {HORA_PRECO} está na tabela de campos dos Docs, com o exempl
   const opcional = textoDe('templates', 'opcional');
   assert.match(opcional, /\[🕒 Preço visto às \{HORA_PRECO\}\]/); assert.match(opcional, /14h32/);
   assert.match(README, /\[🕒 Preço visto às \{HORA_PRECO\}\]/);
-  assert.match(lerRaiz('public/ajuda.js'), /HORA_PRECO: 'Hora em que o preço foi conferido na loja, como 14h32\./);
+  assert.match(lerRaiz('public/ajuda.js'), /HORA_PRECO: 'Hora em que o preço foi visto na loja, como 14h32 \(na hora do envio ou, se a leitura falhou, a do último preço visto\)\./);
   // as TIPS do cartão de Ajustes levam ao capítulo
   const ajuda = lerRaiz('public/ajuda.js');
   assert.match(ajuda, /'ajustes\.verificador': 'manutencao\/verificador'/); assert.match(ajuda, /'ajustes\.verificador\.limite': 'manutencao\/verificador'/);

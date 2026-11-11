@@ -28,7 +28,6 @@ const LINK_ML_PREVIA = 'https://meli.la/(gerado no envio)';
 const TEXTO_MOTIVO = {
   shopee: 'Shopee, confirme o link', desconto_100: 'desconto de 100%, confira o preço',
   preco_antigo: 'preço antigo muito alto, confira o preço', falha_link: 'não consegui gerar o link',
-  nao_conferido: 'não deu para conferir o preço',
 };
 /** Por que ofertas do catálogo esperam (não vão à revisão nem contam como enviadas): aviso a cada execução. */
 const TEXTO_ESPERA = {
