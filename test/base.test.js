@@ -111,7 +111,7 @@ test('esquema: banco da versão anterior reabre com os dados intactos e ganha ta
   for (let abertura = 1; abertura <= 2; abertura++) {
     const db = openDb(dir);
     // A semente "Amazon" entrou em 02/11/2026 (etapa 1 do plano espelhamento-amazon): fora a marca e o template dela, nada muda.
-    const semSemente = { settings: " WHERE key <> 'tpl_amazon_seed'", templates: " WHERE name <> 'Amazon'" };
+    const semSemente = { settings: " WHERE key NOT IN ('tpl_amazon_seed', 'migracao_e1_nao_conferido')", templates: " WHERE name <> 'Amazon'" };
     for (const t of ['settings', 'tags', 'templates']) {
       assert.deepEqual(linhas(db, `SELECT * FROM ${t}${semSemente[t] || ''} ORDER BY rowid`), antes[t], `${t} intacta (abertura ${abertura})`);
     }

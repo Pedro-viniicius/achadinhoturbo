@@ -11,7 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import express from 'express';
-import { openDb } from '../src/db.js';
+import { openDb, getSetting, MARCA_MIGRACAO_E1, textoMigracaoE1 } from '../src/db.js';
 import { createWhatsApp } from '../src/whatsapp.js';
 import { createLinkService } from '../src/links.js';
 import { createEnvios } from '../src/envios.js';
@@ -242,6 +242,128 @@ test('R2 verificador: o descarte do verificador guarda o motivo e a listagem o d
   s.itens.descartar(idRev, {});
   const porChave = Object.fromEntries(s.itens.listar().itens.map((i) => [i.oferta.link.match(/MLB-(\d+)/)[1], i.descartado_por]));
   assert.deepEqual(porChave, { 1: 'esgotado', 2: 'preco_subiu', 3: undefined, 4: undefined, 5: undefined, 6: undefined, 7: undefined });
+});
+
+test('CA1.4 (rodar sozinho): indisponivel e outro_produto, descartes novos do verificador, ficam em descartado_por e voltam na listagem', () => {
+  const s = montar();
+  const regra = s.regra();
+  assert.equal(s.itens.registrar(regra, AMZ('B0AAAAAAA1'), 'descartado', [], { descartadoPor: 'indisponivel' }), true);
+  assert.equal(s.itens.registrar(regra, AMZ('B0AAAAAAA2'), 'descartado', [], { descartadoPor: 'outro_produto' }), true);
+  assert.equal(s.itens.registrar(regra, AMZ('B0AAAAAAA3'), 'enviado', [], { descartadoPor: 'indisponivel' }), true, 'só o descarte leva o motivo');
+  const gravado = (asin) => s.item(s.db.prepare('SELECT id FROM catalogo_itens WHERE chave = ?').get(`ASIN:${asin}`).id);
+  assert.deepEqual([gravado('B0AAAAAAA1').oferta.descartado_por, gravado('B0AAAAAAA1').status], ['indisponivel', 'descartado']);
+  assert.deepEqual([gravado('B0AAAAAAA2').oferta.descartado_por, gravado('B0AAAAAAA2').status], ['outro_produto', 'descartado']);
+  assert.equal(Object.hasOwn(gravado('B0AAAAAAA3').oferta, 'descartado_por'), false);
+  const porChave = Object.fromEntries(s.itens.listar().itens.map((i) => [i.oferta.link.match(/\/dp\/(\w+)/)[1], i.descartado_por]));
+  assert.deepEqual(porChave, { B0AAAAAAA1: 'indisponivel', B0AAAAAAA2: 'outro_produto', B0AAAAAAA3: undefined });
+  // descartado da regra: não volta naquela regra (P3 do plano)
+  assert.equal(s.itens.tratada(regra, AMZ('B0AAAAAAA1'), 'desconto'), true);
+});
+
+// --------------------------------------------------------------------- migração do nao_conferido (CA1.10)
+/**
+ * Banco "da versão anterior": aberto pela versão nova (o esquema é o mesmo), mas sem a marca da migração, com os itens
+ * gravados como o registrar de antes gravava. Fecha o banco: quem testa reabre com openDb (é aí que a migração roda).
+ */
+function bancoAntesDaMigracao(montarItens) {
+  const dir = tmp();
+  const db = openDb(dir);
+  db.prepare('DELETE FROM settings WHERE key = ?').run(MARCA_MIGRACAO_E1);
+  db.prepare('DELETE FROM log').run();
+  const regra = (nome) => ({ id: Number(db.prepare("INSERT INTO rules (name, group_jids, created_at) VALUES (?, '[]', 1)").run(nome).lastInsertRowid), name: nome });
+  const itens = createCatalogoItens({ db, agora: () => 1_000 });
+  const cru = (r, chave, status, motivos) => db.prepare(`INSERT INTO catalogo_itens (rule_id, chave, loja, status, motivos, oferta, criado_em, decidido_em)
+    VALUES (?, ?, 'ml', ?, ?, '{"title":"Fone","price":10}', 1, NULL)`).run(r.id, chave, status, motivos);
+  montarItens({ db, itens, regra, cru });
+  db.close();
+  return dir;
+}
+const linhasItens = (db) => db.prepare('SELECT rule_id, chave, status, motivos FROM catalogo_itens ORDER BY id').all().map((l) => ({ ...l }));
+const linhasLog = (db) => db.prepare('SELECT rule_id, rule_name, level, group_name, offer_title, message FROM log ORDER BY id').all().map((l) => ({ ...l }));
+
+test('CA1.10: a migração tira da revisão só os itens com motivos exatamente ["nao_conferido"], uma vez, e grava a contagem no Histórico', () => {
+  const dir = bancoAntesDaMigracao(({ itens, regra, cru }) => {
+    const r1 = regra('Regra 1'); const r2 = regra('Regra 2');
+    assert.equal(itens.registrar(r1, ML(1), 'revisao', ['nao_conferido']), true);            // sai
+    assert.equal(itens.registrar(r2, ML(1), 'revisao', ['nao_conferido']), true);            // sai (outra regra, mesma chave)
+    assert.equal(itens.registrar(r2, AMZ(), 'revisao', ['nao_conferido']), true);            // sai
+    assert.equal(itens.registrar(r1, ML(2), 'revisao', ['nao_conferido', 'desconto_100']), true);
+    assert.equal(itens.registrar(r1, ML(3), 'revisao', ['falha_link']), true);
+    assert.equal(itens.registrar(r1, SHP(), 'revisao', ['shopee']), true);
+    cru(r1, 'MLB4', 'revisao', '["nao_conferido","outro"]');
+    cru(r1, 'MLB5', 'revisao', '["outro","nao_conferido"]');
+    cru(r1, 'MLB6', 'descartado', '["nao_conferido"]');
+    cru(r1, 'MLB7', 'enviado', '["nao_conferido"]');
+    cru(r1, 'MLB8', 'revisao', '[]');
+  });
+  const ficam = [
+    { rule_id: 1, chave: 'MLB2', status: 'revisao', motivos: '["nao_conferido","desconto_100"]' },
+    { rule_id: 1, chave: 'MLB3', status: 'revisao', motivos: '["falha_link"]' },
+    { rule_id: 1, chave: 'SHOPEE:111.22334455', status: 'revisao', motivos: '["shopee"]' },
+    { rule_id: 1, chave: 'MLB4', status: 'revisao', motivos: '["nao_conferido","outro"]' },
+    { rule_id: 1, chave: 'MLB5', status: 'revisao', motivos: '["outro","nao_conferido"]' },
+    { rule_id: 1, chave: 'MLB6', status: 'descartado', motivos: '["nao_conferido"]' },
+    { rule_id: 1, chave: 'MLB7', status: 'enviado', motivos: '["nao_conferido"]' },
+    { rule_id: 1, chave: 'MLB8', status: 'revisao', motivos: '[]' },
+  ];
+
+  let db = openDb(dir);
+  assert.deepEqual(linhasItens(db), ficam, 'saíram só os três "só nao_conferido" em revisão');
+  assert.equal(getSetting(db, MARCA_MIGRACAO_E1), '1');
+  const linha = { rule_id: null, rule_name: null, level: 'info', group_name: null, offer_title: null, message: textoMigracaoE1(3) };
+  assert.deepEqual(linhasLog(db), [linha], 'uma linha info, sem regra nem oferta');
+  assert.match(linha.message, /\b3 ofertas\b/, 'a contagem vai no texto');
+
+  // roda uma vez só: um item novo "só nao_conferido" (código de antes, rollback) não sai na próxima abertura
+  createCatalogoItens({ db }).registrar({ id: 1, name: 'Regra 1' }, ML(9), 'revisao', ['nao_conferido']);
+  db.close();
+  db = openDb(dir);
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM catalogo_itens WHERE chave = 'MLB9' AND status = 'revisao'").get().n, 1, 'segunda abertura não apaga');
+  assert.equal(linhasLog(db).length, 1, 'nem grava outra linha');
+  db.close();
+});
+
+test('CA1.10: textos da contagem (1, várias, nenhuma) sem "Separada para revisão"; banco novo marca sem linha; com catálogo e nada a tirar, a linha diz que nada saiu', () => {
+  assert.equal(textoMigracaoE1(1), 'Revisão do Catálogo: 1 oferta que esperava revisão só porque não deu para conferir o preço saiu da fila. Ela volta se o catálogo a trouxer de novo.');
+  assert.equal(textoMigracaoE1(12), 'Revisão do Catálogo: 12 ofertas que esperavam revisão só porque não deu para conferir o preço saíram da fila. Elas voltam se o catálogo as trouxer de novo.');
+  assert.equal(textoMigracaoE1(0), 'Revisão do Catálogo: nenhuma oferta esperava revisão só porque não deu para conferir o preço.');
+  for (const n of [0, 1, 12]) assert.doesNotMatch(textoMigracaoE1(n), /Separada para revisão|nao_conferido/);
+
+  // instalação nova: marca na hora (nunca roda depois) e não suja o Histórico
+  const novo = openDb(tmp());
+  assert.equal(getSetting(novo, MARCA_MIGRACAO_E1), '1');
+  assert.deepEqual(linhasLog(novo), []);
+  novo.close();
+
+  // catálogo em uso, sem nenhum "só nao_conferido": a linha diz que nada saiu (o dono confere depois do merge)
+  const dir = bancoAntesDaMigracao(({ itens, regra }) => { assert.equal(itens.registrar(regra('R'), ML(1), 'revisao', ['shopee']), true); });
+  const db = openDb(dir);
+  assert.equal(linhasItens(db).length, 1);
+  assert.deepEqual(linhasLog(db).map((l) => [l.level, l.message]), [['info', textoMigracaoE1(0)]]);
+  db.close();
+});
+
+test('CA1.10: falha no meio da migração desfaz tudo (nada apagado, sem marca, sem linha), não derruba o openDb nem vaza a mensagem do banco; a próxima abertura migra', (t) => {
+  const dir = bancoAntesDaMigracao(({ db, itens, regra }) => {
+    assert.equal(itens.registrar(regra('R'), ML(1), 'revisao', ['nao_conferido']), true);
+    // falha no último passo (a linha do Histórico), depois do DELETE e da marca: os dois precisam ser desfeitos
+    db.exec("CREATE TRIGGER falha_no_log BEFORE INSERT ON log BEGIN SELECT RAISE(ABORT, 'dado 5511999990000'); END");
+  });
+  const erros = [];
+  t.mock.method(console, 'error', (...a) => { erros.push(a.map(String).join(' ')); });
+  let db = openDb(dir);
+  assert.equal(linhasItens(db).length, 1, 'nada apagado');
+  assert.equal(getSetting(db, MARCA_MIGRACAO_E1), null, 'sem marca: tenta de novo na próxima abertura');
+  assert.deepEqual(linhasLog(db), []);
+  assert.equal(erros.length, 1);
+  assert.doesNotMatch(erros[0], /5511999990000/, 'a mensagem do banco não vai ao console');
+  db.exec('DROP TRIGGER falha_no_log');
+  db.close();
+  db = openDb(dir);
+  assert.equal(linhasItens(db).length, 0);
+  assert.equal(getSetting(db, MARCA_MIGRACAO_E1), '1');
+  assert.deepEqual(linhasLog(db).map((l) => l.message), [textoMigracaoE1(1)]);
+  db.close();
 });
 
 test('P5: teto de 50 pendentes por regra; a 51ª não entra; contar e listar dizem quantas e se a fila está cheia', () => {

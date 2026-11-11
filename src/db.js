@@ -270,6 +270,7 @@ export function openDb(dir) {
       .run('Padrão', DEFAULT_TEMPLATE, Date.now());
   }
   semearTemplateAmazon(db);
+  migrarNaoConferido(db);
   if (!getSetting(db, 'ext_token')) setSetting(db, 'ext_token', crypto.randomBytes(24).toString('hex'));
   return db;
 }
@@ -291,6 +292,47 @@ function semearTemplateAmazon(db) {
   } catch (e) {
     db.exec('ROLLBACK');
     throw e;
+  }
+}
+
+// Rodar sozinho, entrega 1 (plano rodar-sozinho-entrega1, decisão 6 e P6): o catálogo deixa de mandar à revisão a
+// oferta que só não pôde ser conferida. Uma vez por banco, os itens que esperam revisão SÓ por esse motivo saem da fila
+// (DELETE: são cópias de ofertas do Etiqueta e voltam se o catálogo as trouxer de novo). Outro motivo, junto ou não, e
+// outro status ficam. A marca é gravada também em banco novo, para a migração nunca rodar depois.
+export const MARCA_MIGRACAO_E1 = 'migracao_e1_nao_conferido';
+const SO_NAO_CONFERIDO = '["nao_conferido"]'; // como o registrar de src/catalogo-itens.js grava (JSON.stringify)
+
+/** Linha `info` do Histórico com quantos itens a migração tirou da revisão. Sem dado pessoal: só a contagem. */
+export function textoMigracaoE1(n) {
+  const base = 'Revisão do Catálogo:';
+  const motivo = 'só porque não deu para conferir o preço';
+  if (n === 1) return `${base} 1 oferta que esperava revisão ${motivo} saiu da fila. Ela volta se o catálogo a trouxer de novo.`;
+  if (n > 1) return `${base} ${n} ofertas que esperavam revisão ${motivo} saíram da fila. Elas voltam se o catálogo as trouxer de novo.`;
+  return `${base} nenhuma oferta esperava revisão ${motivo}.`;
+}
+
+/**
+ * Migração do `nao_conferido` (CA1.10): DELETE restrito a status 'revisao' e motivos exatamente ["nao_conferido"], a
+ * marca e a linha do Histórico na mesma transação. A linha só sai em banco com catálogo em uso (instalação nova não
+ * ganha linha). Falha desfaz tudo, sem marca: tenta de novo na próxima abertura e não impede o programa de subir.
+ */
+function migrarNaoConferido(db) {
+  if (getSetting(db, MARCA_MIGRACAO_E1) !== null) return;
+  let aberta = false;
+  try {
+    db.exec('BEGIN IMMEDIATE');
+    aberta = true;
+    if (getSetting(db, MARCA_MIGRACAO_E1) === null) {
+      const comCatalogo = !!db.prepare('SELECT 1 FROM catalogo_itens LIMIT 1').get();
+      const { changes } = db.prepare("DELETE FROM catalogo_itens WHERE status = 'revisao' AND motivos = ?").run(SO_NAO_CONFERIDO);
+      setSetting(db, MARCA_MIGRACAO_E1, '1');
+      if (comCatalogo) addLog(db, { level: 'info', message: textoMigracaoE1(Number(changes)) });
+    }
+    db.exec('COMMIT');
+  } catch (e) {
+    if (aberta) { try { db.exec('ROLLBACK'); } catch { /* a transação já foi desfeita */ } }
+    // sem e.message: a mensagem do banco pode trazer dados. Os itens ficam na revisão até a próxima abertura.
+    console.error('[db] não consegui tirar da revisão as ofertas só não conferidas:', e?.code || e?.name || 'erro');
   }
 }
 
