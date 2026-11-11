@@ -15,13 +15,13 @@ const SO_DONO_DICA = { desconectar: 'Só o Dono pode desconectar o WhatsApp.', l
 const TEXTOS_VERIFICADOR = {
   titulo: 'Conferir preço e estoque antes de enviar',
   chave: 'Conferir antes de cada envio',
-  sub: 'Logo antes de enviar, o programa lê o preço e o estoque na loja. Esgotado ou preço mais caro que o limite: a oferta não sai e o motivo aparece no Histórico. Se a loja não responder, a oferta só sai se os dados forem de até 30 min.',
+  sub: 'Logo antes de enviar, o programa lê o preço e o estoque na loja. Esgotado ou mais caro que o limite: a oferta não sai e o Histórico diz o motivo. Na Amazon do Catálogo, o Etiqueta relê a página do produto na hora. Se essa leitura falhar, vale o último preço visto, desde que tenha até 6 horas; mais velho, a oferta é pulada e outra ocupa a vaga. Nas outras lojas, se a loja não responder, só sai dado de até 30 min.',
   desligado: 'Desligado: as ofertas saem sem conferir preço nem estoque.',
   limite: 'Aceitar alta de preço até (%)',
   limiteDica: '0 = qualquer alta descarta a oferta. Preço que caiu sempre pode sair.',
   salvar: 'Salvar conferência', salvando: 'Salvando…', salvo: 'Conferência salva',
   erroLimite: 'Informe um número inteiro de 0 a 50.',
-  horaPreco: '{HORA_PRECO}: a hora em que o preço foi conferido na loja, como 14h32. Use dentro de [ ] para a frase sumir quando não houver hora, e não na linha do {LINK}. Ex.: [🕒 Preço visto às {HORA_PRECO}]',
+  horaPreco: '{HORA_PRECO}: a hora em que o preço foi visto na loja, como 14h32 (na hora do envio ou, se a leitura falhou, a do último preço visto). Use dentro de [ ] para a frase sumir quando não houver hora, e não na linha do {LINK}. Ex.: [🕒 Preço visto às {HORA_PRECO}]',
 };
 // Proteção do número (spec docs/produto/specs/anti-banimento.md; plano docs/produto/planos/anti-banimento.md, etapa 7).
 // O cartão de Ajustes, a linha de uso em Números e as frases de erro do cliente, iguais às do servidor (src/ritmo.js).

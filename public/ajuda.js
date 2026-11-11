@@ -28,11 +28,11 @@ const TIPS = {
   'fonte.categorias': 'Nenhuma marcada = todas. Com várias, as ofertas saem intercaladas (uma de cada categoria por vez): bom para grupos de achadinhos gerais.',
   'fonte.maisvendidos': 'Só produtos com o selo “Mais vendido” da Central.',
   'fonte.ganhos': 'Só produtos com comissão extra (“Ganhos extras”) neste momento.',
-  'fonte.catalogo': 'Ofertas do Etiqueta, que já vêm com link de afiliado da própria loja. Escolha categorias, lojas e filtros. Toda oferta da Shopee, as com 100% de desconto ou preço antigo exagerado, as que falham ao gerar o link e as que não deu para conferir o preço na loja esperam a sua revisão (só o Dono revisa; confira o preço na loja antes de enviar).',
+  'fonte.catalogo': 'Ofertas do Etiqueta, que já vêm com link de afiliado da própria loja. Escolha categorias, lojas e filtros. Toda oferta da Shopee, as com 100% de desconto ou preço antigo exagerado, e as que falham ao gerar o link esperam a sua revisão (só o Dono revisa; confira o preço na loja antes de enviar). O preço da Amazon é lido na hora; se a leitura falhar e o preço visto tiver mais de 6 h, a oferta é pulada, sem revisão.',
   'fonte.catalogo.categoria': 'Abas do Etiqueta (aparecem depois de testar a conexão). Nenhuma marcada = todas. Vale qualquer uma das marcadas.',
   'fonte.catalogo.loja': 'Nenhuma marcada = as três lojas. Só Amazon e/ou Shopee não precisa de etiqueta do Mercado Livre.',
   'fonte.catalogo.ordem': '“Novidades” começa a contar quando você salva: envia o que chegar ou for atualizado no catálogo depois disso (uma nova coleta do Etiqueta conta), e a mesma oferta nunca sai duas vezes neste disparo. Para mandar o que já existe, use “Reler do começo”. As outras ordens pegam as melhores que ainda não foram enviadas dentro do prazo de repetição.',
-  'fonte.catalogo.revisao': 'Shopee (o link não prova de quem é a conta) e ofertas com 100% de desconto ou preço antigo exagerado esperam a sua revisão em Histórico > Catálogo; o mesmo vale se o link falhar ao ser gerado ou se não deu para conferir o preço na loja (confira na loja antes de enviar). Só o Dono revisa e envia; corrija os preços à mão antes de enviar. Nada disso sai sozinho.',
+  'fonte.catalogo.revisao': 'Shopee (o link não prova de quem é a conta) e ofertas com 100% de desconto ou preço antigo exagerado esperam a sua revisão em Histórico > Catálogo; o mesmo vale se o link falhar ao ser gerado (confira na loja antes de enviar). Só o Dono revisa e envia; corrija os preços à mão antes de enviar. Nada disso sai sozinho. Oferta pulada ou descartada na conferência não vem para cá.',
   'fonte.lista': 'Um link por linha. Se o programa não conseguir ler título e preço sozinho, escreva na linha: link | título | preço | preço antigo | cupom.',
   'regras.filtros': 'A oferta só sai se passar nos três: preço mínimo, preço máximo e desconto mínimo (em relação ao preço antigo). Vazio = sem filtro.',
   'regras.grupos': 'Grupos do WhatsApp que recebem este disparo. Um grupo pode estar em vários disparos; use “Marcar um bloco” para marcar um nicho inteiro.',
@@ -103,7 +103,7 @@ const TIPS = {
   'ajustes.pausas': 'Espera entre mensagens. O programa varia o tempo ao acaso, para mais ou para menos, para parecer humano: o número que você escreve é o valor do meio. Mais curto = mais risco de bloqueio.',
   'grupos.admin': 'Grupo com um só administrador corre o risco de ficar sem dono se ele sair ou for banido. Adicione um segundo admin pelo WhatsApp e depois atualize a lista de grupos aqui.',
   'ajustes.titulo': 'Tamanho máximo de {TITULO_PRODUTO}: tira “Compatível com…”, “Premium”, “Alta Qualidade” e corta sem partir palavra. 0 = nome inteiro.',
-  'ajustes.verificador': 'Antes de cada envio o programa lê o preço e o estoque na loja. Se estiver esgotado ou o preço subiu mais que o limite, a oferta não sai e o Histórico diz o motivo. Se o preço caiu, sai com o preço novo. Se a loja não responder, a oferta só sai se os dados forem de até 30 min. O Mercado Livre é conferido pela extensão do Chrome.',
+  'ajustes.verificador': 'Antes de cada envio o programa confere o preço e o estoque. Se estiver esgotado, indisponível ou com o preço acima do limite, a oferta é descartada e o Histórico diz o motivo. Preço menor: sai com o preço novo. Amazon do Catálogo: o Etiqueta relê a página só do produto escolhido, na hora. Se a leitura falhar, vale o preço visto há até 6 horas; passou disso, a oferta é pulada (volta depois, sem revisão). O Mercado Livre é conferido pela extensão do Chrome e nunca sai sem conferência. Outras lojas: se a loja não responder, só sai se os dados forem de até 30 min.',
   'ajustes.verificador.limite': 'Quanto o preço pode ter subido, em %, desde a oferta que você viu. Padrão 5, de 0 a 50. Acima disso a oferta é descartada. 0 = qualquer alta descarta.',
   'ajustes.modo_link': 'Pela extensão: link meli.la com a sua etiqueta (gera comissão). Link direto: sem etiqueta, só para testar o fluxo.',
   'ajustes.privacidade': 'Quem entra, sai ou lê é guardado com um pseudônimo (código derivado do número com uma chave local), não com o número. Depois do prazo, os registros são apagados de vez. É o que a LGPD chama de minimização e retenção.',
@@ -164,7 +164,7 @@ const DICAS_PLACEHOLDERS = {
   FRETE: 'Informação de frete, como “Frete grátis”. Vazio quando não há.',
   CUPOM: 'Cupom da oferta. Vazio quando não há.',
   LINK: 'Link do produto com a sua etiqueta ou tag. Obrigatório.',
-  HORA_PRECO: 'Hora em que o preço foi conferido na loja, como 14h32. Vazio quando a oferta não foi conferida. Ponha entre [ ] e fora da linha do {LINK}.',
+  HORA_PRECO: 'Hora em que o preço foi visto na loja, como 14h32 (na hora do envio ou, se a leitura falhou, a do último preço visto). Vazio quando não há hora. Ponha entre [ ] e fora da linha do {LINK}.',
 };
 const DICA_OPCIONAL = 'Para um pedaço da linha sumir sozinho, ponha-o entre colchetes: [🎟️ Cupom: {CUPOM}]. Se algum campo dentro dos colchetes estiver vazio, o pedaço some e o resto da linha fica.';
 

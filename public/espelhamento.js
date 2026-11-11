@@ -572,7 +572,10 @@ const TEXTOS_REVISAO_CATALOGO = {
   },
   enviada: 'Enviada', paraRevisarPre: 'Para revisar', descartada: 'Descartada: na revisão',
   // descartada pelo verificador de preço e estoque (chaves de `descartado_por` de GET /api/catalogo/itens; MOTIVOS_VERIFICADOR)
-  descartadaPor: { esgotado: 'Descartada: esgotado na loja', preco_subiu: 'Descartada: preço subiu' },
+  descartadaPor: {
+    esgotado: 'Descartada: esgotado na loja', preco_subiu: 'Descartada: preço subiu',
+    indisponivel: 'Descartada: indisponível na loja', outro_produto: 'Descartada: a página da loja abriu outro produto',
+  },
   dicaAmazon: 'link da Amazon com a sua tag', dicaML: 'link do Mercado Livre gerado com a sua etiqueta', revisada: 'revisada e enviada', enviando: 'enviando…',
   erroGrupos: (n) => `Erro ao enviar para ${espN(n, 'grupo', 'grupos')}`,
   revisar: 'Revisar', revisarAria: (titulo, loja) => `Revisar oferta ${titulo}, da ${loja}`, soDono: 'Só o Dono revisa.',
