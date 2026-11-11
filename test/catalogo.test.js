@@ -1432,17 +1432,31 @@ test('R1: a espera do freio curto segura a fila — nenhum outro pedido ao Etiqu
 
 test('R1: sem `esperar` injetado, a espera do freio curto é um timer de tentar_em_s', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
-  const f = fetchEmSequencia([freio429('intervalo', 2), { status: 200, corpo: CONFIRMADO }]);
-  const cat = createCatalogo({ db: banco().db, fetch: f, lerConexao: () => ({ endereco: 'http://127.0.0.1:8765', caminho_token: arquivoToken() }) });
-  const p = cat.confirmarPreco(ASIN_OK);
-  for (let i = 0; i < 20 && f.chamadas.length < 1; i++) await new Promise((ok) => setImmediate(ok));
-  for (let i = 0; i < 20; i++) await new Promise((ok) => setImmediate(ok));
-  t.mock.timers.tick(1999);
-  for (let i = 0; i < 20; i++) await new Promise((ok) => setImmediate(ok));
-  assert.equal(f.chamadas.length, 1, 'antes dos 2 s não pede de novo');
-  t.mock.timers.tick(1);
-  assert.equal((await p).resultado, 'confirmado');
-  assert.equal(f.chamadas.length, 2);
+  // Espia o setTimeout falso: o teste espera o timer existir (sem número fixo de voltas, porque o token é lido do
+  // disco de verdade antes do fetch) e só então avança o relógio.
+  const doRelogio = globalThis.setTimeout;
+  const pedidos = [];
+  let timerRegistrado;
+  const registrado = new Promise((ok) => { timerRegistrado = ok; });
+  globalThis.setTimeout = (fn, ms, ...resto) => { pedidos.push(ms); timerRegistrado(); return doRelogio(fn, ms, ...resto); };
+  try {
+    const f = fetchEmSequencia([freio429('intervalo', 2), { status: 200, corpo: CONFIRMADO }]);
+    const cat = createCatalogo({ db: banco().db, fetch: f, lerConexao: () => ({ endereco: 'http://127.0.0.1:8765', caminho_token: arquivoToken() }) });
+    const p = cat.confirmarPreco(ASIN_OK);
+    // Se a espera sumir, a confirmação termina sem timer: a corrida acaba e o teste falha em vez de ficar pendurado.
+    const quem = await Promise.race([registrado.then(() => 'timer'), p.then(() => 'terminou_sem_timer')]);
+    assert.equal(quem, 'timer', 'a espera do freio curto precisa ser um timer');
+    assert.deepEqual(pedidos, [2000]);
+    assert.equal(f.chamadas.length, 1, 'a 1ª recusa já veio e a 2ª chamada ainda não');
+    t.mock.timers.tick(1999);
+    for (let i = 0; i < 10; i++) await new Promise((ok) => setImmediate(ok));
+    assert.equal(f.chamadas.length, 1, 'antes dos 2 s não pede de novo');
+    t.mock.timers.tick(1);
+    assert.equal((await p).resultado, 'confirmado');
+    assert.equal(f.chamadas.length, 2);
+  } finally {
+    globalThis.setTimeout = doRelogio;
+  }
 });
 
 test('CA1.3: confirmarPreco sem conexão, sem token ou com ASIN fora do formato: falha sem rede', async () => {
