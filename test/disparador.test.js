@@ -669,7 +669,7 @@ test('rastreio: falha do link padrão com associação ok — só os grupos do p
   assert.deepEqual(logsDaRegra(s2.db, id2), [
     { level: 'erro', group_name: null, offer_title: 'Fone A', message: 'Link de afiliado não gerado: a etiqueta etiquetaA foi recusada' },
     // saiu menos que o pedido (plano rodar-sozinho-entrega1, CA1.8)
-    { level: 'aviso', group_name: null, offer_title: null, message: 'Saíram 0 de 1 ofertas; 1 pulada (link não gerado); não havia mais ofertas novas dentro dos filtros.' },
+    { level: 'aviso', group_name: null, offer_title: null, message: 'Saíram 0 de 1 oferta; 1 pulada (link não gerado); não havia mais ofertas novas dentro dos filtros.' },
   ]);
   assert.deepEqual([s2.wa.simulated.length, linhasRastreio(s2.db).length, enviadasDaRegra(s2.db, id2).length], [0, 0, 0]);
 });

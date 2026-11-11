@@ -391,6 +391,21 @@ test('CA1.4: descartes da releitura vão ao Histórico e a catalogo_itens com de
   assert.deepEqual(s.eventos, []);
 });
 
+test('CA1.5: a oferta que saiu do Etiqueta pula, mesmo com o preço dentro da reserva, e a frase não promete nova tentativa', async (t) => {
+  const agora = dia(2, 14, 0);
+  t.mock.timers.enable({ apis: ['Date'], now: agora });
+  const s = montar({ catalogo: [doEtiqueta(1, 'amazon', { precoEm: agora - 60 * 60000 })], releitura: { [asinDe(1)]: falhou('nao_encontrado') } });
+  const id = regraCatalogo(s.db);
+  const r = await s.scheduler.runRule(id);
+  assert.deepEqual([r.offers, r.messages, r.errors, r.revisao, r.descartadas, r.puladas], [0, 0, 0, 0, 0, 1]);
+  assert.deepEqual(avisosDe(s.db, id), [
+    ['Produto 1', 'Pulada: a oferta saiu do Etiqueta e o preço não pôde ser conferido. Ela só volta se o catálogo a trouxer de novo.'],
+    [null, 'Saíram 0 de 5 ofertas; 1 pulada (preço sem conferência); não havia mais ofertas novas dentro dos filtros.'],
+  ]);
+  assert.deepEqual(enviadas(s.db, id), []);
+  assert.equal(s.wa.simulated.length, 0);
+});
+
 test('CA1.5: reserva vencida pula: sem revisão e sem sent_offers', async (t) => {
   const agora = dia(2, 14, 0);
   const casos = [
@@ -476,7 +491,7 @@ test('foco 1: Etiqueta cai no meio da execução: as Amazon restantes vão à re
     ['Produto 4', 'Enviado pela Amazon, com a sua tag · preço visto às 11:00, não conferido agora (o Etiqueta não respondeu)'],
   ]);
   // a de 10 h não tinha como sair: ficou fora da escolha, sem gastar tentativa e sem linha de pulada
-  assert.ok(logs(s.db, id).some((l) => l.level === 'info' && l.message === 'Antes da escolha, 1 oferta ficou de fora: 1 da Amazon sem como conferir o preço agora.'));
+  assert.ok(logs(s.db, id).some((l) => l.level === 'info' && l.message === 'Antes da escolha, 1 oferta ficou de fora: 1 da Amazon que não dá para conferir agora.'));
   assert.ok(!logs(s.db, id).some((l) => l.offer_title === 'Produto 3'));
   assert.deepEqual(enviadas(s.db, id), ['ASIN:B000000001', 'ASIN:B000000002', 'ASIN:B000000004']);
   semErro(s.db, id);

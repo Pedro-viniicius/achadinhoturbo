@@ -47,7 +47,7 @@ const PAUSA_DESCARTADA_MS = PAUSA_DESCARTADA_H * 3600000;
 export const TETO_REPOSICAO = 3;
 /** Por que a escolhida não saiu, na frase "saíram X de Y" (CA1.8). Frases curtas, sem jargão. */
 const PULADA_POR = {
-  parecido: 'produto parecido', filtros: 'preço fora dos filtros', espera: 'loja indisponível agora',
+  parecido: 'produto parecido', filtros: 'preço fora dos filtros', espera: 'falta conexão com a loja',
   revisao_cheia: 'revisão cheia', link: 'link não gerado', envio: 'falha no envio',
   conferencia: 'preço sem conferência', sem_preco: 'sem como saber o preço', desligado: 'verificador desligado',
 };
@@ -73,7 +73,7 @@ function fraseSairam(saidas, want, faltas, fim) {
   if (puladas) pedacos.push(pedacoDeFalta(puladas, 'pulada', 'puladas', faltas.pulada));
   if (descartadas) pedacos.push(pedacoDeFalta(descartadas, 'descartada', 'descartadas', faltas.descartada));
   if (faltas.revisao) pedacos.push(`${faltas.revisao} ${faltas.revisao === 1 ? 'separada' : 'separadas'} para revisão`);
-  return `aíram ${saidas} de ${want} ofertas${pedacos.length ? `; ${pedacos.join(', ')}` : ''}${fim ? `; ${fim}` : ''}.`;
+  return `aíram ${saidas} de ${qtdOfertas(want)}${pedacos.length ? `; ${pedacos.join(', ')}` : ''}${fim ? `; ${fim}` : ''}.`;
 }
 /**
  * Linha das candidatas que ficaram de fora antes da escolha (spec, §1), ou null sem nenhuma. `f` = exec.filtradas.
@@ -85,8 +85,8 @@ function fraseFiltradas(f) {
   const pedacos = [];
   if (f.filtros) pedacos.push(`${f.filtros} fora dos filtros da regra`);
   if (f.parecidas) pedacos.push(`${f.parecidas} ${f.parecidas === 1 ? 'já enviada ou parecida' : 'já enviadas ou parecidas'}`);
-  if (f.pausa) pedacos.push(`${f.pausa} em pausa por descarte`);
-  if (f.semConferencia) pedacos.push(`${f.semConferencia} da Amazon sem como conferir o preço agora`);
+  if (f.pausa) pedacos.push(`${f.pausa} em pausa de ${PAUSA_DESCARTADA_H} h`);
+  if (f.semConferencia) pedacos.push(`${f.semConferencia} da Amazon que não dá para conferir agora`);
   return `Antes da escolha, ${total} ${total === 1 ? 'oferta ficou' : 'ofertas ficaram'} de fora: ${pedacos.join(', ')}.`;
 }
 const LOJAS_RESUMO = ['ml', 'amazon', 'shopee'];
@@ -119,6 +119,8 @@ const TEXTO_PULADA_DESLIGADO = `Pulada: o verificador foi desligado durante este
 function textoPuladaSemConferencia(offer, causa, agora) {
   const porque = CAUSAS[causa];
   if (CAUSAS_SEM_PRECO.has(causa)) return `Pulada: não dá para saber o preço (${porque}). Fica ${PAUSA_DESCARTADA_H} h fora da escolha desta regra.`;
+  // a oferta que o Etiqueta já não tem não volta sozinha: só se o catálogo a trouxer de novo
+  if (causa === 'etiqueta_sem_oferta') return `Pulada: ${porque} e o preço não pôde ser conferido. Ela só volta se o catálogo a trouxer de novo.`;
   if (offer.loja === 'ml') return `Pulada: não deu para conferir o preço (${porque}). O Mercado Livre não sai sem conferir; tenta de novo no próximo envio.`;
   if (offer.loja === 'amazon' && !reservaValida(offer.precoEm, agora)) {
     const velho = Number.isFinite(offer.precoEm) && offer.precoEm < agora;

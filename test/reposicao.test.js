@@ -163,7 +163,7 @@ test('CA1.7: para em 4× as vagas', async (t) => {
       assert.equal(v.conferidas.length, per * 4, `${per * 4} escolhidas, e só`);
       assert.deepEqual([r.offers, r.descartadas], [0, per * 4]);
       // o teto, e não a falta de candidatas: a frase não diz "não havia mais ofertas novas"
-      assert.deepEqual(sairam(s, id), [`Saíram 0 de ${per} ofertas; ${per * 4} descartadas (esgotada na loja).`]);
+      assert.deepEqual(sairam(s, id), [`Saíram 0 de ${per} ${per === 1 ? 'oferta' : 'ofertas'}; ${per * 4} descartadas (esgotada na loja).`]);
     });
   }
 });
@@ -265,7 +265,7 @@ test('contagem das filtradas: só quando sai menos que o pedido; sem nenhuma can
   s.db.prepare('INSERT INTO sent_offers (rule_id, offer_key, sent_at, title, price_cents) VALUES (?,?,?,?,?)').run(id, 'MLB999', Date.now() - HORA, A, 5000);
   await s.scheduler.runRule(id);
   const infos = () => s.logs(id).filter((l) => l.level === 'info' && !l.message.startsWith('Pulada')).map((l) => l.message);
-  assert.deepEqual(infos(), ['Antes da escolha, 3 ofertas ficaram de fora: 1 fora dos filtros da regra, 1 já enviada ou parecida, 1 da Amazon sem como conferir o preço agora. Nenhuma sobrou.']);
+  assert.deepEqual(infos(), ['Antes da escolha, 3 ofertas ficaram de fora: 1 fora dos filtros da regra, 1 já enviada ou parecida, 1 da Amazon que não dá para conferir agora. Nenhuma sobrou.']);
   assert.deepEqual(sairam(s, id), [], 'sem escolhida, sem "saíram 0 de 1"');
 
   // uma sai e o pedido é 2: a frase "saíram" e a contagem; com o pedido cheio, nenhuma das duas
@@ -273,7 +273,7 @@ test('contagem das filtradas: só quando sai menos que o pedido; sem nenhuma can
   s.db.prepare('UPDATE rules SET per_run = 2 WHERE id = ?').run(id);
   await s.scheduler.runRule(id);
   assert.deepEqual(sairam(s, id), ['Saíram 1 de 2 ofertas; não havia mais ofertas novas dentro dos filtros.']);
-  assert.equal(infos().at(-1), 'Antes da escolha, 3 ofertas ficaram de fora: 1 fora dos filtros da regra, 1 já enviada ou parecida, 1 da Amazon sem como conferir o preço agora.');
+  assert.equal(infos().at(-1), 'Antes da escolha, 3 ofertas ficaram de fora: 1 fora dos filtros da regra, 1 já enviada ou parecida, 1 da Amazon que não dá para conferir agora.');
   assert.equal(infos().length, 2, 'sem "Nenhuma sobrou." quando alguma saiu');
 });
 
@@ -286,7 +286,7 @@ test('contagem das filtradas: em pausa por descarte (fontes antigas) e com o ped
   assert.deepEqual(contagens(), [], 'a 2 ocupou a vaga da esgotada: pedido cheio');
   t.mock.timers.setTime(Date.now() + HORA);
   await s.scheduler.runRule(id);
-  assert.deepEqual(contagens(), ['Antes da escolha, 1 oferta ficou de fora: 1 em pausa por descarte. Nenhuma sobrou.']);
+  assert.deepEqual(contagens(), ['Antes da escolha, 1 oferta ficou de fora: 1 em pausa de 6 h. Nenhuma sobrou.']);
 });
 
 // ---------------------------------------------------------------------------------------------------- CA1.12

@@ -144,7 +144,7 @@ test('docs (ponto 1): as 5 frases do Histórico do README são, letra por letra,
 });
 
 test('docs (ponto 1): as frases do capítulo Referência (com aspas tipográficas) são as do código; o 409 e o descarte também', () => {
-  const frasesCap = [...CAP_REF.matchAll(/'((?:Pulada|Saiu como|Descartada: preço subiu para)[^']*)'/g)].map((m) => m[1].replaceAll('“', '"').replaceAll('”', '"'));
+  const frasesCap = [...CAP_REF.matchAll(/'((?:Pulada: (?:o mesmo produto|parecida|na conferência)|Saiu como|Descartada: preço subiu para)[^']*)'/g)].map((m) => m[1].replaceAll('“', '"').replaceAll('”', '"'));
   assert.deepEqual(frasesCap, [...FRASES_DOC, DESCARTE_DOC], 'mesma lista, mesma ordem');
   assert.match(CAP_REF, /'Não enviada: … \(as mesmas frases de “Pulada”\)'/);
   // a frase da mensagem: README, capítulo do Disparo automático (aspas tipográficas ao redor) e o TIP não a repetem diferente

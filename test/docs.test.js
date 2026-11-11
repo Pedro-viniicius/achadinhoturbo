@@ -826,6 +826,10 @@ const FATOS = [
   { nome: 'primeiras palavras do título que entram na comparação', valor: 8, texto: (v) => new RegExp(`só as ${v} primeiras palavras`), codigo: [['src/parecido.js', /export const PALAVRAS_PARECIDO = (\d+);/]] },
   // adendo de 10/11 (D11): o mesmo produto com outro código só volta antes do prazo com este desconto mínimo
   { nome: 'desconto mínimo para o mesmo produto sair antes do prazo (%)', valor: 5, texto: (v) => new RegExp(`pelo menos ${v}% mais barato\\b`), codigo: [['src/parecido.js', /export const DESCONTO_MINIMO_MAIS_BARATA = (\d+);/]] },
+  // Rodar sozinho, entrega 1: depois de uma falha do Etiqueta, as Amazon seguem direto para a reserva por este prazo
+  { nome: 'minutos sem chamar o Etiqueta depois de uma falha na releitura da Amazon', valor: 10, texto: (v) => new RegExp(`deixa de chamar o Etiqueta por ${v} min\\b`), codigo: [['src/verificador.js', /export const PAUSA_RELEITURA_MIN = (\d+);/]] },
+  // a linha "Antes da escolha" diz a pausa do descarte pela constante (mesmo 6 da PAUSA_DESCARTADA_H, outra frase que a da reserva)
+  { nome: 'horas da pausa na linha "Antes da escolha" (descarte e pulada por preço desconhecido)', valor: 6, texto: (v) => new RegExp(`em pausa de ${v} h\\b`), codigo: [['src/verificador.js', /export const PAUSA_DESCARTADA_H = (\d+);/]] },
   { nome: 'segundos até o programa desistir do pedido de produto', valor: 18, texto: (v) => new RegExp(`desiste em ${v} s\\b`), codigo: [['src/links.js', /export const PRAZO_PRODUTO_MS = (\d+)000;/]] },
 ];
 
@@ -1513,7 +1517,7 @@ test('Grade: as frases do Histórico citadas nos Docs e no README são as que o 
   assert.ok(sched.includes('Horário ${quandoDe(pulados[0], agora)} pulado')); assert.ok(sched.includes('${pulados.length} horários pulados ('));
   assert.ok(sched.includes('${quandoDe(pulados[0], agora)} a ${quandoDe(pulados.at(-1), agora)})')); assert.ok(sched.includes('return `${horaDe(ts)} de ${pad2(d.getDate())}/${pad2(d.getMonth() + 1)}`;'), 'outro dia: "10:00 de 03/11"');
   // a frase "saíram X de Y" (plano rodar-sozinho-entrega1, CA1.8): pedaços na ordem pulada, descartada, revisão e o fim
-  assert.ok(sched.includes('return `aíram ${saidas} de ${want} ofertas${pedacos.length ? `; ${pedacos.join(\', \')}` : \'\'}${fim ? `; ${fim}` : \'\'}.`;'));
+  assert.ok(sched.includes('return `aíram ${saidas} de ${qtdOfertas(want)}${pedacos.length ? `; ${pedacos.join(\', \')}` : \'\'}${fim ? `; ${fim}` : \'\'}.`;'));
   assert.ok(sched.includes("acabou ? 'não havia mais ofertas novas dentro dos filtros'"));
   assert.ok(sched.includes("pedacoDeFalta(descartadas, 'descartada', 'descartadas', faltas.descartada)"), 'a frase com as descartadas do verificador');
   assert.ok(sched.includes("esgotado: 'esgotada na loja'"), 'o motivo do exemplo dos Docs');
@@ -1707,6 +1711,7 @@ test('Verificador, Rodar sozinho (entrega 1): descartes novos, reserva, pulada, 
     ['Pulada: não deu para conferir o preço (${porque}). O Mercado Livre não sai sem conferir; tenta de novo no próximo envio.', 'O Mercado Livre não sai sem conferir; tenta de novo no próximo envio.', false],
     ['Pulada: não dá para saber o preço (${porque}). Fica ${PAUSA_DESCARTADA_H} h fora da escolha desta regra.', 'Pulada: não dá para saber o preço (a página não trouxe o preço). Fica 6 h fora da escolha desta regra.', false],
     ['Pulada: o verificador foi desligado durante este envio e o preço não foi conferido.', 'Pulada: o verificador foi desligado durante este envio e o preço não foi conferido.', false],
+    ['Pulada: ${porque} e o preço não pôde ser conferido. Ela só volta se o catálogo a trouxer de novo.', 'Pulada: a oferta saiu do Etiqueta e o preço não pôde ser conferido. Ela só volta se o catálogo a trouxer de novo.', true],
   ];
   for (const [noCodigo, citada, noReadme] of pulada) {
     assert.ok(sched.includes(noCodigo), `src/scheduler.js não escreve mais: ${noCodigo}`);
@@ -1714,14 +1719,19 @@ test('Verificador, Rodar sozinho (entrega 1): descartes novos, reserva, pulada, 
     if (noReadme) assert.ok(README.includes(citada), `README não cita: ${citada}`);
   }
   // 4. "Saíram X de Y ofertas; …" e a linha das candidatas que ficaram de fora (spec §1): o molde e os pedaços vêm do código
-  assert.ok(sched.includes('aíram ${saidas} de ${want} ofertas'));
+  assert.ok(sched.includes('aíram ${saidas} de ${qtdOfertas(want)}'));
   assert.ok(sched.includes("conferencia: 'preço sem conferência'") && sched.includes("esgotado: 'esgotada na loja'"));
   const saíram = 'Saíram 2 de 3 ofertas; 1 pulada (preço sem conferência), 1 descartada (esgotada na loja).';
   assert.ok(REF.includes(saíram), 'Docs (Referência): a frase "Saíram X de Y"'); assert.ok(README.includes(saíram), 'README: a frase "Saíram X de Y"');
   assert.ok(sched.includes('Antes da escolha, ${total}'));
-  for (const pedaco of ['fora dos filtros da regra', 'já enviadas ou parecidas', 'em pausa por descarte']) {
+  for (const pedaco of ['fora dos filtros da regra', 'já enviadas ou parecidas']) {
     assert.ok(sched.includes(pedaco), `src/scheduler.js: ${pedaco}`); assert.ok(REF.includes(pedaco), `Docs (Referência): ${pedaco}`);
   }
+  // a pausa vem da constante (o número está no FATOS) e a Amazon sem conferência tem redação própria no código e nos Docs
+  assert.ok(sched.includes('em pausa de ${PAUSA_DESCARTADA_H} h'), 'src/scheduler.js: em pausa de ${PAUSA_DESCARTADA_H} h');
+  assert.ok(REF.includes('3 em pausa de 6 h.') && README.includes('3 em pausa de 6 h.'), 'Docs e README: a linha de exemplo diz "em pausa de 6 h"');
+  assert.ok(sched.includes('da Amazon que não dá para conferir agora') && REF.includes('as que não dá para conferir agora'), 'a Amazon sem conferência na linha "Antes da escolha"');
+  assert.ok(!sched.includes('em pausa por descarte') && !REF.includes('em pausa por descarte') && !README.includes('em pausa por descarte'), 'a redação antiga "em pausa por descarte" sumiu');
   assert.match(REF, /Antes da escolha, \d+ ofertas ficaram de fora: \d+ fora dos filtros da regra/);
   // 5. ligar o verificador também deixa linha (CA1.9), como desligar
   assert.ok(server.includes("export const AVISO_VERIFICADOR_LIGADO = 'Verificador ligado em Ajustes';"));
