@@ -6,7 +6,7 @@ import { createAuth, createLimiter, parseCookies, safeEqual, soDono, ehDono, SES
 import * as privacidade from './privacidade.js';
 import { pseudonimo, migrarPseudonimos, limparAntigos, chaveIp, RETENCAO_PADRAO_DIAS } from './privacidade.js';
 import { createWhatsApp } from './whatsapp.js';
-import { createLinkService } from './links.js';
+import { createLinkService, lerVersao, TIPOS_ERRO_EXTENSAO } from './links.js';
 import { createScheduler } from './scheduler.js';
 import * as mlPadrao from './ml.js';
 import { montarRotas as rotasEnvios } from './envios.js';
@@ -194,15 +194,18 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
   // Long-poll: manda os cabeçalhos na hora (a extensão já sabe que está conectada)
   // e só depois o corpo, quando chegar um pedido ou der 20 s. `x-recursos` (depois do token): o que esta extensão sabe
   // atender além dos links e da lista (a 1.5.0 manda "produto_ml"); links.poll ignora nome desconhecido e cabeçalho longo.
+  // `x-versao` (a 1.6.0 manda): só "N.N.N", senão null (a extensão aparece desatualizada no painel).
   app.get('/api/ext/poll', extAuth, async (req, res) => {
     res.status(200).type('application/json').flushHeaders();
-    res.end(JSON.stringify({ job: await links.poll(20000, { recursos: req.headers['x-recursos'] }) }));
+    res.end(JSON.stringify({ job: await links.poll(20000, { recursos: req.headers['x-recursos'], versao: lerVersao(req.headers['x-versao']) }) }));
   });
   // `longo` (só no pedido link_shopee): o longLink, que serve só para conferir o ID de afiliado; links.submit o valida.
   // `sub_id_aplicado` (só no link_shopee com Sub_id): a extensão diz se o Sub_id entrou no link; só o true literal vale.
+  // `tipo` (a 1.6.0, no erro): só de TIPOS_ERRO_EXTENSAO; outro valor não chega ao serviço (vale o texto do erro).
   app.post('/api/ext/result', extAuth, jsonGrande, (req, res) => {
+    const tipo = TIPOS_ERRO_EXTENSAO.includes(req.body.tipo) ? req.body.tipo : undefined;
     const ok = links.submit(Number(req.body.id), { ok: !!req.body.ok, link: req.body.link, longo: req.body.longo, data: req.body.data, error: req.body.error,
-      sub_id_aplicado: req.body.sub_id_aplicado });
+      sub_id_aplicado: req.body.sub_id_aplicado, tipo });
     res.json({ ok });
   });
 

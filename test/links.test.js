@@ -396,7 +396,7 @@ test('links: a resposta da extensão (submit) conta como contato: mais 45 s on-l
   const prox = links.poll(20000);
   const r = resultado(links.requestLink({ url: 'https://www.mercadolivre.com.br/p/MLB1', tag: 'etq' }));
   const job = await prox;
-  t.mock.timers.tick(80_000); // a extensão responde perto do teto dela
+  t.mock.timers.tick(40_000); // a extensão 1.6.0 responde no teto dela (40 s), antes dos 45 s do servidor
   assert.equal(links.submit(job.id, { ok: false, error: 'a Central de Afiliados do Mercado Livre não respondeu a tempo' }), true);
   assert.ok((await r).erro);
   t.mock.timers.tick(44_000);
