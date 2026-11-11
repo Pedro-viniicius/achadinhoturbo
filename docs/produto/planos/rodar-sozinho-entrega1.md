@@ -27,7 +27,7 @@ Antes de enviar uma oferta da Amazon do catálogo, o Turbo pede ao Etiqueta para
 Vale a A, que o dono já escolheu. Para a reposição de vaga, a **escolha preguiçosa** (uma candidata por vez, a mesma lista lida uma vez) vence a de "escolher 4× as vagas de uma vez". Escolher tudo de uma vez poria na trava da rodada candidatas que nunca saem: as parecidas delas seriam barradas e apareceriam no Histórico como "Pulada" sem motivo real.
 
 ## Decisão
-1. **Etiqueta:** `POST /api/v1/amazon/<ASIN>/confirmar-preco`. Relê `https://www.amazon.com.br/dp/<ASIN>` (sem tag) com prazo de 10 s. Grava só `preco`, `preco_antigo` e `desconto` sobre a linha relida, mais `preco_em` e `atualizado_em`. Nunca insere e nunca mexe em `url`. Freio próprio. A lógica fica em `servidor.py`, ao lado de `buscar_produto_amazon` e de `sanear_precos`; o `api_ofertas.py` continua só de leitura.
+1. **Etiqueta:** `POST /api/v1/amazon/<ASIN>/confirmar-preco`. Relê `https://www.amazon.com.br/dp/<ASIN>` (sem tag) com prazo total de 8 s (redirects incluídos), 4 s por operação de rede e teto de 4 MB por página (ajuste da rodada 1; o plano original dizia 10 s). Grava só `preco`, `preco_antigo` e `desconto` sobre a linha relida, mais `preco_em` e `atualizado_em`. Nunca insere e nunca mexe em `url`. Freio próprio. A lógica fica em `servidor.py`, ao lado de `buscar_produto_amazon` e de `sanear_precos`; o `api_ofertas.py` continua só de leitura.
 2. **Turbo, catálogo:** `paraCandidato` passa a levar `precoEm` (ms). O cliente ganha `confirmarPreco(asin)`.
 3. **Turbo, verificador:** a releitura só acontece com a opção `releitura`, que só a regra do catálogo passa, e só para a Amazon sem API. Preço lido: vale `decidir` como hoje. `sem_preco`: descarta como `indisponivel`. `outro_produto`: descarta como `outro_produto`. Qualquer outra falha cai na reserva: `precoEm` entre −5 min e 6 h envia com `vistoEm = precoEm`; fora disso, `descartar nao_conferido` com `causa`. Depois de uma falha, a releitura fica pausada por 10 min no Turbo.
 4. **Turbo, regra:**
@@ -150,7 +150,7 @@ Se o Turbo entrar antes do Etiqueta, nada quebra: a rota responde 405, o Turbo t
   - URL montada no servidor a partir do ASIN validado por fullmatch; nenhuma URL vem do cliente;
   - redirect conferido por `OPENER_AMAZON`;
   - freio (vazão, concorrência, pausa depois de captcha, rodada da Amazon);
-  - timeout de 10 s.
+  - prazo total de 8 s, 4 s por operação de rede e teto de 4 MB por página.
 - A v1 passa a gravar. Pontos a conferir:
   - só `preco`, `preco_antigo`, `desconto`, `preco_em` e `atualizado_em`;
   - `BEGIN IMMEDIATE` só depois da rede;
