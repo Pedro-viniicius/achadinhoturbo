@@ -228,7 +228,7 @@ test('CA4: lista com preço digitado (idade desconhecida) sem conferência não 
   assert.deepEqual(logs(s.db, id).filter((l) => l.level === 'aviso').map((l) => [l.offer_title, l.message]), [
     ['Fone A', 'Descartada: não deu para conferir o preço (a loja não respondeu)'],
     // a regra pediu 3 (rodar-sozinho CA1.8)
-    [null, 'Saíram 1 de 3 ofertas; 1 descartada (preço não conferido (loja sem resposta)); não havia mais ofertas novas dentro dos filtros.'],
+    [null, 'Saíram 1 de 3 ofertas; 1 descartada (loja sem resposta e dados antigos); não havia mais ofertas novas dentro dos filtros.'],
   ]);
   assert.ok(s.wa.simulated[0].text.includes('R$ 30,00'), 'preço digitado à mão é mantido (CA3)');
   assert.equal(logs(s.db, id).find((l) => l.level === 'ok').message, 'Enviado com a etiqueta etiquetaA');

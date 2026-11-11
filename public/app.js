@@ -15,7 +15,7 @@ const SO_DONO_DICA = { desconectar: 'Só o Dono pode desconectar o WhatsApp.', l
 const TEXTOS_VERIFICADOR = {
   titulo: 'Conferir preço e estoque antes de enviar',
   chave: 'Conferir antes de cada envio',
-  sub: 'Logo antes de enviar, o programa lê o preço e o estoque na loja. Esgotado ou mais caro que o limite: a oferta não sai e o Histórico diz o motivo. Na Amazon do Catálogo, o Etiqueta relê a página do produto na hora. Se essa leitura falhar, vale o último preço visto, desde que tenha até 6 horas; mais velho, a oferta é pulada e outra ocupa a vaga. Nas outras lojas, se a loja não responder, só sai dado de até 30 min.',
+  sub: 'Logo antes de enviar, o programa lê o preço e o estoque na loja. Esgotado ou mais caro que o limite: a oferta não sai e o Histórico diz o motivo. Se a loja não responder, só sai dado de até 30 min. As regras do Catálogo e da Amazon estão no “?”.',
   desligado: 'Desligado: as ofertas saem sem conferir preço nem estoque.',
   limite: 'Aceitar alta de preço até (%)',
   limiteDica: '0 = qualquer alta descarta a oferta. Preço que caiu sempre pode sair.',

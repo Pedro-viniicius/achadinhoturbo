@@ -151,7 +151,7 @@ docsCapitulo({
           ],
         } },
         { p: 'Oferta cujo preço não deu para conferir não vai à revisão: é pulada, e o Histórico diz a causa entre parênteses, como em “Pulada: o preço visto às 02:10 de 10/11 tem mais de 6 h e não deu para conferir agora (a Amazon bloqueou a leitura).” Oferta esgotada, indisponível ou mais cara que o limite também não vai à revisão: é descartada. Pulada e descartada não vêm para cá, e a vaga delas passa para a próxima oferta. Veja [Conferir preço e estoque antes de enviar](#docs/manutencao/verificador).' },
-        { p: 'Uma oferta pode ter mais de um motivo: eles aparecem juntos, ligados por “e”. As ofertas na revisão contam nas “ofertas por envio” do disparo.' },
+        { p: 'Uma oferta pode ter mais de um motivo: eles aparecem juntos, ligados por “e”. A oferta separada para revisão libera a vaga, que passa para a próxima da lista; por isso a fila de revisão de um disparo com muita Shopee enche mais depressa. O teto de 50 continua valendo.' },
         { p: 'Cada disparo guarda no máximo 50 ofertas esperando. Acima disso, as novas esperam sem entrar na fila. O cartão mostra “Revisão cheia (50)” e o Histórico avisa a cada execução, até você revisar ou descartar algumas.' },
         { p: 'O número de ofertas para revisar aparece no cartão do disparo (“N para revisar”), no Histórico e no menu, só para o Dono.' },
         { nota: 'dica', texto: 'Nem tudo vai para a revisão. Se a extensão do Chrome estiver desligada, as ofertas do Mercado Livre esperam e saem sozinhas quando ela voltar. Sem a tag da Amazon, as da Amazon esperam com um aviso.' },

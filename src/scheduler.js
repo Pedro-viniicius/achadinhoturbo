@@ -52,7 +52,7 @@ const PULADA_POR = {
   conferencia: 'preço sem conferência', sem_preco: 'sem como saber o preço', desligado: 'verificador desligado',
 };
 const DESCARTADA_POR = {
-  esgotado: 'esgotada na loja', preco_subiu: 'preço subiu', nao_conferido: 'preço não conferido (loja sem resposta)',
+  esgotado: 'esgotada na loja', preco_subiu: 'preço subiu', nao_conferido: 'loja sem resposta e dados antigos',
   indisponivel: 'indisponível na loja', outro_produto: 'outro produto na página',
 };
 /** "2 descartadas (esgotada na loja)" ou, com motivos diferentes, "2 descartadas (1 esgotada na loja, 1 preço subiu)". */
