@@ -1657,8 +1657,9 @@ test('Verificador: a tabela de "motivos" de Referência que fala da conferência
 
 test('Verificador: toda causa de CAUSAS e as frases fixas do código aparecem nos Docs e no README', () => {
   const ver = lerRaiz('src/verificador.js'); const server = lerRaiz('src/server.js'); const sched = lerRaiz('src/scheduler.js');
-  // as doze de antes mais as três do Etiqueta (o Etiqueta não respondeu, a Amazon bloqueou a leitura, a oferta saiu do Etiqueta)
-  assert.equal(Object.keys(CAUSAS).length, 15);
+  // as doze de antes mais as quatro do Etiqueta (o Etiqueta não respondeu, a Amazon bloqueou a leitura, a oferta saiu do Etiqueta,
+  // o Etiqueta estava ocupado com outra leitura da Amazon)
+  assert.equal(Object.keys(CAUSAS).length, 16);
   for (const causa of Object.values(CAUSAS)) {
     assert.ok(TEXTO_DOCS.includes(causa), `Docs: causa “${causa}”`);
     assert.ok(README.includes(causa), `README: causa “${causa}”`);
@@ -1712,6 +1713,8 @@ test('Verificador, Rodar sozinho (entrega 1): descartes novos, reserva, pulada, 
     ['Pulada: não dá para saber o preço (${porque}). Fica ${PAUSA_DESCARTADA_H} h fora da escolha desta regra.', 'Pulada: não dá para saber o preço (a página não trouxe o preço). Fica 6 h fora da escolha desta regra.', false],
     ['Pulada: o verificador foi desligado durante este envio e o preço não foi conferido.', 'Pulada: o verificador foi desligado durante este envio e o preço não foi conferido.', false],
     ['Pulada: ${porque} e o preço não pôde ser conferido. Ela só volta se o catálogo a trouxer de novo.', 'Pulada: a oferta saiu do Etiqueta e o preço não pôde ser conferido. Ela só volta se o catálogo a trouxer de novo.', true],
+    // a Amazon cuja página falhou agora fica 6 h fora da escolha (achados Q1/R2): o mesmo fim da pulada por preço impossível
+    ['const FICA_FORA = `Fica ${PAUSA_DESCARTADA_H} h fora da escolha desta regra.`;', `Pulada: o preço visto às 02:10 de 10/11 tem mais de ${R} h e não deu para conferir agora (a Amazon bloqueou a leitura). Fica 6 h fora da escolha desta regra.`, true],
   ];
   for (const [noCodigo, citada, noReadme] of pulada) {
     assert.ok(sched.includes(noCodigo), `src/scheduler.js não escreve mais: ${noCodigo}`);
@@ -1750,7 +1753,7 @@ test('Verificador, ML pela extensão: as quatro causas novas, a versão 1.5.0 e 
     assert.ok(Object.hasOwn(CAUSAS, k), `CAUSAS.${k}`);
     for (const [onde, txt] of secoes) assert.ok(txt.includes(CAUSAS[k]), `${onde}: causa “${CAUSAS[k]}”`);
   }
-  // a lista "Entre parênteses…" de cada lugar traz as quinze causas (a causa também aparece em outros parágrafos: não basta achar a frase na seção)
+  // a lista "Entre parênteses…" de cada lugar traz as dezesseis causas (a causa também aparece em outros parágrafos: não basta achar a frase na seção)
   const listas = [
     ['Docs: manutencao/verificador', strings(CAPS.manutencao.secoes.find((x) => x.id === 'verificador').blocos).find((t) => t.includes('a causa pode ser'))],
     ['Docs: referencia/motivos', strings(CAPS.referencia.secoes.find((x) => x.id === 'motivos').blocos).find((t) => t.includes('Entre parênteses vai a causa'))],

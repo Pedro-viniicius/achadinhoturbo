@@ -52,7 +52,7 @@ const PULADA_POR = {
   conferencia: 'preço sem conferência', sem_preco: 'sem como saber o preço', desligado: 'verificador desligado',
 };
 const DESCARTADA_POR = {
-  esgotado: 'esgotada na loja', preco_subiu: 'preço subiu', nao_conferido: 'preço sem conferência',
+  esgotado: 'esgotada na loja', preco_subiu: 'preço subiu', nao_conferido: 'preço não conferido (loja sem resposta)',
   indisponivel: 'indisponível na loja', outro_produto: 'outro produto na página',
 };
 /** "2 descartadas (esgotada na loja)" ou, com motivos diferentes, "2 descartadas (1 esgotada na loja, 1 preço subiu)". */
@@ -90,7 +90,11 @@ function fraseFiltradas(f) {
   return `Antes da escolha, ${total} ${total === 1 ? 'oferta ficou' : 'ofertas ficaram'} de fora: ${pedacos.join(', ')}.`;
 }
 const LOJAS_RESUMO = ['ml', 'amazon', 'shopee'];
-/** summary.porLoja (para a entrega 3): o que aconteceu com as escolhidas de cada loja nesta execução. */
+/**
+ * summary.porLoja (para a entrega 3), por loja nesta execução: o que aconteceu com as escolhidas (saiu, pulada,
+ * descartada, revisao) e, em `esperou`, as ofertas que esperaram a loja ou a revisão, escolhidas ou não (a candidata que
+ * espera já na escolha nem chega a ser escolhida).
+ */
 const contadoresPorLoja = () => Object.fromEntries(LOJAS_RESUMO.map((l) => [l, { saiu: 0, pulada: 0, descartada: 0, revisao: 0, esperou: 0 }]));
 
 // Grade de horários (plano grade-de-disparos, D3 e D4): textos do Histórico
@@ -106,29 +110,33 @@ const quandoDe = (ts, agora) => {
 const MOTIVO_PULADO = 'o programa estava desligado, o WhatsApp desconectado ou outro envio demorou.';
 
 // Oferta do catálogo sem conferência (plano rodar-sozinho-entrega1, decisão 4; spec, §1 "Puladas"): nunca vai à revisão
-// e nunca entra em sent_offers nem em catalogo_itens. Só o preço impossível de conhecer fica PAUSA_DESCARTADA_H fora da
-// escolha da regra; as outras causas são passageiras e a oferta pode voltar na execução seguinte.
+// e nunca entra em sent_offers nem em catalogo_itens. O preço impossível de conhecer e a Amazon cuja página o Etiqueta
+// tentou ler agora e não conseguiu (`releu` do verificador: bloqueio ou falha de rede DESTA oferta, achados Q1/R2) ficam
+// PAUSA_DESCARTADA_H fora da escolha da regra; as outras causas são passageiras e a oferta pode voltar na execução seguinte.
 const CAUSAS_SEM_PRECO = new Set(['sem_preco', 'varias_versoes']);
 const TENTA_DE_NOVO = 'Tenta de novo no próximo envio.';
+const FICA_FORA = `Fica ${PAUSA_DESCARTADA_H} h fora da escolha desta regra.`;
 const TEXTO_PULADA_DESLIGADO = `Pulada: o verificador foi desligado durante este envio e o preço não foi conferido. ${TENTA_DE_NOVO}`;
 /**
- * Linha "Pulada: …" da oferta do catálogo que o verificador não conseguiu conferir. `causa`: chave de CAUSAS. Na Amazon,
- * a frase diz a idade do preço visto (`precoEm`, ms): mais de RESERVA_AMAZON_H h, ou sem data que valha (ausente ou no
- * futuro). Preço visto dentro da reserva (a API da Amazon ligada, a oferta que saiu do Etiqueta): só a causa.
+ * Linha "Pulada: …" da oferta do catálogo que o verificador não conseguiu conferir. `causa`: chave de CAUSAS. Na Amazon
+ * conferida pela releitura do Etiqueta (`pelaReleitura`, sem a API), a frase diz a idade do preço visto (`precoEm`, ms):
+ * mais de RESERVA_AMAZON_H h, ou sem data que valha (ausente ou no futuro). Com a API da Amazon ligada não há reserva:
+ * só a causa. `foraDaEscolha`: a oferta ficou PAUSA_DESCARTADA_H fora da escolha (em vez de tentar no próximo envio).
  */
-function textoPuladaSemConferencia(offer, causa, agora) {
+function textoPuladaSemConferencia(offer, causa, agora, { pelaReleitura = false, foraDaEscolha = false } = {}) {
   const porque = CAUSAS[causa];
   if (CAUSAS_SEM_PRECO.has(causa)) return `Pulada: não dá para saber o preço (${porque}). Fica ${PAUSA_DESCARTADA_H} h fora da escolha desta regra.`;
   // a oferta que o Etiqueta já não tem não volta sozinha: só se o catálogo a trouxer de novo
   if (causa === 'etiqueta_sem_oferta') return `Pulada: ${porque} e o preço não pôde ser conferido. Ela só volta se o catálogo a trouxer de novo.`;
   if (offer.loja === 'ml') return `Pulada: não deu para conferir o preço (${porque}). O Mercado Livre não sai sem conferir; tenta de novo no próximo envio.`;
-  if (offer.loja === 'amazon' && !reservaValida(offer.precoEm, agora)) {
+  const depois = foraDaEscolha ? FICA_FORA : TENTA_DE_NOVO;
+  if (offer.loja === 'amazon' && pelaReleitura && !reservaValida(offer.precoEm, agora)) {
     const velho = Number.isFinite(offer.precoEm) && offer.precoEm < agora;
     return velho
-      ? `Pulada: o preço visto às ${quandoDe(offer.precoEm, agora)} tem mais de ${RESERVA_AMAZON_H} h e não deu para conferir agora (${porque}). ${TENTA_DE_NOVO}`
-      : `Pulada: não deu para conferir o preço agora (${porque}) e a oferta não diz quando o preço foi visto. ${TENTA_DE_NOVO}`;
+      ? `Pulada: o preço visto às ${quandoDe(offer.precoEm, agora)} tem mais de ${RESERVA_AMAZON_H} h e não deu para conferir agora (${porque}). ${depois}`
+      : `Pulada: não deu para conferir o preço agora (${porque}) e a oferta não diz quando o preço foi visto. ${depois}`;
   }
-  return `Pulada: não deu para conferir o preço agora (${porque}). ${TENTA_DE_NOVO}`;
+  return `Pulada: não deu para conferir o preço agora (${porque}). ${depois}`;
 }
 
 // Proteção do número (plano anti-banimento, etapa 4): textos do Histórico, todos 'aviso' (nunca 'erro', que alerta)
@@ -266,8 +274,8 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
    * verificador só a usa na Amazon sem API (plano rodar-sozinho-entrega1, ADR-014; o Disparo manual e o "Enviar" da
    * revisão nunca a passam, CA1.11). Sem verificador → enviar como veio. Nunca lança: um descarte não para as outras
    * ofertas (D6).
-   * → { acao: 'enviar', oferta, sufixo } | { acao: 'descartar', motivo, texto, causa? } (`causa`, chave de CAUSAS, só
-   * no `nao_conferido`)
+   * → { acao: 'enviar', oferta, sufixo } | { acao: 'descartar', motivo, texto, causa?, pelaReleitura?, releu? } (`causa`,
+   * chave de CAUSAS, só no `nao_conferido`; `pelaReleitura` e `releu`: os sinais do verificador, só quando true)
    */
   async function conferirDaRegra(offer) {
     if (!verificador) return { acao: 'enviar', oferta: offer, sufixo: null };
@@ -279,7 +287,10 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
       if (r?.acao === 'descartar' && Object.hasOwn(MOTIVOS_VERIFICADOR, r.motivo)) {
         const texto = typeof r.texto === 'string' && r.texto ? r.texto : MOTIVOS_VERIFICADOR[r.motivo];
         if (r.motivo !== 'nao_conferido') return { acao: 'descartar', motivo: r.motivo, texto };
-        return { acao: 'descartar', motivo: r.motivo, texto, causa: typeof r.causa === 'string' && Object.hasOwn(CAUSAS, r.causa) ? r.causa : 'loja_fora' };
+        return {
+          acao: 'descartar', motivo: r.motivo, texto, causa: typeof r.causa === 'string' && Object.hasOwn(CAUSAS, r.causa) ? r.causa : 'loja_fora',
+          ...(r.pelaReleitura === true ? { pelaReleitura: true } : {}), ...(r.releu === true ? { releu: true } : {}),
+        };
       }
     } catch (e) { console.error('[agendador] verificador:', e?.name || 'erro'); }
     // resposta fora do contrato (o conferir nunca lança): sem conferência, não sai (D3)
@@ -428,7 +439,8 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
    * ofertas barradas por já ter saído (ou estar saindo) uma igual ou parecida (src/parecido.js): { key, title, r } cada uma.
    * `filtradas`: quantas candidatas a escolha deixou de fora, por quê (a linha "Antes da escolha…"). `conferenciaNaHora`:
    * o verificador estava ligado no começo (o catálogo pode pedir preços mais velhos, cada oferta é conferida antes de sair).
-   * `porLoja`: o que aconteceu com as escolhidas de cada loja (vai no summary).
+   * `porLoja`: o que aconteceu com as escolhidas de cada loja e, em `esperou`, as que esperaram, escolhidas ou não (vai no
+   * summary).
    */
   const novaExecucao = () => ({
     paginas: new Map(), recusadas: new Set(), esperando: new Map(), vistas: new Set(), puladas: [],
@@ -828,15 +840,21 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
               // registrado no Catálogo (sem aviso de descarte, sem link): em `exec.recusadas` o cursor das Novidades avança
               // por ela e não fica preso, e em outras ordens ela pode voltar a valer se o preço cair
               if (ml.rejectReason(offer, rule)) { exec.recusadas.add(o.key); faltou(o, 'pulada', PULADA_POR.filtros); continue; }
-              if (naoMaisBarata(offer)) { puladaNaConferencia(offer); exec.recusadas.add(o.key); continue; }
+              // o preço conferido passa de novo pela guarda do preço suspeito (achado S1): uma leitura errada da página
+              // (a parcela no lugar do preço) não sai sozinha; vai à revisão abaixo, gravada com o preço conferido
+              motivos = motivosDeRevisao(offer);
+              if (!motivos.length && naoMaisBarata(offer)) { puladaNaConferencia(offer); exec.recusadas.add(o.key); continue; }
             } else if (c.motivo === 'nao_conferido') {
               // falha técnica nunca vai à revisão (plano rodar-sozinho-entrega1, decisão 4; CA1.5): pulada, sem
-              // catalogo_itens e sem sent_offers, e a vaga vai à próxima candidata. Só o preço impossível de conhecer
-              // fica PAUSA_DESCARTADA_H fora da escolha; o resto pode voltar já
+              // catalogo_itens e sem sent_offers, e a vaga vai à próxima candidata. O preço impossível de conhecer e a
+              // Amazon cuja página falhou agora (`releu`, achados Q1/R2: a "veneno" não prende a cabeça da lista) ficam
+              // PAUSA_DESCARTADA_H fora da escolha; o resto pode voltar já
               const semPreco = CAUSAS_SEM_PRECO.has(c.causa);
-              if (semPreco) pausar(rule, o.key);
+              const foraDaEscolha = semPreco || c.releu === true;
+              if (foraDaEscolha) pausar(rule, o.key);
               faltou(o, 'pulada', semPreco ? PULADA_POR.sem_preco : PULADA_POR.conferencia);
-              log(rule, { level: 'aviso', offer_title: o.title, message: textoPuladaSemConferencia(o, c.causa, Date.now()) });
+              const texto = textoPuladaSemConferencia(o, c.causa, Date.now(), { pelaReleitura: c.pelaReleitura === true, foraDaEscolha: c.releu === true });
+              log(rule, { level: 'aviso', offer_title: o.title, message: texto });
               continue;
             } else {
               if (!regraExiste(rule.id)) continue;

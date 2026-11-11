@@ -51,7 +51,13 @@
 //       vale: envia com `vistoEm = precoEm` e o sufixo " · preço visto às HH:MM, não conferido agora (<causa>)". Fora
 //       disso (ou sem `precoEm`): descartar 'nao_conferido' com a `causa`. A falha pausa a releitura por
 //       PAUSA_RELEITURA_MIN min neste verificador: nesse prazo as Amazon vão direto à reserva, sem chamar o Etiqueta.
-//       Exceção: `nao_encontrado` (a oferta saiu do Etiqueta) não tem reserva e não pausa.
+//       Exceção: `nao_encontrado` (a oferta saiu do Etiqueta) não tem reserva e não pausa. O freio do Etiqueta (429)
+//       segue o motivo (CAUSA_DO_FREIO): `intervalo`/`ocupado` não pausam; `teto`, `pausa`, `rodada` (e motivo
+//       desconhecido) pausam pelo `tentar_em_s` (sem ele, PAUSA_RELEITURA_MIN min; no máximo 1 h).
+//     - confirmado com `preco_em` fora de [agora − (prazo + 1 min), agora + 5 min] vale como resposta fora do contrato.
+//     - O descarte 'nao_conferido' deste caminho traz `pelaReleitura: true` e, quando o Etiqueta tentou ler a página
+//       desta oferta agora e falhou (bloqueado, falha de rede), `releu: true`: a falha é da oferta (o agendador a tira
+//       da escolha da regra por PAUSA_DESCARTADA_H), não do Etiqueta.
 //     Com a API da Amazon ligada, sem `releitura`, desligado ou simulado, a releitura nunca é chamada.
 //   - semConfirmacaoAgora({ loja, precoEm }): a oferta (Amazon, verificador ligado, sem API) hoje não teria como ser
 //     conferida nem sairia pela reserva: a releitura está pausada e o `precoEm` não vale (reservaValida).
@@ -109,6 +115,7 @@ export const CAUSAS = Object.freeze({
   etiqueta_fora: 'o Etiqueta não respondeu',
   etiqueta_bloqueio: 'a Amazon bloqueou a leitura',
   etiqueta_sem_oferta: 'a oferta saiu do Etiqueta',
+  etiqueta_ocupado: 'o Etiqueta estava ocupado com outra leitura da Amazon',
 });
 
 /** Falha nomeada de links.requestProduto → chave de CAUSAS (D8). Outra falha → 'loja_fora'. */
@@ -121,10 +128,12 @@ const CAUSA_DA_FALHA = Object.freeze({
   erro: 'loja_fora',
 });
 
-/** Falha de catalogo.confirmarPreco (mais 'timeout', o prazo do verificador) → chave de CAUSAS. Outra falha → 'etiqueta_fora'. */
+/**
+ * Falha de catalogo.confirmarPreco (mais 'timeout', o prazo do verificador) → chave de CAUSAS. Outra falha → 'etiqueta_fora'.
+ * O 'freio' (429) não está aqui: a causa vem do motivo (CAUSA_DO_FREIO).
+ */
 const CAUSA_DA_RELEITURA = Object.freeze({
   falha_rede: 'loja_fora',
-  freio: 'limite_hora',
   timeout: 'demorou',
   bloqueado: 'etiqueta_bloqueio',
   fora_do_ar: 'etiqueta_fora',
@@ -134,6 +143,23 @@ const CAUSA_DA_RELEITURA = Object.freeze({
   nao_configurada: 'etiqueta_fora',
   nao_encontrado: 'etiqueta_sem_oferta',
 });
+
+/**
+ * 429 do Etiqueta (freio da releitura) por motivo → { causa, pausa }. `pausa`: abre a pausa da releitura (pelo
+ * `tentar_em_s`). intervalo e ocupado são esperas curtas que o catalogo.confirmarPreco já esperou: não pausam nada
+ * (sobra só a oferta, sem conferência). Motivo desconhecido ou ausente: como a rodada (ocupado, com pausa).
+ */
+const CAUSA_DO_FREIO = Object.freeze({
+  intervalo: { causa: 'etiqueta_ocupado', pausa: false },
+  ocupado: { causa: 'etiqueta_ocupado', pausa: false },
+  rodada: { causa: 'etiqueta_ocupado', pausa: true },
+  pausa: { causa: 'etiqueta_bloqueio', pausa: true }, // o Etiqueta parou de ler a Amazon depois de um bloqueio
+  teto: { causa: 'limite_hora', pausa: true },
+});
+const FREIO_DESCONHECIDO = Object.freeze({ causa: 'etiqueta_ocupado', pausa: true });
+
+/** Falhas em que o Etiqueta leu (ou tentou ler) a página DESTA oferta e não conseguiu: a falha é da oferta, não do Etiqueta. */
+const FALHA_NA_PAGINA = new Set(['bloqueado', 'falha_rede']);
 
 /** Oferta que o verificador barrou (a fila lança esta no preparar). `motivo` é chave de MOTIVOS_VERIFICADOR. */
 export class OfertaDescartada extends Error {
@@ -152,6 +178,8 @@ const TOLERANCIA_FUTURO_MS = 60 * 1000; // created_at do SQLite tem resolução 
 const RESERVA_AMAZON_MS = RESERVA_AMAZON_H * 60 * 60 * 1000;
 const TOLERANCIA_PRECO_EM_FUTURO_MS = 5 * 60 * 1000; // relógio do Etiqueta um pouco adiantado
 const PAUSA_RELEITURA_MS = PAUSA_RELEITURA_MIN * 60 * 1000;
+const PAUSA_FREIO_MAX_MS = 60 * 60 * 1000; // o `tentar_em_s` do Etiqueta vale até 1 h (a janela do teto por hora)
+const FOLGA_PRECO_EM_MS = 60 * 1000;       // o `preco_em` de um confirmado é de agora: no máximo o prazo da conferência + 1 min atrás
 const RE_ASIN = /^[A-Z0-9]{10}$/;
 const RE_ID_SHOPEE = /^\d{1,20}$/;
 
@@ -397,9 +425,13 @@ export function createVerificador({ db, ml = mlPadrao, amazon = null, shopee = n
   const pausaReleitura = { ate: 0, causa: 'etiqueta_fora' };
   const releituraPausada = () => agora() < pausaReleitura.ate;
 
-  /** catalogo.confirmarPreco com o prazo do verificador, validada. → { resultado, … } ou { resultado: 'falha', causa: chave de CAUSAS }. */
+  /**
+   * catalogo.confirmarPreco com o prazo do verificador, validada. → { resultado, … } ou { resultado: 'falha', causa:
+   * chave de CAUSAS, pausaMs (0 = não pausa a releitura), naPagina (a falha foi na leitura da página desta oferta) }.
+   */
   async function confirmarNaHora(asin) {
-    if (typeof catalogo?.confirmarPreco !== 'function') return { resultado: 'falha', causa: 'etiqueta_fora' };
+    const falhou = (causa, { pausaMs = PAUSA_RELEITURA_MS, naPagina = false } = {}) => ({ resultado: 'falha', causa, pausaMs, naPagina });
+    if (typeof catalogo?.confirmarPreco !== 'function') return falhou('etiqueta_fora');
     const bruta = await comPrazo(
       () => catalogo.confirmarPreco(asin),
       { resultado: 'falha', causa: 'timeout' },
@@ -411,24 +443,32 @@ export function createVerificador({ db, ml = mlPadrao, amazon = null, shopee = n
     const r = bruta && typeof bruta === 'object' ? bruta : {};
     if (r.resultado === 'confirmado') {
       const price = precoValido(r.preco);
-      if (price != null && typeof r.precoEm === 'number' && Number.isFinite(r.precoEm)) {
+      // o carimbo é da releitura que acabou de acontecer: de 3 dias atrás ou do futuro, a resposta não é desta leitura
+      const instante = agora();
+      const precoEmValido = typeof r.precoEm === 'number' && Number.isFinite(r.precoEm)
+        && r.precoEm >= instante - (prazo + FOLGA_PRECO_EM_MS) && r.precoEm <= instante + TOLERANCIA_PRECO_EM_FUTURO_MS;
+      if (price != null && precoEmValido) {
         return { resultado: 'confirmado', price, oldPrice: precoValido(r.precoAntigo), discountPct: r.descontoPct, precoEm: r.precoEm };
       }
     } else if (r.resultado === 'sem_preco' || r.resultado === 'outro_produto') {
       return { resultado: r.resultado };
+    } else if (r.resultado === 'falha' && r.causa === 'freio') {
+      const f = typeof r.motivo === 'string' && Object.hasOwn(CAUSA_DO_FREIO, r.motivo) ? CAUSA_DO_FREIO[r.motivo] : FREIO_DESCONHECIDO;
+      const espera = Number.isSafeInteger(r.tentarEmS) && r.tentarEmS >= 1 ? Math.min(r.tentarEmS * 1000, PAUSA_FREIO_MAX_MS) : PAUSA_RELEITURA_MS;
+      return falhou(f.causa, { pausaMs: f.pausa ? espera : 0 });
     } else if (r.resultado === 'falha') {
       const chave = typeof r.causa === 'string' && Object.hasOwn(CAUSA_DA_RELEITURA, r.causa) ? CAUSA_DA_RELEITURA[r.causa] : 'etiqueta_fora';
-      return { resultado: 'falha', causa: chave };
+      return falhou(chave, { naPagina: FALHA_NA_PAGINA.has(r.causa) });
     }
-    return { resultado: 'falha', causa: 'etiqueta_fora' }; // resposta fora do contrato
+    return falhou('etiqueta_fora'); // resposta fora do contrato
   }
 
   /** Amazon sem API, com `releitura`: confirma na hora ou, se falhar, vale a reserva. → o mesmo que `conferir`. */
   async function conferirAmazonPelaReleitura(oferta, { referencia, releitura }) {
     const asin = asinDe(oferta);
-    if (!asin) return descarteNaoConferido('sem_preco');
+    if (!asin) return { ...descarteNaoConferido('sem_preco'), pelaReleitura: true };
     const pausada = releituraPausada();
-    const r = pausada ? { resultado: 'falha', causa: pausaReleitura.causa } : await confirmarNaHora(asin);
+    const r = pausada ? { resultado: 'falha', causa: pausaReleitura.causa, pausaMs: 0, naPagina: false } : await confirmarNaHora(asin);
     const instante = agora();
     if (r.resultado === 'sem_preco' || r.resultado === 'outro_produto') {
       const motivo = r.resultado === 'sem_preco' ? 'indisponivel' : 'outro_produto';
@@ -444,9 +484,12 @@ export function createVerificador({ db, ml = mlPadrao, amazon = null, shopee = n
       // a hora do preço é a que o Etiqueta carimbou na releitura, nunca a de agora
       return { acao: 'enviar', oferta: ofertaQueSai(oferta, decisao, r, r.precoEm), conferido: decisao.conferido, sufixo: decisao.sufixo };
     }
-    if (r.causa === 'etiqueta_sem_oferta') return descarteNaoConferido(r.causa); // a oferta nem está mais no Etiqueta: sem reserva e sem pausa
-    if (!pausada) { pausaReleitura.ate = instante + PAUSA_RELEITURA_MS; pausaReleitura.causa = r.causa; }
-    if (!reservaValida(releitura.precoEm, instante)) return descarteNaoConferido(r.causa);
+    // a oferta nem está mais no Etiqueta: sem reserva e sem pausa
+    if (r.causa === 'etiqueta_sem_oferta') return { ...descarteNaoConferido(r.causa), pelaReleitura: true };
+    if (r.pausaMs > 0) { pausaReleitura.ate = instante + r.pausaMs; pausaReleitura.causa = r.causa; }
+    if (!reservaValida(releitura.precoEm, instante)) {
+      return { ...descarteNaoConferido(r.causa), pelaReleitura: true, ...(r.naPagina ? { releu: true } : {}) };
+    }
     const { vistoEm: _antigo, ...copia } = oferta;
     return {
       acao: 'enviar', oferta: { ...copia, vistoEm: releitura.precoEm }, conferido: false,

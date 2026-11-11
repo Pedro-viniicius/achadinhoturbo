@@ -213,6 +213,28 @@ test('CA7: PUT /api/ajustes valida o limite (inteiro de 0 a 50) e a chave (boole
   assert.equal((await req(s.port, '/api/ajustes', { method: 'PUT' })).status, 200);
 });
 
+test('Q2: PUT /api/ajustes valida todos os campos antes de gravar — um campo ruim não deixa nenhum outro gravado nem linha no Histórico', async (t) => {
+  const s = await subir();
+  t.after(s.fechar);
+  const bons = { verificador_ativo: false, verificador_limite_pct: 9, retencao_dias: 30, titulo_max: 40, link_mode: 'direct' };
+  for (const [campo, ruim, erro] of [
+    ['retencao_dias', 99999, 'Retenção: de 0 (para sempre) a 3650 dias.'],
+    ['retencao_dias', 'x', 'Retenção: de 0 (para sempre) a 3650 dias.'],
+    ['titulo_max', 201, 'Tamanho do título: de 0 (inteiro) a 200.'],
+    ['link_mode', 'fake', 'Modo de link inválido'],
+  ]) {
+    const r = await put(s, { ...bons, [campo]: ruim });
+    assert.equal(r.status, 400, `${campo} ${ruim}`);
+    assert.equal(r.json.erro, erro);
+    for (const k of Object.keys(bons)) assert.equal(setting(s, k), null, `${campo} ${ruim}: ${k} não pode ter sido gravado`);
+    assert.deepEqual(logs(s), [], `${campo} ${ruim}: nenhuma linha no Histórico`);
+  }
+  // todos bons: grava todos, com a linha do verificador
+  assert.equal((await put(s, bons)).status, 200);
+  assert.deepEqual(Object.keys(bons).map((k) => setting(s, k)), ['0', '9', '30', '40', 'direct']);
+  assert.equal(logs(s).filter((l) => l.message.startsWith('Verificador desligado em Ajustes')).length, 1);
+});
+
 test('CA7 (D10) e CA1.9: desligar e ligar gravam cada um a sua linha aviso no Histórico; salvar no mesmo estado não grava', async (t) => {
   const s = await subir();
   t.after(s.fechar);

@@ -1285,6 +1285,8 @@ test('CA1.3: confirmarPreco, resultados do 200: sem_preco, outro_produto, bloque
       { preco_antigo: '119.9' }, { preco_antigo: -5 }, { preco_antigo: 0 }, { preco_antigo: {} },
       { desconto_pct: -1 }, { desconto_pct: 101 }, { desconto_pct: '25' }, { desconto_pct: [] },
       { preco_em: null }, { preco_em: undefined }, { preco_em: '2026-02-30T10:00:00' }, { preco_em: '2026-11-11 09:41:07' }, { preco_em: 1762860600000 },
+      // o mesmo teto de preço dos outros caminhos (achado S1): acima de 10 milhões é leitura errada
+      { preco: 10_000_000.01 }, { preco: 1e9 }, { preco_antigo: 10_000_000.01 },
     ].map((mais) => [{ ...CONFIRMADO, ...mais }, { resultado: 'falha', causa: 'resposta_inesperada' }]),
   ];
   for (const [corpo, esperado] of casos) {
@@ -1299,8 +1301,6 @@ test('CA1.3: confirmarPreco, códigos HTTP, rede, tempo e corpo grande viram cau
     ['401', () => ({ status: 401, corpo: { error: 'x' } }), 'token_recusado'],
     ['503', () => ({ status: 503, corpo: { error: 'x' } }), 'desligada'],
     ['404', () => ({ status: 404, corpo: { error: 'oferta da Amazon não encontrada' } }), 'nao_encontrado'],
-    ['429', () => ({ status: 429, corpo: { versao: 1, resultado: 'freio', motivo: 'intervalo', tentar_em_s: 3 } }), 'freio'],
-    ['429 sem corpo', () => ({ status: 429, corpo: null }), 'freio'],
     ['405 (Etiqueta antigo)', () => ({ status: 405, corpo: { error: 'a API v1 só aceita GET' } }), 'resposta_inesperada'],
     ['403', () => ({ status: 403, corpo: { error: 'x' } }), 'resposta_inesperada'],
     ['400', () => ({ status: 400, corpo: { error: 'esta rota não aceita corpo' } }), 'resposta_inesperada'],
@@ -1340,6 +1340,109 @@ test('CA1.3: confirmarPreco, códigos HTTP, rede, tempo e corpo grande viram cau
   t.after(desvio.fechar);
   assert.deepEqual(await cliente({ endereco: desvio.endereco, caminho: arquivoToken() }).cat.confirmarPreco(ASIN_OK), { resultado: 'falha', causa: 'fora_do_ar' });
   assert.deepEqual(alvo, [], 'o token nunca vai a outro endereço');
+});
+
+test('confirmarPreco: preço de até 10 milhões vale (o teto é inclusivo)', async () => {
+  const f = fetchDe(() => ({ status: 200, corpo: { ...CONFIRMADO, preco: 10_000_000, preco_antigo: null } }));
+  const r = await cliente({ fetch: f, caminho: arquivoToken() }).cat.confirmarPreco(ASIN_OK);
+  assert.deepEqual([r.resultado, r.preco], ['confirmado', 10_000_000]);
+});
+
+/** fetch falso da confirmação que responde, em ordem, cada item de `respostas` ({ status, corpo, headers }); guarda as chamadas. */
+function fetchEmSequencia(respostas) {
+  const chamadas = [];
+  const f = async (url, init = {}) => {
+    chamadas.push(`${init.method ?? 'GET'} ${new URL(String(url)).pathname}`);
+    const r = respostas[Math.min(chamadas.length - 1, respostas.length - 1)];
+    return new Response(r.corpo == null ? null : JSON.stringify(r.corpo), { status: r.status, headers: { 'content-type': 'application/json; charset=utf-8', ...(r.headers ?? {}) } });
+  };
+  f.chamadas = chamadas;
+  return f;
+}
+const freio429 = (motivo, s, extra = {}) => ({ status: 429, corpo: { versao: 1, resultado: 'freio', motivo, tentar_em_s: s }, headers: { 'retry-after': String(s) }, ...extra });
+/** Cliente com a espera do freio injetada (nunca dorme de verdade): guarda os ms pedidos. */
+function clienteComEspera(f, extra = {}) {
+  const esperas = [];
+  const cat = createCatalogo({ db: banco().db, fetch: f, lerConexao: () => ({ endereco: 'http://127.0.0.1:8765', caminho_token: arquivoToken() }), esperar: async (ms) => { esperas.push(ms); }, ...extra });
+  return { cat, esperas };
+}
+
+test('R1: 429 "intervalo" ou "ocupado" (espera de até 3 s): espera o tentar_em_s dentro da fila e pede de novo — a segunda Amazon seguida é relida', async () => {
+  for (const motivo of ['intervalo', 'ocupado']) {
+    const f = fetchEmSequencia([freio429(motivo, 2), { status: 200, corpo: CONFIRMADO }]);
+    const { cat, esperas } = clienteComEspera(f);
+    const r = await cat.confirmarPreco(ASIN_OK);
+    assert.equal(r.resultado, 'confirmado', motivo);
+    assert.deepEqual(esperas, [2000], motivo);
+    assert.deepEqual(f.chamadas, [`POST ${ROTA_CONFIRMAR}`, `POST ${ROTA_CONFIRMAR}`], motivo);
+  }
+  // até duas novas tentativas; a terceira recusa volta como freio, com o motivo e a espera
+  const sempre = fetchEmSequencia([freio429('ocupado', 3)]);
+  const { cat, esperas } = clienteComEspera(sempre);
+  assert.deepEqual(await cat.confirmarPreco(ASIN_OK), { resultado: 'falha', causa: 'freio', motivo: 'ocupado', tentarEmS: 3 });
+  assert.deepEqual(esperas, [3000, 3000]);
+  assert.equal(sempre.chamadas.length, 3);
+  // duas recusas e depois o 200: sai confirmado
+  const duas = fetchEmSequencia([freio429('intervalo', 1), freio429('ocupado', 3), { status: 200, corpo: CONFIRMADO }]);
+  const d = clienteComEspera(duas);
+  assert.equal((await d.cat.confirmarPreco(ASIN_OK)).resultado, 'confirmado');
+  assert.deepEqual(d.esperas, [1000, 3000]);
+});
+
+test('R1: 429 "teto", "pausa", "rodada", espera longa ou corpo fora do contrato voltam na hora, sem esperar, com o motivo e o tentar_em_s', async () => {
+  const casos = [
+    [freio429('teto', 1800), { motivo: 'teto', tentarEmS: 1800 }],
+    [freio429('pausa', 600), { motivo: 'pausa', tentarEmS: 600 }],
+    [freio429('rodada', 60), { motivo: 'rodada', tentarEmS: 60 }],
+    [freio429('intervalo', 4), { motivo: 'intervalo', tentarEmS: 4 }], // espera longa não é "curta"
+    // sem corpo: o Retry-After; sem os dois, nada
+    [{ status: 429, corpo: null, headers: { 'retry-after': '45' } }, { motivo: null, tentarEmS: 45 }],
+    [{ status: 429, corpo: null }, { motivo: null, tentarEmS: null }],
+    // corpo fora do contrato: motivo desconhecido, tentar_em_s inválido (o Retry-After vale no lugar)
+    [{ status: 429, corpo: { versao: 1, resultado: 'freio', motivo: 'xyz', tentar_em_s: 2 } }, { motivo: null, tentarEmS: 2 }],
+    [{ status: 429, corpo: { versao: 1, resultado: 'freio', motivo: 'intervalo', tentar_em_s: '2' }, headers: { 'retry-after': '7' } }, { motivo: 'intervalo', tentarEmS: 7 }],
+    [{ status: 429, corpo: { versao: 1, resultado: 'freio', motivo: 'intervalo', tentar_em_s: 0 } }, { motivo: 'intervalo', tentarEmS: null }],
+    [{ status: 429, corpo: { versao: 1, resultado: 'freio', motivo: 'intervalo', tentar_em_s: 2.5 }, headers: { 'retry-after': 'Wed, 11 Nov 2026 10:00:00 GMT' } }, { motivo: 'intervalo', tentarEmS: null }],
+    [{ status: 429, corpo: { versao: 2, resultado: 'freio', motivo: 'intervalo', tentar_em_s: 2 } }, { motivo: null, tentarEmS: null }],
+    [{ status: 429, corpo: ['intervalo'] }, { motivo: null, tentarEmS: null }],
+  ];
+  for (const [resposta, esperado] of casos) {
+    const f = fetchEmSequencia([resposta, { status: 200, corpo: CONFIRMADO }]);
+    const { cat, esperas } = clienteComEspera(f);
+    assert.deepEqual(await cat.confirmarPreco(ASIN_OK), { resultado: 'falha', causa: 'freio', ...esperado }, JSON.stringify(resposta));
+    assert.deepEqual(esperas, [], JSON.stringify(resposta));
+    assert.equal(f.chamadas.length, 1, JSON.stringify(resposta));
+  }
+});
+
+test('R1: a espera do freio curto segura a fila — nenhum outro pedido ao Etiqueta passa no meio', async () => {
+  const estado = { ofertas: [oferta(1)] };
+  const ofertas = etiqueta(estado);
+  let posts = 0;
+  const f = fetchDe((url, h) => {
+    if (url.includes('/confirmar-preco')) return ++posts === 1 ? { status: 429, corpo: { versao: 1, resultado: 'freio', motivo: 'intervalo', tentar_em_s: 3 } } : { status: 200, corpo: CONFIRMADO };
+    return ofertas(url, h);
+  });
+  const { cat } = clienteComEspera(f, { esperar: () => new Promise((ok) => setTimeout(ok, 30)) });
+  const [a, b] = await Promise.all([cat.confirmarPreco(ASIN_OK), cat.testar()]);
+  assert.equal(a.resultado, 'confirmado');
+  assert.equal(b.resultado, 'ok');
+  assert.deepEqual(f.chamadas.map((c) => new URL(c.url).pathname), [ROTA_CONFIRMAR, ROTA_CONFIRMAR, '/api/v1/categorias']);
+});
+
+test('R1: sem `esperar` injetado, a espera do freio curto é um timer de tentar_em_s', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const f = fetchEmSequencia([freio429('intervalo', 2), { status: 200, corpo: CONFIRMADO }]);
+  const cat = createCatalogo({ db: banco().db, fetch: f, lerConexao: () => ({ endereco: 'http://127.0.0.1:8765', caminho_token: arquivoToken() }) });
+  const p = cat.confirmarPreco(ASIN_OK);
+  for (let i = 0; i < 20 && f.chamadas.length < 1; i++) await new Promise((ok) => setImmediate(ok));
+  for (let i = 0; i < 20; i++) await new Promise((ok) => setImmediate(ok));
+  t.mock.timers.tick(1999);
+  for (let i = 0; i < 20; i++) await new Promise((ok) => setImmediate(ok));
+  assert.equal(f.chamadas.length, 1, 'antes dos 2 s não pede de novo');
+  t.mock.timers.tick(1);
+  assert.equal((await p).resultado, 'confirmado');
+  assert.equal(f.chamadas.length, 2);
 });
 
 test('CA1.3: confirmarPreco sem conexão, sem token ou com ASIN fora do formato: falha sem rede', async () => {

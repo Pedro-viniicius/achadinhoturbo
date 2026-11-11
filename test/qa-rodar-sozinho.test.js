@@ -133,7 +133,7 @@ function cenarioVeneno(t, opcoes = {}) {
   return s;
 }
 
-test('foco 1 (veneno): uma Amazon que SEMPRE bloqueia a releitura não prende as outras para sempre (execuções espaçadas além da pausa)', { todo: 'Q1: a veneno é a 1ª da escolha a cada execução, abre a pausa de 10 min e as outras (preço > 6 h) ficam só na reserva' }, async (t) => {
+test('foco 1 (veneno): uma Amazon que SEMPRE bloqueia a releitura não prende as outras para sempre (execuções espaçadas além da pausa)', async (t) => {
   const s = cenarioVeneno(t);
   const id = regraCatalogo(s.db, { per: 2 });
   for (let i = 0; i < 6; i++) {
@@ -145,7 +145,7 @@ test('foco 1 (veneno): uma Amazon que SEMPRE bloqueia a releitura não prende as
 });
 
 for (const causa of ['bloqueado', 'falha_rede']) {
-  test(`foco 1 (veneno): com o freio de 15 min do Etiqueta real e a causa "${causa}", as outras não ficam presas`, { todo: 'Q1' }, async (t) => {
+  test(`foco 1 (veneno): com o freio de 15 min do Etiqueta real e a causa "${causa}", as outras não ficam presas`, async (t) => {
     const s = montar(t, {
       catalogo: [1, 2, 3, 4, 5].map((i) => doEtiqueta(i, 'amazon', { precoEm: dia(2, 4) })),
       releitura: (asin) => (asin === asinDe(1) ? falhou(causa) : confirmado(100, Date.now())),
@@ -707,7 +707,7 @@ test('integração: Etiqueta fora do ar (fetch lança) — pulada sem revisão; 
   assert.equal(r2.offers, 1, 'voltou: sai sem ação do dono');
 });
 
-test('integração foco 1: o bloqueio de uma oferta vira 429 nas outras por 15 min no Etiqueta; mesmo depois disso, a veneno é a 1ª de toda execução', { todo: 'Q1' }, async (t) => {
+test('integração foco 1: o bloqueio de uma oferta vira 429 nas outras por 15 min no Etiqueta; mesmo depois disso, a veneno é a 1ª de toda execução', async (t) => {
   const velho = dia(1, 20); // 18 h antes
   const itens = Object.fromEntries([1, 2, 3, 4].map((i) => [asinDe(i), { titulo: unico(i), preco: 100, precoEm: velho, bloqueia: i === 1 }]));
   const s = montarIntegrado(t, { itens });
@@ -881,7 +881,7 @@ test('CA1.9: ligar e desligar em sequência rápida gravam uma linha cada, na or
   assert.equal(getSetting(s.db, 'verificador_ativo'), '0');
 });
 
-test('CA1.9: um pedido que falha por OUTRO campo (retenção fora da faixa) não deixa o verificador ligado/desligado e a linha no Histórico', { todo: 'Q2: o PUT grava e loga o verificador antes de validar retencao_dias/titulo_max/link_mode; responde 400 mas o estado já mudou' }, async (t) => {
+test('CA1.9: um pedido que falha por OUTRO campo (retenção fora da faixa) não deixa o verificador ligado/desligado e a linha no Histórico', async (t) => {
   const s = await subirServidor(); t.after(s.fechar);
   const r = await pedir(s.port, '/api/ajustes', { method: 'PUT', body: { verificador_ativo: false, retencao_dias: 99999 } });
   assert.equal(r.status, 400);

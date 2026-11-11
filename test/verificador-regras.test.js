@@ -14,7 +14,7 @@ import { createWhatsApp } from '../src/whatsapp.js';
 import { createVerificador, PAUSA_DESCARTADA_H } from '../src/verificador.js';
 import { createCatalogoItens } from '../src/catalogo-itens.js';
 import { createAmazon } from '../src/amazon.js';
-import { paraCandidato } from '../src/catalogo.js';
+import { paraCandidato, createCatalogo } from '../src/catalogo.js';
 
 // ------------------------------------------------------------------------------------------- sem rede nenhuma
 const fetchOriginal = globalThis.fetch;
@@ -39,9 +39,11 @@ const dia = (d, h, m = 0) => new Date(2026, 10, d, h, m).getTime(); // 02/11/202
  * `comVerificador: false` = como hoje (sem a injeção). `catalogo`: ofertas no formato do Etiqueta (fonte "catalogo").
  * `releitura`: ASIN → resposta de catalogo.confirmarPreco (ou função asin → resposta); cada pedido entra em `eventos`
  * como 'reler <ASIN>'. Sem ela, o verificador não tem o cliente do Etiqueta (a releitura falha como 'o Etiqueta não
- * respondeu'). `ctxs` guarda o contexto de cada leitura da lista do catálogo.
+ * respondeu'). `confirmador`: o cliente do Etiqueta inteiro (ex.: o createCatalogo real), no lugar de `releitura`.
+ * `amazonApi`: o cliente da Amazon que o verificador vê (ex.: com a API ligada); o agendador segue com o de só a tag.
+ * `ctxs` guarda o contexto de cada leitura da lista do catálogo.
  */
-function montar({ loja = {}, comVerificador = true, catalogo = null, releitura = null } = {}) {
+function montar({ loja = {}, comVerificador = true, catalogo = null, releitura = null, confirmador = null, amazonApi = null } = {}) {
   const dir = tmp(); const db = openDb(dir);
   const wa = createWhatsApp({ db, dir, dryRun: true }); wa.connect();
   const links = createLinkService({ getMode: () => 'fake' });
@@ -58,14 +60,14 @@ function montar({ loja = {}, comVerificador = true, catalogo = null, releitura =
   };
   const conexaoAmazon = { tag: 'achadinho-20' }; // tag salva, sem ID e segredo: a API da Amazon não está ligada
   const amazon = createAmazon({ db, fetch: async () => { throw new Error('rede proibida (Amazon)'); }, esperar: async () => {}, lerConexao: () => conexaoAmazon });
-  const etiqueta = releitura ? {
+  const etiqueta = confirmador ?? (releitura ? {
     async confirmarPreco(asin) {
       eventos.push(`reler ${asin}`);
       const r = typeof releitura === 'function' ? releitura(asin) : releitura[asin];
       return r ?? { resultado: 'falha', causa: 'nao_encontrado' };
     },
-  } : null;
-  const verificador = comVerificador ? createVerificador({ db, ml: mlLoja, amazon, catalogo: etiqueta }) : null;
+  } : null);
+  const verificador = comVerificador ? createVerificador({ db, ml: mlLoja, amazon: amazonApi ?? amazon, catalogo: etiqueta }) : null;
   const extra = {};
   const ctxs = [];
   if (catalogo) {
@@ -226,7 +228,7 @@ test('CA4: lista com preço digitado (idade desconhecida) sem conferência não 
   assert.deepEqual(logs(s.db, id).filter((l) => l.level === 'aviso').map((l) => [l.offer_title, l.message]), [
     ['Fone A', 'Descartada: não deu para conferir o preço (a loja não respondeu)'],
     // a regra pediu 3 (rodar-sozinho CA1.8)
-    [null, 'Saíram 1 de 3 ofertas; 1 descartada (preço sem conferência); não havia mais ofertas novas dentro dos filtros.'],
+    [null, 'Saíram 1 de 3 ofertas; 1 descartada (preço não conferido (loja sem resposta)); não havia mais ofertas novas dentro dos filtros.'],
   ]);
   assert.ok(s.wa.simulated[0].text.includes('R$ 30,00'), 'preço digitado à mão é mantido (CA3)');
   assert.equal(logs(s.db, id).find((l) => l.level === 'ok').message, 'Enviado com a etiqueta etiquetaA');
@@ -408,11 +410,12 @@ test('CA1.5: a oferta que saiu do Etiqueta pula, mesmo com o preço dentro da re
 
 test('CA1.5: reserva vencida pula: sem revisão e sem sent_offers', async (t) => {
   const agora = dia(2, 14, 0);
+  // bloqueado e falha de rede são falhas da página DESTA oferta (achados Q1/R2): ela fica 6 h fora da escolha da regra
   const casos = [
-    { nome: 'mais de 6 h', precoEm: dia(2, 7, 59), falha: 'bloqueado', texto: 'Pulada: o preço visto às 07:59 tem mais de 6 h e não deu para conferir agora (a Amazon bloqueou a leitura). Tenta de novo no próximo envio.' },
+    { nome: 'mais de 6 h', precoEm: dia(2, 7, 59), falha: 'bloqueado', texto: 'Pulada: o preço visto às 07:59 tem mais de 6 h e não deu para conferir agora (a Amazon bloqueou a leitura). Fica 6 h fora da escolha desta regra.' },
     { nome: 'de ontem', precoEm: dia(1, 22, 10), falha: 'fora_do_ar', texto: 'Pulada: o preço visto às 22:10 de 01/11 tem mais de 6 h e não deu para conferir agora (o Etiqueta não respondeu). Tenta de novo no próximo envio.' },
-    { nome: 'sem preco_em', precoEm: undefined, falha: 'falha_rede', texto: 'Pulada: não deu para conferir o preço agora (a loja não respondeu) e a oferta não diz quando o preço foi visto. Tenta de novo no próximo envio.' },
-    { nome: 'data inválida', precoEm: '2026-02-30T10:00:00', falha: 'freio', texto: 'Pulada: não deu para conferir o preço agora (o limite de conferências por hora foi atingido) e a oferta não diz quando o preço foi visto. Tenta de novo no próximo envio.' },
+    { nome: 'sem preco_em', precoEm: undefined, falha: 'falha_rede', texto: 'Pulada: não deu para conferir o preço agora (a loja não respondeu) e a oferta não diz quando o preço foi visto. Fica 6 h fora da escolha desta regra.' },
+    { nome: 'data inválida', precoEm: '2026-02-30T10:00:00', falha: 'freio', texto: 'Pulada: não deu para conferir o preço agora (o Etiqueta estava ocupado com outra leitura da Amazon) e a oferta não diz quando o preço foi visto. Tenta de novo no próximo envio.' },
     { nome: '6 min no futuro', precoEm: agora + 6 * 60000, falha: 'resposta_inesperada', texto: 'Pulada: não deu para conferir o preço agora (o Etiqueta não respondeu) e a oferta não diz quando o preço foi visto. Tenta de novo no próximo envio.' },
   ];
   t.mock.timers.enable({ apis: ['Date'], now: agora });
@@ -433,16 +436,27 @@ test('CA1.5: reserva vencida pula: sem revisão e sem sent_offers', async (t) =>
     assert.equal(s.wa.simulated.length, 0, caso.nome);
     assert.ok(!logs(s.db, id).some((l) => /revisão/.test(l.message)), `${caso.nome}: a palavra revisão não aparece`);
     semErro(s.db, id);
-    if (caso.nome !== 'mais de 6 h') continue;
-    // pode voltar depois: durante a pausa da releitura (10 min) ela fica fora da escolha sem chamar o Etiqueta; depois,
-    // é relida de novo (não ficou registrada como tratada)
-    s.eventos.length = 0;
-    t.mock.timers.setTime(agora + 9 * 60000);
-    await s.scheduler.runRule(id);
-    assert.deepEqual(s.eventos, [], 'pausa da releitura: sem nova chamada');
-    t.mock.timers.setTime(agora + 11 * 60000);
-    await s.scheduler.runRule(id);
-    assert.deepEqual(s.eventos, [`reler ${asinDe(1)}`], 'depois da pausa a oferta volta e é relida');
+    if (caso.nome === 'de ontem') {
+      // pode voltar depois: durante a pausa da releitura (10 min) ela fica fora da escolha sem chamar o Etiqueta; depois,
+      // é relida de novo (não ficou registrada como tratada)
+      s.eventos.length = 0;
+      t.mock.timers.setTime(agora + 9 * 60000);
+      await s.scheduler.runRule(id);
+      assert.deepEqual(s.eventos, [], 'pausa da releitura: sem nova chamada');
+      t.mock.timers.setTime(agora + 11 * 60000);
+      await s.scheduler.runRule(id);
+      assert.deepEqual(s.eventos, [`reler ${asinDe(1)}`], 'depois da pausa a oferta volta e é relida');
+    }
+    if (caso.nome === 'mais de 6 h') {
+      // a falha foi da página desta oferta: passada a pausa da releitura, ela segue fora da escolha até as 6 h
+      s.eventos.length = 0;
+      t.mock.timers.setTime(agora + 11 * 60000);
+      await s.scheduler.runRule(id);
+      assert.deepEqual(s.eventos, [], 'em pausa de 6 h na regra: sem nova chamada');
+      t.mock.timers.setTime(agora + PAUSA_DESCARTADA_H * HORA + 60000);
+      await s.scheduler.runRule(id);
+      assert.deepEqual(s.eventos, [`reler ${asinDe(1)}`], 'depois das 6 h a oferta volta e é relida');
+    }
   }
 });
 
@@ -450,8 +464,8 @@ test('CA1.6: {HORA_PRECO} da mensagem é a hora do preço', async (t) => {
   t.mock.timers.enable({ apis: ['Date'], now: dia(2, 14, 40) });
   const s = montar({
     catalogo: [doEtiqueta(1, 'amazon', { precoEm: dia(2, 8, 0) }), doEtiqueta(2, 'amazon', { precoEm: dia(2, 10, 15) })],
-    // a 1ª é confirmada na hora (o Etiqueta carimba 14:32); a 2ª falha e sai pela reserva (preço visto às 10:15)
-    releitura: { [asinDe(1)]: confirmado(100, dia(2, 14, 32)), [asinDe(2)]: falhou('bloqueado') },
+    // a 1ª é confirmada na hora (o Etiqueta carimba 14:39:30, a hora da releitura); a 2ª falha e sai pela reserva (preço visto às 10:15)
+    releitura: { [asinDe(1)]: confirmado(100, dia(2, 14, 39) + 30000), [asinDe(2)]: falhou('bloqueado') },
   });
   const id = regraCatalogo(s.db);
   s.db.prepare('UPDATE rules SET template_id = ? WHERE id = ?').run(templateComHora(s.db), id);
@@ -459,12 +473,121 @@ test('CA1.6: {HORA_PRECO} da mensagem é a hora do preço', async (t) => {
   const r = await s.scheduler.runRule(id);
   assert.deepEqual([r.offers, r.messages], [2, 2]);
   const [a, b] = s.wa.simulated.map((m) => m.text);
-  assert.match(a, /\(preço das 14h32\)/); assert.match(a, /\nConferido às 14h32\n/);
+  assert.match(a, /\(preço das 14h39\)/); assert.match(a, /\nConferido às 14h39\n/);
   assert.match(b, /\(preço das 10h15\)/); assert.match(b, /\nConferido às 10h15\n/);
   for (const m of [a, b]) assert.ok(!m.includes('14h40'), 'nunca a hora do envio');
   assert.deepEqual(oksDe(s.db, id), [
     ['Produto 1', 'Enviado pela Amazon, com a sua tag'],
     ['Produto 2', 'Enviado pela Amazon, com a sua tag · preço visto às 10:15, não conferido agora (a Amazon bloqueou a leitura)'],
+  ]);
+  semErro(s.db, id);
+});
+
+/**
+ * Etiqueta falso atrás do cliente REAL (createCatalogo), com o freio da releitura como o do Etiqueta (servidor.py,
+ * FreioReleitura): 429 `intervalo` a menos de 3 s do início da leitura anterior. Cada leitura leva 0,4 s. O relógio é o
+ * Date falso do teste: a leitura e a espera do freio o avançam (ninguém dorme de verdade). `precos`: ASIN → preço lido.
+ */
+function etiquetaComFreio(t, precos) {
+  const dir = tmp();
+  const caminho = path.join(dir, 'api_token.txt');
+  const token = 'tkFALSO_freio_0123456789_abcdefghijklmnop';
+  fs.writeFileSync(caminho, `${token}\n`, { mode: 0o600 });
+  const p2 = (n) => String(n).padStart(2, '0');
+  const texto = (ms) => { const d = new Date(ms); return `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}T${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}`; };
+  const chamadas = []; const esperas = [];
+  let inicio = -Infinity;
+  const json = (status, corpo, headers = {}) => new Response(JSON.stringify(corpo), { status, headers: { 'content-type': 'application/json', ...headers } });
+  const fetchFalso = async (url, init = {}) => {
+    const asin = /amazon\/([A-Z0-9]{10})\/confirmar-preco$/.exec(new URL(String(url)).pathname)?.[1];
+    if (!asin || init.headers?.Authorization !== `Bearer ${token}`) return json(404, { error: 'x' });
+    const agora = Date.now();
+    if (agora - inicio < 3000) {
+      const s = Math.max(1, Math.ceil((inicio + 3000 - agora) / 1000));
+      chamadas.push(`${asin} freio(intervalo)`);
+      return json(429, { versao: 1, resultado: 'freio', motivo: 'intervalo', tentar_em_s: s }, { 'retry-after': String(s) });
+    }
+    inicio = agora;
+    t.mock.timers.setTime(agora + 400); // a leitura da página
+    chamadas.push(`${asin} confirmado 200`);
+    return json(200, { versao: 1, resultado: 'confirmado', preco: precos[asin], preco_antigo: 150, desconto_pct: null, preco_em: texto(Date.now()) });
+  };
+  const catalogo = createCatalogo({
+    db: null, fetch: fetchFalso, lerConexao: () => ({ endereco: 'http://127.0.0.1:8765', caminho_token: caminho }),
+    esperar: async (ms) => { esperas.push(ms); t.mock.timers.setTime(Date.now() + ms); },
+  });
+  return { catalogo, chamadas, esperas };
+}
+
+test('R1 (regressão): a Amazon que cai fora não faz a próxima levar o 429 do intervalo — a reposta é relida e sai, também na regra seguinte', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: dia(2, 14, 0) });
+  const velho = dia(2, 4, 0); // 10 h antes: sem reserva, só sai se for relida
+  const e = etiquetaComFreio(t, { [asinDe(1)]: 120, [asinDe(2)]: 100, [asinDe(3)]: 100, [asinDe(4)]: 100 });
+  const s = montar({ catalogo: [1, 2, 3].map((i) => doEtiqueta(i, 'amazon', { precoEm: velho })), confirmador: e.catalogo });
+  const id = regraCatalogo(s.db);
+
+  const r = await s.scheduler.runRule(id);
+  assert.deepEqual(e.chamadas, [
+    'B000000001 confirmado 200', 'B000000002 freio(intervalo)', 'B000000002 confirmado 200', 'B000000003 freio(intervalo)', 'B000000003 confirmado 200',
+  ]);
+  assert.deepEqual(e.esperas, [3000, 3000], 'esperou o tentar_em_s dentro da fila');
+  assert.deepEqual([r.offers, r.descartadas, r.puladas], [2, 1, 0]);
+  assert.deepEqual(titulos(s.wa), ['*Produto 2*', '*Produto 3*']);
+  assert.deepEqual(avisosDe(s.db, id), [
+    ['Produto 1', 'Descartada: preço subiu de R$ 100,00 para R$ 120,00 (+20%, o limite é 5%)'],
+    [null, 'Saíram 2 de 5 ofertas; 1 descartada (preço subiu); não havia mais ofertas novas dentro dos filtros.'],
+  ]);
+  assert.ok(!logs(s.db, id).some((l) => /limite de conferências por hora/.test(l.message)), 'nunca a causa falsa do teto');
+  // a regra seguinte do mesmo tick, logo depois: a releitura não ficou pausada e a 1ª Amazon dela é relida
+  const outra = Number(s.db.prepare(`INSERT INTO rules (name, enabled, tag_id, template_id, group_jids, source_type, source_config, sources, per_run,
+    interval_min, window_start, window_end, dedupe_days, send_image, created_at) VALUES ('B', 1, 1, 1, ?, 'list', '{}', ?, 1, 60, '00:00', '23:59', 7, 0, ?)`)
+    .run(JSON.stringify(['111@g.us']), JSON.stringify([{ type: 'catalogo', tag_id: null, config: { ordem: 'relevancia' } }]), Date.now()).lastInsertRowid);
+  e.chamadas.length = 0;
+  const r2 = await s.scheduler.runRule(outra);
+  // a 1ª da regra B começa menos de 3 s depois da última leitura da regra A: espera e é relida (e cai, mais cara); a reposta também
+  assert.deepEqual(e.chamadas, ['B000000001 freio(intervalo)', 'B000000001 confirmado 200', 'B000000002 freio(intervalo)', 'B000000002 confirmado 200']);
+  assert.deepEqual([r2.offers, r2.descartadas, r2.puladas], [1, 1, 0]);
+  semErro(s.db, id); semErro(s.db, outra);
+});
+
+test('R4: com a API da Amazon ligada não há reserva — a pulada não fala da idade do preço visto', async (t) => {
+  const agora = dia(2, 14, 0);
+  t.mock.timers.enable({ apis: ['Date'], now: agora });
+  const amazonApi = { configurado: () => true, lerItem: async () => { throw new Error('API fora do ar (falsa)'); } };
+  const s = montar({ catalogo: [doEtiqueta(1, 'amazon', { precoEm: dia(2, 4, 0) })], releitura: { [asinDe(1)]: confirmado(100, agora) }, amazonApi });
+  const id = regraCatalogo(s.db);
+  const r = await s.scheduler.runRule(id);
+  assert.deepEqual([r.offers, r.puladas], [0, 1]);
+  assert.deepEqual(s.eventos, [], 'com a API ligada o Etiqueta não é chamado');
+  assert.deepEqual(avisosDe(s.db, id)[0], ['Produto 1', 'Pulada: não deu para conferir o preço agora (a loja não respondeu). Tenta de novo no próximo envio.']);
+  assert.ok(!logs(s.db, id).some((l) => /preço visto às|não diz quando o preço foi visto/.test(l.message)));
+});
+
+test('S1: o preço da releitura passa de novo pela guarda do preço suspeito — 1,99 "de 199" e 0,001 vão à revisão, nunca ao WhatsApp', async (t) => {
+  const agora = dia(2, 14, 0);
+  t.mock.timers.enable({ apis: ['Date'], now: agora });
+  const s = montar({
+    catalogo: [1, 2, 3].map((i) => doEtiqueta(i, 'amazon', { precoEm: dia(2, 4, 0) })),
+    releitura: {
+      // o leitor do Etiqueta pegou a parcela no lugar do preço; e um preço quase zero (desconto de 100%)
+      [asinDe(1)]: { resultado: 'confirmado', preco: 1.99, precoAntigo: 199, descontoPct: null, precoEm: agora - 30000 },
+      [asinDe(2)]: { resultado: 'confirmado', preco: 0.001, precoAntigo: 150, descontoPct: null, precoEm: agora - 30000 },
+      [asinDe(3)]: confirmado(100, agora - 30000),
+    },
+  });
+  const id = regraCatalogo(s.db);
+  const r = await s.scheduler.runRule(id);
+  assert.deepEqual([r.offers, r.revisao, r.descartadas, r.puladas], [1, 2, 0, 0]);
+  assert.deepEqual(titulos(s.wa), ['*Produto 3*'], 'só a de preço normal sai');
+  assert.deepEqual(enviadas(s.db, id), ['ASIN:B000000003'], 'nenhuma das suspeitas em sent_offers');
+  const naRevisao = s.db.prepare("SELECT chave, motivos, json_extract(oferta, '$.price') AS price, json_extract(oferta, '$.oldPrice') AS antigo FROM catalogo_itens WHERE rule_id = ? AND status = 'revisao' ORDER BY id").all(id).map((l) => ({ ...l }));
+  assert.deepEqual(naRevisao, [
+    { chave: 'ASIN:B000000001', motivos: '["preco_antigo"]', price: 1.99, antigo: 199 }, // gravada com o preço conferido
+    { chave: 'ASIN:B000000002', motivos: '["desconto_100"]', price: 0, antigo: 150 },
+  ]);
+  assert.deepEqual(avisosDe(s.db, id).slice(0, 2), [
+    ['Produto 1', 'Separada para revisão: preço antigo muito alto, confira o preço.'],
+    ['Produto 2', 'Separada para revisão: desconto de 100%, confira o preço.'],
   ]);
   semErro(s.db, id);
 });

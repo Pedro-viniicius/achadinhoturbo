@@ -361,6 +361,12 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
     if (verificador_ativo != null && typeof verificador_ativo !== 'boolean') throw new Error(ERRO_VERIFICADOR_ATIVO);
     const limiteVf = verificador_limite_pct != null ? limiteVerificador(verificador_limite_pct) : null;
     if (verificador_limite_pct != null && limiteVf == null) throw new Error(ERRO_VERIFICADOR_LIMITE);
+    // os outros campos também são validados antes de gravar qualquer um (achado Q2): um 400 não deixa nada pela metade
+    const retencao = retencao_dias != null ? Number(retencao_dias) : null;
+    if (retencao_dias != null && !(retencao >= 0 && retencao <= 3650)) throw new Error('Retenção: de 0 (para sempre) a 3650 dias.');
+    const tituloMax = titulo_max != null ? Number(titulo_max) : null;
+    if (titulo_max != null && !(tituloMax >= 0 && tituloMax <= 200)) throw new Error('Tamanho do título: de 0 (inteiro) a 200.');
+    if (link_mode != null && !['extension', 'direct'].includes(link_mode)) throw new Error('Modo de link inválido');
     const porQuem = porQuemDe(req); // mexer na proteção de preço deixa rastro de quem foi
     if (limiteVf != null) {
       const antes = ajustesVerificador.limitePct();
@@ -373,12 +379,9 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
       if (estava && !verificador_ativo) addLog(db, { level: 'aviso', message: `${AVISO_VERIFICADOR_DESLIGADO}${porQuem}` });
       if (!estava && verificador_ativo) addLog(db, { level: 'aviso', message: `${AVISO_VERIFICADOR_LIGADO}${porQuem}` });
     }
-    if (retencao_dias != null) { const n = Number(retencao_dias); if (!(n >= 0 && n <= 3650)) throw new Error('Retenção: de 0 (para sempre) a 3650 dias.'); setSetting(db, 'retencao_dias', Math.round(n)); }
-    if (titulo_max != null) { const n = Number(titulo_max); if (!(n >= 0 && n <= 200)) throw new Error('Tamanho do título: de 0 (inteiro) a 200.'); setSetting(db, 'titulo_max', Math.round(n)); }
-    if (link_mode != null) {
-      if (!['extension', 'direct'].includes(link_mode)) throw new Error('Modo de link inválido');
-      setSetting(db, 'link_mode', link_mode);
-    }
+    if (retencao != null) setSetting(db, 'retencao_dias', Math.round(retencao));
+    if (tituloMax != null) setSetting(db, 'titulo_max', Math.round(tituloMax));
+    if (link_mode != null) setSetting(db, 'link_mode', link_mode);
   }));
 
   /**

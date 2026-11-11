@@ -794,7 +794,7 @@ test('releitura (CA1.3): confirmada, a Amazon sem API envia o preço lido, confe
   assert.deepEqual([semDe.oferta.price, semDe.oferta.oldPrice, semDe.oferta.discountPct], [95, 150, 37]);
   // a hora do preço da mensagem é a do Etiqueta ({HORA_PRECO})
   const hora = new Date(2026, 0, 15, 14, 32).getTime();
-  const v2 = createVerificador({ db: novoDb(), amazon: null, catalogo: catalogoFalso(confirmado({ precoEm: hora })), agora: () => hora + 3 * HORA });
+  const v2 = createVerificador({ db: novoDb(), amazon: null, catalogo: catalogoFalso(confirmado({ precoEm: hora })), agora: () => hora + 30 * 1000 });
   const r2 = await v2.conferir(ofertaAmazon(), { releitura: { precoEm: null } });
   assert.equal(renderTemplate('Preço visto às {HORA_PRECO}', { ...r2.oferta, link: 'x' }), 'Preço visto às 14h32');
 });
@@ -855,7 +855,7 @@ test('releitura (CA1.5): falhou, o preço visto há 5h59 envia; 6h01, sem data, 
   const naoVale = [agora - 6 * HORA - MIN, agora + 5 * MIN + 1, agora + HORA, null, undefined, Number.NaN, '09:00', {}, -1 / 0];
   for (const precoEm of naoVale) {
     const r = await rodar(precoEm);
-    assert.deepEqual(r, { acao: 'descartar', motivo: 'nao_conferido', texto: 'Descartada: não deu para conferir o preço (o Etiqueta não respondeu)', causa: 'etiqueta_fora' }, String(precoEm));
+    assert.deepEqual(r, { acao: 'descartar', motivo: 'nao_conferido', texto: 'Descartada: não deu para conferir o preço (o Etiqueta não respondeu)', causa: 'etiqueta_fora', pelaReleitura: true }, String(precoEm));
     textosLimpos(r);
   }
   // sem o objeto `releitura.precoEm` (chave ausente) também não há reserva
@@ -871,20 +871,22 @@ test('releitura (CA1.5): falhou, o preço visto há 5h59 envia; 6h01, sem data, 
 
 test('releitura (CA1.6): vistoEm é o preco_em, na releitura e na reserva, nunca agora()', async () => {
   const agora = T0 + 7 * HORA;
-  const aRel = createVerificador({ db: novoDb(), amazon: null, catalogo: catalogoFalso(confirmado({ precoEm: agora - 2 * MIN })), agora: () => agora });
+  const aRel = createVerificador({ db: novoDb(), amazon: null, catalogo: catalogoFalso(confirmado({ precoEm: agora - MIN })), agora: () => agora });
   const rel = await aRel.conferir(ofertaAmazon({ vistoEm: agora }), { releitura: { precoEm: agora - 5 * HORA } });
-  assert.equal(rel.oferta.vistoEm, agora - 2 * MIN);
+  assert.equal(rel.oferta.vistoEm, agora - MIN);
   const aRes = createVerificador({ db: novoDb(), amazon: null, catalogo: catalogoFalso(falha('bloqueado')), agora: () => agora });
   const res = await aRes.conferir(ofertaAmazon({ vistoEm: agora }), { releitura: { precoEm: agora - 5 * HORA } });
   assert.equal(res.oferta.vistoEm, agora - 5 * HORA);
   assert.notEqual(res.oferta.vistoEm, agora);
   // um vistoEm que veio na oferta nunca sobra quando a oferta é descartada ou o preço não tem hora
-  assert.equal((await comReleitura(catalogoFalso(confirmado({ precoEm: T0 - HORA }))).conferir(ofertaAmazon({ vistoEm: 5 }), { releitura: { precoEm: null } })).oferta.vistoEm, T0 - HORA);
+  assert.equal((await comReleitura(catalogoFalso(confirmado({ precoEm: T0 - MIN }))).conferir(ofertaAmazon({ vistoEm: 5 }), { releitura: { precoEm: null } })).oferta.vistoEm, T0 - MIN);
 });
 
 test('releitura: cada falha do Etiqueta vira a sua causa, na reserva (sufixo) e no descarte (causa)', async () => {
+  // bloqueado e falha_rede: o Etiqueta tentou ler a página desta oferta agora (o descarte leva `releu`, achados Q1/R2)
+  const daPagina = new Set(['falha_rede', 'bloqueado']);
   const mapa = [
-    ['falha_rede', 'a loja não respondeu'], ['freio', 'o limite de conferências por hora foi atingido'],
+    ['falha_rede', 'a loja não respondeu'], ['freio', 'o Etiqueta estava ocupado com outra leitura da Amazon'],
     ['bloqueado', 'a Amazon bloqueou a leitura'], ['fora_do_ar', 'o Etiqueta não respondeu'],
     ['token_recusado', 'o Etiqueta não respondeu'], ['desligada', 'o Etiqueta não respondeu'],
     ['resposta_inesperada', 'o Etiqueta não respondeu'], ['nao_configurada', 'o Etiqueta não respondeu'],
@@ -896,8 +898,104 @@ test('releitura: cada falha do Etiqueta vira a sua causa, na reserva (sufixo) e 
     assert.deepEqual([reserva.acao, reserva.conferido, reserva.sufixo.endsWith(`(${frase})`)], ['enviar', false, true], String(causa));
     textosLimpos(reserva);
     const descarte = await comReleitura(catalogoFalso(falha(causa))).conferir(ofertaAmazon(), { releitura: { precoEm: T0 - 7 * HORA } });
-    assert.deepEqual(descarte, { acao: 'descartar', motivo: 'nao_conferido', texto: `Descartada: não deu para conferir o preço (${frase})`, causa: chaveDe(frase) }, String(causa));
+    assert.deepEqual(descarte, {
+      acao: 'descartar', motivo: 'nao_conferido', texto: `Descartada: não deu para conferir o preço (${frase})`, causa: chaveDe(frase), pelaReleitura: true,
+      ...(daPagina.has(causa) ? { releu: true } : {}),
+    }, String(causa));
     textosLimpos(descarte);
+  }
+});
+
+test('releitura (R1): o freio do Etiqueta segue o motivo — intervalo e ocupado não pausam; teto, pausa e rodada pausam pelo tentar_em_s', async () => {
+  const freio = (motivo, tentarEmS) => ({ resultado: 'falha', causa: 'freio', motivo, tentarEmS });
+  const velha = { releitura: { precoEm: T0 - 7 * HORA } }; // sem reserva: o descarte mostra a causa
+  const casos = [
+    // [motivo, tentarEmS, causa, pausa em ms (0 = não pausa)]
+    ['intervalo', 2, 'etiqueta_ocupado', 0],
+    ['ocupado', 3, 'etiqueta_ocupado', 0],
+    ['teto', 120, 'limite_hora', 120 * 1000],
+    ['pausa', 600, 'etiqueta_bloqueio', 600 * 1000],
+    ['rodada', 60, 'etiqueta_ocupado', 60 * 1000],
+    ['teto', null, 'limite_hora', 10 * MIN], // sem tentar_em_s: os 10 min de sempre
+    ['teto', 99999, 'limite_hora', HORA], // no máximo 1 h
+    [null, 30, 'etiqueta_ocupado', 30 * 1000], // motivo fora do contrato: pausa, sem dizer "limite por hora"
+    ['xyz', null, 'etiqueta_ocupado', 10 * MIN],
+  ];
+  for (const [motivo, tentarEmS, causa, pausa] of casos) {
+    const nome = `${motivo} ${tentarEmS}`;
+    let agora = T0;
+    const catalogo = catalogoFalso(freio(motivo, tentarEmS));
+    const v = createVerificador({ db: novoDb(), amazon: null, catalogo, agora: () => agora });
+    const r = await v.conferir(ofertaAmazon(), velha);
+    assert.deepEqual([r.acao, r.causa, r.releu], ['descartar', causa, undefined], nome);
+    assert.equal(r.texto, `Descartada: não deu para conferir o preço (${CAUSAS[causa]})`, nome);
+    if (!pausa) {
+      // nada pausado: a Amazon seguinte vai ao Etiqueta na hora
+      assert.equal(v.semConfirmacaoAgora({ loja: 'amazon', precoEm: null }), false, nome);
+      await v.conferir(ofertaAmazon({ key: 'ASIN:B000000002' }), velha);
+      assert.equal(catalogo.chamadas.length, 2, nome);
+      continue;
+    }
+    agora = T0 + pausa - 1;
+    await v.conferir(ofertaAmazon({ key: 'ASIN:B000000002' }), velha);
+    assert.equal(catalogo.chamadas.length, 1, `${nome}: pausada até ${pausa} ms`);
+    agora = T0 + pausa;
+    await v.conferir(ofertaAmazon({ key: 'ASIN:B000000002' }), velha);
+    assert.equal(catalogo.chamadas.length, 2, `${nome}: depois da pausa pergunta de novo`);
+  }
+  // só o teto diz "limite de conferências por hora"
+  const naReserva = await comReleitura(catalogoFalso(freio('intervalo', 3))).conferir(ofertaAmazon(), { releitura: { precoEm: T0 - HORA } });
+  assert.ok(naReserva.sufixo.endsWith('(o Etiqueta estava ocupado com outra leitura da Amazon)'), naReserva.sufixo);
+});
+
+test('releitura (Q1/R2): `releu` só quando o Etiqueta tentou ler a página desta oferta agora (bloqueado, falha de rede)', async (t) => {
+  const velha = { releitura: { precoEm: T0 - 7 * HORA } };
+  for (const causa of ['bloqueado', 'falha_rede']) {
+    const r = await comReleitura(catalogoFalso(falha(causa))).conferir(ofertaAmazon(), velha);
+    assert.deepEqual([r.acao, r.releu, r.pelaReleitura], ['descartar', true, true], causa);
+  }
+  for (const resposta of [falha('fora_do_ar'), falha('token_recusado'), falha('resposta_inesperada'), falha('nao_encontrado'),
+    { resultado: 'falha', causa: 'freio', motivo: 'pausa', tentarEmS: 600 }, { resultado: 'falha', causa: 'freio', motivo: 'intervalo', tentarEmS: 3 }]) {
+    const r = await comReleitura(catalogoFalso(resposta)).conferir(ofertaAmazon(), velha);
+    assert.deepEqual([r.acao, 'releu' in r, r.pelaReleitura], ['descartar', false, true], JSON.stringify(resposta));
+  }
+  // com a releitura já pausada (por outra oferta) a falha não é desta oferta
+  const v = comReleitura(catalogoFalso(falha('bloqueado')));
+  await v.conferir(ofertaAmazon(), velha);
+  const seguinte = await v.conferir(ofertaAmazon({ key: 'ASIN:B000000002' }), velha);
+  assert.deepEqual([seguinte.causa, 'releu' in seguinte], ['etiqueta_bloqueio', false]);
+  // a demora do verificador também não (a fila do Etiqueta pode estar ocupada por outra regra)
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const lento = createVerificador({ db: novoDb(), amazon: null, catalogo: { confirmarPreco: () => new Promise(() => {}) }, agora: () => T0, tempoMaxMs: 50 });
+  const p = lento.conferir(ofertaAmazon(), velha);
+  await new Promise((r) => setImmediate(r));
+  t.mock.timers.tick(50);
+  const demorou = await p;
+  assert.deepEqual([demorou.causa, 'releu' in demorou], ['demorou', false]);
+  // as outras lojas não trazem nenhum dos dois sinais
+  const ml = await createVerificador({ db: novoDb(), ml: mlFalso(null), agora: () => T0 }).conferir(ofertaMl(), { lidoEm: null });
+  assert.deepEqual([ml.acao, 'releu' in ml, 'pelaReleitura' in ml], ['descartar', false, false]);
+});
+
+test('releitura (S2): o preco_em de um confirmado precisa ser desta releitura — de 3 dias atrás ou de 2 dias no futuro é resposta fora do contrato', async () => {
+  const prazo = 20000;
+  const casos = [
+    [T0 - 3 * 24 * HORA, false], [T0 + 2 * 24 * HORA, false],
+    [T0 - prazo - MIN, true], [T0 - prazo - MIN - 1, false], // o prazo da conferência + 1 min, inclusivo
+    [T0 + 5 * MIN, true], [T0 + 5 * MIN + 1, false], [T0, true],
+  ];
+  for (const [precoEm, vale] of casos) {
+    const nome = String(precoEm - T0);
+    const v = createVerificador({ db: novoDb(), amazon: null, catalogo: catalogoFalso(confirmado({ precoEm })), agora: () => T0, tempoMaxMs: prazo });
+    // com a reserva valendo: sai pela reserva, com a causa "o Etiqueta não respondeu", nunca como conferida
+    const r = await v.conferir(ofertaAmazon(), { releitura: { precoEm: T0 - HORA } });
+    if (vale) assert.deepEqual([r.acao, r.conferido, r.oferta.vistoEm], ['enviar', true, precoEm], nome);
+    else assert.deepEqual([r.acao, r.conferido, r.sufixo.endsWith('(o Etiqueta não respondeu)'), r.oferta.vistoEm], ['enviar', false, true, T0 - HORA], nome);
+    // sem reserva: descartada sem conferência
+    const sem = await createVerificador({ db: novoDb(), amazon: null, catalogo: catalogoFalso(confirmado({ precoEm })), agora: () => T0, tempoMaxMs: prazo })
+      .conferir(ofertaAmazon(), { releitura: { precoEm: T0 - 7 * HORA } });
+    assert.equal(sem.acao, vale ? 'enviar' : 'descartar', nome);
+    if (!vale) assert.equal(sem.causa, 'etiqueta_fora', nome);
   }
 });
 
@@ -905,7 +1003,7 @@ test('releitura: nao_encontrado (a oferta saiu do Etiqueta) não tem reserva e n
   const catalogo = catalogoFalso(falha('nao_encontrado'));
   const v = comReleitura(catalogo);
   const r = await v.conferir(ofertaAmazon(), { releitura: { precoEm: T0 - MIN } });
-  assert.deepEqual(r, { acao: 'descartar', motivo: 'nao_conferido', texto: 'Descartada: não deu para conferir o preço (a oferta saiu do Etiqueta)', causa: 'etiqueta_sem_oferta' });
+  assert.deepEqual(r, { acao: 'descartar', motivo: 'nao_conferido', texto: 'Descartada: não deu para conferir o preço (a oferta saiu do Etiqueta)', causa: 'etiqueta_sem_oferta', pelaReleitura: true });
   textosLimpos(r);
   await v.conferir(ofertaAmazon({ key: 'ASIN:B000000002' }), { releitura: { precoEm: T0 - MIN } });
   assert.deepEqual(catalogo.chamadas, [ASIN, 'B000000002'], 'a segunda também foi ao Etiqueta');
@@ -1060,7 +1158,7 @@ test('releitura (CA1.11): verificador desligado ou simulado e ofertas de outras 
 test('releitura: Amazon sem ASIN nem chave não chama o Etiqueta e não vai pela reserva', async () => {
   const catalogo = catalogoFalso(proibido('confirmarPreco'));
   const r = await comReleitura(catalogo).conferir({ loja: 'amazon', price: 100, key: 'qualquer' }, { releitura: { precoEm: T0 } });
-  assert.deepEqual(r, { acao: 'descartar', motivo: 'nao_conferido', texto: 'Descartada: não deu para conferir o preço (a página não trouxe o preço)', causa: 'sem_preco' });
+  assert.deepEqual(r, { acao: 'descartar', motivo: 'nao_conferido', texto: 'Descartada: não deu para conferir o preço (a página não trouxe o preço)', causa: 'sem_preco', pelaReleitura: true });
   assert.equal(catalogo.chamadas.length, 0);
 });
 

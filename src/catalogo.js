@@ -3,7 +3,7 @@
 //
 // Contrato do módulo:
 //
-// - createCatalogo({ db, fetch, lerConexao, agora, timeoutMs }) →
+// - createCatalogo({ db, fetch, lerConexao, agora, timeoutMs, orcamentoMs, esperar }) →
 //   { testar(), situacao(), ultimaVerificacao(), candidatos(cfg, ctx), avancar(ruleId, paginas, tratada),
 //     recomecar(ruleId), esquecerRegra(ruleId), confirmarPreco(asin) }
 //   - Conexão lida a cada chamada: `lerConexao()` → { endereco, caminho_token } (o servidor passa
@@ -59,7 +59,8 @@
 //   - esquecerRegra(ruleId): apaga os cursores da regra.
 //   - confirmarPreco(asin): POST /api/v1/amazon/<ASIN>/confirmar-preco (o Etiqueta relê a página e grava o preço;
 //     plano rodar-sozinho-entrega1). Nunca lança; resultados e causas no comentário da função. Fila única, sem
-//     corpo, só Authorization, redirect:'error', timeout por pedido, corpo até 4 KiB. Não muda situacao().
+//     corpo, só Authorization, redirect:'error', timeout por pedido, corpo até 4 KiB. Não muda situacao(). O freio
+//     curto do Etiqueta (429 `intervalo`/`ocupado`) é esperado dentro da fila e o pedido é refeito.
 // - Puros: paraCandidato(oferta), motivosDeRevisao(c), emCentavos(v), limparFonteCatalogo(config), precisaEtiqueta(sources),
 //   filtroDe(config), enderecoValido(v), caminhoValido(v), fraseDoTeste(resultado, dados), lerPrecoEm(texto).
 // - settings.catalogo_verificacao (contrato com src/conexoes.js, etapa 3): { verificado_em, total,
@@ -100,6 +101,14 @@ const PAGINAS_LEITURA = 10;      // demais leituras
 const MAX_CURSOR = 500;
 const MAX_CATEGORIAS_RESPOSTA = 1000;
 const MAX_CORPO_CONFIRMAR = 4096; // a resposta da confirmação de preço tem algumas dezenas de bytes
+const PRECO_MAX = 10_000_000;     // o mesmo teto de preço dos outros caminhos (catalogo-itens.js, envios.js)
+/** Motivos do 429 (freio da confirmação) que o contrato do Etiqueta define. */
+const MOTIVOS_FREIO = Object.freeze(['ocupado', 'pausa', 'intervalo', 'teto', 'rodada']);
+/** 429 de espera curta (outra leitura começou há menos de 3 s ou está em curso): espera dentro da fila e tenta de novo. */
+const FREIO_CURTO = Object.freeze(['intervalo', 'ocupado']);
+const ESPERA_FREIO_CURTO_MAX_S = 3; // o intervalo do freio do Etiqueta; espera maior não é "curta"
+const NOVAS_TENTATIVAS_FREIO = 2;   // no pior caso 2 × 3 s de espera, mais a leitura, dentro do prazo do verificador (20 s)
+const dormir = (ms) => new Promise((ok) => { setTimeout(ok, ms); });
 /**
  * Idade máxima do preço (h) pedida ao Etiqueta quando toda oferta da fonte é conferida na hora (verificador
  * ligado, só ML e/ou Amazon). Fora disso, vale a validade do próprio Etiqueta (48 h).
@@ -443,9 +452,10 @@ const impressaoDe = (c) => createHash('sha256').update(`${c.endereco}\n${c.camin
 
 /**
  * Cliente do Etiqueta (ver o contrato no topo do arquivo). db: banco aberto; fetch: injetado nos testes;
- * lerConexao(): { endereco, caminho_token }; agora: relógio; timeoutMs: tempo máximo por pedido.
+ * lerConexao(): { endereco, caminho_token }; agora: relógio; timeoutMs: tempo máximo por pedido; esperar(ms): a espera
+ * do freio curto da confirmação de preço (injetada nos testes, para não dormir de verdade).
  */
-export function createCatalogo({ db, fetch: f, lerConexao, agora = Date.now, timeoutMs = TIMEOUT_PADRAO, orcamentoMs = ORCAMENTO_PADRAO } = {}) {
+export function createCatalogo({ db, fetch: f, lerConexao, agora = Date.now, timeoutMs = TIMEOUT_PADRAO, orcamentoMs = ORCAMENTO_PADRAO, esperar = dormir } = {}) {
   const doFetch = (...a) => (f ?? globalThis.fetch)(...a);
   let fila = Promise.resolve();
   let esperando = 0;        // pedidos na fila que ainda não começaram
@@ -585,7 +595,7 @@ export function createCatalogo({ db, fetch: f, lerConexao, agora = Date.now, tim
       case 'confirmado': break;
       default: return falhaConfirmar('resposta_inesperada');
     }
-    const positivo = (v) => typeof v === 'number' && Number.isFinite(v) && v > 0;
+    const positivo = (v) => typeof v === 'number' && Number.isFinite(v) && v > 0 && v <= PRECO_MAX;
     const { preco, preco_antigo: antigo, desconto_pct: desconto } = json;
     const precoEm = lerPrecoEm(json.preco_em);
     if (!positivo(preco) || precoEm == null) return falhaConfirmar('resposta_inesperada');
@@ -602,15 +612,33 @@ export function createCatalogo({ db, fetch: f, lerConexao, agora = Date.now, tim
   }
 
   /**
+   * O 429 do freio da confirmação → { resultado:'falha', causa:'freio', motivo, tentarEmS }. `motivo`: um de
+   * MOTIVOS_FREIO ou null (corpo fora do contrato); `tentarEmS`: inteiro ≥ 1 do corpo (`tentar_em_s`) ou, sem ele,
+   * do cabeçalho Retry-After; null se nenhum dos dois vale.
+   */
+  async function lerFreio(r) {
+    const { json } = await lerCorpoLimitado(r, MAX_CORPO_CONFIRMAR);
+    const doCorpo = json && typeof json === 'object' && !Array.isArray(json) && json.versao === 1 && json.resultado === 'freio' ? json : {};
+    const motivo = MOTIVOS_FREIO.includes(doCorpo.motivo) ? doCorpo.motivo : null;
+    const segundos = (v) => (Number.isSafeInteger(v) && v >= 1 ? v : null);
+    const cabecalho = r?.headers?.get?.('retry-after');
+    const tentarEmS = segundos(doCorpo.tentar_em_s) ?? (typeof cabecalho === 'string' && /^\d{1,7}$/.test(cabecalho.trim()) ? segundos(Number(cabecalho)) : null);
+    return { ...falhaConfirmar('freio'), motivo, tentarEmS };
+  }
+
+  /**
    * Pede ao Etiqueta para reler a página de um produto da Amazon (POST /api/v1/amazon/<ASIN>/confirmar-preco).
    * → { resultado:'confirmado', preco, precoAntigo|null, descontoPct|null, precoEm } | { resultado:'sem_preco' } |
    * { resultado:'outro_produto' } | { resultado:'falha', causa }. causa: bloqueado | falha_rede (o Etiqueta não
-   * leu a Amazon) | freio (429) | nao_encontrado (404, ou ASIN fora de [A-Z0-9]{10}, que o Etiqueta recusaria
-   * com 404) | fora_do_ar (rede, tempo, 5xx) | token_recusado (401) | desligada (503) | resposta_inesperada
-   * (3xx, 400/403/405, JSON fora do contrato) | nao_configurada (sem endereço e caminho válidos, ou sem token
-   * legível no arquivo). Nunca lança. Na fila única, POST sem corpo, só Authorization, redirect:'error', mesmo
-   * timeout por pedido e corpo limitado. Não muda situacao(): ela fala da lista de ofertas, não da releitura.
-   * O token só existe dentro desta função.
+   * leu a Amazon) | freio (429; vem com `motivo` e `tentarEmS`, ver lerFreio) | nao_encontrado (404, ou ASIN fora de
+   * [A-Z0-9]{10}, que o Etiqueta recusaria com 404) | fora_do_ar (rede, tempo, 5xx) | token_recusado (401) |
+   * desligada (503) | resposta_inesperada (3xx, 400/403/405, JSON fora do contrato, preço acima de PRECO_MAX) |
+   * nao_configurada (sem endereço e caminho válidos, ou sem token legível no arquivo). Nunca lança. Na fila única,
+   * POST sem corpo, só Authorization, redirect:'error', mesmo timeout por pedido e corpo limitado. Não muda
+   * situacao(): ela fala da lista de ofertas, não da releitura. O token só existe dentro desta função.
+   * Freio curto (429 `intervalo` ou `ocupado` com espera de até ESPERA_FREIO_CURTO_MAX_S): espera o `tentar_em_s`
+   * ainda dentro da fila (nenhum outro pedido passa na frente) e pede de novo, até NOVAS_TENTATIVAS_FREIO vezes; assim
+   * duas Amazon seguidas são as duas relidas. Os outros motivos voltam na hora (quem chama decide a pausa).
    */
   async function confirmarPreco(asin) {
     try {
@@ -621,26 +649,34 @@ export function createCatalogo({ db, fetch: f, lerConexao, agora = Date.now, tim
         const lido = await lerToken(c.caminho);
         if (!lido.token) return falhaConfirmar('nao_configurada');
         const url = new URL(`/api/v1/amazon/${asin}/confirmar-preco`, `${c.endereco}/`);
-        let r;
-        try {
-          r = await doFetch(url.href, {
-            method: 'POST', redirect: 'error', signal: AbortSignal.timeout(timeoutMs),
-            headers: { Authorization: `Bearer ${lido.token}` },
-          });
-        } catch { return falhaConfirmar('fora_do_ar'); }
-        const status = Number(r?.status) || 0;
-        if (status !== 200) {
-          try { await r?.body?.cancel?.(); } catch { /* corpo já fechado */ }
-          if (status === 401) return falhaConfirmar('token_recusado');
-          if (status === 503) return falhaConfirmar('desligada');
-          if (status === 404) return falhaConfirmar('nao_encontrado');
-          if (status === 429) return falhaConfirmar('freio');
-          if (status >= 500 || status === 0) return falhaConfirmar('fora_do_ar');
-          return falhaConfirmar('resposta_inesperada');
+        for (let tentativa = 0; ; tentativa++) {
+          let r;
+          try {
+            r = await doFetch(url.href, {
+              method: 'POST', redirect: 'error', signal: AbortSignal.timeout(timeoutMs),
+              headers: { Authorization: `Bearer ${lido.token}` },
+            });
+          } catch { return falhaConfirmar('fora_do_ar'); }
+          const status = Number(r?.status) || 0;
+          if (status === 429) {
+            const freio = await lerFreio(r);
+            const curto = FREIO_CURTO.includes(freio.motivo) && freio.tentarEmS != null && freio.tentarEmS <= ESPERA_FREIO_CURTO_MAX_S;
+            if (!curto || tentativa >= NOVAS_TENTATIVAS_FREIO) return freio;
+            await esperar(freio.tentarEmS * 1000);
+            continue;
+          }
+          if (status !== 200) {
+            try { await r?.body?.cancel?.(); } catch { /* corpo já fechado */ }
+            if (status === 401) return falhaConfirmar('token_recusado');
+            if (status === 503) return falhaConfirmar('desligada');
+            if (status === 404) return falhaConfirmar('nao_encontrado');
+            if (status >= 500 || status === 0) return falhaConfirmar('fora_do_ar');
+            return falhaConfirmar('resposta_inesperada');
+          }
+          const { json, recusado } = await lerCorpoLimitado(r, MAX_CORPO_CONFIRMAR);
+          if (recusado || !json) return falhaConfirmar('resposta_inesperada');
+          return lerConfirmacao(json);
         }
-        const { json, recusado } = await lerCorpoLimitado(r, MAX_CORPO_CONFIRMAR);
-        if (recusado || !json) return falhaConfirmar('resposta_inesperada');
-        return lerConfirmacao(json);
       });
     } catch {
       return falhaConfirmar('resposta_inesperada');
