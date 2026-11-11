@@ -897,3 +897,527 @@ test('foco 7: lerPrecoEm no buraco do horário de verão (a hora que não existe
   assert.equal(typeof lerPrecoEm('2026-03-08T03:30:00'), 'number');
   assert.equal(typeof lerPrecoEm('2026-11-01T01:30:00'), 'number', 'a hora repetida do fim do horário de verão tem um instante');
 });
+
+// =============================================================================== RODADA 2: freio da releitura (R1), Q1, S1, S2, R4, Q2
+//
+// Etiqueta falso que imita o `FreioReleitura` de servidor.py (etiqueta-wt-e1): uma leitura por vez, 3 s entre o início de duas,
+// 60 por hora, 15 min de pausa depois de `bloqueado` e recusa enquanto uma rodada da Amazon corre. Fala o contrato v1 por fetch
+// (cliente REAL createCatalogo) e usa o `Date` simulado como relógio; a espera do cliente (`esperar`) avança esse relógio, então
+// nenhum teste dorme de verdade.
+
+/**
+ * `estado.itens`: ASIN → { titulo, preco, precoEm (ms), categoria?, leitura? }. `leitura`: 'ok' (padrão), 'preco_subiu', 'sem_preco',
+ * 'outro_produto', 'bloqueado', 'falha_rede' ou função (asin) → corpo JSON do 200. `estado.forcar(asin, n)` → null ou um 429 à força
+ * { motivo, segundos?, corpo?, cabecalhos? } (corpo: texto cru, ou null para vazio). `estado.captcha`: toda leitura dá `bloqueado`.
+ * `estado.rodadaLivre = false`: uma rodada da Amazon segura a trava. Registros: leituras (as que passaram), recusas (motivos), posts
+ * (todo POST recebido), esperas (ms que o cliente esperou), maxEmCurso.
+ */
+function etiquetaComFreio(estado) {
+  const freio = { ocupado: false, inicios: [], pausaAte: null };
+  Object.assign(estado, { leituras: [], recusas: [], posts: 0, esperas: [], emCurso: 0, maxEmCurso: 0, porAsin: new Map() });
+  const seg = (ms) => Math.max(1, Math.ceil(ms / 1000));
+  const json = (status, corpo, cab = {}) => new Response(JSON.stringify(corpo), { status, headers: { 'content-type': 'application/json; charset=utf-8', ...cab } });
+  const reservar = () => {
+    const agora = Date.now();
+    if (freio.ocupado) return ['ocupado', 3];
+    if (freio.pausaAte != null && agora < freio.pausaAte) return ['pausa', seg(freio.pausaAte - agora)];
+    while (freio.inicios.length && freio.inicios[0] <= agora - HORA) freio.inicios.shift();
+    const ultimo = freio.inicios.at(-1);
+    if (ultimo != null && agora - ultimo < 3000) return ['intervalo', seg(ultimo + 3000 - agora)];
+    if (freio.inicios.length >= 60) return ['teto', seg(freio.inicios[0] + HORA - agora)];
+    if (estado.rodadaLivre === false) return ['rodada', 60];
+    freio.ocupado = true; freio.inicios.push(agora);
+    return null;
+  };
+  const recusa = (motivo, segundos) => {
+    estado.recusas.push(motivo);
+    return json(429, { versao: 1, resultado: 'freio', motivo, tentar_em_s: segundos }, { 'Retry-After': String(segundos) });
+  };
+  estado.preencherFreio = (n, antesMs = 1800000) => { for (let i = 0; i < n; i++) freio.inicios.push(Date.now() - antesMs + i); };
+  return async (url, init = {}) => {
+    const u = new URL(String(url));
+    const h = Object.fromEntries(Object.entries(init.headers ?? {}).map(([k, v]) => [k.toLowerCase(), v]));
+    if (h.authorization !== `Bearer ${TOKEN_FALSO}`) return json(401, { error: 'token ausente ou inválido' });
+    if ((init.method ?? 'GET') === 'GET' && u.pathname === '/api/v1/ofertas') {
+      const maxH = Number(u.searchParams.get('preco_max_horas') ?? 48);
+      const cats = u.searchParams.getAll('cat');
+      const ofertas = Object.entries(estado.itens)
+        .filter(([, i]) => Date.now() - i.precoEm <= maxH * HORA && (!cats.length || cats.includes(i.categoria ?? 'Casa')))
+        .map(([asin, i], n) => ({ id: n + 1, loja: 'amazon', item_id: asin, titulo: i.titulo, preco: i.preco, preco_antigo: i.preco + 50, desconto_pct: 33,
+          preco_em: precoEmTexto(i.precoEm), categoria: i.categoria ?? 'Casa', link: `https://www.amazon.com.br/dp/${asin}?tag=terceiro-20`, imagem: '', criado_em: '2026-11-01T10:00:00', atualizado_em: '2026-11-01T10:00:00' }));
+      return json(200, { versao: 1, ofertas, proximo: null, total: ofertas.length });
+    }
+    const m = /^\/api\/v1\/amazon\/([A-Z0-9]{10})\/confirmar-preco$/.exec(u.pathname);
+    if (init.method !== 'POST' || !m) return json(404, { error: 'rota não encontrada' });
+    const asin = m[1];
+    estado.posts++;
+    const n = (estado.porAsin.get(asin) ?? 0) + 1; estado.porAsin.set(asin, n);
+    const item = estado.itens[asin];
+    if (!item) return json(404, { error: 'oferta da Amazon não encontrada' });
+    const forcado = estado.forcar?.(asin, n);
+    if (forcado) {
+      estado.recusas.push(forcado.motivo);
+      if (forcado.corpo === undefined) return recusa(forcado.motivo, forcado.segundos ?? 3);
+      return new Response(forcado.corpo, { status: 429, headers: forcado.cabecalhos ?? {} });
+    }
+    const negado = reservar();
+    if (negado) return recusa(...negado);
+    estado.emCurso++; estado.maxEmCurso = Math.max(estado.maxEmCurso, estado.emCurso);
+    await new Promise((ok) => { setImmediate(ok); }); // a leitura "demora": quem não está na fila esbarraria em `ocupado`
+    let resultado = 'confirmado';
+    try {
+      const modo = estado.captcha ? 'bloqueado' : (item.leitura ?? 'ok');
+      estado.leituras.push(asin);
+      if (typeof modo === 'function') { const corpo = modo(asin); resultado = corpo.resultado; return json(200, corpo); }
+      if (['sem_preco', 'outro_produto', 'bloqueado', 'falha_rede'].includes(modo)) { resultado = modo; return json(200, { versao: 1, resultado: modo }); }
+      const preco = modo === 'preco_subiu' ? Math.round(item.preco * 1.3 * 100) / 100 : item.preco;
+      item.precoEm = Date.now();
+      return json(200, { versao: 1, resultado: 'confirmado', preco, preco_antigo: preco + 50, desconto_pct: 33, preco_em: precoEmTexto(item.precoEm) });
+    } finally {
+      estado.emCurso--;
+      freio.ocupado = false;
+      if (resultado === 'bloqueado') freio.pausaAte = Date.now() + 15 * MIN;
+    }
+  };
+}
+
+/** Como montarIntegrado, com o Etiqueta que tem freio e a espera do cliente ligada ao relógio simulado. */
+function montarFreio(t, { agora = dia(2, 14), itens, extra = {} } = {}) {
+  t.mock.timers.reset();
+  t.mock.timers.enable({ apis: ['Date'], now: agora });
+  const dir = tmp(); const db = openDb(dir);
+  const tokenPath = path.join(dir, 'api_token.txt');
+  fs.writeFileSync(tokenPath, `${TOKEN_FALSO}\n`, { mode: 0o600 });
+  const estado = { itens, ...extra };
+  const fetchFalso = etiquetaComFreio(estado);
+  const esperar = async (ms) => { estado.esperas.push(ms); if (estado.esperaAvanca !== false) t.mock.timers.setTime(Date.now() + ms); };
+  const wa = createWhatsApp({ db, dir, dryRun: true }); wa.connect();
+  const links = createLinkService({ getMode: () => 'fake' });
+  const amazon = createAmazon({ db, fetch: async () => { throw new Error('rede proibida (Amazon)'); }, esperar: async () => {}, lerConexao: () => ({ tag: 'achadinho-20' }) });
+  const catalogo = createCatalogo({ db, fetch: fetchFalso, lerConexao: () => ({ endereco: 'http://127.0.0.1:8765', caminho_token: tokenPath }), esperar });
+  const catalogoItens = createCatalogoItens({ db, wa, links, amazon });
+  const verificador = createVerificador({ db, amazon, catalogo });
+  const scheduler = createScheduler({ db, wa, links, fast: true, amazon, verificador, catalogo, catalogoItens });
+  db.prepare('INSERT INTO groups (jid, name, size, updated_at) VALUES (?,?,?,?)').run('111@g.us', 'Achadinhos', 10, Date.now());
+  db.prepare('INSERT INTO tags (name, created_at) VALUES (?,?)').run('etiquetaA', Date.now());
+  const logs = (id) => db.prepare('SELECT level, offer_title, message FROM log WHERE rule_id = ? ORDER BY id').all(id).map((l) => ({ ...l }));
+  const avancar = (ms) => t.mock.timers.setTime(Date.now() + ms);
+  return { db, wa, scheduler, estado, logs, avancar, verificador, catalogo, dir };
+}
+const regraAmazonCat = (db, { per = 2, categorias = [], nome = 'Amazon', intervalo = 60 } = {}) => Number(db.prepare(`INSERT INTO rules (name, enabled, tag_id, template_id,
+  group_jids, source_type, source_config, sources, per_run, interval_min, window_start, window_end, dedupe_days, send_image, created_at)
+  VALUES (?, 1, 1, 1, ?, 'list', '{}', ?, ?, ?, '00:00', '23:59', 7, 0, ?)`)
+  .run(nome, JSON.stringify(['111@g.us']), JSON.stringify([{ type: 'catalogo', tag_id: null, config: { ordem: 'relevancia', lojas: ['amazon'], ...(categorias.length ? { categorias } : {}) } }]), per, intervalo, Date.now()).lastInsertRowid);
+const itensVelhos = (indices, { precoEm = dia(1, 20), leitura = {}, categoria = 'Casa', preco = 100 } = {}) =>
+  Object.fromEntries(indices.map((i) => [asinDe(i), { titulo: unico(i), preco, precoEm, categoria, leitura: leitura[i] ?? 'ok' }]));
+const textosEnviados = (s) => s.wa.simulated.map((m) => m.text.split('\n')[0].replace(/^\*|\*$/g, ''));
+const mensagens = (s, id) => s.logs(id).map((l) => l.message);
+
+// ------------------------------------------------------------------------------------------------------------ R1
+
+test('R1: várias Amazon de preço velho, três caem (preço subiu, indisponível) — as outras relidas, uma depois da outra, preenchem as vagas', async (t) => {
+  const lista = itensVelhos([1, 2, 3, 4, 5, 6], { leitura: { 1: 'preco_subiu', 2: 'preco_subiu', 3: 'sem_preco' } });
+  const s = montarFreio(t, { itens: lista });
+  const id = regraAmazonCat(s.db, { per: 3 });
+  const r = await s.scheduler.runRule(id);
+  assert.deepEqual([r.offers, r.descartadas, r.puladas, r.revisao], [3, 3, 0, 0], mensagens(s, id).join(' | '));
+  assert.deepEqual(textosEnviados(s).sort(), [unico(4), unico(5), unico(6)].sort());
+  assert.deepEqual(s.estado.leituras, [1, 2, 3, 4, 5, 6].map(asinDe), 'seis leituras de verdade, na ordem');
+  assert.ok(s.estado.recusas.length >= 5 && s.estado.recusas.every((m) => m === 'intervalo'), `o freio de 3 s recusou e o cliente esperou: ${s.estado.recusas}`);
+  assert.ok(s.estado.esperas.every((ms) => ms >= 1000 && ms <= 3000), `esperas: ${s.estado.esperas}`);
+  assert.equal(s.estado.maxEmCurso, 1, 'nunca duas leituras ao mesmo tempo');
+  assert.deepEqual(enviadas(s.db, id).sort(), [4, 5, 6].map((i) => 'ASIN:' + asinDe(i)).sort());
+  assert.equal(s.db.prepare("SELECT COUNT(*) AS n FROM catalogo_itens WHERE status = 'revisao'").get().n, 0);
+  assert.ok(mensagens(s, id).some((m) => /Descartada: preço subiu/.test(m)) && mensagens(s, id).some((m) => /Descartada: indisponível/i.test(m)), mensagens(s, id).join(' | '));
+});
+
+test('R1: sem esperar o freio (esperar não avança o relógio) as leituras seguintes seriam recusadas — o teste só passa porque o cliente espera de verdade', async (t) => {
+  const lista = itensVelhos([1, 2, 3]);
+  const s = montarFreio(t, { itens: lista, extra: { esperaAvanca: false } });
+  const id = regraAmazonCat(s.db, { per: 3 });
+  const r = await s.scheduler.runRule(id);
+  // controle do harness: a 1ª lê; a 2ª e a 3ª esbarram no `intervalo` (3 s) mesmo depois de duas esperas que não passaram o tempo
+  assert.equal(s.estado.leituras.length, 1);
+  assert.equal(r.offers, 1);
+  assert.ok(s.estado.esperas.length >= 2);
+});
+
+test('R1: duas regras no mesmo tick (laço real do agendador) — as duas preenchem as vagas pela mesma fila, sem `ocupado`', async (t) => {
+  const lista = { ...itensVelhos([1, 2, 3], { categoria: 'A', leitura: { 1: 'sem_preco' } }), ...itensVelhos([4, 5, 6], { categoria: 'B', leitura: { 4: 'preco_subiu' } }) };
+  const s = montarFreio(t, { itens: lista });
+  const a = regraAmazonCat(s.db, { per: 2, categorias: ['A'], nome: 'A' });
+  const b = regraAmazonCat(s.db, { per: 2, categorias: ['B'], nome: 'B' });
+  await s.scheduler.tick();
+  assert.deepEqual(enviadas(s.db, a).sort(), [2, 3].map((i) => 'ASIN:' + asinDe(i)), mensagens(s, a).join(' | '));
+  assert.deepEqual(enviadas(s.db, b).sort(), [5, 6].map((i) => 'ASIN:' + asinDe(i)), mensagens(s, b).join(' | '));
+  assert.ok(!s.estado.recusas.includes('ocupado'), `recusas: ${s.estado.recusas}`);
+  assert.equal(s.estado.maxEmCurso, 1);
+});
+
+test('R1: duas regras ao mesmo tempo (runRule em paralelo) — a fila única serializa as leituras e as duas saem completas', async (t) => {
+  const lista = { ...itensVelhos([1, 2, 3], { categoria: 'A', leitura: { 1: 'sem_preco' } }), ...itensVelhos([4, 5, 6], { categoria: 'B', leitura: { 4: 'preco_subiu' } }) };
+  const s = montarFreio(t, { itens: lista });
+  const a = regraAmazonCat(s.db, { per: 2, categorias: ['A'], nome: 'A' });
+  const b = regraAmazonCat(s.db, { per: 2, categorias: ['B'], nome: 'B' });
+  const [ra, rb] = await Promise.all([s.scheduler.runRule(a), s.scheduler.runRule(b)]);
+  assert.deepEqual([ra.offers, rb.offers], [2, 2]);
+  assert.ok(!s.estado.recusas.includes('ocupado'), `recusas: ${s.estado.recusas}`);
+  assert.equal(s.estado.maxEmCurso, 1);
+});
+
+test('R1: 429 `intervalo` com espera curta e depois 200 — uma espera de `tentar_em_s` e a oferta sai (sem pausar a releitura)', async (t) => {
+  const s = montarFreio(t, { itens: itensVelhos([1, 2]), extra: { forcar: (asin, n) => (n === 1 ? { motivo: 'intervalo', segundos: 2 } : null) } });
+  const id = regraAmazonCat(s.db, { per: 2 });
+  const r = await s.scheduler.runRule(id);
+  assert.equal(r.offers, 2);
+  assert.ok(s.estado.esperas.includes(2000), `esperas: ${s.estado.esperas}`);
+});
+
+// 429 que PAUSA a releitura: `corpo` (texto cru, ou undefined → o padrão do Etiqueta com `segundos`), cabecalhos, e quanto a pausa deve durar.
+const MIN10 = 10 * MIN;
+const casosDePausa = [
+  ['teto com tentar_em_s 120', { motivo: 'teto', segundos: 120 }, 120000],
+  ['pausa com tentar_em_s 900', { motivo: 'pausa', segundos: 900 }, 900000],
+  ['rodada com tentar_em_s 60', { motivo: 'rodada', segundos: 60 }, 60000],
+  ['teto com tentar_em_s enorme (1e9) → no máximo 1 h', { motivo: 'teto', segundos: 1e9 }, HORA],
+  ['teto com tentar_em_s 1e20 (não é inteiro seguro) → 10 min', { motivo: 'teto', corpo: '{"versao":1,"resultado":"freio","motivo":"teto","tentar_em_s":1e20}' }, MIN10],
+  ['teto com tentar_em_s 0 → 10 min', { motivo: 'teto', segundos: 0 }, MIN10],
+  ['teto com tentar_em_s negativo → 10 min', { motivo: 'teto', segundos: -30 }, MIN10],
+  ['teto com tentar_em_s fracionário → 10 min', { motivo: 'teto', corpo: '{"versao":1,"resultado":"freio","motivo":"teto","tentar_em_s":2.5}' }, MIN10],
+  ['teto com tentar_em_s em texto → 10 min', { motivo: 'teto', corpo: '{"versao":1,"resultado":"freio","motivo":"teto","tentar_em_s":"120"}' }, MIN10],
+  ['teto com tentar_em_s ausente → 10 min', { motivo: 'teto', corpo: '{"versao":1,"resultado":"freio","motivo":"teto"}' }, MIN10],
+  ['teto sem o corpo, só Retry-After 90', { motivo: 'teto', corpo: null, cabecalhos: { 'Retry-After': '90' } }, 90000],
+  ['teto com tentar_em_s inválido e Retry-After 45 → usa o cabeçalho', { motivo: 'teto', corpo: '{"versao":1,"resultado":"freio","motivo":"teto","tentar_em_s":-1}', cabecalhos: { 'Retry-After': '45' } }, 45000],
+  ['429 sem corpo e sem cabeçalho → 10 min', { motivo: 'desconhecido', corpo: null }, MIN10],
+  ['429 com HTML → 10 min', { motivo: 'desconhecido', corpo: '<html><body>Too Many Requests</body></html>' }, MIN10],
+  ['429 com JSON de outra versão → 10 min', { motivo: 'desconhecido', corpo: '{"versao":2,"resultado":"freio","motivo":"teto","tentar_em_s":30}' }, MIN10],
+  ['429 com lista no corpo → 10 min', { motivo: 'desconhecido', corpo: '[1,2,3]' }, MIN10],
+  ['429 com null no corpo → 10 min', { motivo: 'desconhecido', corpo: 'null' }, MIN10],
+  ['429 com motivo desconhecido e tentar_em_s 30 → pausa pelo tentar_em_s', { motivo: 'desconhecido', corpo: '{"versao":1,"resultado":"freio","motivo":"inventado","tentar_em_s":30}' }, 30000],
+  ['429 com corpo de 10 KiB → 10 min', { motivo: 'desconhecido', corpo: `{"versao":1,"resultado":"freio","motivo":"teto","tentar_em_s":30,"x":"${'a'.repeat(10240)}"}` }, MIN10],
+  ['intervalo com tentar_em_s 100 (não é espera curta) → 10 min? não: intervalo não pausa', null, 0],
+];
+for (const [nome, freioForcado, pausaMs] of casosDePausa) {
+  if (!freioForcado) continue;
+  test(`R1: ${nome} — pula sem revisão e a releitura só volta depois da pausa`, async (t) => {
+    const s = montarFreio(t, { itens: itensVelhos([1]), extra: { forcar: (asin, n) => (n === 1 ? freioForcado : null) } });
+    const id = regraAmazonCat(s.db, { per: 1 });
+    const r = await s.scheduler.runRule(id);
+    assert.deepEqual([r.offers, r.puladas, r.revisao], [0, 1, 0], mensagens(s, id).join(' | '));
+    assert.deepEqual(enviadas(s.db, id), []);
+    assert.deepEqual(itens(s.db, id), []);
+    assert.deepEqual(s.estado.esperas, [], 'motivo que pausa não espera dentro da fila');
+    assert.equal(s.estado.posts, 1);
+    s.avancar(pausaMs - 1000);
+    await s.scheduler.runRule(id);
+    assert.equal(s.estado.posts, 1, `1 s antes do fim da pausa (${pausaMs / 1000} s) o Etiqueta ainda não é perguntado`);
+    s.avancar(2000);
+    const r3 = await s.scheduler.runRule(id);
+    assert.equal(s.estado.posts, 2, '1 s depois do fim da pausa a releitura volta');
+    assert.equal(r3.offers, 1, 'e a oferta sai (o Etiqueta já deixa ler)');
+  });
+}
+
+test('R1: 429 `intervalo` ou `ocupado` com espera longa (tentar_em_s 100) ou sem o campo — não espera, não pausa a releitura; a oferta é pulada sem 6 h de pausa', async (t) => {
+  for (const corpo of [{ motivo: 'intervalo', segundos: 100 }, { motivo: 'intervalo', corpo: '{"versao":1,"resultado":"freio","motivo":"intervalo"}' }, { motivo: 'ocupado', segundos: 0 }]) {
+    const s = montarFreio(t, { itens: itensVelhos([1, 2]), extra: { forcar: (asin, n) => (asin === asinDe(1) && n === 1 ? corpo : null) } });
+    const id = regraAmazonCat(s.db, { per: 1 });
+    const r = await s.scheduler.runRule(id);
+    assert.deepEqual(s.estado.esperas, [], JSON.stringify(corpo));
+    assert.equal(r.offers, 1, `${JSON.stringify(corpo)}: a vaga vai à 2ª, que é lida na mesma execução (sem pausa da releitura)`);
+    assert.deepEqual(enviadas(s.db, id), ['ASIN:' + asinDe(2)]);
+    // a 1ª não ficou 6 h fora: na execução seguinte ela volta a ser escolhida
+    s.avancar(HORA);
+    await s.scheduler.runRule(id);
+    assert.ok(s.estado.porAsin.get(asinDe(1)) >= 2, `${JSON.stringify(corpo)}: a oferta que esbarrou no freio curto volta na execução seguinte`);
+  }
+});
+
+test('R1: `ocupado` que não acaba — cada oferta escolhida custa 2 esperas de 3 s e vira "Pulada"; a execução é limitada pelo teto de escolhidas e nada vai à revisão', async (t) => {
+  const s = montarFreio(t, { itens: itensVelhos([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]), extra: { forcar: () => ({ motivo: 'ocupado', segundos: 3 }) } });
+  const id = regraAmazonCat(s.db, { per: 2 });
+  const antes = s.logs(id).length;
+  const r = await s.scheduler.runRule(id);
+  const tentadas = r.puladas;
+  assert.equal(r.offers, 0);
+  assert.equal(tentadas, 8, 'no máximo 4× as vagas (2 × (1 + 3))');
+  assert.equal(s.estado.posts, tentadas * 3, 'três pedidos por oferta (1 + 2 novas tentativas)');
+  assert.equal(s.estado.esperas.length, tentadas * 2);
+  assert.ok(s.estado.esperas.every((ms) => ms === 3000));
+  const esperaTotalS = s.estado.esperas.reduce((a, b) => a + b, 0) / 1000;
+  assert.equal(esperaTotalS, 48, 'pior caso desta regra: 48 s presos esperando, sem contar a leitura');
+  assert.deepEqual(enviadas(s.db, id), []);
+  assert.deepEqual(itens(s.db, id), []);
+  const linhas = s.logs(id).slice(antes);
+  assert.ok(linhas.length <= 10, `linhas gravadas: ${linhas.length}`);
+  assert.ok(linhas.filter((l) => l.message.startsWith('Pulada')).length === 8);
+  assert.ok(linhas.every((l) => /Etiqueta estava ocupado/.test(l.message) || !l.message.startsWith('Pulada')), linhas.map((l) => l.message).join(' | '));
+  // não pausou a releitura: a execução seguinte tenta de novo (e de novo gasta o mesmo)
+  s.avancar(HORA);
+  const postsAntes = s.estado.posts;
+  await s.scheduler.runRule(id);
+  assert.ok(s.estado.posts > postsAntes);
+});
+
+test('R1: teto por hora do Etiqueta (60 leituras) — a Amazon de preço velho espera pelo `tentar_em_s`, a de preço visto há 2 h sai pela reserva, e a releitura volta quando o Etiqueta deixa', async (t) => {
+  const lista = { ...itensVelhos([1]), ...itensVelhos([2], { precoEm: dia(2, 12) }) }; // 1: 18 h; 2: 2 h
+  const s = montarFreio(t, { itens: lista });
+  s.estado.preencherFreio(60, 1800000); // 60 leituras iniciadas entre 30 min atrás: a próxima só em 30 min
+  const id = regraAmazonCat(s.db, { per: 1 });
+  const r = await s.scheduler.runRule(id);
+  assert.deepEqual(s.estado.recusas, ['teto']);
+  assert.equal(r.offers, 1, mensagens(s, id).join(' | '));
+  assert.deepEqual(enviadas(s.db, id), ['ASIN:' + asinDe(2)], 'a da reserva');
+  assert.match(s.wa.simulated[0].text, /Cadeira Gamer/);
+  s.avancar(29 * MIN);
+  await s.scheduler.runRule(id);
+  assert.equal(s.estado.posts, 1, 'dentro dos 30 min do tentar_em_s: sem novo pedido');
+  s.avancar(2 * MIN);
+  const r2 = await s.scheduler.runRule(id);
+  assert.equal(r2.offers, 1, 'passados os 30 min a velha é relida e sai');
+  assert.deepEqual(s.estado.leituras, [asinDe(1)]);
+});
+
+test('R1: rodada da Amazon no ar (429 `rodada`, 60 s) — pausa curta; a releitura volta sozinha 1 min depois', async (t) => {
+  const s = montarFreio(t, { itens: itensVelhos([1, 2]), extra: { rodadaLivre: false } });
+  const id = regraAmazonCat(s.db, { per: 1 });
+  const r = await s.scheduler.runRule(id);
+  assert.deepEqual(s.estado.recusas, ['rodada']);
+  assert.equal(r.offers, 0);
+  assert.deepEqual(enviadas(s.db, id), []);
+  s.estado.rodadaLivre = true;
+  s.avancar(61 * 1000);
+  const r2 = await s.scheduler.runRule(id);
+  assert.equal(r2.offers, 1);
+});
+
+// --------------------------------------------------------------------------------------- Q1/R2: bloqueio de verdade (captcha geral)
+
+test('Q1/R2: captcha geral da Amazon por 8 execuções espaçadas — uma oferta por execução vai à pausa de 6 h, nada vai à revisão nem sai, e a regra volta a enviar quando o bloqueio acaba', async (t) => {
+  const lista = itensVelhos(Array.from({ length: 16 }, (_, i) => i + 1));
+  const s = montarFreio(t, { itens: lista, extra: { captcha: true } });
+  const id = regraAmazonCat(s.db, { per: 2 });
+  const foraPorExecucao = []; const leiturasPorExecucao = [];
+  for (let i = 0; i < 8; i++) {
+    const antes = s.logs(id).length; const lidasAntes = s.estado.leituras.length;
+    const r = await s.scheduler.runRule(id);
+    assert.equal(r.offers, 0);
+    foraPorExecucao.push(s.logs(id).slice(antes).filter((l) => /Fica 6 h fora da escolha desta regra\.$/.test(l.message)).length);
+    leiturasPorExecucao.push(s.estado.leituras.length - lidasAntes);
+    s.avancar(HORA);
+  }
+  assert.deepEqual(foraPorExecucao, Array(8).fill(1), 'exatamente 1 oferta por execução vai à pausa de 6 h (a que a Amazon bloqueou agora)');
+  assert.deepEqual(leiturasPorExecucao, Array(8).fill(1), 'e o Etiqueta é perguntado uma vez só por execução (não martela a Amazon)');
+  assert.deepEqual(enviadas(s.db, id), []);
+  assert.deepEqual(itens(s.db, id).length ? itens(s.db, id) : [], [], 'nada na revisão nem em catalogo_itens');
+  assert.equal(s.logs(id).filter((l) => l.level === 'erro').length, 0);
+  // o bloqueio acaba: a próxima execução já envia (as 1 a 2 estão em pausa, as demais não)
+  s.estado.captcha = false;
+  const r = await s.scheduler.runRule(id);
+  assert.equal(r.offers, 2, mensagens(s, id).slice(-4).join(' | '));
+  assert.equal(enviadas(s.db, id).length, 2);
+});
+
+test('Q1/R2: captcha geral com execuções a cada 12 min — o freio de 15 min do Etiqueta recusa (429 pausa) sem virar pausa de 6 h; a pausa de 6 h só vem da leitura que a Amazon bloqueou de fato', async (t) => {
+  const lista = itensVelhos([1, 2, 3, 4]);
+  const s = montarFreio(t, { itens: lista, extra: { captcha: true } });
+  const id = regraAmazonCat(s.db, { per: 2 });
+  const postsPorExecucao = [];
+  for (let i = 0; i < 4; i++) { const antes = s.estado.posts; await s.scheduler.runRule(id); postsPorExecucao.push(s.estado.posts - antes); s.avancar(12 * MIN); }
+  assert.ok(postsPorExecucao.every((n) => n <= 1), `no máximo 1 pedido ao Etiqueta por execução: ${postsPorExecucao}`);
+  assert.deepEqual(s.estado.leituras, [1, 2].map(asinDe), 'leituras de verdade: às 0 min e às 24 min (a de 12 min bateu na pausa do Etiqueta)');
+  assert.ok(s.estado.recusas.includes('pausa'));
+  assert.deepEqual(enviadas(s.db, id), []);
+  assert.equal(s.logs(id).filter((l) => /Fica 6 h fora/.test(l.message)).length, 2, 'só as duas leituras bloqueadas de verdade foram para a pausa de 6 h');
+  s.avancar(7 * HORA); // as pausas de 6 h acabaram e o captcha também
+  s.estado.captcha = false;
+  const r = await s.scheduler.runRule(id);
+  assert.equal(r.offers, 2);
+});
+
+test('Q1/R2: a veneno com a reserva válida (preço visto há 2 h) sai pela reserva e NÃO vai à pausa de 6 h — `releu` só vale quando a oferta não sai', async (t) => {
+  const lista = { ...itensVelhos([1], { precoEm: dia(2, 12), leitura: { 1: 'bloqueado' } }), ...itensVelhos([2, 3]) };
+  const s = montarFreio(t, { itens: lista });
+  const id = regraAmazonCat(s.db, { per: 1 });
+  const r = await s.scheduler.runRule(id);
+  assert.equal(r.offers, 1);
+  assert.deepEqual(enviadas(s.db, id), ['ASIN:' + asinDe(1)]);
+  assert.ok(!mensagens(s, id).some((m) => /Fica 6 h fora/.test(m)), mensagens(s, id).join(' | '));
+});
+
+test('Q1/R2: `falha_rede` da página (Etiqueta não alcançou a Amazon) também tira a oferta da escolha por 6 h; `fora_do_ar` do Etiqueta não', async (t) => {
+  const s = montarFreio(t, { itens: itensVelhos([1, 2], { leitura: { 1: 'falha_rede' } }) });
+  const id = regraAmazonCat(s.db, { per: 1 });
+  await s.scheduler.runRule(id);
+  assert.ok(mensagens(s, id).some((m) => /Fica 6 h fora da escolha desta regra\.$/.test(m)), mensagens(s, id).join(' | '));
+  const s2 = montarFreio(t, { itens: itensVelhos([1, 2]) });
+  s2.estado.itens[asinDe(1)].leitura = () => { throw new TypeError('fetch'); };
+  s2.estado.captcha = false;
+  const id2 = regraAmazonCat(s2.db, { per: 1 });
+  const ant = s2.estado.itens;
+  void ant;
+  await s2.scheduler.runRule(id2); // a leitura em função lança dentro do fetch falso → o cliente vê fora_do_ar
+  assert.ok(!mensagens(s2, id2).some((m) => /Fica 6 h fora/.test(m)), mensagens(s2, id2).join(' | '));
+});
+
+// ------------------------------------------------------------------------------------------------------------ S2: preco_em
+
+const confirmadoComPrecoEm = (ms, preco = 90) => (asin) => ({ versao: 1, resultado: 'confirmado', preco, preco_antigo: preco + 50, desconto_pct: 35, preco_em: precoEmTexto(ms) });
+const PRAZO = 20000;
+const casosPrecoEm = [
+  ['agora', () => Date.now(), true],
+  ['no limite de baixo (prazo + 1 min)', () => Date.now() - (PRAZO + 60000), true],
+  ['1 s além do limite de baixo', () => Date.now() - (PRAZO + 61000), false],
+  ['3 dias atrás', () => Date.now() - 72 * HORA, false],
+  ['no limite de cima (+5 min)', () => Date.now() + 5 * MIN, true],
+  ['1 s além do limite de cima', () => Date.now() + 5 * MIN + 1000, false],
+  ['1 hora no futuro', () => Date.now() + HORA, false],
+];
+for (const [nome, quando, vale] of casosPrecoEm) {
+  test(`S2: confirmado com preco_em ${nome} — ${vale ? 'vale e sai com o preço lido' : 'é resposta inesperada: pula (sem revisão) quando o preço da lista é velho'}`, async (t) => {
+    const lista = itensVelhos([1], { leitura: { 1: (asin) => confirmadoComPrecoEm(quando())(asin) } });
+    const s = montarFreio(t, { itens: lista });
+    const id = regraAmazonCat(s.db, { per: 1 });
+    const r = await s.scheduler.runRule(id);
+    if (vale) {
+      assert.equal(r.offers, 1, mensagens(s, id).join(' | '));
+      assert.match(s.wa.simulated[0].text, /90,00/, 'sai com o preço lido, não com o da lista (100)');
+    } else {
+      assert.deepEqual([r.offers, r.puladas, r.revisao], [0, 1, 0], mensagens(s, id).join(' | '));
+      assert.deepEqual(enviadas(s.db, id), []);
+      assert.deepEqual(itens(s.db, id), []);
+    }
+  });
+}
+
+test('S2: confirmado com preco_em fora da janela + preço da lista visto há 2 h — sai pela reserva com a hora da LISTA, nunca a do carimbo inventado', async (t) => {
+  const lista = itensVelhos([1], { precoEm: dia(2, 12), leitura: { 1: confirmadoComPrecoEm(dia(2, 14) + HORA) } });
+  const s = montarFreio(t, { itens: lista });
+  const id = regraAmazonCat(s.db, { per: 1 });
+  const r = await s.scheduler.runRule(id);
+  assert.equal(r.offers, 1);
+  assert.match(mensagens(s, id).find((m) => /não conferido agora/.test(m)) ?? '', /preço visto às 12:00, não conferido agora/);
+  assert.match(s.wa.simulated[0].text, /100,00/, 'sai com o preço da lista, não com o da resposta fora do contrato');
+});
+
+// ------------------------------------------------------------------------------------------------------------------- S1
+
+test('S1: Amazon relida com R$ 1,99 "de R$ 199" (parcela no lugar do preço) vai à revisão com preco_antigo e NÃO chega ao WhatsApp nem a sent_offers', async (t) => {
+  const s = montar(t, {
+    catalogo: [doEtiqueta(1, 'amazon', { precoEm: dia(1, 20) })],
+    releitura: { [asinDe(1)]: { resultado: 'confirmado', preco: 1.99, precoAntigo: 199, descontoPct: null, precoEm: dia(2, 14) } },
+  });
+  const id = regraCatalogo(s.db, { per: 1 });
+  const r = await s.scheduler.runRule(id);
+  assert.deepEqual([r.offers, r.revisao], [0, 1]);
+  assert.equal(s.wa.simulated.length, 0);
+  assert.deepEqual(enviadas(s.db, id), []);
+  const [item] = itens(s.db, id);
+  assert.deepEqual([item.status, JSON.parse(item.motivos)], ['revisao', ['preco_antigo']]);
+  const oferta = JSON.parse(s.db.prepare('SELECT oferta FROM catalogo_itens WHERE rule_id = ?').get(id).oferta);
+  assert.equal(oferta.price, 1.99, 'a revisão mostra o preço lido, que é o que o dono precisa ver');
+  assert.ok(s.logs(id).some((l) => /Separada para revisão/.test(l.message)));
+});
+
+test('S1: Amazon relida a R$ 0,001 (desconto de 100%) vai à revisão com desconto_100 e NÃO sai', async (t) => {
+  const s = montarFreio(t, { itens: itensVelhos([1]), extra: {} });
+  s.estado.itens[asinDe(1)].leitura = () => ({ versao: 1, resultado: 'confirmado', preco: 0.001, preco_antigo: 150, desconto_pct: null, preco_em: precoEmTexto(Date.now()) });
+  const id = regraAmazonCat(s.db, { per: 1 });
+  const r = await s.scheduler.runRule(id);
+  assert.deepEqual([r.offers, r.revisao], [0, 1], mensagens(s, id).join(' | '));
+  assert.equal(s.wa.simulated.length, 0);
+  assert.deepEqual(enviadas(s.db, id), []);
+  assert.ok(JSON.parse(itens(s.db, id)[0].motivos).includes('desconto_100'));
+});
+
+test('S1: a suspeita não derruba a vaga — a oferta suspeita vai à revisão e a vaga é reposta pela próxima candidata, que sai', async (t) => {
+  const s = montarFreio(t, { itens: itensVelhos([1, 2]), extra: {} });
+  s.estado.itens[asinDe(1)].leitura = () => ({ versao: 1, resultado: 'confirmado', preco: 1.99, preco_antigo: 199, desconto_pct: 99, preco_em: precoEmTexto(Date.now()) });
+  const id = regraAmazonCat(s.db, { per: 1 });
+  const r = await s.scheduler.runRule(id);
+  assert.deepEqual([r.offers, r.revisao], [1, 1]);
+  assert.deepEqual(enviadas(s.db, id), ['ASIN:' + asinDe(2)]);
+});
+
+test('S1: Mercado Livre conferido pela extensão com preço R$ 1,99 (a oferta tinha "de R$ 150") vai à revisão e não sai', async (t) => {
+  const s = montar(t, { catalogo: [doEtiqueta(1, 'ml')], loja: { 4000000001: { price: 1.99, disponivel: true } } });
+  const id = regraCatalogo(s.db, { per: 1 });
+  const r = await s.scheduler.runRule(id);
+  assert.deepEqual([r.offers, r.revisao], [0, 1], s.logs(id).map((l) => l.message).join(' | '));
+  assert.equal(s.wa.simulated.length, 0);
+  assert.deepEqual(enviadas(s.db, id), []);
+  assert.ok(JSON.parse(itens(s.db, id)[0].motivos).includes('preco_antigo'));
+});
+
+test('S1: Amazon com a API ligada (catálogo) que lê R$ 1,99 "de R$ 199" também vai à revisão — é o mesmo caminho do catálogo', async (t) => {
+  const s = montar(t, { catalogo: [doEtiqueta(1, 'amazon', { precoEm: dia(2, 13) })] });
+  const comApi = { ...s.amazon, configurado: () => true, lerItem: async () => ({ price: 1.99, disponivel: true, discountPct: 99, oldPrice: 199 }), montarLink: s.amazon.montarLink };
+  const verif = createVerificador({ db: s.db, amazon: comApi, catalogo: { confirmarPreco: async () => { throw new Error('não podia chamar'); } } });
+  const catalogoItens = createCatalogoItens({ db: s.db, wa: s.wa, links: s.links, amazon: comApi });
+  const fonte = { async candidatos(cfg, ctx) { return [doEtiqueta(1, 'amazon', { precoEm: dia(2, 13) })].map(paraCandidato).filter((c) => c && !ctx.tratada(c, cfg.ordem)); }, avancar() {} };
+  const sch = createScheduler({ db: s.db, wa: s.wa, links: s.links, fast: true, amazon: comApi, verificador: verif, catalogo: fonte, catalogoItens });
+  const id = regraCatalogo(s.db, { per: 1 });
+  const r = await sch.runRule(id);
+  assert.deepEqual([r.offers, r.revisao], [0, 1]);
+  assert.equal(s.wa.simulated.length, 0);
+  assert.deepEqual(enviadas(s.db, id), []);
+});
+
+test('S1: preço acima de 10 milhões na resposta do Etiqueta é resposta inesperada (pula) e 10 milhões exatos passam pelo cliente', async (t) => {
+  const s = montarFreio(t, { itens: itensVelhos([1]), extra: {} });
+  s.estado.itens[asinDe(1)].leitura = () => ({ versao: 1, resultado: 'confirmado', preco: 10_000_000.01, preco_antigo: null, desconto_pct: null, preco_em: precoEmTexto(Date.now()) });
+  const r1 = await s.catalogo.confirmarPreco(asinDe(1));
+  assert.deepEqual(r1, { resultado: 'falha', causa: 'resposta_inesperada' });
+  s.estado.itens[asinDe(1)].leitura = () => ({ versao: 1, resultado: 'confirmado', preco: 10_000_000, preco_antigo: null, desconto_pct: null, preco_em: precoEmTexto(Date.now()) });
+  s.avancar(10 * 1000);
+  const r2 = await s.catalogo.confirmarPreco(asinDe(1));
+  assert.equal(r2.resultado, 'confirmado');
+  assert.equal(r2.preco, 10_000_000);
+});
+
+// ------------------------------------------------------------------------------------------------------------------- R4
+
+test('R4: a frase da idade do preço ("tem mais de 6 h") só aparece com a releitura em uso; com a API da Amazon ligada só diz a causa', async (t) => {
+  // sem API (releitura em uso): idade na frase
+  const s = montarFreio(t, { itens: itensVelhos([1]), extra: { forcar: () => ({ motivo: 'pausa', segundos: 900 }) } });
+  const id = regraAmazonCat(s.db, { per: 1 });
+  await s.scheduler.runRule(id);
+  assert.ok(mensagens(s, id).some((m) => /^Pulada: o preço visto às \d\d:\d\d de \d\d\/\d\d tem mais de 6 h e não deu para conferir agora/.test(m)), mensagens(s, id).join(' | '));
+  // com a API ligada e a loja fora do ar
+  const s2 = montar(t, { catalogo: [doEtiqueta(1, 'amazon', { precoEm: dia(1, 20) })] });
+  const comApi = { ...s2.amazon, configurado: () => true, lerItem: async () => { throw new Error('API fora'); }, montarLink: s2.amazon.montarLink };
+  const verif = createVerificador({ db: s2.db, amazon: comApi, catalogo: { confirmarPreco: async () => { throw new Error('não podia chamar'); } } });
+  const fonte = { async candidatos(cfg, ctx) { return [doEtiqueta(1, 'amazon', { precoEm: dia(1, 20) })].map(paraCandidato).filter((c) => c && !ctx.tratada(c, cfg.ordem)); }, avancar() {} };
+  const sch = createScheduler({ db: s2.db, wa: s2.wa, links: s2.links, fast: true, amazon: comApi, verificador: verif, catalogo: fonte, catalogoItens: s2.catalogoItens });
+  const id2 = regraCatalogo(s2.db, { per: 1 });
+  await sch.runRule(id2);
+  const linhas = s2.logs(id2).map((l) => l.message).filter((m) => m.startsWith('Pulada'));
+  assert.equal(linhas.length, 1, s2.logs(id2).map((l) => l.message).join(' | '));
+  assert.ok(!/mais de 6 h|preço visto/.test(linhas[0]), linhas[0]);
+});
+
+// ------------------------------------------------------------------------------------------------------------------- Q2
+
+test('Q2: campo inválido (titulo_max, link_mode, limite) recusa com 400 e NÃO grava nenhum dos outros nem a linha do verificador', async (t) => {
+  const s = await subirServidor(); t.after(s.fechar);
+  const antes = () => ({ v: getSetting(s.db, 'verificador_ativo'), l: getSetting(s.db, 'verificador_limite_pct'), r: getSetting(s.db, 'retencao_dias'), t: getSetting(s.db, 'titulo_max'), m: getSetting(s.db, 'link_mode') });
+  const base = antes();
+  const invalidos = [{ titulo_max: 999 }, { titulo_max: -1 }, { titulo_max: 'abc' }, { link_mode: 'xx' }, { retencao_dias: -5 }, { retencao_dias: 'abc' }, { verificador_limite_pct: 'abc' }];
+  for (const ruim of invalidos) {
+    const r = await pedir(s.port, '/api/ajustes', { method: 'PUT', body: { verificador_ativo: false, verificador_limite_pct: ruim.verificador_limite_pct === undefined ? 12 : undefined, retencao_dias: ruim.retencao_dias === undefined ? 30 : undefined, titulo_max: ruim.titulo_max === undefined ? 50 : undefined, link_mode: ruim.link_mode === undefined ? 'direct' : undefined, ...ruim } });
+    assert.equal(r.status, 400, JSON.stringify(ruim));
+    assert.deepEqual(antes(), base, `estado intacto depois de ${JSON.stringify(ruim)}`);
+    assert.deepEqual(avisosDoVerificador(s.db), [], `sem linha no Histórico depois de ${JSON.stringify(ruim)}`);
+  }
+});
+
+test('Q2: pedido todo válido grava todos os campos e a linha do verificador (quem fez)', async (t) => {
+  const s = await subirServidor(); t.after(s.fechar);
+  const r = await pedir(s.port, '/api/ajustes', { method: 'PUT', body: { verificador_ativo: false, verificador_limite_pct: 12, retencao_dias: 30, titulo_max: 50, link_mode: 'direct' } });
+  assert.equal(r.status, 200, r.txt);
+  assert.equal(getSetting(s.db, 'verificador_ativo'), '0');
+  assert.equal(getSetting(s.db, 'retencao_dias'), '30');
+  assert.equal(getSetting(s.db, 'titulo_max'), '50');
+  assert.equal(getSetting(s.db, 'link_mode'), 'direct');
+  assert.deepEqual(avisosDoVerificador(s.db).length, 1);
+});
