@@ -135,7 +135,7 @@ O grupo 1 roda em paralelo (A1, B1, B2, B3, B4 e B7 não compartilham arquivo). 
    - merge da worktree e `python3 verificar.py` verde;
    - o dono roda `python3 backup_banco.py --motivo entrega1` e reinicia o `servidor.py`;
    - `python3 verificar.py --servidor` deve dar 0;
-   - o dono testa uma oferta: `curl -s -X POST -H "Authorization: Bearer $(cat api_token.txt)" http://127.0.0.1:8765/api/v1/amazon/<ASIN>/confirmar-preco`.
+   - o dono testa uma oferta: `curl -s -X POST -H @api_cabecalho.txt http://127.0.0.1:8765/api/v1/amazon/<ASIN>/confirmar-preco`.
 2. **Turbo:**
    - `npm test` verde na worktree;
    - o dono roda `npm run backup` (a migração apaga linhas);
