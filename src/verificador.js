@@ -20,7 +20,8 @@
 //   → { acao: 'enviar', conferido, precoNovo: número|null, sufixo: texto|null }
 //     | { acao: 'descartar', motivo: 'esgotado'|'preco_subiu'|'nao_conferido', texto, causa? (só no nao_conferido) }
 // - createVerificador({ db, ml, amazon, shopee, links = null, catalogo = null, simulado = false, agora = Date.now, tempoMaxMs = TEMPO_MAX_MS })
-//   → { ativo(), limitePct(), conferir(oferta, { lidoEm, referencia, releitura }), podeConferir(loja), semConfirmacaoAgora({ loja, precoEm }) }
+//   → { ativo(), limitePct(), conferir(oferta, { lidoEm, referencia, releitura }), podeConferir(loja), semConfirmacaoAgora({ loja, precoEm }),
+//   pausaDaLeituraMl() }
 //   - ativo(): `settings.verificador_ativo` diferente de '0' (ausente = ligado). limitePct(): inteiro de 0 a
 //     LIMITE_MAX_PCT de `settings.verificador_limite_pct`; ausente ou fora disso = LIMITE_PADRAO_PCT.
 //   - oferta = { loja: 'mercadolivre'|'amazon'|'shopee'|'magalu', url, asin, shopId, itemId, price, oldPrice,
@@ -52,7 +53,8 @@
 //       disso (ou sem `precoEm`): descartar 'nao_conferido' com a `causa`. A falha pausa a releitura por
 //       PAUSA_RELEITURA_MIN min neste verificador: nesse prazo as Amazon vão direto à reserva, sem chamar o Etiqueta.
 //       Exceção: `nao_encontrado` (a oferta saiu do Etiqueta) não tem reserva e não pausa. O freio do Etiqueta (429)
-//       segue o motivo (CAUSA_DO_FREIO): `intervalo`/`ocupado` não pausam; `teto`, `pausa`, `rodada` (e motivo
+//       segue o motivo (CAUSA_DO_FREIO): `intervalo`/`ocupado`, que sobram depois das novas tentativas do
+//       catálogo, pausam PAUSA_ETIQUETA_OCUPADO_S s (rodar sozinho, entrega 2); `teto`, `pausa`, `rodada` (e motivo
 //       desconhecido) pausam pelo `tentar_em_s` (sem ele, PAUSA_RELEITURA_MIN min; no máximo 1 h).
 //     - confirmado com `preco_em` fora de [agora − (prazo + 1 min), agora + 5 min] vale como resposta fora do contrato.
 //     - O descarte 'nao_conferido' deste caminho traz `pelaReleitura: true` e, quando o Etiqueta tentou ler a página
@@ -61,6 +63,9 @@
 //     Com a API da Amazon ligada, sem `releitura`, desligado ou simulado, a releitura nunca é chamada.
 //   - semConfirmacaoAgora({ loja, precoEm }): a oferta (Amazon, verificador ligado, sem API) hoje não teria como ser
 //     conferida nem sairia pela reserva: a releitura está pausada e o `precoEm` não vale (reservaValida).
+//   - pausaDaLeituraMl() (rodar sozinho, entrega 2, CA2.13): `links.produtoDisponivel()` (sem pedido) vira a causa
+//     ml_verificacao | limite_hora | extensao_antiga, ou null. Só com o verificador ligado, fora da simulação e com o ML
+//     pela extensão; 'desconectada' e qualquer outro valor dão null. O agendador usa para tirar o ML da escolha.
 //   - Desligado: enviar a oferta como veio, sem `vistoEm` e sem sufixo, sem ler a loja.
 //   - simulado (DRY_RUN): confirma sem rede (conferido, `vistoEm`, preço como veio). A Magalu segue sem conferência,
 //     como fora da simulação (nunca há leitura dela).
@@ -83,6 +88,8 @@ export const PAUSA_DESCARTADA_H = 6;
 export const RESERVA_AMAZON_H = 6;
 /** Depois de uma falha, a releitura do Etiqueta fica pausada por tantos minutos neste verificador. */
 export const PAUSA_RELEITURA_MIN = 10;
+/** Etiqueta ainda ocupado (`ocupado`/`intervalo`) depois das novas tentativas do catálogo: a releitura fica pausada por tantos segundos. */
+export const PAUSA_ETIQUETA_OCUPADO_S = 60;
 
 export const MOTIVOS_VERIFICADOR = Object.freeze({
   esgotado: 'Descartada: esgotado na loja',
@@ -90,6 +97,7 @@ export const MOTIVOS_VERIFICADOR = Object.freeze({
   nao_conferido: 'Descartada: não deu para conferir o preço',
   indisponivel: 'Descartada: indisponível na loja',
   outro_produto: 'Descartada: a página da loja abriu outro produto',
+  preco_suspeito: 'Descartada: preço suspeito',
 });
 
 /** O que o texto do descarte diz entre parênteses (frases fixas), nos motivos que não trazem causa. */
@@ -116,6 +124,10 @@ export const CAUSAS = Object.freeze({
   etiqueta_bloqueio: 'a Amazon bloqueou a leitura',
   etiqueta_sem_oferta: 'a oferta saiu do Etiqueta',
   etiqueta_ocupado: 'o Etiqueta estava ocupado com outra leitura da Amazon',
+  central_sem_resposta: 'a Central de Afiliados não respondeu',
+  central_aba: 'não deu para abrir a Central de Afiliados no Chrome',
+  central_login: 'a Central de Afiliados pediu login',
+  anuncio_inativo: 'o anúncio está pausado ou inativo',
 });
 
 /** Falha nomeada de links.requestProduto → chave de CAUSAS (D8). Outra falha → 'loja_fora'. */
@@ -126,6 +138,13 @@ const CAUSA_DA_FALHA = Object.freeze({
   limite: 'limite_hora',
   tempo: 'demorou',
   erro: 'loja_fora',
+});
+
+/** Pausa de links.produtoDisponivel() → chave de CAUSAS. 'desconectada' não está aqui: é a espera da extensão (esperaDoMl). */
+const CAUSA_DA_PAUSA = Object.freeze({
+  verificacao: 'ml_verificacao',
+  limite: 'limite_hora',
+  antiga: 'extensao_antiga',
 });
 
 /**
@@ -145,13 +164,14 @@ const CAUSA_DA_RELEITURA = Object.freeze({
 });
 
 /**
- * 429 do Etiqueta (freio da releitura) por motivo → { causa, pausa }. `pausa`: abre a pausa da releitura (pelo
- * `tentar_em_s`). intervalo e ocupado são esperas curtas que o catalogo.confirmarPreco já esperou: não pausam nada
- * (sobra só a oferta, sem conferência). Motivo desconhecido ou ausente: como a rodada (ocupado, com pausa).
+ * 429 do Etiqueta (freio da releitura) por motivo → { causa, pausa }. `pausa`: abre a pausa da releitura, pelo
+ * `tentar_em_s` (`true`) ou por PAUSA_ETIQUETA_OCUPADO_S (`'ocupado'`). intervalo e ocupado são esperas curtas que o
+ * catalogo.confirmarPreco já esperou e tentou de novo: se sobraram, o Etiqueta segue ocupado e a releitura pausa 60 s
+ * (as Amazon seguintes vão à reserva sem chamá-lo). Motivo desconhecido ou ausente: como a rodada (ocupado, com pausa).
  */
 const CAUSA_DO_FREIO = Object.freeze({
-  intervalo: { causa: 'etiqueta_ocupado', pausa: false },
-  ocupado: { causa: 'etiqueta_ocupado', pausa: false },
+  intervalo: { causa: 'etiqueta_ocupado', pausa: 'ocupado' },
+  ocupado: { causa: 'etiqueta_ocupado', pausa: 'ocupado' },
   rodada: { causa: 'etiqueta_ocupado', pausa: true },
   pausa: { causa: 'etiqueta_bloqueio', pausa: true }, // o Etiqueta parou de ler a Amazon depois de um bloqueio
   teto: { causa: 'limite_hora', pausa: true },
@@ -178,6 +198,7 @@ const TOLERANCIA_FUTURO_MS = 60 * 1000; // created_at do SQLite tem resolução 
 const RESERVA_AMAZON_MS = RESERVA_AMAZON_H * 60 * 60 * 1000;
 const TOLERANCIA_PRECO_EM_FUTURO_MS = 5 * 60 * 1000; // relógio do Etiqueta um pouco adiantado
 const PAUSA_RELEITURA_MS = PAUSA_RELEITURA_MIN * 60 * 1000;
+const PAUSA_ETIQUETA_OCUPADO_MS = PAUSA_ETIQUETA_OCUPADO_S * 1000;
 const PAUSA_FREIO_MAX_MS = 60 * 60 * 1000; // o `tentar_em_s` do Etiqueta vale até 1 h (a janela do teto por hora)
 const FOLGA_PRECO_EM_MS = 60 * 1000;       // o `preco_em` de um confirmado é de agora: no máximo o prazo da conferência + 1 min atrás
 const RE_ASIN = /^[A-Z0-9]{10}$/;
@@ -455,7 +476,7 @@ export function createVerificador({ db, ml = mlPadrao, amazon = null, shopee = n
     } else if (r.resultado === 'falha' && r.causa === 'freio') {
       const f = typeof r.motivo === 'string' && Object.hasOwn(CAUSA_DO_FREIO, r.motivo) ? CAUSA_DO_FREIO[r.motivo] : FREIO_DESCONHECIDO;
       const espera = Number.isSafeInteger(r.tentarEmS) && r.tentarEmS >= 1 ? Math.min(r.tentarEmS * 1000, PAUSA_FREIO_MAX_MS) : PAUSA_RELEITURA_MS;
-      return falhou(f.causa, { pausaMs: f.pausa ? espera : 0 });
+      return falhou(f.causa, { pausaMs: f.pausa === 'ocupado' ? PAUSA_ETIQUETA_OCUPADO_MS : f.pausa ? espera : 0 });
     } else if (r.resultado === 'falha') {
       const chave = typeof r.causa === 'string' && Object.hasOwn(CAUSA_DA_RELEITURA, r.causa) ? CAUSA_DA_RELEITURA[r.causa] : 'etiqueta_fora';
       return falhou(chave, { naPagina: FALHA_NA_PAGINA.has(r.causa) });
@@ -511,6 +532,22 @@ export function createVerificador({ db, ml = mlPadrao, amazon = null, shopee = n
     }
   }
 
+  /**
+   * A leitura do ML pela extensão está em pausa agora (verificação do navegador, limite por hora, extensão antiga)?
+   * → 'ml_verificacao' | 'limite_hora' | 'extensao_antiga' | null. Só com o verificador ligado, fora da simulação e com o
+   * ML lido pela extensão; a extensão desconectada não entra (é a espera do agendador). Sem pedido, nunca lança: o
+   * agendador tira a oferta do ML da escolha sem gastar tentativa nem escrever uma linha "Pulada" por oferta.
+   */
+  function pausaDaLeituraMl() {
+    try {
+      if (simulado || !ativo() || !mlPelaExtensao() || typeof links.produtoDisponivel !== 'function') return null;
+      const p = links.produtoDisponivel();
+      return typeof p === 'string' && Object.hasOwn(CAUSA_DA_PAUSA, p) ? CAUSA_DA_PAUSA[p] : null;
+    } catch {
+      return null;
+    }
+  }
+
   async function conferir(oferta, { lidoEm = null, referencia, releitura = null } = {}) {
     try {
       if (!oferta || typeof oferta !== 'object') return descarteNaoConferido('loja_fora');
@@ -545,5 +582,5 @@ export function createVerificador({ db, ml = mlPadrao, amazon = null, shopee = n
     }
   }
 
-  return { ativo, limitePct, conferir, podeConferir, semConfirmacaoAgora };
+  return { ativo, limitePct, conferir, podeConferir, semConfirmacaoAgora, pausaDaLeituraMl };
 }

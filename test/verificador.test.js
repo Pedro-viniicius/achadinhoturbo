@@ -12,7 +12,7 @@ import path from 'node:path';
 import { openDb, setSetting } from '../src/db.js';
 import {
   decidir, createVerificador, OfertaDescartada, MOTIVOS_VERIFICADOR, CAUSAS,
-  LIMITE_PADRAO_PCT, LIMITE_MAX_PCT, FRESCOR_MIN, TEMPO_MAX_MS, PAUSA_DESCARTADA_H, RESERVA_AMAZON_H, PAUSA_RELEITURA_MIN, reservaValida,
+  LIMITE_PADRAO_PCT, LIMITE_MAX_PCT, FRESCOR_MIN, TEMPO_MAX_MS, PAUSA_DESCARTADA_H, RESERVA_AMAZON_H, PAUSA_RELEITURA_MIN, PAUSA_ETIQUETA_OCUPADO_S, reservaValida,
 } from '../src/verificador.js';
 import { conferirProduto } from '../src/ml.js';
 import { createAmazon, ErroAmazon } from '../src/amazon.js';
@@ -36,7 +36,7 @@ const ITEM = '6309028319';
 /** Textos que o verificador pode produzir: só frases fixas, CAUSAS e preços em R$. */
 const R = 'R\\$ \\d{1,3}(?:\\.\\d{3})*,\\d{2}';
 const CAUSA = `(?:${Object.values(CAUSAS).map((c) => c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})`;
-const TEXTO_PERMITIDO = new RegExp(`^(?:Descartada: esgotado na loja|Descartada: preço subiu de ${R} para ${R} \\(\\+\\d+(?:,\\d{1,2})?%, o limite é \\d{1,2}%\\)|Descartada: não deu para conferir o preço \\(${CAUSA}\\)|Descartada: indisponível na loja \\(a página não mostra preço nem estoque\\)|Descartada: a página da loja abriu outro produto \\(o código não confere com a oferta\\))$`);
+const TEXTO_PERMITIDO = new RegExp(`^(?:Descartada: esgotado na loja|Descartada: preço subiu de ${R} para ${R} \\(\\+\\d+(?:,\\d{1,2})?%, o limite é \\d{1,2}%\\)|Descartada: não deu para conferir o preço \\(${CAUSA}\\)|Descartada: indisponível na loja \\(a página não mostra preço nem estoque\\)|Descartada: a página da loja abriu outro produto \\(o código não confere com a oferta\\)|Descartada: preço suspeito)$`);
 const HORA_VISTA = '\\d{2}:\\d{2}(?: de \\d{2}/\\d{2})?';
 const SUFIXO_PERMITIDO = new RegExp(`^ · (?:preço não conferido \\(${CAUSA}\\)|preço atualizado de ${R} para ${R}|preço visto às ${HORA_VISTA}, não conferido agora \\(${CAUSA}\\))$`);
 function textosLimpos(r) {
@@ -69,12 +69,14 @@ test('verificador: constantes e frases fixas do contrato', () => {
     [LIMITE_PADRAO_PCT, LIMITE_MAX_PCT, FRESCOR_MIN, TEMPO_MAX_MS, PAUSA_DESCARTADA_H, RESERVA_AMAZON_H, PAUSA_RELEITURA_MIN],
     [5, 50, 30, 20000, 6, 6, 10],
   );
+  assert.equal(PAUSA_ETIQUETA_OCUPADO_S, 60, 'rodar sozinho, entrega 2: pausa da releitura com o Etiqueta ocupado');
   assert.deepEqual({ ...MOTIVOS_VERIFICADOR }, {
     esgotado: 'Descartada: esgotado na loja',
     preco_subiu: 'Descartada: preço subiu',
     nao_conferido: 'Descartada: não deu para conferir o preço',
     indisponivel: 'Descartada: indisponível na loja',
     outro_produto: 'Descartada: a página da loja abriu outro produto',
+    preco_suspeito: 'Descartada: preço suspeito',
   });
   assert.ok(Object.isFrozen(MOTIVOS_VERIFICADOR) && Object.isFrozen(CAUSAS));
   for (const frase of ['a loja não respondeu', 'a API da Amazon não está ligada', 'a Magalu não deixa ler a página',
@@ -95,6 +97,12 @@ test('verificador: constantes e frases fixas do contrato', () => {
     ['o Etiqueta não respondeu', 'a Amazon bloqueou a leitura', 'a oferta saiu do Etiqueta'],
   );
   assert.equal(CAUSAS.amazon_sem_api, 'a API da Amazon não está ligada', 'o Disparo manual ainda a usa');
+  // rodar sozinho, entrega 2: o link do ML pela Central de Afiliados e a recusa definitiva
+  assert.deepEqual(
+    [CAUSAS.central_sem_resposta, CAUSAS.central_aba, CAUSAS.central_login, CAUSAS.anuncio_inativo],
+    ['a Central de Afiliados não respondeu', 'não deu para abrir a Central de Afiliados no Chrome',
+      'a Central de Afiliados pediu login', 'o anúncio está pausado ou inativo'],
+  );
 });
 
 test('verificador: OfertaDescartada leva motivo e texto; motivo desconhecido vira nao_conferido', () => {
@@ -754,6 +762,83 @@ test('conferir (ML, extensão): pedido que não volta é cortado no prazo do ver
   assert.equal((await p).sufixo, ' · preço não conferido (a loja demorou demais)');
 });
 
+// ---------------------------------------------------------------------------------- ML: leitura em pausa (entrega 2, CA2.13)
+/** links falso com o contrato de `produtoDisponivel()` do plano (null ou 'verificacao'|'limite'|'antiga'|'desconectada', sem pedido). */
+function linksComPausa(estado, { modo = 'extension' } = {}) {
+  const l = linksFalso(proibido('requestProduto'), { modo });
+  l.consultas = 0;
+  l.produtoDisponivel = () => { l.consultas++; if (estado.lanca) throw new Error('quebrou'); return estado.valor; };
+  return l;
+}
+
+test('pausaDaLeituraMl (CA2.13): cada pausa do pedido de produto vira a causa do verificador; sem pausa ou desconectada, null', () => {
+  const estado = { valor: null };
+  const links = linksComPausa(estado);
+  const v = createVerificador({ db: novoDb(), ml: { conferirProduto: proibido('ml') }, links, agora: () => T0 });
+  assert.equal(typeof v.pausaDaLeituraMl, 'function');
+  const casos = [
+    [null, null], ['verificacao', 'ml_verificacao'], ['limite', 'limite_hora'], ['antiga', 'extensao_antiga'],
+    // a extensão desconectada é a espera de sempre do agendador (esperaDoMl), não a pausa da leitura
+    ['desconectada', null],
+    // fora do contrato: nunca tira o ML da escolha por engano
+    ['tempo', null], ['erro', null], ['', null], [undefined, null], [42, null], [{}, null], ['toString', null], ['constructor', null],
+  ];
+  for (const [valor, esperado] of casos) {
+    estado.valor = valor;
+    assert.equal(v.pausaDaLeituraMl(), esperado, String(valor));
+  }
+  // lê a cada chamada (a pausa passa sozinha) e nunca faz pedido à extensão
+  estado.valor = 'limite';
+  assert.equal(v.pausaDaLeituraMl(), 'limite_hora');
+  estado.valor = null;
+  assert.equal(v.pausaDaLeituraMl(), null);
+  assert.equal(links.chamadas.length, 0);
+  // as causas devolvidas são chaves de CAUSAS (o agendador as usa no texto)
+  for (const c of ['ml_verificacao', 'limite_hora', 'extensao_antiga']) assert.ok(Object.hasOwn(CAUSAS, c), c);
+});
+
+test('pausaDaLeituraMl (CA2.13): só vale com o verificador ligado e o ML pela extensão; fora disso nem consulta o serviço de links', () => {
+  const estado = { valor: 'verificacao' };
+  const montar = (extra = {}, opcoes) => {
+    const links = linksComPausa(estado, opcoes);
+    return { links, v: createVerificador({ db: novoDb(), ml: { conferirProduto: proibido('ml') }, links, agora: () => T0, ...extra }) };
+  };
+  // modo direct e fake: o ML é lido pelo servidor, a pausa da extensão não tem o que dizer
+  for (const modo of ['direct', 'fake']) {
+    const { links, v } = montar({}, { modo });
+    assert.equal(v.pausaDaLeituraMl(), null, modo);
+    assert.equal(links.consultas, 0, modo);
+  }
+  // sem links, ou links sem produtoDisponivel (serviço antigo)
+  assert.equal(createVerificador({ db: novoDb(), agora: () => T0 }).pausaDaLeituraMl(), null);
+  const antigo = linksFalso(proibido('requestProduto'));
+  assert.equal(createVerificador({ db: novoDb(), links: antigo, agora: () => T0 }).pausaDaLeituraMl(), null);
+  // verificador desligado: o ML sai sem conferir, então não há pausa a respeitar
+  const db = novoDb();
+  setSetting(db, 'verificador_ativo', '0');
+  const desligado = linksComPausa(estado);
+  assert.equal(createVerificador({ db, links: desligado, agora: () => T0 }).pausaDaLeituraMl(), null);
+  assert.equal(desligado.consultas, 0);
+  // simulado: a conferência confirma sem ler nada
+  const sim = montar({ simulado: true });
+  assert.equal(sim.v.pausaDaLeituraMl(), null);
+  assert.equal(sim.links.consultas, 0);
+  // e, ligado e pela extensão, vale
+  const ok = montar();
+  assert.equal(ok.v.pausaDaLeituraMl(), 'ml_verificacao');
+  assert.equal(ok.links.consultas, 1);
+});
+
+test('pausaDaLeituraMl (CA2.13): erro no serviço de links, em modo() ou nos Ajustes vira null, nunca lança', () => {
+  const estado = { valor: 'limite', lanca: true };
+  const v = createVerificador({ db: novoDb(), links: linksComPausa(estado), agora: () => T0 });
+  assert.equal(v.pausaDaLeituraMl(), null);
+  const quebrado = { modo: () => { throw new Error('getMode quebrou'); }, produtoDisponivel: () => 'limite' };
+  assert.equal(createVerificador({ db: novoDb(), links: quebrado, agora: () => T0 }).pausaDaLeituraMl(), null);
+  const dbQuebrado = { prepare: () => { throw new Error('banco quebrou'); } };
+  assert.equal(createVerificador({ db: dbQuebrado, links: linksComPausa({ valor: 'limite' }), agora: () => T0 }).pausaDaLeituraMl(), null);
+});
+
 // ---------------------------------------------------------------------------------- Amazon: releitura pelo Etiqueta
 // (docs/produto/planos/rodar-sozinho-entrega1.md, etapa B2; CA1.3 a CA1.6 e CA1.11). O `catalogo` chega injetado e aqui é
 // um falso com o contrato de confirmarPreco: nenhum teste fala com o Etiqueta.
@@ -906,13 +991,15 @@ test('releitura: cada falha do Etiqueta vira a sua causa, na reserva (sufixo) e 
   }
 });
 
-test('releitura (R1): o freio do Etiqueta segue o motivo — intervalo e ocupado não pausam; teto, pausa e rodada pausam pelo tentar_em_s', async () => {
+test('releitura (R1): o freio do Etiqueta segue o motivo — intervalo e ocupado pausam 60 s fixos; teto, pausa e rodada pausam pelo tentar_em_s', async () => {
   const freio = (motivo, tentarEmS) => ({ resultado: 'falha', causa: 'freio', motivo, tentarEmS });
   const velha = { releitura: { precoEm: T0 - 7 * HORA } }; // sem reserva: o descarte mostra a causa
   const casos = [
     // [motivo, tentarEmS, causa, pausa em ms (0 = não pausa)]
-    ['intervalo', 2, 'etiqueta_ocupado', 0],
-    ['ocupado', 3, 'etiqueta_ocupado', 0],
+    ['intervalo', 2, 'etiqueta_ocupado', 60 * 1000], // CA2.15: o que sobra depois das novas tentativas do catálogo pausa 60 s,
+    ['ocupado', 3, 'etiqueta_ocupado', 60 * 1000], //   com ou sem tentar_em_s e qualquer que seja ele
+    ['ocupado', null, 'etiqueta_ocupado', 60 * 1000],
+    ['intervalo', 600, 'etiqueta_ocupado', 60 * 1000],
     ['teto', 120, 'limite_hora', 120 * 1000],
     ['pausa', 600, 'etiqueta_bloqueio', 600 * 1000],
     ['rodada', 60, 'etiqueta_ocupado', 60 * 1000],
@@ -946,6 +1033,56 @@ test('releitura (R1): o freio do Etiqueta segue o motivo — intervalo e ocupado
   // só o teto diz "limite de conferências por hora"
   const naReserva = await comReleitura(catalogoFalso(freio('intervalo', 3))).conferir(ofertaAmazon(), { releitura: { precoEm: T0 - HORA } });
   assert.ok(naReserva.sufixo.endsWith('(o Etiqueta estava ocupado com outra leitura da Amazon)'), naReserva.sufixo);
+});
+
+test('releitura (CA2.15): ocupado depois das novas tentativas pausa 60 s; a Amazon seguinte vai à reserva sem chamar o Etiqueta', async () => {
+  for (const motivo of ['ocupado', 'intervalo']) {
+    let agora = T0;
+    const catalogo = catalogoFalso({ resultado: 'falha', causa: 'freio', motivo, tentarEmS: 3 });
+    const v = createVerificador({ db: novoDb(), amazon: null, catalogo, agora: () => agora });
+    const rel = { releitura: { precoEm: T0 - HORA } };
+    const primeira = await v.conferir(ofertaAmazon(), rel);
+    assert.deepEqual([primeira.acao, primeira.conferido, catalogo.chamadas.length], ['enviar', false, 1], motivo);
+    assert.ok(primeira.sufixo.endsWith('(o Etiqueta estava ocupado com outra leitura da Amazon)'), primeira.sufixo);
+    // dentro da pausa: reserva (6 h) com a mesma causa; sem reserva, descarte com a causa; o Etiqueta nem é chamado
+    agora = T0 + 30 * 1000;
+    const reserva = await v.conferir(ofertaAmazon({ key: 'ASIN:B000000002' }), rel);
+    assert.equal(reserva.acao, 'enviar', motivo);
+    assert.ok(reserva.sufixo.startsWith(' · preço visto às '), reserva.sufixo);
+    assert.ok(reserva.sufixo.endsWith('(o Etiqueta estava ocupado com outra leitura da Amazon)'), reserva.sufixo);
+    assert.equal(reserva.oferta.vistoEm, T0 - HORA, 'a hora é a do preço visto, não a de agora');
+    const velha = await v.conferir(ofertaAmazon({ key: 'ASIN:B000000003' }), { releitura: { precoEm: T0 - 7 * HORA } });
+    assert.deepEqual([velha.acao, velha.causa], ['descartar', 'etiqueta_ocupado'], motivo);
+    assert.equal(catalogo.chamadas.length, 1, `${motivo}: nenhuma chamada durante a pausa`);
+    // o agendador também tira da escolha a Amazon sem reserva que valha, sem gastar tentativa
+    assert.equal(v.semConfirmacaoAgora({ loja: 'amazon', precoEm: T0 - 7 * HORA }), true, motivo);
+    assert.equal(v.semConfirmacaoAgora({ loja: 'amazon', precoEm: T0 - HORA }), false, motivo);
+    // 1 ms antes dos 60 s da PRIMEIRA falha ainda pausada; aos 60 s pergunta de novo
+    agora = T0 + 60 * 1000 - 1;
+    await v.conferir(ofertaAmazon({ key: 'ASIN:B000000004' }), rel);
+    assert.equal(catalogo.chamadas.length, 1, `${motivo}: um ms antes dos 60 s`);
+    agora = T0 + 60 * 1000;
+    await v.conferir(ofertaAmazon({ key: 'ASIN:B000000004' }), rel);
+    assert.equal(catalogo.chamadas.length, 2, `${motivo}: passados os 60 s pergunta de novo`);
+    assert.equal(v.semConfirmacaoAgora({ loja: 'amazon', precoEm: T0 - 7 * HORA }), true, 'a nova falha abre nova pausa de 60 s');
+    agora += 60 * 1000;
+    assert.equal(v.semConfirmacaoAgora({ loja: 'amazon', precoEm: T0 - 7 * HORA }), false, 'e ela também passa');
+  }
+});
+
+test('releitura (CA2.15): a pausa de 60 s não vale para o ML, e o Etiqueta que volta a confirmar tira a Amazon da reserva', async () => {
+  let agora = T0;
+  const estado = { ocupado: true };
+  const catalogo = catalogoFalso(() => (estado.ocupado ? { resultado: 'falha', causa: 'freio', motivo: 'ocupado', tentarEmS: 3 } : confirmado({ precoEm: agora })));
+  const ml = mlFalso({ price: 100, disponivel: true });
+  const v = createVerificador({ db: novoDb(), ml, amazon: null, catalogo, agora: () => agora });
+  await v.conferir(ofertaAmazon(), { releitura: { precoEm: T0 - HORA } });
+  assert.equal((await v.conferir(ofertaMl(), { lidoEm: null })).conferido, true, 'o ML segue sendo lido durante a pausa do Etiqueta');
+  agora = T0 + 60 * 1000;
+  estado.ocupado = false;
+  const volta = await v.conferir(ofertaAmazon(), { releitura: { precoEm: T0 - HORA } });
+  assert.deepEqual([volta.acao, volta.conferido, volta.oferta.price], ['enviar', true, 90]);
+  assert.equal(catalogo.chamadas.length, 2);
 });
 
 test('releitura (Q1/R2): `releu` só quando o Etiqueta tentou ler a página desta oferta agora (bloqueado, falha de rede)', async (t) => {
