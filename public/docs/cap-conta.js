@@ -116,7 +116,7 @@ docsCapitulo({
       onde: '[[Equipe]]',
       blocos: [
         { p: 'A senha vira um código irreversível (hash) no banco. Depois de entrar, a sessão fica num cookie do navegador por **30 dias** e cai antes se ficar **7 dias sem uso**. Ela sobrevive a reinícios do programa.' },
-        { p: 'Cinco tentativas erradas bloqueiam o IP por 15 minutos. O erro é sempre “E-mail ou senha incorretos.”, sem dizer qual dos dois errou.' },
+        { p: 'Cinco tentativas erradas bloqueiam o IP por 15 minutos (no painel só local, a variável `LOGIN_SEM_LIMITE=1` desliga esse bloqueio; veja o README). O erro é sempre “E-mail ou senha incorretos.”, sem dizer qual dos dois errou.' },
         { p: 'Esqueceu a senha do Dono? Num terminal, na pasta do programa, rode o comando abaixo. Ele troca a senha do Dono mais antigo da equipe e encerra **todas** as sessões abertas.' },
         { comando: 'npm run senha' },
       ],

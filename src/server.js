@@ -1,6 +1,6 @@
 import express from 'express';
 import path from 'node:path';
-import { DATA_DIR, PORT, DRY_RUN, FAST, ROOT, PUBLIC_HOST, PANEL_PASSWORD } from './config.js';
+import { DATA_DIR, PORT, DRY_RUN, FAST, ROOT, PUBLIC_HOST, PANEL_PASSWORD, LOGIN_SEM_LIMITE } from './config.js';
 import { openDb, getSetting, setSetting, parseRule, nz, MAX_SOURCES } from './db.js';
 import { createAuth, createLimiter, parseCookies, safeEqual, soDono, ehDono, SESSION_MS } from './auth.js';
 import * as privacidade from './privacidade.js';
@@ -111,7 +111,7 @@ const ASIN_SONDA = 'B000000000'; // montarLink com um ASIN de sonda diz se há t
 
 // amazon, shopee, catalogo e catalogoItens: os mesmos do agendador (criarServicos); sem eles, as rotas tratam a loja
 // (ou o catálogo) como indisponível.
-export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, panelPassword = PANEL_PASSWORD, dataDir = DATA_DIR, ml = mlPadrao,
+export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, panelPassword = PANEL_PASSWORD, dataDir = DATA_DIR, ml = mlPadrao, loginSemLimite = LOGIN_SEM_LIMITE,
   amazon = scheduler?.amazon ?? null, shopee = scheduler?.shopee ?? null, catalogo = scheduler?.catalogo ?? null, catalogoItens = scheduler?.catalogoItens ?? null }) {
   const app = express();
   app.disable('x-powered-by');
@@ -137,6 +137,9 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
   const porQuemDe = (req) => (req.user?.nome ? ` (por ${String(req.user.nome).slice(0, 60)})` : '');
   const loginLimiter = createLimiter({ max: 5, windowMs: 15 * 60 * 1000 });       // por IP (/64 no IPv6)
   const loginGlobal = createLimiter({ max: 50, windowMs: 15 * 60 * 1000 });        // todas as origens juntas
+  // LOGIN_SEM_LIMITE=1: sem bloqueio por tentativas, só com o painel local (com PUBLIC_HOST o limite continua)
+  const semLimiteLogin = !!loginSemLimite && !publicHost;
+  if (semLimiteLogin) console.warn('[aviso] LOGIN_SEM_LIMITE=1: login sem bloqueio por tentativas erradas (painel só local).');
   const extLimiter = createLimiter({ max: 20, windowMs: 15 * 60 * 1000 });
   const gLimiter = createLimiter({ max: 120, windowMs: 60 * 1000 });                // /g/<slug>: 120 por minuto por IP (CGNAT junta muita gente num IP)
   const sucessoRecente = new Map();                                                  // ip -> ts do último login certo: esse IP não sofre o limite global
@@ -237,7 +240,7 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
     const ip = chaveIp(req.ip);
     // quem já entrou deste IP nas últimas 24 h não sofre o limite global (senão 50 erros de terceiros trancariam o dono)
     const confiavel = Date.now() - (sucessoRecente.get(ip) || 0) < 24 * 3600000;
-    if (loginLimiter.blocked(ip) || (!confiavel && loginGlobal.blocked('todos'))) {
+    if (!semLimiteLogin && (loginLimiter.blocked(ip) || (!confiavel && loginGlobal.blocked('todos')))) {
       const s = Math.max(loginLimiter.retryAfterS(ip), confiavel ? 0 : loginGlobal.retryAfterS('todos'));
       return res.status(429).json({ erro: `Muitas tentativas. Tente de novo em ${Math.ceil(s / 60)} min.` });
     }

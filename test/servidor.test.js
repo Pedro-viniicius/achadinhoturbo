@@ -29,12 +29,12 @@ const redeProibida = async () => { throw new Error('rede proibida no teste'); };
  * `modoLink`: o modo do serviço de links ('fake' por padrão; 'extension' para a volta da extensão). `ml`: leitor do
  * Mercado Livre falso (padrão: o de src/ml.js).
  */
-function subir({ publicHost = HOST, panelPassword = SENHA, dir = tmp(), fetch = redeProibida, modoLink = 'fake', ml } = {}) {
+function subir({ publicHost = HOST, panelPassword = SENHA, dir = tmp(), fetch = redeProibida, modoLink = 'fake', ml, loginSemLimite = false } = {}) {
   const db = openDb(dir);
   const wa = createWhatsApp({ db, dir, dryRun: true }); wa.connect();
   const links = createLinkService({ getMode: () => modoLink });
   const { amazon, shopee, catalogo, catalogoItens, scheduler } = criarServicos({ db, wa, links, fast: true, dir, fetch, ...(ml ? { ml } : {}) });
-  const app = buildApp({ db, wa, links, scheduler, amazon, shopee, catalogo, catalogoItens, publicHost, panelPassword, ...(ml ? { ml } : {}) });
+  const app = buildApp({ db, wa, links, scheduler, amazon, shopee, catalogo, catalogoItens, publicHost, panelPassword, loginSemLimite, ...(ml ? { ml } : {}) });
   return new Promise((ok) => {
     const server = app.listen(0, '127.0.0.1', () => {
       const port = server.address().port;
@@ -72,6 +72,26 @@ test('sem login: API 401, páginas redirecionam, exceções continuam abertas', 
     const hz = await req(s.port, '/healthz');
     assert.equal(hz.status, 200); assert.deepEqual(hz.json, { ok: true });
   } finally { await s.fechar(); }
+});
+
+test('LOGIN_SEM_LIMITE: sem PUBLIC_HOST não bloqueia; com PUBLIC_HOST o limite continua', async () => {
+  const local = await subir({ publicHost: '', loginSemLimite: true });
+  try {
+    for (let i = 0; i < 8; i++) assert.equal((await login(local.port, 'errada')).status, 401);
+    assert.equal((await login(local.port)).status, 200, 'senha certa entra depois de 8 erros');
+  } finally { await local.fechar(); }
+
+  const publico = await subir({ loginSemLimite: true });
+  try {
+    for (let i = 0; i < 5; i++) assert.equal((await login(publico.port, 'errada', HOST)).status, 401);
+    assert.equal((await login(publico.port, SENHA, HOST)).status, 429, 'com PUBLIC_HOST a chave é ignorada');
+  } finally { await publico.fechar(); }
+
+  const localSemChave = await subir({ publicHost: '' });
+  try {
+    for (let i = 0; i < 5; i++) assert.equal((await login(localSemChave.port, 'errada')).status, 401);
+    assert.equal((await login(localSemChave.port)).status, 429, 'sem a chave, o painel local continua com o limite');
+  } finally { await localSemChave.fechar(); }
 });
 
 test('senha errada dá 401 e bloqueia depois de 5 tentativas; senha certa abre sessão com cookie seguro', async () => {

@@ -45,6 +45,7 @@ Em casa, só no `localhost`, o painel abre sem login (aparece um aviso no termin
 
 - **Quem já tinha senha:** no primeiro start desta versão, a senha única vira a conta do **Dono** (sem e-mail), e as sessões abertas continuam valendo. Ao entrar, o painel pede **"Complete seu cadastro"** (nome e e-mail; nova senha é opcional). Depois disso, o login pede **e-mail e senha**.
 - A senha vira um hash no banco; a sessão fica num cookie `httpOnly` por 30 dias (cai depois de 7 dias sem uso) e sobrevive a reinícios. Cinco tentativas erradas bloqueiam o IP por 15 minutos. A mensagem de erro é sempre "E-mail ou senha incorretos.", sem dizer qual dos dois errou.
+- **`LOGIN_SEM_LIMITE=1`** desliga esse bloqueio (por exemplo, enquanto só você usa o painel). Só vale sem `PUBLIC_HOST`: com o painel público, o limite continua. No serviço do systemd, crie `~/.config/systemd/user/achadinhoturbo.service.d/sem-limite.conf` com `[Service]` e `Environment=LOGIN_SEM_LIMITE=1`, depois `systemctl --user daemon-reload && systemctl --user restart achadinhoturbo`. Para religar o bloqueio, apague o arquivo e rode os mesmos dois comandos.
 - **`npm run senha`** troca a senha do Dono (o mais antigo da equipe) e encerra **todas** as sessões. Serve para recuperar o acesso. Em "Complete seu cadastro" dá para escolher uma senha nova: as outras sessões dessa pessoa caem, a do navegador em uso fica.
 - **Voltar à versão anterior:** a senha única continua guardada e acompanha a senha do Dono mais antigo, então o código antigo entra com ela.
 

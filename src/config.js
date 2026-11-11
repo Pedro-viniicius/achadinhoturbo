@@ -26,4 +26,6 @@ export const PUBLIC_HOST = String(process.env.PUBLIC_HOST || '').trim().toLowerC
   .replace(/^https?:\/\//, '').replace(/\/.*$/, '');
 // Senha do painel: vira hash no banco no primeiro start. Para trocar depois: npm run senha.
 export const PANEL_PASSWORD = process.env.PANEL_PASSWORD || '';
+// LOGIN_SEM_LIMITE=1 desliga o bloqueio por tentativas erradas de login. Só vale sem PUBLIC_HOST (painel só local).
+export const LOGIN_SEM_LIMITE = process.env.LOGIN_SEM_LIMITE === '1';
 // Fuso horário: o Node lê a variável TZ sozinho (ex.: TZ=America/Sao_Paulo). O agendador usa a hora local.
