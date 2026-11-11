@@ -15,6 +15,29 @@ const TEXTOS_CONEXOES = {
   mlDesc: 'Gera os links meli.la com as suas etiquetas, pela extensão do Chrome.',
   conectado: 'Conectado',
   falta: 'Falta configurar',
+  // Mercado Livre (spec rodar-sozinho-entrega2): selo único por prioridade e duas linhas de estado (extensão, Central).
+  // O erro real da Central vem da extensão, sem tradução: entra só por textContent, entre aspas.
+  ml: {
+    seloExtOff: 'Extensão desconectada', seloEspera: 'Central sem resposta', seloAntiga: 'Extensão desatualizada',
+    modoDireto: 'Modo direto ligado em Ajustes: os links saem sem etiqueta e não geram comissão.',
+    extOn: 'Extensão do Chrome conectada.', extOff: 'Extensão do Chrome desconectada.',
+    extFalou: (s) => `Falou com o painel há ${s} s.`, extFalouQuando: (q) => `Falou com o painel ${q}.`, extUltima: (q) => `Última conversa ${q}.`, extNunca: 'Nunca conectou neste painel.',
+    extAntiga: (inst, esp) => (inst
+      ? `Extensão do Chrome conectada, mas desatualizada: é a ${inst} e o painel espera a ${esp} ou mais nova.`
+      : `Extensão do Chrome conectada, mas desatualizada: é mais antiga que a ${esp}.`),
+    dicaExtOff: 'Abra o Chrome com a extensão instalada e entre na Central de Afiliados com a sua conta.',
+    // HTML fixo, sem dado de fora
+    avisoAntiga: '<div class="aviso-corpo"><p><b>Atualize a extensão.</b></p><ol class="passos"><li>Atualize a pasta <code>extension</code> do programa, se ainda não fez.</li><li>Abra <code>chrome://extensions</code>.</li><li>Na extensão achadinhoturbo, clique em recarregar (a seta circular).</li><li>Volte aqui: este aviso some sozinho.</li></ol><p>Enquanto isso o Mercado Livre continua funcionando, só sem as correções novas.</p></div>',
+    centralOk: 'Central de Afiliados respondendo.', centralFalhou: 'A Central não respondeu ao último pedido.',
+    centralEspera: 'Central sem resposta. O Mercado Livre está esperando.', centralSemInfo: 'Sem informação: a extensão está desconectada.',
+    centralSemTeste: 'Central ainda não testada.', semTeste: 'Ela é testada no primeiro link que o programa pedir.',
+    ultimoLink: (q) => `Último link gerado ${q}.`, nenhumLink: 'Nenhum link gerado ainda.',
+    ha: (q) => `${q.charAt(0).toUpperCase()}${q.slice(1)}.`,
+    semRespostaDesde: (quando, q) => `Sem resposta desde ${quando} (${q}).`,
+    novoTeste: (min) => (min === null ? 'Teste em andamento…' : min === 0 ? 'Novo teste em menos de 1 min.' : `Novo teste em ${min} min.`),
+    erroReal: (txt) => `Último erro: “${txt}”`,
+    dicaEspera: 'Passou de 1 hora: abra a Central de Afiliados no Chrome e veja se a página carrega e se a sua conta está logada.',
+  },
   impl: 'Ainda não implementado',
   pronta: 'Configurada',
   avisoImpl: '<b>Ainda não implementado.</b> Você já pode guardar os dados. O painel só vai usar quando a integração existir.',
@@ -156,7 +179,11 @@ function paginaConexoes({ rolarPara } = {}) {
             <li>Clique no ícone da extensão e cole o endereço e o token abaixo.</li></ol>
           <label class="campo">Endereço<div class="copia"><input readonly value="${esc(url)}" id="c1"><button type="button" data-c="c1" aria-label="Copiar endereço">Copiar</button></div></label>
           <label class="campo">Token<div class="copia"><input readonly value="${esc(S.st.ext_token)}" id="c2"><button type="button" data-c="c2" aria-label="Copiar token">Copiar</button></div></label>
-          <p class="estado-linha" id="ml-estado" role="status"></p>
+          <ul class="ext-estados" id="ml-estados">
+            <li id="ml-l-ext"><span class="glifo" aria-hidden="true"></span><div><span class="frase" role="status"></span> <span class="quando"></span><small class="extra"></small></div></li>
+            <li id="ml-l-central"><span class="glifo" aria-hidden="true"></span><div><span class="frase" role="status"></span> <span class="quando"></span><small class="extra"></small></div></li>
+          </ul>
+          <div class="aviso-impl" id="ml-aviso" role="status" hidden></div>
           <div class="linha">${podeEquipe() ? '<button type="button" id="novo-token" class="leve perigo">Gerar novo token</button><small class="dica">Use se achar que o token vazou. A extensão para de funcionar até você colar o novo.</small>'
     : `<small class="dica">${TEXTOS_CONEXOES.tokenSoDono}</small>`}</div>
         </section>
@@ -175,22 +202,78 @@ function paginaConexoes({ rolarPara } = {}) {
   outrasLojas();
 }
 
-/** Selo do cartão e linha de estado da extensão. Também chamada por atualizarEstado (app.js) a cada 3 s nesta página. */
+/**
+ * Estado do cartão Mercado Livre, puro (testável): selo único por prioridade e as duas linhas (extensão, Central).
+ * `st`: /api/state; `temEtiqueta`: há etiqueta salva. Cada linha: { glifo, frase, quando, extra }; `frase` é a parte viva
+ * (role="status"), `quando` o relógio (fora da região viva), `extra` o erro real ou a dica. Sem `extensao.central`
+ * (servidor antigo), só a linha da extensão.
+ */
+function cxMlEstado(st, temEtiqueta, agora = Date.now()) {
+  const M = TEXTOS_CONEXOES.ml; const e = st.extensao || {}; const c = e.central || null;
+  const direto = st.ajustes?.link_mode === 'direct';
+  const espera = !!c && c.estado === 'em_espera';
+  const quando = (ts, f) => { const q = haQuanto(ts, { agora }); return q ? f(q) : ''; };
+  const ultimoOk = Math.max(Number(c?.ultimoOkEm) || 0, Number(e.lastOkAt) || 0);
+  const ultimoLink = ultimoOk ? M.ultimoLink(haQuanto(ultimoOk, { agora })) : M.nenhumLink;
+  let selo;
+  if (!temEtiqueta || direto) selo = ['falta', TEXTOS_CONEXOES.falta];
+  else if (!e.online) selo = ['pendente', M.seloExtOff];
+  else if (espera) selo = ['pendente', M.seloEspera];
+  else if (e.desatualizada === true) selo = ['pendente', M.seloAntiga];
+  else selo = ['conectado', TEXTOS_CONEXOES.conectado];
+  if (direto) return { selo, aviso: false, linhas: [{ glifo: '!', alerta: true, frase: M.modoDireto, quando: '', extra: '' }] };
+  const ext = e.online
+    ? (e.desatualizada === true
+      ? { glifo: '!', alerta: true, frase: M.extAntiga(typeof e.versao === 'string' ? e.versao : '', e.versaoEsperada || ''), quando: '', extra: '' }
+      : { glifo: '✓', alerta: false, frase: M.extOn, quando: e.lastPollAt ? M.extFalou(Math.max(0, Math.round((agora - e.lastPollAt) / 1000))) : '', extra: '' })
+    : { glifo: '!', alerta: true, frase: M.extOff, quando: e.lastPollAt ? quando(e.lastPollAt, M.extUltima) : M.extNunca, extra: M.dicaExtOff };
+  // até 59 s o relógio da extensão fala em segundos; depois cai no "há N min" comum
+  if (e.online && e.lastPollAt && agora - e.lastPollAt >= 60000) ext.quando = quando(e.lastPollAt, M.extFalouQuando);
+  const linhas = [ext];
+  if (c) {
+    const erro = c.ultimoErro ? M.erroReal(c.ultimoErro) : '';
+    let cen;
+    if (!e.online) cen = { glifo: '–', alerta: false, frase: M.centralSemInfo, quando: ultimoOk ? ultimoLink : '', extra: '' };
+    else if (c.estado === 'em_espera') {
+      const desde = Number(c.emEsperaDesde) || 0; const mesmoDia = desde && new Date(desde).toDateString() === new Date(agora).toDateString();
+      const hh = desde ? new Date(desde).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) : '';
+      const quandoDesde = desde ? M.semRespostaDesde(mesmoDia ? `as ${hh}` : `${new Date(desde).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' })} às ${hh}`, haQuanto(desde, { agora })) : '';
+      const falta = Number(c.proximoTesteEm) ? Number(c.proximoTesteEm) - agora : undefined;
+      const teste = falta === undefined ? '' : M.novoTeste(falta <= 0 ? null : falta < 60000 ? 0 : Math.ceil(falta / 60000));
+      const longa = desde && agora - desde > 3600000;
+      cen = { glifo: '!', alerta: true, frase: M.centralEspera, quando: [quandoDesde, teste, ultimoLink].filter(Boolean).join(' '), extra: [erro, longa ? M.dicaEspera : ''].filter(Boolean).join('\n') };
+    } else if (c.estado === 'falhando') {
+      cen = { glifo: '!', alerta: true, frase: M.centralFalhou, quando: [quando(c.ultimoErroEm, M.ha), ultimoLink].filter(Boolean).join(' '), extra: erro };
+    } else if (c.estado === 'sem_teste') cen = { glifo: '–', alerta: false, frase: M.centralSemTeste, quando: M.semTeste, extra: '' };
+    else cen = { glifo: '✓', alerta: false, frase: M.centralOk, quando: ultimoLink, extra: '' };
+    linhas.push(cen);
+  }
+  return { selo, aviso: e.online && e.desatualizada === true, linhas };
+}
+
+/** Selo do cartão e linhas de estado. Também chamada por atualizarEstado (app.js) a cada 3 s nesta página. */
 function pintarEstadoML() {
   const cx = $('#cx-shopee'); // a linha da extensão e o selo da Shopee acompanham a extensão, como o cartão do Mercado Livre
   const ult = cx && cxUltimo.get(cx);
   if (ult && S.st?.extensao && ult.extensao_online !== S.st.extensao.online) pintarSeloConexao(cx, { ...ult, extensao_online: S.st.extensao.online });
-  const selo = $('#ml-selo'); const linha = $('#ml-estado'); if (!selo || !linha) return;
-  const e = S.st.extensao; const direto = S.st.ajustes.link_mode === 'direct';
-  const ok = S.tags.length > 0 && e.online && !direto;
-  selo.className = 'estado-pill ' + (ok ? 'conectado' : 'falta');
-  selo.textContent = ok ? TEXTOS_CONEXOES.conectado : TEXTOS_CONEXOES.falta;
-  const erro = e.lastError ? ` Último erro: ${e.lastError}.` : '';
-  const texto = direto ? 'Modo direto ligado em Ajustes: os links saem sem etiqueta e não geram comissão.'
-    : e.online ? `Extensão conectada. ${e.lastOkAt ? `Último link gerado em ${dataHora(e.lastOkAt)}.` : 'Nenhum link gerado ainda.'}${erro}`
-      : `Extensão desconectada.${erro || ' Abra o Chrome com a extensão instalada e logado na Central de Afiliados.'}`;
-  linha.classList.toggle('aviso', direto || !e.online);
-  if (linha.textContent !== texto) linha.textContent = texto;
+  const selo = $('#ml-selo'); const lista = $('#ml-estados'); if (!selo || !lista) return;
+  const m = cxMlEstado(S.st, S.tags.length > 0);
+  const cls = 'estado-pill ' + m.selo[0];
+  if (selo.className !== cls) selo.className = cls;
+  if (selo.textContent !== m.selo[1]) selo.textContent = m.selo[1];
+  // só mexe no texto que mudou: a frase fica numa região viva e o leitor de tela não deve relê-la a cada 3 s
+  const set = (el, t) => { if (el.textContent !== t) el.textContent = t; };
+  ['#ml-l-ext', '#ml-l-central'].forEach((id, i) => {
+    const li = $(id, lista); const l = m.linhas[i];
+    li.hidden = !l; if (!l) return;
+    li.classList.toggle('alerta', l.alerta);
+    set($('.glifo', li), l.glifo); set($('.frase', li), l.frase); set($('.quando', li), l.quando);
+    const extra = $('.extra', li); const partes = String(l.extra || '').split('\n').filter(Boolean);
+    const chave = partes.join('\n'); if (extra.dataset.k !== chave) { extra.dataset.k = chave; extra.replaceChildren(...partes.map((t) => Object.assign(document.createElement('span'), { textContent: t }))); }
+  });
+  const aviso = $('#ml-aviso');
+  aviso.hidden = !m.aviso;
+  if (m.aviso && !aviso.firstChild) aviso.innerHTML = TEXTOS_CONEXOES.ml.avisoAntiga;
 }
 
 // ---------- etiquetas de afiliado (era a página #etiquetas; agora é uma seção do cartão Mercado Livre) ----------

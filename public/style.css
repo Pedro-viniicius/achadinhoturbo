@@ -45,6 +45,8 @@ main { padding:24px clamp(16px,4vw,48px) 64px; max-width:1040px; width:100%; }
 .pilula i { width:8px; height:8px; border-radius:50%; background:var(--err); }
 .pilula.ok i { background:var(--ok); } .pilula.espera i { background:var(--warn); }
 .pilula.sim { background:var(--warn); color:#fff; border-color:var(--warn); font-weight:600; }
+.faixa a.pilula { text-decoration:none; }
+@media (max-width:600px) { .faixa a.pilula { padding:11px 14px; } } /* alvo de toque de 44 px no celular */
 h1 { font:800 30px/1.1 var(--titulo); letter-spacing:-.03em; margin:0; }
 h2 { font:700 17px/1.25 var(--titulo); letter-spacing:-.02em; margin:0 0 4px; }
 .topo { display:flex; justify-content:space-between; align-items:flex-end; gap:16px; margin-bottom:20px; flex-wrap:wrap; }
@@ -486,6 +488,16 @@ a[href="#templates"].dica { display:inline-block; min-height:24px; line-height:2
 .aviso-impl .aviso-corpo a { color:var(--text); font-weight:600; text-decoration:underline; display:inline-block; min-height:24px; line-height:24px; }
 .aviso-impl .aviso-corpo summary { cursor:pointer; font-weight:600; min-height:24px; line-height:24px; }
 .conexao .ext-linha { margin:0; font-size:14px; color:var(--text); }
+.conexao ul.ext-estados { list-style:none; margin:0; padding:0; display:grid; gap:8px; }
+.conexao .ext-estados li { display:grid; grid-template-columns:20px minmax(0,1fr); gap:8px; align-items:start; font-size:14px; color:var(--text); overflow-wrap:anywhere; }
+.conexao .ext-estados li[hidden] { display:none; }
+.conexao .ext-estados .glifo { width:20px; text-align:center; font-weight:800; }
+.conexao .ext-estados li.alerta { background:color-mix(in oklab, var(--warn) 16%, var(--surface)); border:1px solid var(--warn); border-radius:10px; padding:8px 12px; grid-template-columns:20px minmax(0,1fr); }
+.conexao .ext-estados .quando { color:var(--muted); }
+.conexao .ext-estados li.alerta .quando, .conexao .ext-estados li.alerta small.extra { color:var(--text); }
+.conexao .ext-estados small.extra { display:block; color:var(--muted); font-size:13px; }
+.conexao .ext-estados small.extra:empty { display:none; }
+.conexao .ext-estados small.extra span { display:block; margin-top:2px; }
 .conexao .ext-linha.off { background:color-mix(in oklab, var(--warn) 16%, var(--surface)); border:1px solid var(--warn); border-radius:10px; padding:8px 12px; }
 .conexao fieldset { min-width:0; }
 .conexao fieldset .dica { margin:0; }

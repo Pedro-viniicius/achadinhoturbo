@@ -69,7 +69,7 @@ const TEXTOS_DISPAROS = {
   agendarSemConferencia: 'Esta loja não tem conferência de preço: agende para até 25 min ou envie agora.',
   descartado: 'Descartado',
   // motivo do selo quando a linha não traz o texto (chaves de MOTIVOS_VERIFICADOR, src/verificador.js)
-  motivosDescarte: { esgotado: 'esgotado na loja', preco_subiu: 'preço subiu', nao_conferido: 'não deu para conferir o preço' },
+  motivosDescarte: { esgotado: 'esgotado na loja', preco_subiu: 'preço subiu', nao_conferido: 'não deu para conferir o preço', preco_suspeito: 'preço suspeito' },
   disparar: 'Disparar', agendarEnvio: 'Agendar envio', enviando: 'Enviando…', salvando: 'Salvando…',
   motivoWhats: 'Conecte o WhatsApp em Números de WhatsApp para disparar agora.',
   motivoExtensao: 'A extensão do Chrome está desconectada: abra a Central de Afiliados no Chrome, ou agende o envio.',

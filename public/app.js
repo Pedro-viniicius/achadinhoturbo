@@ -107,18 +107,69 @@ async function carregar() {
     api('/state'), api('/tags'), api('/templates'), api('/groups'), api('/rules'), api('/blocks')]);
 }
 
+// ---------- há quanto tempo ----------
+/**
+ * "Há quanto tempo" em texto, para a faixa e para Conexões (spec rodar-sozinho-entrega2, "haQuanto").
+ * Padrão: "agora há pouco" (menos de 1 min), "há N min" (até 59), "há N h" (até 24 h), depois "em 09/11 às 14:32".
+ * `{ faixa: true }`: degraus de 5 min, porque a faixa é aria-live e cada mudança de texto é lida: "há pouco" até 5 min,
+ * "há 5 min", "há 10 min"… "há 55 min", "há 1 h", "há 2 h"…; passou de 24 h, "desde 10/11". `agora` só para teste.
+ * Sem instante válido (ou no futuro), devolve ''.
+ */
+function haQuanto(ts, { faixa: curto = false, agora = Date.now() } = {}) {
+  const t = Number(ts);
+  if (!Number.isFinite(t) || t <= 0 || t > agora + 60000) return '';
+  const min = Math.max(0, Math.floor((agora - t) / 60000)); const h = Math.floor(min / 60);
+  const dia = new Date(t).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit' });
+  if (curto) {
+    if (min < 5) return 'há pouco';
+    if (min < 60) return `há ${min - (min % 5)} min`;
+    return h < 24 ? `há ${h} h` : `desde ${dia}`;
+  }
+  if (min < 1) return 'agora há pouco';
+  if (min < 60) return `há ${min} min`;
+  if (h < 24) return `há ${h} h`;
+  return `em ${dia} às ${new Date(t).toLocaleString('pt-BR', { hour: '2-digit', minute: '2-digit' })}`;
+}
+
 // ---------- faixa de status ----------
+const TEXTOS_FAIXA = {
+  extOn: 'Extensão do Chrome conectada', extOff: 'Extensão do Chrome desconectada', extAntiga: 'Extensão do Chrome desatualizada',
+  centralOk: 'Central de Afiliados respondendo', centralSemInfo: 'Central de Afiliados sem informação',
+  centralSemTeste: 'Central de Afiliados ainda não testada',
+  espera: (quando) => `Mercado Livre em espera: Central sem resposta ${quando}`.trim(),
+  direto: 'Links sem etiqueta (modo direto)',
+};
+/**
+ * As duas pílulas do Mercado Livre, na ordem extensão, Central (spec, "Faixa do topo"). Pílula com problema é link para
+ * Conexões. A cor nunca é o único sinal: o texto carrega o estado. Sem `extensao.central` (servidor antigo), só a da extensão.
+ */
+function faixaPilulasML(e, agora = Date.now()) {
+  const T = TEXTOS_FAIXA; const c = e?.central;
+  const pil = (cls, txt, link, ponto = true) => (link
+    ? `<a href="#conexoes" class="pilula ${cls}"><i></i>${esc(txt)}</a>`
+    : `<span class="pilula ${cls}">${ponto ? '<i></i>' : ''}${esc(txt)}</span>`);
+  const ext = !e.online ? pil('', T.extOff, true) : e.desatualizada === true ? pil('espera', T.extAntiga, true) : pil('ok', T.extOn, false);
+  if (!c) return ext;
+  let cen;
+  if (!e.online) cen = pil('', T.centralSemInfo, false, false);
+  else if (c.estado === 'em_espera') cen = pil('espera', T.espera(haQuanto(c.emEsperaDesde, { faixa: true, agora })), true);
+  else if (c.estado === 'sem_teste') cen = pil('', T.centralSemTeste, false, false);
+  else cen = pil('ok', T.centralOk, false);
+  return ext + cen;
+}
 function faixa() {
   const w = S.st.whatsapp; const e = S.st.extensao;
   const wTxt = { open: 'WhatsApp conectado', qr: 'WhatsApp aguardando leitura do QR', connecting: 'WhatsApp conectando…', idle: 'WhatsApp desconectado' }[w.status];
   const wCls = w.status === 'open' ? 'ok' : w.status === 'idle' ? '' : 'espera';
   const modo = S.st.ajustes.link_mode;
-  $('#faixa').innerHTML =
+  const html =
     (S.st.simulacao ? '<span class="pilula sim">Modo simulação: nada é enviado de verdade</span>' : '') +
     `<span class="pilula ${wCls}"><i></i>${wTxt}</span>` +
-    (modo === 'direct' ? '<span class="pilula espera"><i></i>Links sem etiqueta (modo direto)</span>'
-      : `<span class="pilula ${e.online ? 'ok' : ''}"><i></i>${e.online ? 'Extensão do Chrome conectada' : 'Extensão do Chrome desconectada'}</span>`) +
+    (modo === 'direct' ? `<span class="pilula espera"><i></i>${TEXTOS_FAIXA.direto}</span>` : faixaPilulasML(e)) +
     (S.st.propostas_pendentes ? `<a href="#links" class="pilula espera" style="text-decoration:none"><i></i>${S.st.propostas_pendentes} ${S.st.propostas_pendentes === 1 ? 'proposta de grupo novo' : 'propostas de grupo novo'}</a>` : '');
+  // só repinta quando o HTML muda: a faixa é aria-live, e reescrever o mesmo texto a cada 3 s faz o leitor de tela relê-lo
+  if (faixa.ultimo === html) return;
+  faixa.ultimo = html; $('#faixa').innerHTML = html;
 }
 
 // ---------- regras ----------

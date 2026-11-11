@@ -561,7 +561,7 @@ const TEXTOS_REVISAO_CATALOGO = {
   regra: 'Disparo automático', todasRegras: 'Todos os disparos', resultado: 'Mostrar', todos: 'Tudo', soRevisar: 'Só o que está para revisar',
   colunas: ['Quando', 'Regra', 'Loja', 'Oferta', 'Resultado'],
   rotulosCelula: { regra: 'Regra', loja: 'Loja' },
-  vazio: 'Nada para revisar. As ofertas da Shopee e as com 100% de desconto aparecem aqui.', vazioFiltro: 'Nada com este filtro.',
+  vazio: 'Nada para revisar. As ofertas da Shopee, as com 100% de desconto, as com queda grande de preço e as que falharam 3 vezes aparecem aqui.', vazioFiltro: 'Nada com este filtro.',
   erroCarregar: 'Não consegui carregar as ofertas do catálogo. Tente de novo.',
   semRegra: '(disparo apagado)', semTitulo: 'Oferta sem título',
   lojas: { ml: 'Mercado Livre', amazon: 'Amazon', shopee: 'Shopee' },
@@ -569,7 +569,13 @@ const TEXTOS_REVISAO_CATALOGO = {
     shopee: 'Shopee: confirme o link', desconto_100: 'Desconto de 100%: confira o preço',
     preco_antigo: 'Preço antigo muito alto: confira o preço', falha_link: 'Não consegui gerar o link: confira a oferta',
     nao_conferido: 'Não deu para conferir o preço: confira na loja',
+    queda_preco: 'Preço muito abaixo da lista: confira o preço', falhas_repetidas: 'Falhou 3 vezes seguidas: confira a oferta e envie',
   },
+  // com a queda em % (`queda_pct` do item, quando o servidor a mandar): o texto da spec; sem ela, o de `motivos.queda_preco`
+  quedaMotivo: (pct) => `Preço ${pct}% abaixo da lista: confira o preço`,
+  // item que voltou à revisão porque o "Enviar" não chegou a nenhum grupo (`ultimo_envio_falhou`)
+  ultimoEnvioFalhou: 'Último envio falhou: a oferta não chegou a nenhum grupo. Ela continua na revisão: tente de novo.',
+  ultimoEnvioErro: (nome, erro) => `${nome}${erro ? ': ' + erro : ''}`,
   enviada: 'Enviada', paraRevisarPre: 'Para revisar', descartada: 'Descartada: na revisão',
   // descartada pelo verificador de preço e estoque (chaves de `descartado_por` de GET /api/catalogo/itens; MOTIVOS_VERIFICADOR)
   descartadaPor: {
@@ -594,6 +600,10 @@ const TEXTOS_REVISAO_CATALOGO = {
   // 100% informado pelo Etiqueta sem preço antigo 10× maior: o envio é liberado, porque o servidor nunca manda o "100%"
   faixa100SemAntigo: 'O Etiqueta informou 100% de desconto; esse número não vai na mensagem. Sem um preço antigo maior que o preço, ela sai sem “de/por” e sem desconto. Confira o preço antes de enviar.',
   faixa100ComAntigo: (antigo, preco) => `O Etiqueta informou 100% de desconto; esse número não vai na mensagem. O desconto sai calculado dos dois preços (${antigo} → ${preco}). Confira os preços antes de enviar.`,
+  // queda de preço: {LIMITE} é QUEDA_REVISAO_PCT (src/catalogo.js); o servidor ainda não manda o limite, então o número é o da constante
+  faixaQueda: (pct, limite) => `O Etiqueta trouxe este preço ${pct == null ? 'bem abaixo' : pct + '% abaixo'} do preço da lista, mais que o limite de ${limite}%. Pode ser promoção de verdade ou preço errado. Confira na loja antes de enviar.`,
+  faixaFalhas: 'O link ou a conferência do preço falhou em 3 envios seguidos. Ao enviar, o painel tenta de novo na hora; se falhar, o motivo aparece na linha desta oferta no Histórico.',
+  faixaUltimoFalhou: 'O último envio desta oferta não chegou a nenhum grupo:',
   faixaLink: 'Não consegui gerar o link do Mercado Livre desta oferta. Ao enviar, o painel tenta de novo na hora; se falhar, o motivo aparece na linha desta oferta no Histórico.',
   abrirLink: 'Abrir o link da oferta (abre em outra aba)', linkFora: 'Link fora do esperado: não enviar.',
   corrijaPreco: 'Corrija o preço ou apague o preço antigo para enviar.',
@@ -618,7 +628,13 @@ const HCAT = { regra: '', status: '', itens: [], dados: null };
 /** O link do item, se for exatamente o formato esperado da loja; senão null (não vira <a> e trava o "Enviar"). */
 const hcatLinkSeguro = (loja, link) => (Object.hasOwn(HCAT_LINKS, loja) && typeof link === 'string' && HCAT_LINKS[loja].test(link) ? link : null);
 /** Motivos do servidor em texto ("A e B"); motivo desconhecido não aparece. */
-const hcatMotivos = (lista) => (Array.isArray(lista) ? lista : []).map((m) => (Object.hasOwn(TEXTOS_REVISAO_CATALOGO.motivos, m) ? TEXTOS_REVISAO_CATALOGO.motivos[m] : '')).filter(Boolean).join(' e ');
+const HCAT_QUEDA_LIMITE = 50; // espelha QUEDA_REVISAO_PCT de src/catalogo.js (o painel não importa de src/)
+/** `queda_pct` do item (inteiro de 1 a 99) ou null: o servidor ainda pode não mandar. */
+const hcatQuedaPct = (it) => (Number.isInteger(it?.queda_pct) && it.queda_pct >= 1 && it.queda_pct <= 99 ? it.queda_pct : null);
+const hcatMotivos = (lista, it) => (Array.isArray(lista) ? lista : []).map((m) => {
+  if (m === 'queda_preco' && hcatQuedaPct(it) != null) return TEXTOS_REVISAO_CATALOGO.quedaMotivo(hcatQuedaPct(it));
+  return Object.hasOwn(TEXTOS_REVISAO_CATALOGO.motivos, m) ? TEXTOS_REVISAO_CATALOGO.motivos[m] : '';
+}).filter(Boolean).join(' e ');
 const hcatNomeLoja = (loja) => (Object.hasOwn(TEXTOS_REVISAO_CATALOGO.lojas, loja) ? TEXTOS_REVISAO_CATALOGO.lojas[loja] : '—');
 /**
  * Preço ainda suspeito com os valores do formulário (a mesma conta do servidor, precoSuspeito em src/catalogo-itens.js):
@@ -633,7 +649,12 @@ function hcatPrecoSuspeito(v) {
 /** Texto e classe do resultado de um item do catálogo. → { cls, texto, detalhe, extra } */
 function hcatResultado(it) {
   const R = TEXTOS_REVISAO_CATALOGO;
-  if (it.status === 'revisao') return { cls: 'nivel-aviso', texto: `${R.paraRevisarPre}: ${hcatMotivos(it.motivos) || '—'}`, detalhe: '', extra: [] };
+  if (it.status === 'revisao') {
+    // voltou à revisão porque o "Enviar" falhou em todos os grupos (CA2.8): o aviso do último envio e o erro de cada grupo
+    const falhou = it.ultimo_envio_falhou === true;
+    const erros = falhou && Array.isArray(it.ultimo_envio_erros) ? it.ultimo_envio_erros.map((g) => R.ultimoEnvioErro(g?.nome ?? '', g?.erro ?? '')) : [];
+    return { cls: 'nivel-aviso', texto: `${R.paraRevisarPre}: ${hcatMotivos(it.motivos, it) || '—'}`, detalhe: falhou ? R.ultimoEnvioFalhou : '', extra: erros };
+  }
   if (it.status === 'descartado') {
     const porque = typeof it.descartado_por === 'string' && Object.hasOwn(R.descartadaPor, it.descartado_por) ? R.descartadaPor[it.descartado_por] : R.descartada;
     return { cls: 'nivel-aviso', texto: porque, detalhe: '', extra: [] };
@@ -753,7 +774,13 @@ function hcatFaixaHtml(it) {
     if (temAntigo && (antigo >= 10 * preco || !m.includes('desconto_100'))) ps.push(R.faixaPreco(Math.round(antigo / preco), dispBrl(antigo), dispBrl(preco)));
     else if (m.includes('desconto_100')) ps.push(temAntigo ? R.faixa100ComAntigo(dispBrl(antigo), dispBrl(preco)) : R.faixa100SemAntigo);
   }
+  if (m.includes('queda_preco')) ps.push(R.faixaQueda(hcatQuedaPct(it), HCAT_QUEDA_LIMITE));
   if (m.includes('falha_link')) ps.push(R.faixaLink);
+  if (m.includes('falhas_repetidas')) ps.push(R.faixaFalhas);
+  if (it.status === 'revisao' && it.ultimo_envio_falhou === true) {
+    const erros = Array.isArray(it.ultimo_envio_erros) ? it.ultimo_envio_erros.map((g) => R.ultimoEnvioErro(g?.nome ?? '', g?.erro ?? '')) : [];
+    ps.push(erros.length ? `${R.faixaUltimoFalhou} ${erros.join(' · ')}` : R.ultimoEnvioFalhou);
+  }
   return ps.length ? `<div class="aviso-impl" role="status"><div class="aviso-corpo">${ps.map((p) => `<p>${esc(p)}</p>`).join('')}</div></div>` : '';
 }
 
@@ -777,7 +804,7 @@ function revisarCatalogo(itemId) {
     $('#hc-tab')?.focus(); // o botão que abriu sumiu com a linha: o foco volta à tabela
   };
   espDialogOferta({
-    titulo: R.titulo, sub: reenvio ? R.subReenviar(it.regra || R.semRegra) : R.sub(it.regra || R.semRegra, hcatMotivos(it.motivos) || '—'),
+    titulo: R.titulo, sub: reenvio ? R.subReenviar(it.regra || R.semRegra) : R.sub(it.regra || R.semRegra, hcatMotivos(it.motivos, it) || '—'),
     topoHtml: hcatFaixaHtml(it) + linkHtml,
     oferta: it.oferta || {}, sold: it.oferta?.sold, link: linkPrevia, tpl,
     legenda: tpl ? R.legenda[it.loja] || '' : R.semTemplate,
