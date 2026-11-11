@@ -63,6 +63,7 @@ import { hostPermitido } from './ml.js';
 import { montarEnquete } from './whatsapp.js';
 import { renderTemplate, discountPct } from './template.js';
 import { centavos, comFraseMaisBarata, maisBarataOBastante, textoNaoMaisBarata, textoPassou } from './parecido.js';
+import { precoSuspeito } from './catalogo-itens.js';
 import { sleep, jitter } from './util.js';
 import { pausaGrupoGravada } from './ritmo.js';
 import { OfertaDescartada, MOTIVOS_VERIFICADOR, FRESCOR_MIN, MARGEM_AGENDADO_MIN } from './verificador.js';
@@ -1292,7 +1293,8 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
    * (`asin`, `shop_id`/`item_id`, `url`), a referência é `preco_loja` (sem ele, o verificador usa `offer.price`) e
    * `lidoEm` é a idade dos dados (`envios.created_at`). → { offer: os campos gravados com o preço, o preço antigo e o
    * desconto conferidos e `vistoEm` só quando conferido; sufixo: '' ou ' · …' para a linha `ok` }. Barrada → lança
-   * OfertaDescartada. Sem verificador: a oferta gravada, sem sufixo. O `vistoEm` gravado no payload nunca vale.
+   * OfertaDescartada (inclusive 'preco_suspeito', quando o preço conferido trocou o gravado). Sem verificador: a oferta
+   * gravada, sem sufixo. O `vistoEm` gravado no payload nunca vale.
    */
   async function conferirOferta(p, lidoEm) {
     const { vistoEm: _gravado, ...gravada } = p.offer && typeof p.offer === 'object' && !Array.isArray(p.offer) ? p.offer : {};
@@ -1307,6 +1309,10 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
     const conferida = r.oferta && typeof r.oferta === 'object' ? r.oferta : {};
     for (const k of ['price', 'oldPrice', 'discountPct']) if (Object.hasOwn(conferida, k)) offer[k] = conferida[k];
     if (r.conferido === true && Number.isFinite(conferida.vistoEm)) offer.vistoEm = conferida.vistoEm;
+    // preço suspeito (CA2.12, a mesma regra do "Enviar" do Catálogo): só quando o preço que vai na mensagem veio da leitura
+    // de agora. O verificador só troca o preço quando ele não foi digitado (o digitado fica), então "trocou" = "veio da
+    // leitura"; preço digitado pelo dono, ou gravado e só confirmado, não passa pela guarda.
+    if (centavos(offer.price) !== centavos(gravada.price) && precoSuspeito(offer)) throw new OfertaDescartada('preco_suspeito');
     return { offer, sufixo: typeof r.sufixo === 'string' ? r.sufixo : '' };
   }
 

@@ -460,6 +460,90 @@ test('R1: o Identificar marca sem_conferencia só nas lojas sem conferência e c
   assert.equal(Object.hasOwn(await sem.envios.identificar({ url: URL_MAGALU, template_id: sem.tpl }), 'sem_conferencia'), false, 'sem verificador');
 });
 
+test('CA2.12: preço suspeito que veio da conferência descarta o envio antes do link e da mensagem; preço digitado pelo dono sai; com o verificador desligado nada muda', async (t) => {
+  const MOTIVO = 'Descartada: preço suspeito';
+  assert.equal(MOTIVOS_VERIFICADOR.preco_suspeito, MOTIVO);
+  const comum = (s) => ({ tag_id: 2, etiqueta: 'etiquetaB', template_id: s.tpl, template_criado_em: s.tplCriado, enviar_foto: false });
+  const ml = (price) => ({
+    ...{ url: URL_ML_PRODUTO, loja: 'mercadolivre', preco_loja: 89.9 },
+    offer: { key: 'MLB1234567890', title: 'Fone Bom', price, oldPrice: 149.9, discountPct: 40, sold: null, freeShipping: false, coupon: null, image: null },
+  });
+
+  await t.test('ML (Disparo manual agendado/agora): a leitura baixa o preço a 1/10 do antigo → descartado, sem link e sem mensagem', async () => {
+    const s = montar();
+    s.ml.estado.leitura = { price: 8.99, disponivel: true };
+    const id = gravar(s, { ...comum(s), ...ml(89.9) });
+    await s.envios.processarPendentes();
+    assert.equal(envio(s, id).status, 'erro');
+    assert.deepEqual(resultadoDe(s, id), { ok: 0, erro: 1, motivo: MOTIVO, descartado: 'preco_suspeito' });
+    assert.deepEqual(resultadosDe(s, id), [{ jid: G1, group_name: 'Achadinhos', ok: 0, erro: MOTIVO }]);
+    assert.deepEqual(s.pedidosDeLink, [], 'nenhum pedido de link');
+    assert.equal(s.wa.simulated.length, 0, 'nenhuma mensagem');
+    assert.deepEqual(logs(s), [{ rule_name: 'Disparo manual', level: 'aviso', group_name: null, offer_title: 'Fone Bom', message: MOTIVO }]);
+    assert.ok(!niveis(s).includes('erro'));
+    const painel = await s.envios.painel('oferta');
+    assert.deepEqual(painel.linhas.map((l) => [l.status, l.erro, l.descartado]), [['erro', MOTIVO, 'preco_suspeito']]);
+  });
+
+  await t.test('Amazon pelo criar, preço digitado pelo dono: a guarda não vale, o texto sai com o preço digitado', async () => {
+    const s = montar({ agora: () => T_1432 });
+    const id = await criar(s, { url: URL_AMAZON, tag_id: undefined, group_jids: [G1], ajustes: { price: '5,00' } });
+    assert.deepEqual([payloadDe(s, id).preco_loja, payloadDe(s, id).offer.price, payloadDe(s, id).offer.oldPrice], [99.9, 5, 199.9], '10x o preço: pareceria suspeito');
+    s.amazon.estado.leitura = { ...s.amazon.estado.item };
+    await s.envios.processarPendentes();
+    assert.equal(envio(s, id).status, 'concluido');
+    assert.match(s.wa.simulated.at(-1).text, /Por R\$ 5,00 \(de R\$ 199,90\)/);
+    assert.deepEqual(niveis(s), ['ok']);
+  });
+
+  await t.test('Amazon pelo criar sem digitar: a leitura cai a menos de 1/10 do preço antigo → descartado', async () => {
+    const s = montar({ agora: () => T_1432 });
+    const id = await criar(s, { url: URL_AMAZON, tag_id: undefined, group_jids: [G1] });
+    s.amazon.estado.leitura = { ...s.amazon.estado.item, price: 9.99, oldPrice: 199.9 };
+    await s.envios.processarPendentes();
+    assert.deepEqual(resultadoDe(s, id), { ok: 0, erro: 1, motivo: MOTIVO, descartado: 'preco_suspeito' });
+    assert.equal(s.wa.simulated.length, 0);
+    assert.deepEqual(s.pedidosDeLink, []);
+  });
+
+  await t.test('preço digitado em outra origem (ML gravado com preço diferente do da loja) sai mesmo parecendo suspeito', async () => {
+    const s = montar();
+    s.ml.estado.leitura = { price: 89.9, disponivel: true };
+    const id = gravar(s, { ...comum(s), ...ml(8.99) });
+    await s.envios.processarPendentes();
+    assert.equal(envio(s, id).status, 'concluido');
+    assert.match(s.wa.simulated.at(-1).text, /Por R\$ 8,99 \(de R\$ 149,90\)/);
+    assert.deepEqual(niveis(s), ['ok']);
+  });
+
+  await t.test('preço que a conferência trocou mas que não é suspeito (queda normal) sai', async () => {
+    const s = montar();
+    s.ml.estado.leitura = { price: 79.9, disponivel: true };
+    const id = gravar(s, { ...comum(s), ...ml(89.9) });
+    await s.envios.processarPendentes();
+    assert.equal(envio(s, id).status, 'concluido');
+    assert.match(s.wa.simulated.at(-1).text, /Por R\$ 79,90/);
+  });
+
+  await t.test('verificador desligado (Ajustes) ou ausente: nada muda, a oferta sai como foi gravada', async () => {
+    const s = montar();
+    setSetting(s.db, 'verificador_ativo', '0');
+    s.ml.estado.leitura = { price: 8.99, disponivel: true };
+    const id = gravar(s, { ...comum(s), ...ml(89.9) });
+    await s.envios.processarPendentes();
+    assert.equal(envio(s, id).status, 'concluido');
+    assert.match(s.wa.simulated.at(-1).text, /Por R\$ 89,90/);
+
+    const sem = montar({ verificar: false });
+    const gravado = { ...comum(sem), ...ml(8.99) };
+    delete gravado.preco_loja;
+    const id2 = gravar(sem, gravado);
+    await sem.envios.processarPendentes();
+    assert.equal(envio(sem, id2).status, 'concluido');
+    assert.match(sem.wa.simulated.at(-1).text, /Por R\$ 8,99/);
+  });
+});
+
 test('CA6: nenhum teste deste arquivo acessou a rede', () => {
   assert.equal(acessosRede, 0);
 });
