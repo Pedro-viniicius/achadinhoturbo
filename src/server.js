@@ -84,7 +84,8 @@ export function criarServicos({ db, wa, links, fast = FAST, dir = DATA_DIR, ml =
   };
   const catalogoItens = createCatalogoItens({ db, wa, links, amazon, envios, acordar });
   // links: no modo extension, o verificador lê o ML pela extensão (links.requestProduto; plano verificador-ml-extensao, D9)
-  const verificador = verificar === true ? createVerificador({ db, ml, amazon, shopee, links, simulado: simulado === true }) : null;
+  // catalogo: a releitura da Amazon sem API pelo Etiqueta (confirmarPreco; plano rodar-sozinho-entrega1, B7)
+  const verificador = verificar === true ? createVerificador({ db, ml, amazon, shopee, links, catalogo, simulado: simulado === true }) : null;
   scheduler = createScheduler({ db, wa, links, fast, dir, ml, amazon, shopee, magalu, catalogo, catalogoItens, verificador });
   wa.onMensagem((m) => scheduler.espelho.receber(m));
   // Para desligar o envio pelo sócio na hora: desligue os remetentes no painel (ou apague esta linha e reinicie)
@@ -92,8 +93,12 @@ export function criarServicos({ db, wa, links, fast = FAST, dir = DATA_DIR, ml =
   return { amazon, shopee, catalogo, catalogoItens, scheduler, verificador };
 }
 
-/** Linha `aviso` do Histórico quando a conferência de preço e estoque é desligada em Ajustes (D10); com login, "(por <nome>)" no fim. */
+/**
+ * Linhas `aviso` do Histórico quando a conferência de preço e estoque é desligada (D10) ou ligada (CA1.9 de
+ * rodar-sozinho-entrega1) em Ajustes; com login, "(por <nome>)" no fim. Só na mudança de estado.
+ */
 export const AVISO_VERIFICADOR_DESLIGADO = 'Verificador desligado em Ajustes';
+export const AVISO_VERIFICADOR_LIGADO = 'Verificador ligado em Ajustes';
 const ERRO_VERIFICADOR_LIMITE = `Informe um número inteiro de 0 a ${LIMITE_MAX_PCT}.`;
 export const ERRO_TEMPLATE_HORA_PRECO = 'Ponha o {HORA_PRECO} em outra linha, ou entre [ ] sem o {LINK}: sem conferência de preço, a linha some e a mensagem sai sem o link de afiliado.';
 const ERRO_VERIFICADOR_ATIVO = 'Conferir preço e estoque: informe ligado ou desligado.';
@@ -352,7 +357,7 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
     // as pausas são do cartão Proteção do número, só do Dono (PUT /api/protecao): recusa antes de gravar qualquer campo
     if (delay_group_s != null || delay_offer_s != null) throw new Error(ERRO_PAUSAS_EM_PROTECAO);
     // Conferência de preço e estoque (D10: sem soDono, como os outros Ajustes). Os dois campos são validados antes de
-    // gravar qualquer um; desligar (de ligado para desligado) deixa uma linha `aviso` no Histórico.
+    // gravar qualquer um; desligar e ligar (mudança de estado) deixam, cada um, uma linha `aviso` no Histórico.
     if (verificador_ativo != null && typeof verificador_ativo !== 'boolean') throw new Error(ERRO_VERIFICADOR_ATIVO);
     const limiteVf = verificador_limite_pct != null ? limiteVerificador(verificador_limite_pct) : null;
     if (verificador_limite_pct != null && limiteVf == null) throw new Error(ERRO_VERIFICADOR_LIMITE);
@@ -366,6 +371,7 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
       const estava = ajustesVerificador.ativo();
       setSetting(db, 'verificador_ativo', verificador_ativo ? '1' : '0');
       if (estava && !verificador_ativo) addLog(db, { level: 'aviso', message: `${AVISO_VERIFICADOR_DESLIGADO}${porQuem}` });
+      if (!estava && verificador_ativo) addLog(db, { level: 'aviso', message: `${AVISO_VERIFICADOR_LIGADO}${porQuem}` });
     }
     if (retencao_dias != null) { const n = Number(retencao_dias); if (!(n >= 0 && n <= 3650)) throw new Error('Retenção: de 0 (para sempre) a 3650 dias.'); setSetting(db, 'retencao_dias', Math.round(n)); }
     if (titulo_max != null) { const n = Number(titulo_max); if (!(n >= 0 && n <= 200)) throw new Error('Tamanho do título: de 0 (inteiro) a 200.'); setSetting(db, 'titulo_max', Math.round(n)); }

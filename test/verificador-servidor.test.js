@@ -1,7 +1,7 @@
 // Verificador de preço e estoque, etapa 8 (docs/produto/planos/verificador-preco-estoque.md; CA1 e CA7): a fiação
 // (criarServicos com `verificar`/`simulado`, D9), os Ajustes por HTTP (GET /api/state e PUT /api/ajustes, com a linha
-// `aviso` ao desligar, D10) e a tela (cartão de Ajustes, dica de {HORA_PRECO} em Templates, selo "Descartado" e dica do
-// agendar no Disparo manual). Servidor pelo mesmo caminho do main (criarServicos + buildApp), WhatsApp simulado, links
+// `aviso` ao desligar, D10, e ao ligar, CA1.9 de rodar-sozinho-entrega1) e a tela (cartão de Ajustes, dica de
+// {HORA_PRECO} em Templates, selo "Descartado" e dica do agendar no Disparo manual). Servidor pelo mesmo caminho do main (criarServicos + buildApp), WhatsApp simulado, links
 // meli.la/fake-…, ml falso e o fetch global bloqueado (o último teste prova que ninguém o chamou). Painel num vm.
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -14,7 +14,7 @@ import { fileURLToPath } from 'node:url';
 import { openDb, setSetting } from '../src/db.js';
 import { createWhatsApp } from '../src/whatsapp.js';
 import { createLinkService } from '../src/links.js';
-import { buildApp, criarServicos, AVISO_VERIFICADOR_DESLIGADO } from '../src/server.js';
+import { buildApp, criarServicos, AVISO_VERIFICADOR_DESLIGADO, AVISO_VERIFICADOR_LIGADO } from '../src/server.js';
 import { LIMITE_PADRAO_PCT, MOTIVOS_VERIFICADOR } from '../src/verificador.js';
 
 let acessosRede = 0;
@@ -213,21 +213,61 @@ test('CA7: PUT /api/ajustes valida o limite (inteiro de 0 a 50) e a chave (boole
   assert.equal((await req(s.port, '/api/ajustes', { method: 'PUT' })).status, 200);
 });
 
-test('CA7 (D10): desligar grava uma linha aviso no Histórico; ligar e salvar de novo desligado não gravam outra', async (t) => {
+test('CA7 (D10) e CA1.9: desligar e ligar gravam cada um a sua linha aviso no Histórico; salvar no mesmo estado não grava', async (t) => {
   const s = await subir();
   t.after(s.fechar);
   assert.equal((await put(s, { verificador_ativo: true })).status, 200);
-  assert.deepEqual(logs(s), [], 'ligar não vai ao Histórico');
+  assert.deepEqual(logs(s), [], 'já estava ligado (o padrão): ligar de novo não vai ao Histórico');
   assert.equal((await put(s, { verificador_ativo: false })).status, 200);
   assert.equal((await estado(s)).verificador_ativo, false);
   assert.deepEqual(logs(s), [{ level: 'aviso', message: AVISO_VERIFICADOR_DESLIGADO }]);
   assert.equal(AVISO_VERIFICADOR_DESLIGADO, 'Verificador desligado em Ajustes');
+  assert.equal(AVISO_VERIFICADOR_LIGADO, 'Verificador ligado em Ajustes');
   assert.equal((await put(s, { verificador_ativo: false })).status, 200, 'salvar de novo desligado');
   assert.equal(logs(s).length, 1, 'já estava desligado: sem nova linha');
   assert.equal((await put(s, { verificador_ativo: true })).status, 200);
   assert.equal((await estado(s)).verificador_ativo, true);
+  assert.equal((await put(s, { verificador_ativo: true })).status, 200, 'salvar de novo ligado');
   assert.equal((await put(s, { verificador_ativo: false })).status, 200);
-  assert.deepEqual(logs(s).map((l) => l.level), ['aviso', 'aviso'], 'cada desligamento fica no Histórico');
+  assert.deepEqual(logs(s), [
+    { level: 'aviso', message: AVISO_VERIFICADOR_DESLIGADO },
+    { level: 'aviso', message: AVISO_VERIFICADOR_LIGADO },
+    { level: 'aviso', message: AVISO_VERIFICADOR_DESLIGADO },
+  ], 'cada mudança fica no Histórico, sem "(por …)" sem login');
+  // pedido recusado (limite ruim) não liga nem grava linha
+  assert.equal((await put(s, { verificador_ativo: true, verificador_limite_pct: 51 })).status, 400);
+  assert.equal((await estado(s)).verificador_ativo, false);
+  assert.equal(logs(s).length, 3);
+});
+
+test('CA1.9: com login, ligar leva "(por <nome>)" como o desligar; só o nome da sessão vai ao Histórico', async (t) => {
+  const s = await subir({ panelPassword: SENHA });
+  t.after(s.fechar);
+  const lg = await req(s.port, '/api/login', { method: 'POST', body: { senha: SENHA } });
+  assert.equal(lg.status, 200);
+  const sessao = { cookie: String(lg.headers?.['set-cookie']?.[0] ?? '').split(';')[0] };
+  s.db.prepare("UPDATE users SET nome = 'Ana Souza', email = 'ana@exemplo.com'").run();
+  assert.equal((await put(s, { verificador_ativo: false }, sessao)).status, 200);
+  assert.equal((await put(s, { verificador_ativo: true }, sessao)).status, 200);
+  assert.deepEqual(logs(s), [
+    { level: 'aviso', message: `${AVISO_VERIFICADOR_DESLIGADO} (por Ana Souza)` },
+    { level: 'aviso', message: `${AVISO_VERIFICADOR_LIGADO} (por Ana Souza)` },
+  ]);
+  assert.equal(logs(s)[1].message, 'Verificador ligado em Ajustes (por Ana Souza)', 'a frase da spec, §1');
+  assert.ok(!JSON.stringify(logs(s)).includes('ana@exemplo.com'), 'o e-mail nunca vai ao Histórico');
+});
+
+test('B7: o catálogo do agendador vai ao createVerificador; a releitura da Amazon sem API pergunta ao confirmarPreco dele', async (t) => {
+  const s = await subir({ servicos: { verificar: true } });
+  t.after(s.fechar);
+  assert.ok(s.catalogo && s.verificador);
+  const pedidos = [];
+  const agora = Date.now();
+  s.catalogo.confirmarPreco = async (asin) => { pedidos.push(asin); return { resultado: 'confirmado', preco: 50, precoAntigo: null, descontoPct: null, precoEm: agora }; };
+  const oferta = { loja: 'amazon', key: 'ASIN:B0FG2MD49G', title: 'Roteador', price: 50, url: 'https://www.amazon.com.br/dp/B0FG2MD49G' };
+  const r = await s.verificador.conferir(oferta, { lidoEm: agora, referencia: 50, releitura: { precoEm: agora - 3_600_000 } });
+  assert.deepEqual(pedidos, ['B0FG2MD49G'], 'uma releitura, pelo catálogo passado em criarServicos');
+  assert.equal(r.acao, 'enviar');
 });
 
 test('CA7 (D10): quem salva os outros Ajustes salva o verificador; o Operador também (e o desligamento fica no Histórico)', async (t) => {
