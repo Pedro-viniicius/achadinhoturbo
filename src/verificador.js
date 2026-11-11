@@ -12,14 +12,15 @@
 //   - `varias` com preço: só o descarte vale (o menor preço acima do limite → 'preco_subiu'); senão, sem conferência
 //     ('varias_versoes'): nunca o preço de uma versão como se fosse o do anúncio.
 //   - Sem conferência (D3): `lidoEm` (ms) de até FRESCOR_MIN atrás → enviar, sem conferir, com o sufixo
-//     " · preço não conferido (<causa>)"; mais velho, no futuro ou desconhecido → descartar 'nao_conferido'.
+//     " · preço não conferido (<causa>)"; mais velho, no futuro ou desconhecido → descartar 'nao_conferido' (com `causa`,
+//     a chave de CAUSAS).
 //   - Conferido (D4): referência inválida → enviar sem comparar. Preço atual acima de referência × (1 + L/100)
 //     → descartar 'preco_subiu'. Senão, se o preço da oferta é a referência (e não foi digitado), sai com o preço
 //     atual (`precoNovo`) e o sufixo " · preço atualizado de R$ X para R$ Y"; preço digitado à mão é mantido.
 //   → { acao: 'enviar', conferido, precoNovo: número|null, sufixo: texto|null }
-//     | { acao: 'descartar', motivo: 'esgotado'|'preco_subiu'|'nao_conferido', texto }
-// - createVerificador({ db, ml, amazon, shopee, links = null, simulado = false, agora = Date.now, tempoMaxMs = TEMPO_MAX_MS })
-//   → { ativo(), limitePct(), conferir(oferta, { lidoEm, referencia }), podeConferir(loja) }
+//     | { acao: 'descartar', motivo: 'esgotado'|'preco_subiu'|'nao_conferido', texto, causa? (só no nao_conferido) }
+// - createVerificador({ db, ml, amazon, shopee, links = null, catalogo = null, simulado = false, agora = Date.now, tempoMaxMs = TEMPO_MAX_MS })
+//   → { ativo(), limitePct(), conferir(oferta, { lidoEm, referencia, releitura }), podeConferir(loja), semConfirmacaoAgora({ loja, precoEm }) }
 //   - ativo(): `settings.verificador_ativo` diferente de '0' (ausente = ligado). limitePct(): inteiro de 0 a
 //     LIMITE_MAX_PCT de `settings.verificador_limite_pct`; ausente ou fora disso = LIMITE_PADRAO_PCT.
 //   - oferta = { loja: 'mercadolivre'|'amazon'|'shopee'|'magalu', url, asin, shopId, itemId, price, oldPrice,
@@ -42,6 +43,18 @@
 //   - `conferir` nunca lança. → { acao: 'enviar', oferta, conferido, sufixo|null } (cópia da oferta; `vistoEm` = agora()
 //     só quando conferido; preço, preço antigo e desconto atualizados quando o preço mudou)
 //     | { acao: 'descartar', motivo, texto }.
+//   - Amazon sem API, só com `releitura: { precoEm }` (a regra do Catálogo; entrega 1 do "Rodar sozinho", ADR-014): o
+//     Etiqueta relê a página do produto na hora (`catalogo.confirmarPreco(asin)`, nunca lança).
+//     - confirmado → vale `decidir` como nas outras lojas; `vistoEm` é o `preco_em` que o Etiqueta devolveu, nunca agora().
+//     - sem_preco → descartar 'indisponivel'; outro_produto → descartar 'outro_produto'.
+//     - falha → o preço visto (`releitura.precoEm`, ms) de até RESERVA_AMAZON_H h atrás (e até 5 min no futuro) ainda
+//       vale: envia com `vistoEm = precoEm` e o sufixo " · preço visto às HH:MM, não conferido agora (<causa>)". Fora
+//       disso (ou sem `precoEm`): descartar 'nao_conferido' com a `causa`. A falha pausa a releitura por
+//       PAUSA_RELEITURA_MIN min neste verificador: nesse prazo as Amazon vão direto à reserva, sem chamar o Etiqueta.
+//       Exceção: `nao_encontrado` (a oferta saiu do Etiqueta) não tem reserva e não pausa.
+//     Com a API da Amazon ligada, sem `releitura`, desligado ou simulado, a releitura nunca é chamada.
+//   - semConfirmacaoAgora({ loja, precoEm }): a oferta (Amazon, verificador ligado, sem API) hoje não teria como ser
+//     conferida nem sairia pela reserva: a releitura está pausada e o `precoEm` não vale (reservaValida).
 //   - Desligado: enviar a oferta como veio, sem `vistoEm` e sem sufixo, sem ler a loja.
 //   - simulado (DRY_RUN): confirma sem rede (conferido, `vistoEm`, preço como veio). A Magalu segue sem conferência,
 //     como fora da simulação (nunca há leitura dela).
@@ -60,11 +73,23 @@ export const FRESCOR_MIN = 30;
 export const MARGEM_AGENDADO_MIN = 5;
 export const TEMPO_MAX_MS = 20000;
 export const PAUSA_DESCARTADA_H = 6;
+/** Reserva da Amazon: o preço visto (`preco_em`) há até tantas horas vale quando a releitura na hora falha. Não é a PAUSA_DESCARTADA_H. */
+export const RESERVA_AMAZON_H = 6;
+/** Depois de uma falha, a releitura do Etiqueta fica pausada por tantos minutos neste verificador. */
+export const PAUSA_RELEITURA_MIN = 10;
 
 export const MOTIVOS_VERIFICADOR = Object.freeze({
   esgotado: 'Descartada: esgotado na loja',
   preco_subiu: 'Descartada: preço subiu',
   nao_conferido: 'Descartada: não deu para conferir o preço',
+  indisponivel: 'Descartada: indisponível na loja',
+  outro_produto: 'Descartada: a página da loja abriu outro produto',
+});
+
+/** O que o texto do descarte diz entre parênteses (frases fixas), nos motivos que não trazem causa. */
+const DETALHE_MOTIVO = Object.freeze({
+  indisponivel: 'a página não mostra preço nem estoque',
+  outro_produto: 'o código não confere com a oferta',
 });
 
 /** Por que não houve conferência. Frases fixas: entram no Histórico entre parênteses. */
@@ -81,6 +106,9 @@ export const CAUSAS = Object.freeze({
   ml_verificacao: 'o Mercado Livre pediu verificação no navegador',
   limite_hora: 'o limite de conferências por hora foi atingido',
   varias_versoes: 'o produto tem várias versões e o link não diz qual',
+  etiqueta_fora: 'o Etiqueta não respondeu',
+  etiqueta_bloqueio: 'a Amazon bloqueou a leitura',
+  etiqueta_sem_oferta: 'a oferta saiu do Etiqueta',
 });
 
 /** Falha nomeada de links.requestProduto → chave de CAUSAS (D8). Outra falha → 'loja_fora'. */
@@ -91,6 +119,20 @@ const CAUSA_DA_FALHA = Object.freeze({
   limite: 'limite_hora',
   tempo: 'demorou',
   erro: 'loja_fora',
+});
+
+/** Falha de catalogo.confirmarPreco (mais 'timeout', o prazo do verificador) → chave de CAUSAS. Outra falha → 'etiqueta_fora'. */
+const CAUSA_DA_RELEITURA = Object.freeze({
+  falha_rede: 'loja_fora',
+  freio: 'limite_hora',
+  timeout: 'demorou',
+  bloqueado: 'etiqueta_bloqueio',
+  fora_do_ar: 'etiqueta_fora',
+  token_recusado: 'etiqueta_fora',
+  desligada: 'etiqueta_fora',
+  resposta_inesperada: 'etiqueta_fora',
+  nao_configurada: 'etiqueta_fora',
+  nao_encontrado: 'etiqueta_sem_oferta',
 });
 
 /** Oferta que o verificador barrou (a fila lança esta no preparar). `motivo` é chave de MOTIVOS_VERIFICADOR. */
@@ -107,6 +149,9 @@ export class OfertaDescartada extends Error {
 
 const FRESCOR_MS = FRESCOR_MIN * 60 * 1000;
 const TOLERANCIA_FUTURO_MS = 60 * 1000; // created_at do SQLite tem resolução de segundos
+const RESERVA_AMAZON_MS = RESERVA_AMAZON_H * 60 * 60 * 1000;
+const TOLERANCIA_PRECO_EM_FUTURO_MS = 5 * 60 * 1000; // relógio do Etiqueta um pouco adiantado
+const PAUSA_RELEITURA_MS = PAUSA_RELEITURA_MIN * 60 * 1000;
 const RE_ASIN = /^[A-Z0-9]{10}$/;
 const RE_ID_SHOPEE = /^\d{1,20}$/;
 
@@ -124,6 +169,16 @@ function dadosFrescos(lidoEm, agora) {
   if (typeof lidoEm !== 'number' || !Number.isFinite(lidoEm) || typeof agora !== 'number' || !Number.isFinite(agora)) return false;
   const idade = agora - lidoEm;
   return idade >= -TOLERANCIA_FUTURO_MS && idade <= FRESCOR_MS;
+}
+
+/**
+ * A reserva da Amazon vale? `precoEm` (ms, quando o Etiqueta viu o preço) de até RESERVA_AMAZON_H h atrás e, no máximo,
+ * 5 min no futuro. Ausente, não numérico ou fora disso: não vale. Os dois limites são inclusivos.
+ */
+export function reservaValida(precoEm, agora) {
+  if (typeof precoEm !== 'number' || !Number.isFinite(precoEm) || typeof agora !== 'number' || !Number.isFinite(agora)) return false;
+  const idade = agora - precoEm;
+  return idade >= -TOLERANCIA_PRECO_EM_FUTURO_MS && idade <= RESERVA_AMAZON_MS;
 }
 
 /**
@@ -149,7 +204,7 @@ export function decidir({ leitura, referencia, precoOferta, limitePct, lidoEm, a
   const semConferencia = (chave) => {
     const causa = CAUSAS[causaValida(chave)];
     if (dadosFrescos(lidoEm, agora)) return { acao: 'enviar', conferido: false, precoNovo: null, sufixo: ` · preço não conferido (${causa})` };
-    return { acao: 'descartar', motivo: 'nao_conferido', texto: `${MOTIVOS_VERIFICADOR.nao_conferido} (${causa})` };
+    return { acao: 'descartar', motivo: 'nao_conferido', texto: `${MOTIVOS_VERIFICADOR.nao_conferido} (${causa})`, causa: causaValida(chave) };
   };
   const varias = leitura?.varias === true;
   const atual = precoValido(leitura?.price);
@@ -218,7 +273,20 @@ function causaDoErro(loja, e) {
   return 'loja_fora';
 }
 
-export function createVerificador({ db, ml = mlPadrao, amazon = null, shopee = null, links = null, simulado = false, agora = Date.now, tempoMaxMs = TEMPO_MAX_MS } = {}) {
+/** "09:40" se for no dia de `agora`; senão "09:40 de 10/11" (hora local, como o `quandoDe` do Histórico). */
+function quandoDe(ts, agora) {
+  const d = new Date(ts);
+  const p2 = (n) => String(n).padStart(2, '0');
+  const hora = `${p2(d.getHours())}:${p2(d.getMinutes())}`;
+  return d.toDateString() === new Date(agora).toDateString() ? hora : `${hora} de ${p2(d.getDate())}/${p2(d.getMonth() + 1)}`;
+}
+
+/** Descarte por falta de conferência, com a causa (chave de CAUSAS) para quem decide o que fazer com a oferta. */
+const descarteNaoConferido = (chave) => ({
+  acao: 'descartar', motivo: 'nao_conferido', texto: `${MOTIVOS_VERIFICADOR.nao_conferido} (${CAUSAS[chave]})`, causa: chave,
+});
+
+export function createVerificador({ db, ml = mlPadrao, amazon = null, shopee = null, links = null, catalogo = null, simulado = false, agora = Date.now, tempoMaxMs = TEMPO_MAX_MS } = {}) {
   const prazo = typeof tempoMaxMs === 'number' && Number.isFinite(tempoMaxMs) && tempoMaxMs > 0 ? tempoMaxMs : TEMPO_MAX_MS;
 
   function ativo() {
@@ -289,16 +357,21 @@ export function createVerificador({ db, ml = mlPadrao, amazon = null, shopee = n
     return { causa: 'loja_fora' };
   }
 
-  /** lerLoja com o teto de `prazo` ms. Nunca rejeita: erro e demora viram { causa }. */
-  async function lerComPrazo(loja, oferta) {
+  /** `tarefa` com o teto de `prazo` ms. Nunca rejeita: a demora vira `aoDemorar` e o erro, `aoFalhar(e)`. */
+  async function comPrazo(tarefa, aoDemorar, aoFalhar) {
     let timer = null;
-    const limite = new Promise((resolve) => { timer = setTimeout(() => resolve({ causa: 'demorou' }), prazo); });
+    const limite = new Promise((resolve) => { timer = setTimeout(() => resolve(aoDemorar), prazo); });
     // o .catch fica na própria promessa: se ela perder a corrida e falhar depois, não sobra rejeição sem tratamento
-    const leitura = Promise.resolve().then(() => lerLoja(loja, oferta)).catch((e) => {
+    const trabalho = Promise.resolve().then(tarefa).catch(aoFalhar);
+    try { return await Promise.race([trabalho, limite]); } finally { clearTimeout(timer); }
+  }
+
+  /** lerLoja com o teto de `prazo` ms. Nunca rejeita: erro e demora viram { causa }. */
+  function lerComPrazo(loja, oferta) {
+    return comPrazo(() => lerLoja(loja, oferta), { causa: 'demorou' }, (e) => {
       console.error(`[verificador] conferência sem resposta (${loja}):`, e?.name || 'erro');
       return { causa: causaDoErro(loja, e) };
     });
-    try { return await Promise.race([leitura, limite]); } finally { clearTimeout(timer); }
   }
 
   /** A oferta que sai: cópia, sem `vistoEm` herdado; com preço novo, o preço antigo só fica se ainda for maior. */
@@ -320,11 +393,84 @@ export function createVerificador({ db, ml = mlPadrao, amazon = null, shopee = n
     return copia;
   }
 
-  async function conferir(oferta, { lidoEm = null, referencia } = {}) {
-    try {
-      if (!oferta || typeof oferta !== 'object') {
-        return { acao: 'descartar', motivo: 'nao_conferido', texto: `${MOTIVOS_VERIFICADOR.nao_conferido} (${CAUSAS.loja_fora})` };
+  // ---- releitura da Amazon pelo Etiqueta (entrega 1 do "Rodar sozinho")
+  const pausaReleitura = { ate: 0, causa: 'etiqueta_fora' };
+  const releituraPausada = () => agora() < pausaReleitura.ate;
+
+  /** catalogo.confirmarPreco com o prazo do verificador, validada. → { resultado, … } ou { resultado: 'falha', causa: chave de CAUSAS }. */
+  async function confirmarNaHora(asin) {
+    if (typeof catalogo?.confirmarPreco !== 'function') return { resultado: 'falha', causa: 'etiqueta_fora' };
+    const bruta = await comPrazo(
+      () => catalogo.confirmarPreco(asin),
+      { resultado: 'falha', causa: 'timeout' },
+      (e) => {
+        console.error('[verificador] releitura sem resposta (amazon):', e?.name || 'erro');
+        return { resultado: 'falha', causa: 'resposta_inesperada' };
+      },
+    );
+    const r = bruta && typeof bruta === 'object' ? bruta : {};
+    if (r.resultado === 'confirmado') {
+      const price = precoValido(r.preco);
+      if (price != null && typeof r.precoEm === 'number' && Number.isFinite(r.precoEm)) {
+        return { resultado: 'confirmado', price, oldPrice: precoValido(r.precoAntigo), discountPct: r.descontoPct, precoEm: r.precoEm };
       }
+    } else if (r.resultado === 'sem_preco' || r.resultado === 'outro_produto') {
+      return { resultado: r.resultado };
+    } else if (r.resultado === 'falha') {
+      const chave = typeof r.causa === 'string' && Object.hasOwn(CAUSA_DA_RELEITURA, r.causa) ? CAUSA_DA_RELEITURA[r.causa] : 'etiqueta_fora';
+      return { resultado: 'falha', causa: chave };
+    }
+    return { resultado: 'falha', causa: 'etiqueta_fora' }; // resposta fora do contrato
+  }
+
+  /** Amazon sem API, com `releitura`: confirma na hora ou, se falhar, vale a reserva. → o mesmo que `conferir`. */
+  async function conferirAmazonPelaReleitura(oferta, { referencia, releitura }) {
+    const asin = asinDe(oferta);
+    if (!asin) return descarteNaoConferido('sem_preco');
+    const pausada = releituraPausada();
+    const r = pausada ? { resultado: 'falha', causa: pausaReleitura.causa } : await confirmarNaHora(asin);
+    const instante = agora();
+    if (r.resultado === 'sem_preco' || r.resultado === 'outro_produto') {
+      const motivo = r.resultado === 'sem_preco' ? 'indisponivel' : 'outro_produto';
+      return { acao: 'descartar', motivo, texto: `${MOTIVOS_VERIFICADOR[motivo]} (${DETALHE_MOTIVO[motivo]})` };
+    }
+    if (r.resultado === 'confirmado') {
+      const decisao = decidir({
+        leitura: { price: r.price, disponivel: null, oldPrice: r.oldPrice, discountPct: r.discountPct },
+        referencia: referencia ?? oferta.price, precoOferta: oferta.price, limitePct: limitePct(),
+        lidoEm: null, agora: instante, digitado: oferta.digitado === true,
+      });
+      if (decisao.acao === 'descartar') return decisao;
+      // a hora do preço é a que o Etiqueta carimbou na releitura, nunca a de agora
+      return { acao: 'enviar', oferta: ofertaQueSai(oferta, decisao, r, r.precoEm), conferido: decisao.conferido, sufixo: decisao.sufixo };
+    }
+    if (r.causa === 'etiqueta_sem_oferta') return descarteNaoConferido(r.causa); // a oferta nem está mais no Etiqueta: sem reserva e sem pausa
+    if (!pausada) { pausaReleitura.ate = instante + PAUSA_RELEITURA_MS; pausaReleitura.causa = r.causa; }
+    if (!reservaValida(releitura.precoEm, instante)) return descarteNaoConferido(r.causa);
+    const { vistoEm: _antigo, ...copia } = oferta;
+    return {
+      acao: 'enviar', oferta: { ...copia, vistoEm: releitura.precoEm }, conferido: false,
+      sufixo: ` · preço visto às ${quandoDe(releitura.precoEm, instante)}, não conferido agora (${CAUSAS[r.causa]})`,
+    };
+  }
+
+  /**
+   * Esta Amazon do Catálogo não teria como sair agora? Ligado, sem API, com a releitura pausada e sem reserva que valha.
+   * O agendador a tira da escolha sem gastar tentativa. Na dúvida (erro ao ler os Ajustes), false.
+   */
+  function semConfirmacaoAgora({ loja, precoEm } = {}) {
+    try {
+      if (lojaDe({ loja }) !== 'amazon' || simulado || !ativo() || amazonLiga()) return false;
+      const instante = agora();
+      return releituraPausada() && !reservaValida(precoEm, instante);
+    } catch {
+      return false;
+    }
+  }
+
+  async function conferir(oferta, { lidoEm = null, referencia, releitura = null } = {}) {
+    try {
+      if (!oferta || typeof oferta !== 'object') return descarteNaoConferido('loja_fora');
       if (!ativo()) {
         const { vistoEm: _antigo, ...copia } = oferta;
         return { acao: 'enviar', oferta: copia, conferido: false, sufixo: null };
@@ -333,13 +479,16 @@ export function createVerificador({ db, ml = mlPadrao, amazon = null, shopee = n
       if (simulado && loja && loja !== 'magalu') {
         return { acao: 'enviar', oferta: { ...oferta, vistoEm: agora() }, conferido: true, sufixo: null };
       }
+      if (loja === 'amazon' && releitura && typeof releitura === 'object' && !amazonLiga()) {
+        return await conferirAmazonPelaReleitura(oferta, { referencia, releitura });
+      }
       const leitura = loja ? await lerComPrazo(loja, oferta) : { causa: 'loja_fora' };
       const instante = agora();
       const decisao = decidir({
         leitura, referencia: referencia ?? oferta.price, precoOferta: oferta.price, limitePct: limitePct(),
         lidoEm, agora: instante, digitado: oferta.digitado === true,
       });
-      if (decisao.acao === 'descartar') return { acao: 'descartar', motivo: decisao.motivo, texto: decisao.texto };
+      if (decisao.acao === 'descartar') return decisao;
       return { acao: 'enviar', oferta: ofertaQueSai(oferta, decisao, leitura, instante), conferido: decisao.conferido, sufixo: decisao.sufixo };
     } catch (e) {
       // defesa (ex.: o banco falhou ao ler os Ajustes): vale a regra de quem não conferiu, a do frescor
@@ -347,11 +496,11 @@ export function createVerificador({ db, ml = mlPadrao, amazon = null, shopee = n
       let instante = null;
       try { instante = agora(); } catch { instante = Date.now(); }
       const decisao = decidir({ leitura: { causa: 'loja_fora' }, lidoEm, agora: instante });
-      if (decisao.acao === 'descartar') return { acao: 'descartar', motivo: decisao.motivo, texto: decisao.texto };
+      if (decisao.acao === 'descartar') return decisao;
       const { vistoEm: _antigo, ...copia } = oferta;
       return { acao: 'enviar', oferta: copia, conferido: false, sufixo: decisao.sufixo };
     }
   }
 
-  return { ativo, limitePct, conferir, podeConferir };
+  return { ativo, limitePct, conferir, podeConferir, semConfirmacaoAgora };
 }
