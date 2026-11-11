@@ -1201,8 +1201,9 @@ test('"Enviar" cujo envio falha no WhatsApp: o item fica rastreável na lista (e
   assert.equal(r.status, 200, r.txt);
   await assentar(s);
   const lista = (await s.get(`/api/catalogo/itens?regra=${id}`)).json.itens[0];
-  assert.deepEqual([lista.status, lista.envio_status], ['enviado', 'erro']);
-  assert.deepEqual(lista.grupos, [{ nome: 'Achadinhos', ok: false, erro: 'socket caiu' }]);
+  // Rodar sozinho, entrega 2 (CA2.8): o "Enviar" que falhou em todos os grupos volta à revisão.
+  assert.deepEqual([lista.status, lista.envio_status, lista.ultimo_envio_falhou], ['revisao', 'erro', true]);
+  assert.deepEqual(lista.ultimo_envio_erros, [{ nome: 'Achadinhos', erro: 'socket caiu' }]);
   assert.equal(s.msgs().length, 0);
 });
 

@@ -420,8 +420,9 @@ test('"Enviar" da revisão (ML): esgotado na hora do envio → nada sai, o item 
   assert.deepEqual(descartes(s.db), ['Descartada: esgotado na loja']);
   semErroNoLog(s.db, 'revisão');
   const lista = s.catalogoItens.listar({ regra: s.regra.id });
-  assert.equal(lista.itens[0].pode_reenviar, true, 'o dono pode tentar de novo');
-  assert.deepEqual(lista.itens[0].grupos.map((g) => g.erro), ['Descartada: esgotado na loja', 'Descartada: esgotado na loja']);
+  // Rodar sozinho, entrega 2 (CA2.8): o "Enviar" que falhou em todos os grupos volta à revisão.
+  assert.deepEqual([lista.itens[0].status, lista.itens[0].ultimo_envio_falhou], ['revisao', true], 'volta à revisão: o dono pode tentar de novo');
+  assert.deepEqual(lista.itens[0].ultimo_envio_erros.map((g) => g.erro), ['Descartada: esgotado na loja', 'Descartada: esgotado na loja']);
   // a loja volta ao estoque
   s.estado.leitura = { price: 89.9, disponivel: true };
   const r2 = await s.catalogoItens.enviar(s.itemId, {});
