@@ -4,10 +4,18 @@ async function pintar() {
   const { conf = {}, st = {} } = await chrome.storage.local.get(['conf', 'st']);
   if (conf.servidor) $('servidor').value = conf.servidor;
   if (conf.token && !$('token').value) $('token').value = conf.token;
-  $('estado').className = 'estado' + (st.ok ? ' ok' : '');
+  $('linhaExtensao').className = 'linha' + (st.ok ? ' ok' : '');
   $('msg').textContent = st.ok ? 'Conectado ao achadinhoturbo' : (st.erro || 'Desconectado');
+  // Central de Afiliados: o resultado do último pedido que passou por ela (o background.js grava st.central), só com
+  // a extensão conectada ao painel; antes do primeiro pedido, a linha não aparece
+  const central = st.ok && (st.central === 'respondendo' || st.central === 'sem_resposta') ? st.central : null;
+  $('linhaCentral').hidden = !central;
+  $('linhaCentral').className = 'linha' + (central === 'respondendo' ? ' ok' : '');
+  $('msgCentral').textContent = central ? `Central de Afiliados: ${central === 'respondendo' ? 'respondendo' : 'sem resposta'}` : '';
   $('erro').textContent = st.ultimoErro ? 'Último erro ao gerar link: ' + st.ultimoErro : '';
 }
+
+try { $('versao').textContent = `Versão ${chrome.runtime.getManifest().version}`; } catch { /* sem manifest: sem rodapé */ }
 
 const LOOPBACK = /^(localhost|127\.0\.0\.1|\[::1\])$/i;
 $('salvar').addEventListener('click', async () => {

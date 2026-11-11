@@ -11,14 +11,17 @@ const ML = 'https://www.mercadolivre.com.br';
 const CENTRAL = `${ML}/afiliados/hub?is_affiliate=true`;
 const API_LINK = '/affiliate-program/api/v2/affiliates/createLink';
 const API_LISTA = '/affiliate-program/api/hub/search?is_affiliate=true&device=desktop';
-// Tempos limite. Dentro da aba, cada chamada à Central ou ao portal da Shopee tem 20 s (fixo em chamarCentral e em
-// chamarPortalShopee, que são injetadas e não enxergam as constantes daqui). ESPERA_ABA é quanto a aba da Central tem
-// para devolver o resultado (acima dos 20 s do fetch). O teto vale para o pedido inteiro e fica abaixo do prazo do
-// servidor (src/links.js): 90 s para os links (requestLink, requestLinkShopee) e 60 s para a lista de ofertas
-// (requestOffers). Com a aba presa, o laço responde ao painel e volta ao poll em vez de travar.
-const ESPERA_ABA = 30000;
-const TETO_PEDIDO = 80000;
+// Tempos limite. Dentro da aba, cada chamada à Central tem 15 s e cada chamada ao portal da Shopee, 20 s (fixos em
+// chamarCentral e em chamarPortalShopee, que são injetadas e não enxergam as constantes daqui). ESPERA_ABA é quanto a
+// aba da Central tem para devolver o resultado (acima dos 15 s do fetch). O teto vale para o pedido inteiro e fica
+// abaixo do prazo do servidor (src/links.js): 45 s para o link do ML (requestLink), 90 s para o da Shopee
+// (requestLinkShopee) e 60 s para a lista de ofertas (requestOffers). Com a aba presa, o laço responde ao painel e
+// volta ao poll em vez de travar.
+const ESPERA_ABA = 20000;
+const TETO_PEDIDO = 40000; // link do ML: abaixo dos 45 s de requestLink
+const TETO_SHOPEE = 80000; // link da Shopee: abaixo dos 90 s de requestLinkShopee
 const TETO_OFERTAS = 55000; // abaixo dos 60 s de requestOffers em src/links.js
+const ESPERA_CARREGAR = 15000; // a aba que abre ou recarrega tem até isso para terminar de carregar
 // Leitura de produto (produto_ml): o fetch da página tem 12 s (corpo incluído) e o pedido inteiro, 15 s, abaixo dos
 // 18 s de requestProduto em src/links.js. O estouro não marca centralTravada: a aba da Central não entra nesse pedido.
 const TEMPO_PRODUTO = 12000;
@@ -28,6 +31,11 @@ const RECURSOS = 'produto_ml';
 const CENTRAL_SEM_RESPOSTA = 'a Central de Afiliados do Mercado Livre não respondeu a tempo. A extensão recarrega a aba e tenta de novo no próximo pedido';
 const SHOPEE_SEM_RESPOSTA = 'o portal de afiliados da Shopee não respondeu a tempo. A extensão recarrega a aba e tenta de novo no próximo pedido';
 const PRODUTO_SEM_RESPOSTA = 'a página do produto no Mercado Livre não respondeu a tempo';
+const CENTRAL_NAO_ABRIU = 'não consegui abrir a Central de Afiliados';
+const CENTRAL_SEM_SESSAO = 'não há sessão de afiliado neste Chrome. Entre na sua conta da Central de Afiliados do Mercado Livre';
+// Versão desta extensão (manifest.json), mandada no poll (x-versao): o painel avisa quando a extensão está desatualizada.
+const VERSAO = (() => { try { return String(chrome.runtime.getManifest?.()?.version || ''); } catch { return ''; } })();
+const MAX_ERRO_REAL = 160;
 let rodando = false;
 let centralTravada = false; // uma chamada à Central ficou sem resposta: recarrega a aba antes da próxima
 let shopeeTravada = false; // o mesmo para a aba do portal da Shopee
@@ -42,10 +50,36 @@ async function status(p) {
 }
 
 /**
+ * Texto de diagnóstico que veio do Chrome ou do fetch (só `e.message`, nunca cabeçalho, corpo, token ou cookie): sem
+ * caracteres de controle, cada endereço reduzido à origem (caminho e query podem levar dados) e cortado em
+ * MAX_ERRO_REAL caracteres. Vazio quando não há texto.
+ */
+function erroReal(v) {
+  const bruto = typeof v === 'string' ? v : typeof v?.message === 'string' ? v.message : '';
+  const t = bruto
+    .replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ')
+    .replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s"'<>]+/gi, (u) => {
+      try { const o = new URL(u).origin; return o && o !== 'null' ? o : 'endereço'; } catch { return 'endereço'; }
+    })
+    .replace(/\s+/g, ' ').trim();
+  return t.length > MAX_ERRO_REAL ? `${t.slice(0, MAX_ERRO_REAL - 1)}…` : t;
+}
+
+/**
+ * Erro de um pedido à Central, com o `tipo` que vai ao painel (recusa | sessao | sem_resposta | aba | http | formato)
+ * e, quando houver, o erro real entre aspas depois da nossa frase.
+ */
+function erroCentral(tipo, frase, real) {
+  const r = erroReal(real);
+  return Object.assign(new Error(r ? `${frase}: “${r}”` : frase), { tipo });
+}
+
+/**
  * Roda DENTRO da aba da Central (mesma origem, com a sessão e o token anti-CSRF da página). Por ser injetada, não enxerga
- * nada de fora. Devolve { semSessao } | { status, texto } | { status: 0, tempoEsgotado? } (sem resposta em 20 s ou
- * falha de rede); nunca lança, e o token não sai daqui. Fora da origem de CENTRAL (a aba foi para outra página),
- * devolve { semSessao } sem chamar nada: naCentral recarrega a aba na Central e tenta de novo.
+ * nada de fora. Devolve { semSessao } | { status, texto } | { status: 0, tempoEsgotado?, erro? } (sem resposta em 15 s
+ * ou falha de rede, com a mensagem do fetch em `erro`); nunca lança, e o token não sai daqui. Fora da origem de CENTRAL
+ * (a aba foi para outra página), devolve { semSessao } sem chamar nada: naCentral recarrega a aba na Central e tenta
+ * de novo.
  */
 async function chamarCentral(caminho, corpo) {
   if (location.origin !== 'https://www.mercadolivre.com.br') return { status: 0, semSessao: true }; // a origem de ML/CENTRAL
@@ -55,11 +89,12 @@ async function chamarCentral(caminho, corpo) {
     const r = await fetch(location.origin + caminho, {
       method: 'POST', credentials: 'include',
       headers: { accept: 'application/json, text/plain, */*', 'content-type': 'application/json', 'x-csrf-token': csrf, 'x-custom-origin': location.origin },
-      body: JSON.stringify(corpo), signal: AbortSignal.timeout(20000),
+      body: JSON.stringify(corpo), signal: AbortSignal.timeout(15000),
     });
     return { status: r.status, texto: await r.text() };
   } catch (e) {
-    return { status: 0, tempoEsgotado: e?.name === 'TimeoutError' || e?.name === 'AbortError' };
+    if (e?.name === 'TimeoutError' || e?.name === 'AbortError') return { status: 0, tempoEsgotado: true };
+    return { status: 0, erro: String(e?.message ?? '').slice(0, 300) };
   }
 }
 
@@ -77,84 +112,167 @@ function esperarCarregar(tabId) {
   return new Promise((ok) => {
     const f = (id, i) => { if (id === tabId && i.status === 'complete') { chrome.tabs.onUpdated.removeListener(f); ok(); } };
     chrome.tabs.onUpdated.addListener(f);
-    setTimeout(() => { chrome.tabs.onUpdated.removeListener(f); ok(); }, 25000);
+    setTimeout(() => { chrome.tabs.onUpdated.removeListener(f); ok(); }, ESPERA_CARREGAR);
   });
 }
 
-/** Usa uma aba da Central já aberta ou abre uma fixada, em segundo plano. */
+/** O endereço é uma página de afiliados do Mercado Livre (https://<…>.mercadolivre.com.br/afiliados…)? */
+function naPaginaDeAfiliados(url) {
+  let u;
+  try { u = new URL(String(url ?? '')); } catch { return false; }
+  const h = u.hostname;
+  return u.protocol === 'https:' && (h === 'mercadolivre.com.br' || h.endsWith('.mercadolivre.com.br'))
+    && /^\/afiliados(?:\/|$)/.test(u.pathname);
+}
+
+// A aba da Central que a extensão abriu fica lembrada em chrome.storage.session: sobrevive ao service worker que o
+// Chrome encerra e some quando o Chrome reinicia, porque os ids de aba recomeçam e o mesmo número pode ser uma aba
+// do dono. Sem storage.session (Chrome anterior ao 102), nada é lembrado.
+async function idLembrado() {
+  try {
+    const { abaCentral } = await chrome.storage.session.get('abaCentral');
+    return Number.isInteger(abaCentral) ? abaCentral : null;
+  } catch { return null; }
+}
+async function lembrar(id) {
+  try { await chrome.storage.session.set({ abaCentral: id }); } catch { /* sem storage.session: segue sem lembrar */ }
+}
+
+/** A aba lembrada, se ainda existe; fechada, é esquecida. */
+async function abaLembrada() {
+  const id = await idLembrado();
+  if (id === null) return null;
+  try { return await chrome.tabs.get(id); } catch {
+    try { await chrome.storage.session.remove('abaCentral'); } catch { /* nada a esquecer */ }
+    return null;
+  }
+}
+
+/**
+ * Leva a aba à Central e espera carregar. Só navega a aba que a extensão abriu ou uma que ainda esteja em /afiliados:
+ * qualquer outra aba do Mercado Livre é do dono e nunca é navegada (devolve false sem tocar nela). Aba fechada lança.
+ */
+async function levarACentral(tabId) {
+  const aba = await chrome.tabs.get(tabId);
+  if (aba.id !== await idLembrado() && !naPaginaDeAfiliados(aba.url)) return false;
+  const carregou = esperarCarregar(tabId);
+  await chrome.tabs.update(tabId, { url: CENTRAL });
+  await carregou;
+  return true;
+}
+
+/**
+ * A aba da Central para o próximo pedido, nesta ordem: a que a extensão abriu, se está em /afiliados; outra aba em
+ * /afiliados (de preferência carregada); a que a extensão abriu e saiu de /afiliados, levada de volta à Central; ou
+ * uma nova, fixada e em segundo plano, que passa a ser a lembrada.
+ */
 async function abaDaCentral() {
-  const abertas = await chrome.tabs.query({ url: 'https://*.mercadolivre.com.br/afiliados*' });
-  const pronta = abertas.find((t) => t.status === 'complete') || abertas[0];
+  const lembrada = await abaLembrada();
+  if (lembrada && naPaginaDeAfiliados(lembrada.url)) return lembrada.id;
+  const abertas = (await chrome.tabs.query({ url: 'https://*.mercadolivre.com.br/afiliados*' })).filter((t) => naPaginaDeAfiliados(t.url));
+  const pronta = abertas.find((t) => t.status === 'complete' && !t.discarded) || abertas.find((t) => t.status === 'complete') || abertas[0];
   if (pronta) return pronta.id;
+  if (lembrada) {
+    try { if (await levarACentral(lembrada.id)) return lembrada.id; } catch { /* fechou agora: abre outra */ }
+  }
   const nova = await chrome.tabs.create({ url: CENTRAL, active: false, pinned: true });
+  await lembrar(nova.id);
   await esperarCarregar(nova.id);
   return nova.id;
 }
 
-async function recarregar(tabId) {
-  await chrome.tabs.update(tabId, { url: CENTRAL });
-  await esperarCarregar(tabId);
+/** Aba descartada pelo Chrome (tirada da memória) não aceita script: recarrega e espera carregar. Aba fechada lança. */
+async function acordar(tabId) {
+  const aba = await chrome.tabs.get(tabId);
+  if (!aba.discarded) return;
+  const carregou = esperarCarregar(tabId);
+  await chrome.tabs.reload(tabId);
+  await carregou;
 }
 
-/** Recarrega a aba da Central depois de uma chamada sem resposta; se ela foi fechada, usa ou abre outra. */
+/**
+ * Leva a aba de volta à Central (sessão vencida ou chamada sem resposta). Se ela foi fechada ou é uma aba do dono que
+ * saiu de /afiliados, usa ou abre outra.
+ */
 async function recarregarCentral(tabId) {
   centralTravada = false;
   try {
-    await recarregar(tabId);
-    return tabId;
-  } catch {
-    return abaDaCentral();
-  }
+    if (await levarACentral(tabId)) return tabId;
+  } catch { /* fechada */ }
+  return abaDaCentral();
 }
 
 /**
  * Faz a chamada na aba; se a sessão/token da página venceu ou a Central não respondeu, recarrega a aba e tenta mais
  * uma vez. `pedido.encerrado` (o laço desistiu do pedido por tempo): para antes de chamar ou recarregar de novo.
+ * Todo erro sai com `tipo` (erroCentral); o que vier do Chrome sem tipo (abrir ou achar a aba) vira `aba`.
  */
 async function naCentral(caminho, corpo, pedido = {}) {
-  if (pedido.encerrado) throw new Error(CENTRAL_SEM_RESPOSTA);
+  try {
+    return await naCentralSemTipo(caminho, corpo, pedido);
+  } catch (e) {
+    throw e?.tipo ? e : erroCentral('aba', CENTRAL_NAO_ABRIU, e);
+  }
+}
+
+async function naCentralSemTipo(caminho, corpo, pedido) {
+  const semResposta = () => erroCentral('sem_resposta', CENTRAL_SEM_RESPOSTA);
+  if (pedido.encerrado) throw semResposta();
   let tabId = await abaDaCentral();
   if (centralTravada) tabId = await recarregarCentral(tabId);
+  let erroDaAba = null; // a última falha do Chrome ao injetar (vai entre aspas se as duas tentativas falharem)
   for (let tentativa = 0; tentativa < 2; tentativa++) {
-    if (pedido.encerrado) throw new Error(CENTRAL_SEM_RESPOSTA);
+    if (pedido.encerrado) throw semResposta();
     let res;
     const parada = new Error(CENTRAL_SEM_RESPOSTA);
     try {
+      await acordar(tabId);
       [{ result: res } = {}] = await comPrazo(
         chrome.scripting.executeScript({ target: { tabId }, world: 'MAIN', func: chamarCentral, args: [caminho, corpo] }),
         ESPERA_ABA, parada,
       );
     } catch (e) {
       if (e !== parada) {
-        // aba fechada ou navegando: abre outra
+        // aba fechada, descartada de novo ou navegando: usa ou abre outra
+        erroDaAba = e;
         tabId = await abaDaCentral();
         continue;
       }
       res = { status: 0, tempoEsgotado: true }; // a aba não devolveu nada (página congelada)
     }
-    if (pedido.encerrado) throw new Error(CENTRAL_SEM_RESPOSTA);
+    if (pedido.encerrado) throw semResposta();
     if (res && !res.semSessao && res.status !== 401 && res.status !== 403) {
       if (!res.status) {
         // sem resposta: a aba é recarregada antes da segunda tentativa ou, depois dela, antes do próximo pedido
         centralTravada = true;
         if (tentativa === 0) { tabId = await recarregarCentral(tabId); continue; }
-        throw new Error(res.tempoEsgotado ? CENTRAL_SEM_RESPOSTA : 'não consegui falar com a Central de Afiliados');
+        if (res.tempoEsgotado) throw semResposta();
+        throw erroCentral('sem_resposta', 'não consegui falar com a Central de Afiliados', typeof res.erro === 'string' ? res.erro : '');
       }
-      if (res.status >= 400) throw new Error(`a Central de Afiliados respondeu HTTP ${res.status}`);
-      try { return JSON.parse(res.texto); } catch { throw new Error('a Central de Afiliados respondeu algo que não é JSON'); }
+      if (res.status >= 400) throw erroCentral('http', `a Central de Afiliados respondeu HTTP ${Number(res.status) || 0}`);
+      try { return JSON.parse(res.texto); } catch { throw erroCentral('formato', 'a Central de Afiliados respondeu algo que não é JSON'); }
     }
-    if (tentativa === 0) { await recarregar(tabId); continue; }
-    throw new Error('não há sessão de afiliado neste Chrome. Entre na sua conta da Central de Afiliados do Mercado Livre');
+    if (tentativa === 0) { tabId = await recarregarCentral(tabId); continue; }
+    throw erroCentral('sessao', CENTRAL_SEM_SESSAO);
   }
-  throw new Error('não consegui abrir a Central de Afiliados');
+  throw erroCentral('aba', CENTRAL_NAO_ABRIU, erroDaAba);
 }
 
+/**
+ * Só um link https://meli.la/… volta como sucesso, em qualquer tentativa: sem ele, o pedido falha (recusa do Mercado
+ * Livre, com a mensagem dele entre aspas, ou formato) e nunca vira link sem afiliação.
+ */
 async function gerarLink(job, pedido) {
   const j = await naCentral(API_LINK, { urls: [job.url], tag: job.tag }, pedido);
   const u = j?.urls?.[0] || {};
   if (/^https:\/\/meli\.la\//.test(u.short_url || '')) return u.short_url;
-  const motivo = u.error?.message || u.message || j?.message || (j?.total_error ? 'o Mercado Livre recusou o link' : 'resposta sem link');
-  throw new Error(`${motivo} (etiqueta "${job.tag}")`);
+  const motivo = [u.error?.message, u.message, j?.message].find((v) => typeof v === 'string' && v.trim());
+  if (motivo || j?.total_error) {
+    const e = erroCentral('recusa', 'o Mercado Livre recusou o link', motivo);
+    e.message += ` (etiqueta "${job.tag}")`;
+    throw e;
+  }
+  throw erroCentral('formato', 'a Central de Afiliados respondeu sem link');
 }
 
 // ---- Shopee: funções puras (início) ----
@@ -545,7 +663,7 @@ async function buscarOfertas(job, pedido) {
   for (const corpo of job.paginas || []) {
     const j = await naCentral(API_LISTA, corpo, pedido);
     const model = j?.polycard_client_model;
-    if (!model) throw new Error('a Central de Afiliados mudou o formato da lista');
+    if (!model) throw erroCentral('formato', 'a Central de Afiliados mudou o formato da lista');
     // devolve uma entrada por pedido, na mesma ordem (o servidor intercala as categorias)
     paginas.push({ polycard_client_model: { polycard_context: { url_prefix: model.polycard_context?.url_prefix }, polycards: model.polycards || [] } });
   }
@@ -573,7 +691,9 @@ async function laco() {
       let resp;
       try {
         // o painel segura o poll por 20 s; sem resposta em 30 s, o laço para e o alarme o religa
-        resp = await fetch(`${c.servidor}/api/ext/poll`, { headers: { 'x-token': c.token, 'x-recursos': RECURSOS }, signal: AbortSignal.timeout(30000) });
+        const headers = { 'x-token': c.token, 'x-recursos': RECURSOS };
+        if (VERSAO) headers['x-versao'] = VERSAO;
+        resp = await fetch(`${c.servidor}/api/ext/poll`, { headers, signal: AbortSignal.timeout(30000) });
       } catch { await status({ ok: false, erro: 'Painel fechado ou endereço errado.' }); return; }
       if (resp.status === 401) { await status({ ok: false, erro: 'Token recusado. Copie de novo em Conexões → Mercado Livre, no painel.' }); return; }
       await status({ ok: true, erro: null, em: Date.now() });
@@ -584,19 +704,24 @@ async function laco() {
       // Um resultado por pedido: passado o teto, responde o erro e segue; o que o trabalho der depois é ignorado.
       const pedido = { encerrado: false };
       const produto = job.type === 'produto_ml';
-      const estouro = new Error(produto ? PRODUTO_SEM_RESPOSTA : job.type === 'link_shopee' ? SHOPEE_SEM_RESPOSTA : CENTRAL_SEM_RESPOSTA);
-      const teto = produto ? TETO_PRODUTO : job.type === 'ofertas' ? TETO_OFERTAS : TETO_PEDIDO;
+      const shopee = job.type === 'link_shopee';
+      const central = job.type === 'link' || job.type === 'ofertas'; // os pedidos que passam pela Central (levam `tipo`)
+      const estouro = central ? erroCentral('sem_resposta', CENTRAL_SEM_RESPOSTA)
+        : new Error(produto ? PRODUTO_SEM_RESPOSTA : shopee ? SHOPEE_SEM_RESPOSTA : CENTRAL_SEM_RESPOSTA);
+      const teto = produto ? TETO_PRODUTO : job.type === 'ofertas' ? TETO_OFERTAS : shopee ? TETO_SHOPEE : TETO_PEDIDO;
       try {
         corpo = { id: job.id, ok: true, ...(await comPrazo(executar(job, pedido), teto, estouro)) };
-        await status({ ultimoErro: null });
+        await status(central ? { ultimoErro: null, central: 'respondendo' } : { ultimoErro: null });
       } catch (e) {
         if (e === estouro) {
           pedido.encerrado = true; // o trabalho abandonado para na próxima etapa, sem chamar nem recarregar de novo
           // a leitura de produto não usa aba: o estouro dela não recarrega a Central nem o portal
-          if (job.type === 'link_shopee') shopeeTravada = true; else if (!produto) centralTravada = true;
+          if (shopee) shopeeTravada = true; else if (!produto) centralTravada = true;
         }
         corpo = { id: job.id, ok: false, error: String(e.message || e) };
-        await status({ ultimoErro: corpo.error });
+        if (central && e?.tipo) corpo.tipo = e.tipo;
+        // recusa: a Central respondeu (o Mercado Livre recusou a oferta); qualquer outro erro conta como sem resposta
+        await status(central ? { ultimoErro: corpo.error, central: corpo.tipo === 'recusa' ? 'respondendo' : 'sem_resposta' } : { ultimoErro: corpo.error });
       }
       await fetch(`${c.servidor}/api/ext/result`, {
         method: 'POST', headers: { 'x-token': c.token, 'content-type': 'application/json' }, body: JSON.stringify(corpo),

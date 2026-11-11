@@ -23,7 +23,10 @@ const ML = 'https://www.mercadolivre.com.br';
 const CENTRAL = `${ML}/afiliados/hub?is_affiliate=true`;
 const PORTAL = 'https://affiliate.shopee.com.br';
 const SERVIDOR = 'http://127.0.0.1:3737';
-const LIMITE_SERVIDOR = 90_000; // o servidor desiste do pedido em 90 s ("a extensão não respondeu a tempo")
+const LIMITE_SERVIDOR = 90_000; // prazo mais longo do servidor (link da Shopee): "a extensão não respondeu a tempo"
+// Prazo do servidor por tipo de pedido (src/links.js): link do ML 45 s desde a entrega 2, lista 60 s, Shopee 90 s.
+const PRAZO_SERVIDOR = { link: 45_000, ofertas: 60_000, link_shopee: 90_000 };
+const VERSAO_TESTE = '7.8.9'; // versão do manifest falso: o teste nunca depende do número do manifest.json
 const LINK_OK = 'https://meli.la/2abcDEF';
 const PRODUTO_SHOPEE = 'https://shopee.com.br/Produto-Normal-i.52377417.6309028319';
 const PRODUTO_SHOPEE_CONGELA = 'https://shopee.com.br/Produto-Congela-i.52377417.6309028319';
@@ -43,8 +46,16 @@ const congelado = (v) => JSON.stringify(v).toLowerCase().includes('congela');
  *  - congelar(args): true = o executeScript nunca resolve.
  *  - tardio(args): ms depois dos quais um executeScript "congelado" finalmente resolve com o resultado de sempre.
  *  - semCsrf: a página da Central não tem o meta csrf-token (sessão vencida).
+ *  - abas: as abas abertas ({ id, url, status, discarded? }); aba descartada recusa o executeScript até ser recarregada.
+ *  - falhaInjecao(aba, args): texto de erro com que o executeScript falha (como o Chrome), ou null.
+ *  - manifest: o que chrome.runtime.getManifest() devolve (a versão do teste, nunca a do arquivo).
+ *  - demoraCarregar: ms até a aba que abre ou recarrega avisar que terminou de carregar (onUpdated 'complete').
+ * modoCentral também aceita 'rede' (o fetch falha) e { status, corpo } (a Central responde isso).
  */
-function montar({ jobs = [], pollVazio = 'longo', modoCentral = () => 'ok', congelar = () => false, tardio = () => null, semCsrf = false, abas } = {}) {
+function montar({
+  jobs = [], pollVazio = 'longo', modoCentral = () => 'ok', congelar = () => false, tardio = () => null, semCsrf = false, abas,
+  falhaInjecao = () => null, manifest = { version: VERSAO_TESTE }, demoraCarregar = 0,
+} = {}) {
   let agora = 0; const T0 = Date.UTC(2026, 10, 7, 12, 0, 0);
   const timers = []; let seqTimer = 0;
   const setTimeoutV = (f, ms = 0, ...a) => { const id = ++seqTimer; timers.push({ id, em: agora + Number(ms || 0), f: () => f(...a) }); return id; };
@@ -75,7 +86,9 @@ function montar({ jobs = [], pollVazio = 'longo', modoCentral = () => 'ok', cong
   }
 
   const resultados = []; const tempos = []; const eventos = []; const fetchesCentral = [];
+  const navegacoes = []; const recargas = []; const cabecalhosPoll = [];
   const armazenado = { conf: { servidor: SERVIDOR, token: 'tok-painel' }, st: {} };
+  const sessao = {}; // chrome.storage.session: some quando o Chrome reinicia, fica quando só o service worker reinicia
   const fila = [...jobs];
   const ouvintes = new Set(); const alarmes = [];
   const tabs = new Map((abas || [
@@ -85,20 +98,23 @@ function montar({ jobs = [], pollVazio = 'longo', modoCentral = () => 'ok', cong
   let seqAba = 100; let nCentral = 0; let pollsVazios = 0; let polls = 0;
 
   const carregar = (aba, url) => {
-    aba.url = url; aba.status = 'complete';
-    setTimeoutV(() => { for (const f of [...ouvintes]) f(aba.id, { status: 'complete' }); }, 0);
+    aba.url = url; aba.status = 'complete'; aba.discarded = false;
+    setTimeoutV(() => { for (const f of [...ouvintes]) f(aba.id, { status: 'complete' }); }, demoraCarregar);
   };
   const casa = (padrao, url) => new RegExp(`^${padrao.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*')}$`).test(url || '');
+  const area = (dados) => ({
+    get: async (k) => Object.fromEntries([k].flat().filter((c) => c in dados).map((c) => [c, structuredClone(dados[c])])),
+    set: async (o) => { Object.assign(dados, structuredClone(o)); },
+    remove: async (k) => { for (const c of [k].flat()) delete dados[c]; },
+  });
   const chrome = {
     storage: {
-      local: {
-        get: async (k) => Object.fromEntries([k].flat().filter((c) => c in armazenado).map((c) => [c, structuredClone(armazenado[c])])),
-        set: async (o) => { Object.assign(armazenado, structuredClone(o)); },
-      },
+      local: area(armazenado),
+      session: area(sessao),
       onChanged: { addListener() {} },
     },
     alarms: { create() {}, onAlarm: { addListener: (f) => alarmes.push(f) } },
-    runtime: { onStartup: { addListener() {} }, onInstalled: { addListener() {} } },
+    runtime: { onStartup: { addListener() {} }, onInstalled: { addListener() {} }, getManifest: () => structuredClone(manifest) },
     permissions: { remove: async () => true },
     tabs: {
       onUpdated: { addListener: (f) => ouvintes.add(f), removeListener: (f) => ouvintes.delete(f) },
@@ -108,15 +124,18 @@ function montar({ jobs = [], pollVazio = 'longo', modoCentral = () => 'ok', cong
         const aba = { id: ++seqAba, active, pinned }; tabs.set(aba.id, aba); eventos.push('create'); carregar(aba, url); return { id: aba.id };
       },
       update: async (id, { url }) => {
-        const aba = tabs.get(id); if (!aba) throw new Error('No tab'); eventos.push('reload'); carregar(aba, url || aba.url); return { id };
+        const aba = tabs.get(id); if (!aba) throw new Error('No tab'); eventos.push('reload'); navegacoes.push({ id, url }); carregar(aba, url || aba.url); return { id };
       },
-      reload: async (id) => { const aba = tabs.get(id); if (!aba) throw new Error('No tab'); eventos.push('reload'); carregar(aba, aba.url); },
+      reload: async (id) => { const aba = tabs.get(id); if (!aba) throw new Error('No tab'); eventos.push('reload'); recargas.push(id); carregar(aba, aba.url); },
       remove: async (id) => { tabs.delete(id); eventos.push('remove'); },
     },
     scripting: {
       executeScript: async ({ target, func, args }) => {
         const aba = tabs.get(target.tabId);
         if (!aba) throw new Error('No tab with id');
+        if (aba.discarded) throw new Error('The tab was discarded.');
+        const falha = falhaInjecao(aba, args);
+        if (falha) throw new Error(falha);
         const marca = congelado(args) ? 'congela' : 'normal';
         eventos.push(`inject:${marca}`);
         if (congelar(args)) {
@@ -148,6 +167,8 @@ function montar({ jobs = [], pollVazio = 'longo', modoCentral = () => 'ok', cong
           sinal?.addEventListener?.('abort', abortou, { once: true });
         });
       }
+      if (modo === 'rede') throw new TypeError('Failed to fetch');
+      if (modo && typeof modo === 'object') return new Response(modo.corpo, { status: modo.status });
       if (typeof modo === 'number') await esperar(modo);
       return new Response(JSON.stringify(u.pathname.includes('/hub/search') ? respostaLista() : respostaLink()), { status: 200 });
     }
@@ -156,6 +177,7 @@ function montar({ jobs = [], pollVazio = 'longo', modoCentral = () => 'ok', cong
     assert.equal(init.headers['x-token'], 'tok-painel');
     if (u.pathname === '/api/ext/poll') {
       polls++;
+      cabecalhosPoll.push({ ...init.headers });
       if (fila.length) return new Response(JSON.stringify({ job: fila.shift() }), { status: 200 });
       pollsVazios++;
       if (pollVazio === 'cai') throw new TypeError('Failed to fetch');
@@ -172,13 +194,21 @@ function montar({ jobs = [], pollVazio = 'longo', modoCentral = () => 'ok', cong
   };
 
   const espiao = new Proxy({}, { get: (_, nome) => (...a) => { throw new Error(`console.${String(nome)} proibido: ${a.join(' ')}`); } });
-  const ctx = vm.createContext({
-    chrome, fetch: fetchV, URL, Response, Headers, AbortController, AbortSignal: AbortSignalV, structuredClone, console: espiao,
-    setTimeout: setTimeoutV, clearTimeout: clearTimeoutV, Date: DataV,
-  });
-  vm.runInContext(FONTE, ctx, { filename: 'background.js' });
+  let ctx;
+  const subir = () => {
+    alarmes.length = 0; // o service worker antigo morreu: o alarme acorda só o novo
+    ctx = vm.createContext({
+      chrome, fetch: fetchV, URL, Response, Headers, AbortController, AbortSignal: AbortSignalV, structuredClone, console: espiao,
+      setTimeout: setTimeoutV, clearTimeout: clearTimeoutV, Date: DataV,
+    });
+    vm.runInContext(FONTE, ctx, { filename: 'background.js' });
+  };
+  subir();
   return {
-    ctx, avancar, resultados, tempos, eventos, fetchesCentral, armazenado,
+    get ctx() { return ctx; }, avancar, resultados, tempos, eventos, fetchesCentral, armazenado, sessao,
+    navegacoes, recargas, cabecalhosPoll, abas: tabs,
+    /** O Chrome encerra o service worker e o sobe de novo: as variáveis somem, chrome.storage fica. */
+    reiniciarWorker: subir,
     empilhar: (job) => fila.push(job),
     alarme: () => alarmes.forEach((f) => f({ name: 'despertar' })),
     get agora() { return agora; },
@@ -233,7 +263,7 @@ const TIPOS = [
 ];
 
 for (const [nome, fazer] of TIPOS) {
-  test(`CA2: ${nome} com a aba congelada: o laço manda ok:false antes dos 90 s do servidor, e segue no poll`, async () => {
+  test(`CA2: ${nome} com a aba congelada: o laço manda ok:false antes do prazo do servidor, e segue no poll`, async () => {
     const m = montar({ jobs: [fazer(1), jobLink(2)], congelar: congelado });
     await m.avancar(120_000);
     const r1 = porId(m, 1);
@@ -241,7 +271,8 @@ for (const [nome, fazer] of TIPOS) {
     assert.equal(r1[0].ok, false);
     assert.equal(typeof r1[0].error, 'string');
     assert.ok(r1[0].error.length > 5, 'mensagem de erro vazia');
-    assert.ok(m.tempos[m.resultados.indexOf(r1[0])] < LIMITE_SERVIDOR, `o erro só saiu aos ${m.tempos[m.resultados.indexOf(r1[0])]} ms`);
+    const prazo = PRAZO_SERVIDOR[fazer(0).type];
+    assert.ok(m.tempos[m.resultados.indexOf(r1[0])] < prazo, `o erro só saiu aos ${m.tempos[m.resultados.indexOf(r1[0])]} ms (o servidor desiste aos ${prazo} ms)`);
     // o laço seguiu vivo: o job seguinte foi entregue, depois dele o poll continua
     const r2 = porId(m, 2);
     assert.equal(r2.length, 1, 'o job seguinte nunca foi processado: o laço morreu junto com o job travado');
@@ -292,7 +323,7 @@ test('CA1/CA2/CA4: fetch da Central pendurado: o job responde ok:false a tempo, 
   const [r1] = porId(m, 1);
   assert.ok(r1, 'a Central não respondeu e a extensão nunca devolveu resultado do job 1');
   assert.equal(r1.ok, false);
-  assert.ok(m.tempos[m.resultados.indexOf(r1)] < LIMITE_SERVIDOR);
+  assert.ok(m.tempos[m.resultados.indexOf(r1)] < PRAZO_SERVIDOR.link);
   const [r2] = porId(m, 2);
   assert.deepEqual(plano(r2), { id: 2, ok: true, link: LINK_OK });
   // CA4: entre a chamada que passou do tempo e a primeira chamada do próximo job, a aba foi recarregada ou reaberta
@@ -462,19 +493,19 @@ test('R3: lista de ofertas com a aba congelada responde antes dos 60 s em que o 
 });
 
 test('R4: resposta tardia de um pedido abandonado da Central não recarrega a aba; quem recarrega é o pedido seguinte', async () => {
-  // 3 páginas de 9 s e a 4ª congelada (pedida aos 27 s): o teto de 55 s estoura com a aba presa, e o prazo da aba
-  // (30 s) vence aos 57 s, já com o pedido encerrado
-  const paginas = [1, 2, 3].map((pagina) => ({ ...CORPO_LISTA, pagina })).concat({ ...CORPO_LISTA, pagina: 4, q: 'congela' });
+  // 4 páginas de 9 s e a 5ª congelada (pedida aos 36 s): o teto de 55 s estoura com a aba presa, e o prazo da aba
+  // (20 s) vence aos 56 s, já com o pedido encerrado
+  const paginas = [1, 2, 3, 4].map((pagina) => ({ ...CORPO_LISTA, pagina })).concat({ ...CORPO_LISTA, pagina: 5, q: 'congela' });
   const m = montar({ jobs: [{ id: 1, type: 'ofertas', paginas }], congelar: congelado, modoCentral: () => 9000 });
-  await m.avancar(56_000);
+  await m.avancar(55_500);
   assert.deepEqual(m.resultados.map((r) => [r.id, r.ok]), [[1, false]]);
   const depoisDoTeto = m.eventos.length;
-  await m.avancar(3_000); // passa dos 57 s
+  await m.avancar(3_000); // passa dos 56 s
   assert.deepEqual(m.eventos.slice(depoisDoTeto).filter((e) => e === 'reload'), [], `o pedido abandonado recarregou a aba: ${m.eventos.join(',')}`);
   m.empilhar(jobLink(2));
   await m.avancar(60_000);
   assert.deepEqual(plano(porId(m, 2)), [{ id: 2, ok: true, link: LINK_OK }]);
-  const i = nesimo(m.eventos, 'inject:', 5);
+  const i = nesimo(m.eventos, 'inject:', 6);
   assert.equal(m.eventos[i - 1], 'reload', `o pedido seguinte não recarregou a aba presa: ${m.eventos.join(',')}`);
   assert.equal(m.eventos.filter((e) => e === 'reload').length, 1, `recargas a mais: ${m.eventos.join(',')}`);
 });
@@ -588,4 +619,283 @@ test('R5: envio do resultado sem resposta do painel: em 10 s o laço desiste e a
   m.ctx.fetch = (url, init = {}) => (new URL(url).pathname === '/api/ext/result' && JSON.parse(init.body).id === 1 ? pendurado(init) : original(url, init));
   await m.avancar(15_000);
   assert.deepEqual(plano(porId(m, 2)), [{ id: 2, ok: true, link: LINK_OK }], 'o laço ficou preso no envio do resultado anterior');
+});
+
+// ---------------- Rodar sozinho, entrega 2, etapa 2: aba lembrada, aba descartada, erro real, prazos e versão ----------------
+// Plano: docs/produto/planos/rodar-sozinho-entrega2.md (decisões 2, 3 e 7; CA2.7, CA2.9 e CA2.16).
+
+const SO_PORTAL = [{ id: 6, url: `${PORTAL}/offer/custom_link`, status: 'complete' }];
+const criadas = (m) => [...m.abas.values()].filter((t) => t.id > 100);
+/** Entrega um pedido com o laço parado (pollVazio 'cai') e espera a resposta. */
+async function pedir(m, job, ms = 30_000) {
+  m.empilhar(job);
+  m.alarme();
+  await m.avancar(ms);
+  return porId(m, job.id);
+}
+
+test('CA2.7: aba descartada é recarregada antes do executeScript e o link sai, sem abrir outra aba', async () => {
+  const m = montar({
+    jobs: [jobLink(1)], pollVazio: 'cai',
+    abas: [{ id: 5, url: CENTRAL, status: 'complete', discarded: true }, ...SO_PORTAL],
+  });
+  await m.avancar(30_000);
+  assert.deepEqual(plano(m.resultados), [{ id: 1, ok: true, link: LINK_OK }]);
+  assert.deepEqual(m.recargas, [5], 'a aba descartada não foi recarregada');
+  assert.deepEqual(m.navegacoes, [], 'recarregar a aba descartada não muda o endereço dela');
+  assert.deepEqual(m.eventos, ['reload', 'inject:normal', 'fetch:normal']);
+});
+
+test('CA2.7: aba lembrada fora de /afiliados é reaproveitada (volta à Central) em vez de abrir outra', async () => {
+  const m = montar({ pollVazio: 'cai', abas: SO_PORTAL });
+  assert.deepEqual(plano(await pedir(m, jobLink(1))), [{ id: 1, ok: true, link: LINK_OK }]);
+  const [aba] = criadas(m);
+  assert.ok(aba, 'sem aba da Central, a extensão abre uma');
+  assert.equal(aba.pinned, true);
+  assert.equal(aba.active, false);
+  m.abas.get(aba.id).url = `${ML}/ofertas#nav-header`; // a aba fixada saiu da Central (o dono clicou nela e navegou)
+  assert.deepEqual(plano(await pedir(m, jobLink(2))), [{ id: 2, ok: true, link: LINK_OK }]);
+  assert.equal(m.eventos.filter((e) => e === 'create').length, 1, `abriu outra aba: ${m.eventos.join(',')}`);
+  assert.deepEqual(m.navegacoes, [{ id: aba.id, url: CENTRAL }]);
+});
+
+test('CA2.7: três pedidos não criam segunda aba fixada, nem com o service worker reiniciado no meio', async () => {
+  const m = montar({ pollVazio: 'cai', abas: SO_PORTAL });
+  const desvios = [`${ML}/ofertas`, 'https://www.mercadolivre.com.br/jms/mlb/lgz/login?go=x', null];
+  for (let i = 0; i < 3; i++) {
+    assert.deepEqual(plano(await pedir(m, jobLink(i + 1))), [{ id: i + 1, ok: true, link: LINK_OK }]);
+    const [aba] = criadas(m);
+    if (desvios[i]) m.abas.get(aba.id).url = desvios[i];
+    if (i === 1) m.reiniciarWorker(); // as variáveis do background somem; a aba lembrada fica no chrome.storage.session
+  }
+  assert.equal(m.eventos.filter((e) => e === 'create').length, 1, `abriu aba a mais: ${m.eventos.join(',')}`);
+  assert.equal([...m.abas.values()].filter((t) => t.pinned).length, 1);
+});
+
+test('CA2.7: aba do dono fora de /afiliados nunca é navegada', async (t) => {
+  await t.test('sem aba da Central, abre a sua e não toca nas abas do Mercado Livre do dono', async () => {
+    const m = montar({
+      jobs: [jobLink(1), jobLink(2)], pollVazio: 'cai',
+      abas: [{ id: 7, url: `${ML}/ofertas`, status: 'complete' }, { id: 8, url: 'https://produto.mercadolivre.com.br/MLB-123456789-fone', status: 'complete' }, ...SO_PORTAL],
+    });
+    await m.avancar(30_000);
+    assert.deepEqual(m.resultados.map((r) => [r.id, r.ok]), [[1, true], [2, true]]);
+    assert.deepEqual(m.navegacoes.filter((n) => n.id === 7 || n.id === 8), []);
+    assert.equal(m.abas.get(7).url, `${ML}/ofertas`);
+    assert.equal(criadas(m).length, 1);
+  });
+  await t.test('a aba de afiliados do dono saiu da Central no meio do pedido: a extensão não a leva de volta', async () => {
+    let n = 0;
+    const m = montar({
+      jobs: [jobLink(1)], pollVazio: 'cai', congelar: () => ++n === 1,
+      abas: [{ id: 5, url: CENTRAL, status: 'complete' }, ...SO_PORTAL],
+    });
+    await m.avancar(1_000);
+    m.abas.get(5).url = `${ML}/ofertas`; // o dono navegou a aba dele enquanto a primeira tentativa esperava
+    await m.avancar(40_000);
+    assert.deepEqual(plano(m.resultados), [{ id: 1, ok: true, link: LINK_OK }]);
+    assert.deepEqual(m.navegacoes.filter((x) => x.id === 5), [], `navegou a aba do dono: ${JSON.stringify(m.navegacoes)}`);
+    assert.deepEqual(m.recargas, []);
+    assert.equal(m.abas.get(5).url, `${ML}/ofertas`);
+    assert.equal(criadas(m).length, 1, 'sem poder usar a aba do dono, a extensão abre a sua');
+  });
+  await t.test('aba lembrada de outra sessão do Chrome não vale (ids recomeçam): a aba com aquele id é do dono', async () => {
+    const m = montar({ pollVazio: 'cai', abas: [{ id: 7, url: `${ML}/ofertas`, status: 'complete' }, ...SO_PORTAL] });
+    m.armazenado.abaCentral = 7; // um id guardado em chrome.storage.local antes de o Chrome reiniciar não pode ser usado
+    assert.deepEqual(plano(await pedir(m, jobLink(1))), [{ id: 1, ok: true, link: LINK_OK }]);
+    assert.deepEqual(m.navegacoes.filter((x) => x.id === 7), []);
+  });
+});
+
+test('CA2.7: erro real e tipo chegam no result', async (t) => {
+  const recusa = JSON.stringify({ urls: [{ error: { message: 'The article must be active, status: paused' } }] });
+  const casos = [
+    ['aba', { falhaInjecao: () => 'Could not establish connection. Receiving end does not exist.' },
+      /^não consegui abrir a Central de Afiliados: “Could not establish connection\. Receiving end does not exist\.”$/],
+    ['http', { modoCentral: () => ({ status: 500, corpo: 'erro interno' }) }, /^a Central de Afiliados respondeu HTTP 500$/],
+    ['sessao', { semCsrf: true }, /não há sessão de afiliado neste Chrome/],
+    ['sem_resposta', { congelar: () => true }, /Central de Afiliados do Mercado Livre não respondeu a tempo/],
+    ['sem_resposta', { modoCentral: () => 'rede' }, /^não consegui falar com a Central de Afiliados: “Failed to fetch”$/],
+    ['formato', { modoCentral: () => ({ status: 200, corpo: '<html>' }) }, /não é JSON/],
+    ['formato', { modoCentral: () => ({ status: 200, corpo: '{"urls":[{}]}' }) }, /sem link/],
+    ['recusa', { modoCentral: () => ({ status: 200, corpo: recusa }) },
+      /^o Mercado Livre recusou o link: “The article must be active, status: paused” \(etiqueta "minhaetiqueta"\)$/],
+  ];
+  for (const [tipo, opcoes, frase] of casos) {
+    await t.test(`${tipo}: ${frase}`, async () => {
+      const m = montar({ jobs: [jobLink(1)], pollVazio: 'cai', ...opcoes });
+      await m.avancar(60_000);
+      const [r] = plano(m.resultados);
+      assert.equal(r?.ok, false, JSON.stringify(r));
+      assert.equal(r.tipo, tipo);
+      assert.match(r.error, frase);
+      assert.equal(m.armazenado.st.ultimoErro, r.error, 'o popup mostra o mesmo erro que foi ao painel');
+      assert.equal(m.armazenado.st.central, tipo === 'recusa' ? 'respondendo' : 'sem_resposta');
+    });
+  }
+  await t.test('lista de ofertas também leva o tipo; Shopee e produto não', async () => {
+    const m = montar({ jobs: [jobOfertas(1)], pollVazio: 'cai', modoCentral: () => ({ status: 502, corpo: '' }) });
+    await m.avancar(60_000);
+    assert.deepEqual(plano(m.resultados), [{ id: 1, ok: false, error: 'a Central de Afiliados respondeu HTTP 502', tipo: 'http' }]);
+    const s = montar({ jobs: [jobShopee(2)], pollVazio: 'cai' });
+    await s.avancar(10_000);
+    assert.equal(plano(s.resultados)[0].tipo, undefined);
+  });
+  await t.test('link gerado marca a Central respondendo e limpa o último erro', async () => {
+    const m = montar({ pollVazio: 'cai', modoCentral: (_, n) => (n <= 2 ? 'rede' : 'ok'), abas: [{ id: 5, url: CENTRAL, status: 'complete' }, ...SO_PORTAL] });
+    await pedir(m, jobLink(1));
+    assert.equal(m.armazenado.st.central, 'sem_resposta');
+    assert.deepEqual(plano(await pedir(m, jobLink(2))), [{ id: 2, ok: true, link: LINK_OK }]);
+    assert.equal(m.armazenado.st.central, 'respondendo');
+    assert.equal(m.armazenado.st.ultimoErro, null);
+  });
+});
+
+test('CA2.7: o erro real não leva endereço completo, token, caracteres de controle nem texto sem fim', async () => {
+  const sujo = 'Cannot access contents of url "https://www.mercadolivre.com.br/afiliados/hub?token=abc123&csrf=xyz".\n\u0007'
+    + ' Extension manifest must request permission to access this host. ' + 'x'.repeat(400);
+  const m = montar({ jobs: [jobLink(1, 'etiqueta-secreta')], pollVazio: 'cai', falhaInjecao: () => sujo });
+  await m.avancar(30_000);
+  const [r] = plano(m.resultados);
+  assert.equal(r.tipo, 'aba');
+  assert.match(r.error, /“Cannot access contents of url "https:\/\/www\.mercadolivre\.com\.br"\. Extension manifest/);
+  for (const proibido of ['token=abc123', 'csrf=xyz', 'abc123', '/afiliados/hub', 'etiqueta-secreta', 'tok-painel', 'csrf-da-pagina']) {
+    assert.ok(!r.error.includes(proibido), `o erro leva "${proibido}": ${r.error}`);
+  }
+  assert.doesNotMatch(r.error, /[\u0000-\u001f\u007f]/);
+  assert.ok(r.error.length <= 220, `erro com ${r.error.length} caracteres`);
+});
+
+test('CA2.9: nenhuma nova tentativa (aba descartada, sessão recarregada) aceita link fora de meli.la', async (t) => {
+  const semAfiliacao = JSON.stringify({ urls: [{ short_url: 'https://www.mercadolivre.com.br/fone/p/MLB1' }] });
+  const cenarios = [
+    ['aba descartada', { abas: [{ id: 5, url: CENTRAL, status: 'complete', discarded: true }, ...SO_PORTAL] }],
+    ['aba lembrada que saiu da Central', { abas: SO_PORTAL, desviar: true }],
+    ['sessão recarregada', { semCsrfPrimeira: true }],
+  ];
+  for (const [nome, c] of cenarios) {
+    await t.test(nome, async () => {
+      const m = montar({ pollVazio: 'cai', abas: c.abas, modoCentral: () => ({ status: 200, corpo: semAfiliacao }) });
+      if (c.semCsrfPrimeira) {
+        // a primeira injeção cai numa página sem csrf (sessão vencida): a extensão recarrega e tenta de novo
+        const original = m.ctx.chrome.scripting.executeScript;
+        let k = 0;
+        m.ctx.chrome.scripting.executeScript = async (o) => (++k === 1 ? [{ result: { status: 0, semSessao: true } }] : original(o));
+      }
+      if (c.desviar) {
+        await pedir(m, jobLink(1));
+        m.abas.get(criadas(m)[0].id).url = `${ML}/ofertas`;
+      }
+      const r = plano(await pedir(m, jobLink(9)));
+      assert.equal(r.length, 1);
+      assert.equal(r[0].ok, false);
+      assert.equal(r[0].link, undefined);
+      assert.equal(r[0].tipo, 'formato');
+      assert.ok(!m.resultados.some((x) => x.ok && !/^https:\/\/meli\.la\//.test(x.link)), 'saiu link sem afiliação');
+    });
+  }
+});
+
+test('prazos novos: aba congelada é recarregada aos 20 s, e o link responde até os 40 s, antes dos 45 s do servidor', async () => {
+  // a recarga demora 12 s para avisar que carregou: 20 + 12 + 20 = 52 s sem o teto; o teto de 40 s responde antes
+  const m = montar({
+    jobs: [jobLink(1, 'etiqueta-congela', 'https://www.mercadolivre.com.br/congela/p/MLB1')], pollVazio: 'cai', congelar: congelado, demoraCarregar: 12_000,
+  });
+  await m.avancar(19_500);
+  assert.ok(!m.eventos.includes('reload'), 'recarregou antes dos 20 s de espera da aba');
+  await m.avancar(1_000);
+  assert.ok(m.eventos.includes('reload'), `a aba congelada não foi recarregada aos 20 s: ${m.eventos.join(',')}`);
+  await m.avancar(18_500); // 39 s
+  assert.deepEqual(m.resultados, [], 'o link não pode desistir antes do teto de 40 s');
+  await m.avancar(1_500);
+  const [r] = plano(m.resultados);
+  assert.ok(r, 'sem resposta aos 40 s');
+  assert.deepEqual(r, { id: 1, ok: false, error: 'a Central de Afiliados do Mercado Livre não respondeu a tempo. A extensão recarrega a aba e tenta de novo no próximo pedido', tipo: 'sem_resposta' });
+  assert.equal(m.tempos[0], 40_000);
+});
+
+test('prazos novos: aba que não avisa que carregou é usada depois de 15 s de espera', async () => {
+  const m = montar({
+    jobs: [jobLink(1)], pollVazio: 'cai', demoraCarregar: 120_000,
+    abas: [{ id: 5, url: CENTRAL, status: 'complete', discarded: true }, ...SO_PORTAL],
+  });
+  await m.avancar(30_000);
+  assert.deepEqual(plano(m.resultados), [{ id: 1, ok: true, link: LINK_OK }]);
+  assert.equal(m.tempos[0], 15_000);
+});
+
+test('prazos novos: o fetch da Central dentro da aba desiste em 15 s', async () => {
+  const m = montar({ pollVazio: 'cai', modoCentral: () => 'pendurar' });
+  await m.avancar(0);
+  m.ctx.location = new URL(CENTRAL);
+  m.ctx.document = { querySelector: () => ({ content: 'csrf-da-pagina' }) };
+  let fim = null;
+  m.ctx.chamarCentral(API_LINK_TESTE, { urls: ['https://x'], tag: 't' }).then((v) => { fim = v; });
+  await m.avancar(14_900);
+  assert.equal(fim, null, 'desistiu antes dos 15 s');
+  await m.avancar(200);
+  assert.deepEqual(plano(fim), { status: 0, tempoEsgotado: true });
+});
+
+test('CA2.16: o poll manda x-versao com a versão do chrome.runtime.getManifest()', async (t) => {
+  for (const versao of [VERSAO_TESTE, '2.10.3']) {
+    await t.test(versao, async () => {
+      const m = montar({ jobs: [jobLink(1)], pollVazio: 'cai', manifest: { version: versao, name: 'falso' } });
+      await m.avancar(5_000);
+      assert.ok(m.cabecalhosPoll.length >= 2);
+      for (const h of m.cabecalhosPoll) assert.deepEqual(plano(h), { 'x-token': 'tok-painel', 'x-recursos': 'produto_ml', 'x-versao': versao });
+    });
+  }
+});
+
+// ---------------- popup: linha da Central e versão ----------------
+
+const POPUP = fs.readFileSync(path.join(RAIZ, 'extension', 'popup.js'), 'utf8');
+const POPUP_HTML = fs.readFileSync(path.join(RAIZ, 'extension', 'popup.html'), 'utf8');
+
+/** Roda o popup.js num vm com um document de mentira (só getElementById) e o st dado. */
+async function abrirPopup(st, manifest = { version: VERSAO_TESTE }) {
+  const ids = [...POPUP_HTML.matchAll(/\bid="([^"]+)"/g)].map((x) => x[1]);
+  const el = Object.fromEntries(ids.map((id) => [id, { id, textContent: '', className: '', hidden: false, value: '', addEventListener() {} }]));
+  for (const [id, e] of Object.entries(el)) {
+    const tag = POPUP_HTML.match(new RegExp(`<[^>]*\\bid="${id}"[^>]*>`))[0];
+    e.hidden = /\shidden[\s>]/.test(tag);
+    e.className = tag.match(/class="([^"]*)"/)?.[1] || '';
+  }
+  const chrome = {
+    storage: { local: { get: async () => structuredClone({ conf: { servidor: SERVIDOR, token: 't' }, st }) }, onChanged: { addListener() {} } },
+    runtime: { getManifest: () => structuredClone(manifest) },
+    permissions: { request: async () => true },
+  };
+  const ctx = vm.createContext({ chrome, document: { getElementById: (id) => el[id] || null }, setTimeout, URL, confirm: () => true });
+  vm.runInContext(POPUP, ctx, { filename: 'popup.js' });
+  for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+  return el;
+}
+
+test('popup: a caixa de estado tem role=status e a versão sai do manifest', async () => {
+  assert.match(POPUP_HTML, /<div[^>]*\bid="estado"[^>]*\brole="status"|<div[^>]*\brole="status"[^>]*\bid="estado"/);
+  const el = await abrirPopup({ ok: true });
+  assert.equal(el.versao.textContent, `Versão ${VERSAO_TESTE}`);
+  assert.equal((await abrirPopup({ ok: false }, { version: '3.1.4' })).versao.textContent, 'Versão 3.1.4');
+});
+
+test('popup: linha da Central só com a extensão conectada, respondendo ou sem resposta, e o erro real', async () => {
+  let el = await abrirPopup({ ok: true, central: 'respondendo' });
+  assert.equal(el.msg.textContent, 'Conectado ao achadinhoturbo');
+  assert.equal(el.linhaCentral.hidden, false);
+  assert.equal(el.msgCentral.textContent, 'Central de Afiliados: respondendo');
+  assert.match(el.linhaCentral.className, /\bok\b/);
+
+  el = await abrirPopup({ ok: true, central: 'sem_resposta', ultimoErro: 'não consegui abrir a Central de Afiliados: “No tab with id: 5”' });
+  assert.equal(el.msgCentral.textContent, 'Central de Afiliados: sem resposta');
+  assert.doesNotMatch(el.linhaCentral.className, /\bok\b/);
+  assert.equal(el.erro.textContent, 'Último erro ao gerar link: não consegui abrir a Central de Afiliados: “No tab with id: 5”');
+
+  el = await abrirPopup({ ok: false, erro: 'Painel fechado ou endereço errado.', central: 'respondendo' });
+  assert.equal(el.msg.textContent, 'Painel fechado ou endereço errado.');
+  assert.equal(el.linhaCentral.hidden, true, 'sem a extensão conectada, a linha da Central some');
+
+  el = await abrirPopup({ ok: true }); // ainda sem pedido à Central
+  assert.equal(el.linhaCentral.hidden, true);
 });

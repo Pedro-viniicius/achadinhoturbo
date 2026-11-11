@@ -5,20 +5,26 @@
   .marca { display:flex; align-items:center; gap:8px; font-size:17px; letter-spacing:-.02em; font-weight:500; } .marca b { color:#5B3DF5; font-weight:700; } .marca img { width:24px; height:24px; }
   main { padding:16px; display:grid; gap:12px; }
   h1 { margin:0; font-size:15px; }
-  .estado { display:flex; gap:8px; align-items:center; padding:10px 12px; border-radius:10px; background:#F1EEFE; }
-  .estado i { width:9px; height:9px; border-radius:50%; background:#FF7A1A; flex:none; }
-  .estado.ok i { background:#1B8A4B; }
+  .estado { display:grid; gap:6px; padding:10px 12px; border-radius:10px; background:#F1EEFE; }
+  .linha { display:flex; gap:8px; align-items:center; margin:0; overflow-wrap:anywhere; }
+  .linha[hidden] { display:none; }
+  .linha i { width:9px; height:9px; border-radius:50%; background:#FF7A1A; flex:none; }
+  .linha.ok i { background:#1B8A4B; }
   label { display:grid; gap:4px; font-weight:600; }
   input { font:inherit; padding:8px 10px; border:1px solid #E2DDF5; border-radius:8px; }
   input:focus-visible, button:focus-visible { outline:2px solid #5B3DF5; outline-offset:1px; }
   button { font:inherit; font-weight:600; padding:9px 12px; border:0; border-radius:8px; background:#5B3DF5; color:#fff; cursor:pointer; }
-  small { color:#5E5A72; }
+  small { color:#5E5A72; overflow-wrap:anywhere; }
 </style></head>
 <body><main>
   <h1 class="marca"><img src="icons/icon48.png" alt="">achadinho<b>turbo</b></h1>
-  <div class="estado" id="estado"><i></i><span id="msg">Verificando…</span></div>
+  <div class="estado" id="estado" role="status">
+    <p class="linha" id="linhaExtensao"><i></i><span id="msg">Verificando…</span></p>
+    <p class="linha" id="linhaCentral" hidden><i></i><span id="msgCentral"></span></p>
+  </div>
   <label>Endereço do painel<input id="servidor" value="http://127.0.0.1:3737"></label>
   <label>Token (copie em Conexões → Mercado Livre, no painel)<input id="token" placeholder="cole aqui" autocomplete="off"></label>
   <button id="salvar">Salvar e conectar</button>
   <small id="erro"></small>
+  <small id="versao"></small>
 </main><script src="popup.js"></script></body></html>
