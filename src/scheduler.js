@@ -14,7 +14,7 @@ import { createRitmo, pausaGrupoGravada, pausaOfertaGravada } from './ritmo.js';
 import { proximoHorario, horarioDe, resolverVencido, proximoEnvio, qtdDaLinha, templateDaLinha } from './grade.js';
 import { sleep, jitter, inWindow, alignToWindow } from './util.js';
 import { criarTrava, lerEnviados, comparar, centavos, maisBarataOBastante, tituloParaGuardar, comFraseMaisBarata, textoConflito, textoPassou, textoConferencia, HORAS_ENTRE_PARECIDOS } from './parecido.js';
-import { PAUSA_DESCARTADA_H, MOTIVOS_VERIFICADOR, CAUSAS } from './verificador.js';
+import { PAUSA_DESCARTADA_H, RESERVA_AMAZON_H, MOTIVOS_VERIFICADOR, CAUSAS, reservaValida } from './verificador.js';
 
 // Pausas entre mensagens e horário de funcionamento: moram em ./util.js (src/envios.js usa o mesmo ritmo anti-bloqueio);
 // reexportados aqui.
@@ -50,6 +50,7 @@ export const TETO_REPOSICAO = 3;
 const PULADA_POR = {
   parecido: 'produto parecido', filtros: 'preço fora dos filtros', espera: 'loja indisponível agora',
   revisao_cheia: 'revisão cheia', link: 'link não gerado', envio: 'falha no envio',
+  conferencia: 'preço sem conferência', sem_preco: 'sem como saber o preço', desligado: 'verificador desligado',
 };
 const DESCARTADA_POR = {
   esgotado: 'esgotada na loja', preco_subiu: 'preço subiu', nao_conferido: 'preço sem conferência',
@@ -104,6 +105,30 @@ const quandoDe = (ts, agora) => {
   return `${horaDe(ts)} de ${pad2(d.getDate())}/${pad2(d.getMonth() + 1)}`;
 };
 const MOTIVO_PULADO = 'o programa estava desligado, o WhatsApp desconectado ou outro envio demorou.';
+
+// Oferta do catálogo sem conferência (plano rodar-sozinho-entrega1, decisão 4; spec, §1 "Puladas"): nunca vai à revisão
+// e nunca entra em sent_offers nem em catalogo_itens. Só o preço impossível de conhecer fica PAUSA_DESCARTADA_H fora da
+// escolha da regra; as outras causas são passageiras e a oferta pode voltar na execução seguinte.
+const CAUSAS_SEM_PRECO = new Set(['sem_preco', 'varias_versoes']);
+const TENTA_DE_NOVO = 'Tenta de novo no próximo envio.';
+const TEXTO_PULADA_DESLIGADO = `Pulada: o verificador foi desligado durante este envio e o preço não foi conferido. ${TENTA_DE_NOVO}`;
+/**
+ * Linha "Pulada: …" da oferta do catálogo que o verificador não conseguiu conferir. `causa`: chave de CAUSAS. Na Amazon,
+ * a frase diz a idade do preço visto (`precoEm`, ms): mais de RESERVA_AMAZON_H h, ou sem data que valha (ausente ou no
+ * futuro). Preço visto dentro da reserva (a API da Amazon ligada, a oferta que saiu do Etiqueta): só a causa.
+ */
+function textoPuladaSemConferencia(offer, causa, agora) {
+  const porque = CAUSAS[causa];
+  if (CAUSAS_SEM_PRECO.has(causa)) return `Pulada: não dá para saber o preço (${porque}). Fica ${PAUSA_DESCARTADA_H} h fora da escolha desta regra.`;
+  if (offer.loja === 'ml') return `Pulada: não deu para conferir o preço (${porque}). O Mercado Livre não sai sem conferir; tenta de novo no próximo envio.`;
+  if (offer.loja === 'amazon' && !reservaValida(offer.precoEm, agora)) {
+    const velho = Number.isFinite(offer.precoEm) && offer.precoEm < agora;
+    return velho
+      ? `Pulada: o preço visto às ${quandoDe(offer.precoEm, agora)} tem mais de ${RESERVA_AMAZON_H} h e não deu para conferir agora (${porque}). ${TENTA_DE_NOVO}`
+      : `Pulada: não deu para conferir o preço agora (${porque}) e a oferta não diz quando o preço foi visto. ${TENTA_DE_NOVO}`;
+  }
+  return `Pulada: não deu para conferir o preço agora (${porque}). ${TENTA_DE_NOVO}`;
+}
 
 // Proteção do número (plano anti-banimento, etapa 4): textos do Histórico, todos 'aviso' (nunca 'erro', que alerta)
 const textoAdiadoSilencio = (s, ate) => `Horário de silêncio (${s.de} às ${s.ate}): disparo adiado para as ${horaDe(ate)}.`;
@@ -236,21 +261,28 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
 
   /**
    * Confere a oferta da regra logo antes do link (D1). As fontes antigas são do Mercado Livre; o catálogo manda a
-   * própria loja. Sem verificador → enviar como veio. Nunca lança: um descarte não para as outras ofertas (D6).
-   * → { acao: 'enviar', oferta, sufixo } | { acao: 'descartar', motivo, texto }
+   * própria loja e a `releitura` (o preço visto pelo Etiqueta, `precoEm`): só a regra do catálogo a passa, e o
+   * verificador só a usa na Amazon sem API (plano rodar-sozinho-entrega1, ADR-014; o Disparo manual e o "Enviar" da
+   * revisão nunca a passam, CA1.11). Sem verificador → enviar como veio. Nunca lança: um descarte não para as outras
+   * ofertas (D6).
+   * → { acao: 'enviar', oferta, sufixo } | { acao: 'descartar', motivo, texto, causa? } (`causa`, chave de CAUSAS, só
+   * no `nao_conferido`)
    */
   async function conferirDaRegra(offer) {
     if (!verificador) return { acao: 'enviar', oferta: offer, sufixo: null };
     try {
       const { lidoEm = null, maisBarata: _marca, ...oferta } = offer; // a marca da trava é interna: o verificador não a vê
-      const r = await verificador.conferir(offer.catalogo ? oferta : { ...oferta, loja: 'mercadolivre' }, { lidoEm });
+      const opcoes = offer.catalogo ? { lidoEm, releitura: { precoEm: Number.isFinite(offer.precoEm) ? offer.precoEm : null } } : { lidoEm };
+      const r = await verificador.conferir(offer.catalogo ? oferta : { ...oferta, loja: 'mercadolivre' }, opcoes);
       if (r?.acao === 'enviar' && r.oferta && typeof r.oferta === 'object') return { acao: 'enviar', oferta: r.oferta, sufixo: typeof r.sufixo === 'string' && r.sufixo ? r.sufixo : null };
       if (r?.acao === 'descartar' && Object.hasOwn(MOTIVOS_VERIFICADOR, r.motivo)) {
-        return { acao: 'descartar', motivo: r.motivo, texto: typeof r.texto === 'string' && r.texto ? r.texto : MOTIVOS_VERIFICADOR[r.motivo] };
+        const texto = typeof r.texto === 'string' && r.texto ? r.texto : MOTIVOS_VERIFICADOR[r.motivo];
+        if (r.motivo !== 'nao_conferido') return { acao: 'descartar', motivo: r.motivo, texto };
+        return { acao: 'descartar', motivo: r.motivo, texto, causa: typeof r.causa === 'string' && Object.hasOwn(CAUSAS, r.causa) ? r.causa : 'loja_fora' };
       }
     } catch (e) { console.error('[agendador] verificador:', e?.name || 'erro'); }
     // resposta fora do contrato (o conferir nunca lança): sem conferência, não sai (D3)
-    return { acao: 'descartar', motivo: 'nao_conferido', texto: `${MOTIVOS_VERIFICADOR.nao_conferido} (${CAUSAS.loja_fora})` };
+    return { acao: 'descartar', motivo: 'nao_conferido', texto: `${MOTIVOS_VERIFICADOR.nao_conferido} (${CAUSAS.loja_fora})`, causa: 'loja_fora' };
   }
 
   // ---------- fonte "catalogo" (D4 a D9 do plano fonte-catalogo-etiqueta)
@@ -779,7 +811,15 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
           // revisão em vez de envio (D5): Shopee, preço suspeito ou falha do link deste item (nenhum grupo com link)
           let motivos = offer.motivos; let detalhe = '';
           if (!motivos.length) {
-            // conferência antes do link (D1): sem conferência vai à revisão; esgotada ou mais cara, descartada (D6)
+            // a lista veio com a idade larga (o verificador estava ligado no começo, decisão 5) e o verificador foi
+            // desligado no meio: o que resta do catálogo não sai sem conferência (premissa P1; foco de revisão 5)
+            if (exec.conferenciaNaHora && !conferenciaLigada()) {
+              faltou(o, 'pulada', PULADA_POR.desligado);
+              log(rule, { level: 'aviso', offer_title: o.title, message: TEXTO_PULADA_DESLIGADO });
+              continue;
+            }
+            // conferência antes do link (D1): esgotada, mais cara, indisponível ou outro produto, descartada (D6); sem
+            // conferência, pulada (abaixo)
             const c = await conferirDaRegra(offer);
             if (c.acao === 'enviar') {
               offer = c.oferta; sufixo = c.sufixo ?? '';
@@ -789,8 +829,14 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
               if (ml.rejectReason(offer, rule)) { exec.recusadas.add(o.key); faltou(o, 'pulada', PULADA_POR.filtros); continue; }
               if (naoMaisBarata(offer)) { puladaNaConferencia(offer); exec.recusadas.add(o.key); continue; }
             } else if (c.motivo === 'nao_conferido') {
-              motivos = ['nao_conferido'];
-              detalhe = c.texto.startsWith(MOTIVOS_VERIFICADOR.nao_conferido) ? c.texto.slice(MOTIVOS_VERIFICADOR.nao_conferido.length) : '';
+              // falha técnica nunca vai à revisão (plano rodar-sozinho-entrega1, decisão 4; CA1.5): pulada, sem
+              // catalogo_itens e sem sent_offers, e a vaga vai à próxima candidata. Só o preço impossível de conhecer
+              // fica PAUSA_DESCARTADA_H fora da escolha; o resto pode voltar já
+              const semPreco = CAUSAS_SEM_PRECO.has(c.causa);
+              if (semPreco) pausar(rule, o.key);
+              faltou(o, 'pulada', semPreco ? PULADA_POR.sem_preco : PULADA_POR.conferencia);
+              log(rule, { level: 'aviso', offer_title: o.title, message: textoPuladaSemConferencia(o, c.causa, Date.now()) });
+              continue;
             } else {
               if (!regraExiste(rule.id)) continue;
               catalogoItens.registrar(rule, offer, 'descartado', [], { descartadoPor: c.motivo });

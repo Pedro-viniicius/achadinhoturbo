@@ -462,7 +462,8 @@ const regraCatalogo = (s) => Number(s.db.prepare(`INSERT INTO rules (name, enabl
   VALUES ('Catálogo', 1, ?, ?, ?, 'list', '{}', ?, 5, 60, '00:00', '23:59', 7, 0, ?)`)
   .run(s.tag, s.tpl, JSON.stringify([G1]), JSON.stringify([{ type: 'catalogo', tag_id: null, config: { ordem: 'relevancia' } }]), Date.now()).lastInsertRowid);
 
-test('CA1/CA2: regra do Catálogo com itens do ML: o conferido sai sozinho (não vai à revisão), o esgotado é descartado e o sem preço vai à revisão; o link só depois da conferência', async () => {
+// o sem preço deixou de ir à revisão: vira pulada, 6 h fora da escolha (plano rodar-sozinho-entrega1, B6; CA1.5)
+test('CA1/CA2: regra do Catálogo com itens do ML: o conferido sai sozinho (não vai à revisão), o esgotado é descartado e o sem preço é pulado; o link só depois da conferência', async () => {
   await comExtensao({}, async (s, ext) => {
     const of = (n, preco) => ({ id: n, loja: 'ml', titulo: `Produto ${n}`, preco, preco_antigo: 300, desconto_pct: 50, categoria: 'Casa', item_id: `MLB${n}`, link: 'https://meli.la/TerCeiro1' });
     const lista = [of(5257531512, 154.99), of(2000000002, 100), of(2000000003, 100)];
@@ -471,9 +472,9 @@ test('CA1/CA2: regra do Catálogo com itens do ML: o conferido sai sozinho (não
     const id = regraCatalogo(s);
 
     const r = await s.scheduler.runRule(id);
-    assert.deepEqual([r.offers, r.messages, r.errors, r.revisao, r.descartadas], [1, 1, 0, 1, 1]);
+    assert.deepEqual([r.offers, r.messages, r.errors, r.revisao, r.descartadas, r.puladas], [1, 1, 0, 0, 1, 1]);
     const itens = s.db.prepare('SELECT chave, status, motivos FROM catalogo_itens WHERE rule_id = ? ORDER BY id').all(id).map((l) => [l.chave, l.status, JSON.parse(l.motivos)]);
-    assert.deepEqual(itens, [['MLB5257531512', 'enviado', []], ['MLB2000000002', 'descartado', []], ['MLB2000000003', 'revisao', ['nao_conferido']]]);
+    assert.deepEqual(itens, [['MLB5257531512', 'enviado', []], ['MLB2000000002', 'descartado', []]], 'a pulada não entra em catalogo_itens');
     assert.deepEqual(ext.tipos(), ['produto_ml', 'link', 'produto_ml', 'produto_ml'], 'só o item conferido pede link');
     assert.equal(s.wa.simulated.length, 1);
     assert.match(s.wa.simulated[0].text, /Preço visto às \d{2}h\d{2}/);
@@ -481,9 +482,9 @@ test('CA1/CA2: regra do Catálogo com itens do ML: o conferido sai sozinho (não
     assert.deepEqual(logsDaRegra(s, id).map((l) => [l.level, l.offer_title, l.message]), [
       ['ok', 'Produto 5257531512', 'Enviado com a etiqueta etiquetaA'],
       ['aviso', 'Produto 2000000002', 'Descartada: esgotado na loja'],
-      ['aviso', 'Produto 2000000003', 'Separada para revisão: não deu para conferir o preço (a página não trouxe o preço).'],
+      ['aviso', 'Produto 2000000003', 'Pulada: não dá para saber o preço (a página não trouxe o preço). Fica 6 h fora da escolha desta regra.'],
       // a regra pediu 5 (plano rodar-sozinho-entrega1, CA1.8)
-      ['aviso', null, 'Saíram 1 de 5 ofertas; 1 descartada (esgotada na loja), 1 separada para revisão; não havia mais ofertas novas dentro dos filtros.'],
+      ['aviso', null, 'Saíram 1 de 5 ofertas; 1 pulada (sem como saber o preço), 1 descartada (esgotada na loja); não havia mais ofertas novas dentro dos filtros.'],
     ]);
     assert.ok(!niveis(s).includes('erro'));
     assert.deepEqual(s.leituras, []);

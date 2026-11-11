@@ -812,7 +812,9 @@ test('template: tudo que o validador aceita mantém o {LINK} no texto sem confer
 
 // ================================================================================ rodada 2: Catálogo descartado pelo verificador
 
-test('Catálogo (regra): esgotado e preço que subiu viram "descartado" com o porquê em listar(); sem conferência vai à revisão sem porquê; o descarte do dono não tem porquê', async () => {
+// sem conferência o item deixou de ir à revisão: é pulado e não entra em catalogo_itens (plano rodar-sozinho-entrega1,
+// B6; CA1.5). O item da revisão do dono passa a ser o de preço antigo suspeito (Produto 6)
+test('Catálogo (regra): esgotado e preço que subiu viram "descartado" com o porquê em listar(); sem conferência é pulado; o da revisão não tem porquê; o descarte do dono não tem porquê', async () => {
   const dir = tmp(); const db = openDb(dir); semear(db);
   const wa = createWhatsApp({ db, dir, dryRun: true }); wa.connect();
   const links = createLinkService({ getMode: () => 'fake' });
@@ -821,24 +823,25 @@ test('Catálogo (regra): esgotado e preço que subiu viram "descartado" com o po
   const ml = { async conferirProduto(url) { const r = lojaMl[/MLB-?(\d+)/.exec(url)[1]]; if (!r) throw new Error('fora'); return r; } };
   const of = (i, mais = {}) => ({ id: i, loja: 'ml', titulo: `Produto ${i}`, preco: 100, preco_antigo: 150, desconto_pct: 33, categoria: 'Casa', item_id: `MLB${4000000000 + i}`, link: 'https://meli.la/TerCeiro1', ...mais });
   const catalogoItens = createCatalogoItens({ db, wa, links, amazon });
-  const catalogo = { candidatos: async (cfg, { tratada }) => [of(1), of(2), of(3), of(4), of(5)].map(paraCandidato).filter((c) => c && !tratada(c, cfg.ordem)) };
+  const catalogo = { candidatos: async (cfg, { tratada }) => [of(1), of(2), of(3), of(4), of(5), of(6, { preco_antigo: 1000, desconto_pct: 90 })].map(paraCandidato).filter((c) => c && !tratada(c, cfg.ordem)) };
   const verificador = createVerificador({ db, ml, amazon });
   const scheduler = createScheduler({ db, wa, links, fast: true, amazon, verificador, catalogo, catalogoItens });
   const id = Number(db.prepare(`INSERT INTO rules (name, enabled, tag_id, template_id, group_jids, source_type, source_config, sources, per_run, interval_min, window_start, window_end, dedupe_days, send_image, created_at)
     VALUES ('Catálogo', 1, 1, 1, ?, 'list', '{}', ?, 5, 60, '00:00', '23:59', 7, 0, ?)`).run(JSON.stringify([G1]), JSON.stringify([{ type: 'catalogo', tag_id: null, config: { ordem: 'relevancia' } }]), Date.now()).lastInsertRowid);
   const r = await scheduler.runRule(id);
-  assert.deepEqual([r.offers, r.revisao, r.descartadas, r.errors], [2, 1, 2, 0]);
+  assert.deepEqual([r.offers, r.revisao, r.descartadas, r.puladas, r.errors], [2, 1, 2, 1, 0]);
   const porChave = Object.fromEntries(catalogoItens.listar({ regra: id }).itens.map((it) => [it.oferta.title, it]));
   assert.equal(porChave['Produto 1'].status, 'descartado'); assert.equal(porChave['Produto 1'].descartado_por, 'esgotado');
   assert.equal(porChave['Produto 2'].status, 'descartado'); assert.equal(porChave['Produto 2'].descartado_por, 'preco_subiu');
-  assert.equal(porChave['Produto 3'].status, 'revisao'); assert.deepEqual(porChave['Produto 3'].motivos, ['nao_conferido']);
-  assert.equal('descartado_por' in porChave['Produto 3'], false);
+  assert.equal(porChave['Produto 3'], undefined, 'o pulado não entra em catalogo_itens');
+  assert.equal(porChave['Produto 6'].status, 'revisao'); assert.deepEqual(porChave['Produto 6'].motivos, ['preco_antigo']);
+  assert.equal('descartado_por' in porChave['Produto 6'], false);
   assert.equal('descartado_por' in porChave['Produto 4'], false, 'o enviado não tem porquê de descarte');
   assert.deepEqual(descartes(db).sort(), ['Descartada: esgotado na loja', 'Descartada: preço subiu de R$ 100,00 para R$ 120,00 (+20%, o limite é 5%)']);
   semErroNoLog(db, 'Catálogo');
   // o dono descarta o da revisão: sem `descartado_por` (o motivo "esgotado" não pode ser inventado)
-  catalogoItens.descartar(porChave['Produto 3'].id);
-  const depois = catalogoItens.listar({ regra: id }).itens.find((it) => it.oferta.title === 'Produto 3');
+  catalogoItens.descartar(porChave['Produto 6'].id);
+  const depois = catalogoItens.listar({ regra: id }).itens.find((it) => it.oferta.title === 'Produto 6');
   assert.equal(depois.status, 'descartado'); assert.equal('descartado_por' in depois, false);
   // valor forjado no JSON guardado não vaza para a tela
   db.prepare("UPDATE catalogo_itens SET oferta = json_set(oferta, '$.descartado_por', 'constructor') WHERE id = ?").run(porChave['Produto 1'].id);

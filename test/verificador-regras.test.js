@@ -37,8 +37,11 @@ const dia = (d, h, m = 0) => new Date(2026, 10, d, h, m).getTime(); // 02/11/202
  * Agendador com o verificador. `loja`: id do MLB (só os dígitos) → { price, disponivel } | 'falha' (a leitura lança).
  * O que não estiver em `loja` lança também. `eventos` guarda, em ordem, cada conferência e cada pedido de link.
  * `comVerificador: false` = como hoje (sem a injeção). `catalogo`: ofertas no formato do Etiqueta (fonte "catalogo").
+ * `releitura`: ASIN → resposta de catalogo.confirmarPreco (ou função asin → resposta); cada pedido entra em `eventos`
+ * como 'reler <ASIN>'. Sem ela, o verificador não tem o cliente do Etiqueta (a releitura falha como 'o Etiqueta não
+ * respondeu'). `ctxs` guarda o contexto de cada leitura da lista do catálogo.
  */
-function montar({ loja = {}, comVerificador = true, catalogo = null } = {}) {
+function montar({ loja = {}, comVerificador = true, catalogo = null, releitura = null } = {}) {
   const dir = tmp(); const db = openDb(dir);
   const wa = createWhatsApp({ db, dir, dryRun: true }); wa.connect();
   const links = createLinkService({ getMode: () => 'fake' });
@@ -55,10 +58,20 @@ function montar({ loja = {}, comVerificador = true, catalogo = null } = {}) {
   };
   const conexaoAmazon = { tag: 'achadinho-20' }; // tag salva, sem ID e segredo: a API da Amazon não está ligada
   const amazon = createAmazon({ db, fetch: async () => { throw new Error('rede proibida (Amazon)'); }, esperar: async () => {}, lerConexao: () => conexaoAmazon });
-  const verificador = comVerificador ? createVerificador({ db, ml: mlLoja, amazon }) : null;
+  const etiqueta = releitura ? {
+    async confirmarPreco(asin) {
+      eventos.push(`reler ${asin}`);
+      const r = typeof releitura === 'function' ? releitura(asin) : releitura[asin];
+      return r ?? { resultado: 'falha', causa: 'nao_encontrado' };
+    },
+  } : null;
+  const verificador = comVerificador ? createVerificador({ db, ml: mlLoja, amazon, catalogo: etiqueta }) : null;
   const extra = {};
+  const ctxs = [];
   if (catalogo) {
-    extra.catalogo = { candidatos: async (cfg, { tratada }) => catalogo.map(paraCandidato).filter((c) => c && !tratada(c, cfg.ordem)) };
+    extra.catalogo = {
+      candidatos: async (cfg, ctx) => { ctxs.push(ctx); return catalogo.map(paraCandidato).filter((c) => c && !ctx.tratada(c, cfg.ordem)); },
+    };
     extra.catalogoItens = createCatalogoItens({ db, wa, links, amazon });
   }
   const scheduler = createScheduler({ db, wa, links, fast: true, amazon, verificador, ...extra });
@@ -66,7 +79,7 @@ function montar({ loja = {}, comVerificador = true, catalogo = null } = {}) {
     db.prepare('INSERT INTO groups (jid, name, size, updated_at) VALUES (?,?,?,?)').run(jid, nome, 10, Date.now());
   }
   db.prepare('INSERT INTO tags (name, created_at) VALUES (?,?)').run('etiquetaA', Date.now());
-  return { db, wa, links, scheduler, eventos, amazon };
+  return { db, wa, links, scheduler, eventos, amazon, verificador, ctxs };
 }
 
 /** Template com a hora do preço numa linha só dela e num trecho opcional. → id */
@@ -221,7 +234,10 @@ test('CA4: lista com preço digitado (idade desconhecida) sem conferência não 
   semErro(s.db, id);
 });
 
-test('CA4/CA2: catálogo sem conferência vai à revisão (nao_conferido); esgotado é descartado e não volta; conferido sai', async () => {
+// sem conferência o catálogo deixou de ir à revisão: a oferta é pulada, sem catalogo_itens, e pode voltar na execução
+// seguinte (plano rodar-sozinho-entrega1, B6; CA1.5 e CA1.11). A Amazon sem API e sem o cliente do Etiqueta cai na
+// reserva, que não vale sem a data do preço
+test('CA4/CA2: catálogo sem conferência é pulado (sem revisão); esgotado é descartado e não volta; conferido sai', async () => {
   const of = (i, loja, mais = {}) => ({
     id: i, loja, titulo: `Produto ${i}`, preco: 100, preco_antigo: 150, desconto_pct: 33, categoria: 'Casa',
     ...(loja === 'amazon' ? { item_id: `B0${String(i).padStart(8, '0')}`, link: 'https://www.amazon.com.br/dp/X?tag=terceiro-20' } : { item_id: `MLB${4000000000 + i}`, link: 'https://meli.la/TerCeiro1' }),
@@ -234,34 +250,34 @@ test('CA4/CA2: catálogo sem conferência vai à revisão (nao_conferido); esgot
   const id = regraCatalogo(s.db);
 
   const r = await s.scheduler.runRule(id);
-  assert.deepEqual([r.offers, r.messages, r.errors, r.revisao, r.descartadas], [1, 1, 0, 2, 1]);
+  assert.deepEqual([r.offers, r.messages, r.errors, r.revisao, r.descartadas, r.puladas], [1, 1, 0, 0, 1, 2]);
   const itens = s.db.prepare('SELECT chave, status, motivos FROM catalogo_itens WHERE rule_id = ? ORDER BY id').all(id).map((l) => [l.chave, l.status, JSON.parse(l.motivos)]);
   assert.deepEqual(itens, [
-    ['MLB4000000001', 'revisao', ['nao_conferido']],
     ['MLB4000000002', 'descartado', []],
-    ['ASIN:B000000003', 'revisao', ['nao_conferido']],
     ['MLB4000000004', 'enviado', []],
-  ]);
+  ], 'as puladas não entram em catalogo_itens');
   // R2: o item descartado guarda por que (a tela do Histórico do catálogo mostra "Descartada: esgotado na loja")
   assert.deepEqual(s.db.prepare("SELECT chave, json_extract(oferta, '$.descartado_por') AS por FROM catalogo_itens WHERE rule_id = ? ORDER BY id").all(id).map((l) => [l.chave, l.por]),
-    [['MLB4000000001', null], ['MLB4000000002', 'esgotado'], ['ASIN:B000000003', null], ['MLB4000000004', null]]);
+    [['MLB4000000002', 'esgotado'], ['MLB4000000004', null]]);
   assert.deepEqual(s.eventos.filter((e) => e.startsWith('link')), ['link 4000000004'], 'só a conferida pede link');
   assert.deepEqual(logs(s.db, id).filter((l) => l.level === 'aviso').map((l) => [l.offer_title, l.message]), [
-    ['Produto 1', 'Separada para revisão: não deu para conferir o preço (a loja não respondeu).'],
+    ['Produto 1', 'Pulada: não deu para conferir o preço (a loja não respondeu). O Mercado Livre não sai sem conferir; tenta de novo no próximo envio.'],
     ['Produto 2', 'Descartada: esgotado na loja'],
-    ['Produto 3', 'Separada para revisão: não deu para conferir o preço (a API da Amazon não está ligada).'],
-    [null, 'Saíram 1 de 5 ofertas; 1 descartada (esgotada na loja), 2 separadas para revisão; não havia mais ofertas novas dentro dos filtros.'],
+    ['Produto 3', 'Pulada: não deu para conferir o preço agora (o Etiqueta não respondeu) e a oferta não diz quando o preço foi visto. Tenta de novo no próximo envio.'],
+    [null, 'Saíram 1 de 5 ofertas; 2 puladas (preço sem conferência), 1 descartada (esgotada na loja); não havia mais ofertas novas dentro dos filtros.'],
   ]);
   assert.deepEqual(titulos(s.wa), ['*Produto 4*']);
   assert.ok(s.wa.simulated[0].text.includes('R$ 95,00') && !s.wa.simulated[0].text.includes('R$ 100,00'), 'sai com o preço conferido');
   assert.equal(logs(s.db, id).find((l) => l.level === 'ok').message, 'Enviado com a etiqueta etiquetaA · preço atualizado de R$ 100,00 para R$ 95,00');
+  assert.deepEqual(enviadas(s.db, id), ['MLB4000000004'], 'as puladas não entram em sent_offers');
   semErro(s.db, id);
 
-  // a descartada conta como tratada: a próxima execução não a confere de novo
+  // a descartada conta como tratada: a próxima execução não a confere de novo. A pulada do ML volta a ser conferida; a
+  // Amazon sem data do preço fica fora da escolha enquanto a releitura está pausada (semConfirmacaoAgora)
   s.eventos.length = 0;
   const r2 = await s.scheduler.runRule(id);
   assert.equal(r2.offers, 0);
-  assert.deepEqual(s.eventos, [], 'nenhuma releitura da descartada nem das que esperam revisão');
+  assert.deepEqual(s.eventos, ['conferir 4000000001'], 'só a pulada do ML é lida de novo');
 });
 
 // --------------------------------------------------------------------------------------------- grade (CA7 da grade)
@@ -299,6 +315,270 @@ test('grade: descartadas e falta de ofertas na mesma frase', async (t) => {
   assert.equal(s.wa.simulated.length, 3);
   const msg = s.db.prepare("SELECT message FROM log WHERE rule_id = ? AND message LIKE 'Horário%'").get(id).message;
   assert.equal(msg, 'Horário 10:00: saíram 3 de 8 ofertas; 2 descartadas (esgotada na loja); não havia mais ofertas novas dentro dos filtros.');
+});
+
+// ------------------------------------------------- releitura da Amazon e pulada (plano rodar-sozinho-entrega1, B6)
+// O catálogo manda o preço visto pelo Etiqueta (preco_em) e a releitura vai ao cliente falso do Etiqueta (`releitura`
+// do montar). A API da Amazon não está ligada (só a tag). Relógio falso ligado ANTES do montar: o verificador guarda o
+// Date.now de quando é criado.
+
+const p2 = (n) => String(n).padStart(2, '0');
+/** ms → 'AAAA-MM-DDTHH:MM:SS' em hora local (o preco_em do Etiqueta). */
+const precoEmTexto = (ms) => {
+  const d = new Date(ms);
+  return `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}T${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}`;
+};
+const asinDe = (i) => `B0${String(i).padStart(8, '0')}`;
+/** Oferta do Etiqueta. `precoEm`: ms (vira o texto do contrato), texto cru, ou ausente (undefined). */
+const doEtiqueta = (i, loja, { preco = 100, precoEm } = {}) => ({
+  id: i, loja, titulo: `Produto ${i}`, preco, preco_antigo: 150, desconto_pct: 33, categoria: 'Casa',
+  ...(loja === 'amazon' ? { item_id: asinDe(i), link: 'https://www.amazon.com.br/dp/X?tag=terceiro-20' } : { item_id: `MLB${4000000000 + i}`, link: 'https://meli.la/TerCeiro1' }),
+  ...(precoEm === undefined ? {} : { preco_em: typeof precoEm === 'number' ? precoEmTexto(precoEm) : precoEm }),
+});
+const confirmado = (preco, precoEm) => ({ resultado: 'confirmado', preco, precoAntigo: 150, descontoPct: null, precoEm });
+const falhou = (causa) => ({ resultado: 'falha', causa });
+const itensDe = (db, id) => db.prepare("SELECT chave, status, json_extract(oferta, '$.descartado_por') AS por FROM catalogo_itens WHERE rule_id = ? ORDER BY id").all(id).map((l) => [l.chave, l.status, l.por]);
+const avisosDe = (db, id) => logs(db, id).filter((l) => l.level === 'aviso').map((l) => [l.offer_title, l.message]);
+const oksDe = (db, id) => logs(db, id).filter((l) => l.level === 'ok').map((l) => [l.offer_title, l.message]);
+
+test('CA1.3: catálogo Amazon confirmada na hora sai sem passar pela revisão', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: dia(2, 14, 40) });
+  // preço da lista visto há mais de um dia: a releitura confirma na hora, com outro preço
+  const s = montar({ catalogo: [doEtiqueta(1, 'amazon', { precoEm: dia(1, 9, 0) })], releitura: { [asinDe(1)]: confirmado(95, dia(2, 14, 39)) } });
+  const id = regraCatalogo(s.db);
+
+  const r = await s.scheduler.runRule(id);
+  assert.deepEqual([r.offers, r.messages, r.errors, r.revisao, r.descartadas, r.puladas], [1, 1, 0, 0, 0, 0]);
+  assert.deepEqual(s.eventos, [`reler ${asinDe(1)}`], 'uma releitura, só do produto escolhido');
+  assert.ok(s.wa.simulated[0].text.includes('R$ 95,00') && !s.wa.simulated[0].text.includes('R$ 100,00'), 'sai com o preço lido');
+  assert.match(s.wa.simulated[0].text, /amazon\.com\.br\/dp\/B000000001\?tag=achadinho-20/, 'link com a tag de Conexões');
+  assert.deepEqual(oksDe(s.db, id), [['Produto 1', 'Enviado pela Amazon, com a sua tag · preço atualizado de R$ 100,00 para R$ 95,00']]);
+  assert.deepEqual(itensDe(s.db, id), [['ASIN:B000000001', 'enviado', null]], 'nada na revisão');
+  assert.deepEqual(enviadas(s.db, id), ['ASIN:B000000001']);
+  assert.ok(!logs(s.db, id).some((l) => /revisão|Pulada/.test(l.message)));
+  semErro(s.db, id);
+});
+
+test('CA1.4: descartes da releitura vão ao Histórico e a catalogo_itens com descartado_por', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: dia(2, 14, 0) });
+  const agora = dia(2, 14, 0);
+  const s = montar({
+    catalogo: [1, 2, 3].map((i) => doEtiqueta(i, 'amazon', { precoEm: agora - HORA })),
+    releitura: { [asinDe(1)]: { resultado: 'sem_preco' }, [asinDe(2)]: { resultado: 'outro_produto' }, [asinDe(3)]: confirmado(120, agora) },
+  });
+  const id = regraCatalogo(s.db);
+
+  const r = await s.scheduler.runRule(id);
+  assert.deepEqual([r.offers, r.messages, r.errors, r.revisao, r.descartadas, r.puladas], [0, 0, 0, 0, 3, 0]);
+  assert.deepEqual(itensDe(s.db, id), [
+    ['ASIN:B000000001', 'descartado', 'indisponivel'],
+    ['ASIN:B000000002', 'descartado', 'outro_produto'],
+    ['ASIN:B000000003', 'descartado', 'preco_subiu'],
+  ]);
+  assert.deepEqual(avisosDe(s.db, id), [
+    ['Produto 1', 'Descartada: indisponível na loja (a página não mostra preço nem estoque)'],
+    ['Produto 2', 'Descartada: a página da loja abriu outro produto (o código não confere com a oferta)'],
+    ['Produto 3', 'Descartada: preço subiu de R$ 100,00 para R$ 120,00 (+20%, o limite é 5%)'],
+    [null, 'Saíram 0 de 5 ofertas; 3 descartadas (1 indisponível na loja, 1 outro produto na página, 1 preço subiu); não havia mais ofertas novas dentro dos filtros.'],
+  ]);
+  assert.deepEqual(enviadas(s.db, id), []);
+  assert.equal(s.wa.simulated.length, 0);
+  semErro(s.db, id);
+
+  // descartada no catálogo não volta naquela regra: nenhuma releitura na execução seguinte
+  s.eventos.length = 0;
+  await s.scheduler.runRule(id);
+  assert.deepEqual(s.eventos, []);
+});
+
+test('CA1.5: reserva vencida pula: sem revisão e sem sent_offers', async (t) => {
+  const agora = dia(2, 14, 0);
+  const casos = [
+    { nome: 'mais de 6 h', precoEm: dia(2, 7, 59), falha: 'bloqueado', texto: 'Pulada: o preço visto às 07:59 tem mais de 6 h e não deu para conferir agora (a Amazon bloqueou a leitura). Tenta de novo no próximo envio.' },
+    { nome: 'de ontem', precoEm: dia(1, 22, 10), falha: 'fora_do_ar', texto: 'Pulada: o preço visto às 22:10 de 01/11 tem mais de 6 h e não deu para conferir agora (o Etiqueta não respondeu). Tenta de novo no próximo envio.' },
+    { nome: 'sem preco_em', precoEm: undefined, falha: 'falha_rede', texto: 'Pulada: não deu para conferir o preço agora (a loja não respondeu) e a oferta não diz quando o preço foi visto. Tenta de novo no próximo envio.' },
+    { nome: 'data inválida', precoEm: '2026-02-30T10:00:00', falha: 'freio', texto: 'Pulada: não deu para conferir o preço agora (o limite de conferências por hora foi atingido) e a oferta não diz quando o preço foi visto. Tenta de novo no próximo envio.' },
+    { nome: '6 min no futuro', precoEm: agora + 6 * 60000, falha: 'resposta_inesperada', texto: 'Pulada: não deu para conferir o preço agora (o Etiqueta não respondeu) e a oferta não diz quando o preço foi visto. Tenta de novo no próximo envio.' },
+  ];
+  t.mock.timers.enable({ apis: ['Date'], now: agora });
+  for (const caso of casos) {
+    t.mock.timers.setTime(agora);
+    const s = montar({ catalogo: [doEtiqueta(1, 'amazon', { precoEm: caso.precoEm })], releitura: { [asinDe(1)]: falhou(caso.falha) } });
+    const id = regraCatalogo(s.db);
+    const r = await s.scheduler.runRule(id);
+    assert.deepEqual([r.offers, r.messages, r.errors, r.revisao, r.descartadas, r.puladas], [0, 0, 0, 0, 0, 1], caso.nome);
+    assert.equal(r.porLoja.amazon.pulada, 1, caso.nome);
+    assert.deepEqual(s.eventos, [`reler ${asinDe(1)}`], caso.nome);
+    assert.deepEqual(avisosDe(s.db, id), [
+      ['Produto 1', caso.texto],
+      [null, 'Saíram 0 de 5 ofertas; 1 pulada (preço sem conferência); não havia mais ofertas novas dentro dos filtros.'],
+    ], caso.nome);
+    assert.deepEqual(itensDe(s.db, id), [], `${caso.nome}: nada em catalogo_itens (nem revisão)`);
+    assert.deepEqual(enviadas(s.db, id), [], `${caso.nome}: nada em sent_offers`);
+    assert.equal(s.wa.simulated.length, 0, caso.nome);
+    assert.ok(!logs(s.db, id).some((l) => /revisão/.test(l.message)), `${caso.nome}: a palavra revisão não aparece`);
+    semErro(s.db, id);
+    if (caso.nome !== 'mais de 6 h') continue;
+    // pode voltar depois: durante a pausa da releitura (10 min) ela fica fora da escolha sem chamar o Etiqueta; depois,
+    // é relida de novo (não ficou registrada como tratada)
+    s.eventos.length = 0;
+    t.mock.timers.setTime(agora + 9 * 60000);
+    await s.scheduler.runRule(id);
+    assert.deepEqual(s.eventos, [], 'pausa da releitura: sem nova chamada');
+    t.mock.timers.setTime(agora + 11 * 60000);
+    await s.scheduler.runRule(id);
+    assert.deepEqual(s.eventos, [`reler ${asinDe(1)}`], 'depois da pausa a oferta volta e é relida');
+  }
+});
+
+test('CA1.6: {HORA_PRECO} da mensagem é a hora do preço', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: dia(2, 14, 40) });
+  const s = montar({
+    catalogo: [doEtiqueta(1, 'amazon', { precoEm: dia(2, 8, 0) }), doEtiqueta(2, 'amazon', { precoEm: dia(2, 10, 15) })],
+    // a 1ª é confirmada na hora (o Etiqueta carimba 14:32); a 2ª falha e sai pela reserva (preço visto às 10:15)
+    releitura: { [asinDe(1)]: confirmado(100, dia(2, 14, 32)), [asinDe(2)]: falhou('bloqueado') },
+  });
+  const id = regraCatalogo(s.db);
+  s.db.prepare('UPDATE rules SET template_id = ? WHERE id = ?').run(templateComHora(s.db), id);
+
+  const r = await s.scheduler.runRule(id);
+  assert.deepEqual([r.offers, r.messages], [2, 2]);
+  const [a, b] = s.wa.simulated.map((m) => m.text);
+  assert.match(a, /\(preço das 14h32\)/); assert.match(a, /\nConferido às 14h32\n/);
+  assert.match(b, /\(preço das 10h15\)/); assert.match(b, /\nConferido às 10h15\n/);
+  for (const m of [a, b]) assert.ok(!m.includes('14h40'), 'nunca a hora do envio');
+  assert.deepEqual(oksDe(s.db, id), [
+    ['Produto 1', 'Enviado pela Amazon, com a sua tag'],
+    ['Produto 2', 'Enviado pela Amazon, com a sua tag · preço visto às 10:15, não conferido agora (a Amazon bloqueou a leitura)'],
+  ]);
+  semErro(s.db, id);
+});
+
+test('foco 1: Etiqueta cai no meio da execução: as Amazon restantes vão à reserva sem nova chamada', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: dia(2, 14, 0) });
+  const s = montar({
+    catalogo: [
+      doEtiqueta(1, 'amazon', { precoEm: dia(2, 13, 0) }), doEtiqueta(2, 'amazon', { precoEm: dia(2, 12, 0) }),
+      doEtiqueta(3, 'amazon', { precoEm: dia(2, 4, 0) }), doEtiqueta(4, 'amazon', { precoEm: dia(2, 11, 0) }),
+    ],
+    // só as duas primeiras chegam ao Etiqueta; as outras respostas provariam uma chamada a mais
+    releitura: { [asinDe(1)]: confirmado(100, dia(2, 13, 59)), [asinDe(2)]: falhou('fora_do_ar'), [asinDe(3)]: confirmado(100, dia(2, 14, 0)), [asinDe(4)]: confirmado(100, dia(2, 14, 0)) },
+  });
+  const id = regraCatalogo(s.db);
+
+  const r = await s.scheduler.runRule(id);
+  assert.deepEqual(s.eventos, [`reler ${asinDe(1)}`, `reler ${asinDe(2)}`], 'depois da 1ª falha, nenhuma releitura');
+  assert.deepEqual([r.offers, r.messages, r.puladas, r.revisao, r.descartadas], [3, 3, 0, 0, 0]);
+  assert.deepEqual(titulos(s.wa), ['*Produto 1*', '*Produto 2*', '*Produto 4*']);
+  assert.deepEqual(oksDe(s.db, id), [
+    ['Produto 1', 'Enviado pela Amazon, com a sua tag'],
+    ['Produto 2', 'Enviado pela Amazon, com a sua tag · preço visto às 12:00, não conferido agora (o Etiqueta não respondeu)'],
+    ['Produto 4', 'Enviado pela Amazon, com a sua tag · preço visto às 11:00, não conferido agora (o Etiqueta não respondeu)'],
+  ]);
+  // a de 10 h não tinha como sair: ficou fora da escolha, sem gastar tentativa e sem linha de pulada
+  assert.ok(logs(s.db, id).some((l) => l.level === 'info' && l.message === 'Antes da escolha, 1 oferta ficou de fora: 1 da Amazon sem como conferir o preço agora.'));
+  assert.ok(!logs(s.db, id).some((l) => l.offer_title === 'Produto 3'));
+  assert.deepEqual(enviadas(s.db, id), ['ASIN:B000000001', 'ASIN:B000000002', 'ASIN:B000000004']);
+  semErro(s.db, id);
+});
+
+test('foco 5: desligar no meio da execução pula o catálogo pedido com 72 h', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: dia(2, 14, 0) });
+  const agora = dia(2, 14, 0);
+  const s = montar({
+    catalogo: [doEtiqueta(1, 'ml', { precoEm: agora - HORA }), doEtiqueta(2, 'ml', { precoEm: agora - 70 * HORA }), doEtiqueta(3, 'amazon', { precoEm: agora - 70 * HORA })],
+    loja: { 4000000001: { price: 100, disponivel: true }, 4000000002: { price: 100, disponivel: true } },
+    releitura: { [asinDe(3)]: confirmado(100, agora) },
+  });
+  const id = regraCatalogo(s.db);
+  // o dono desliga o verificador enquanto a 1ª oferta (já conferida) pede o link
+  const pedir = s.links.requestLink;
+  s.links.requestLink = async (p) => { setSetting(s.db, 'verificador_ativo', '0'); return pedir(p); };
+
+  const r = await s.scheduler.runRule(id);
+  assert.equal(s.ctxs[0].conferenciaNaHora, true, 'a lista foi pedida com a idade larga');
+  assert.deepEqual(s.eventos, ['conferir 4000000001', 'link 4000000001'], 'as restantes nem são lidas: nada sai sem conferência');
+  assert.deepEqual([r.offers, r.messages, r.puladas, r.revisao, r.descartadas], [1, 1, 2, 0, 0]);
+  assert.deepEqual(titulos(s.wa), ['*Produto 1*']);
+  const desligado = 'Pulada: o verificador foi desligado durante este envio e o preço não foi conferido. Tenta de novo no próximo envio.';
+  assert.deepEqual(avisosDe(s.db, id), [
+    ['Produto 2', desligado],
+    ['Produto 3', desligado],
+    [null, 'Saíram 1 de 5 ofertas; 2 puladas (verificador desligado); não havia mais ofertas novas dentro dos filtros.'],
+  ]);
+  assert.deepEqual(itensDe(s.db, id), [['MLB4000000001', 'enviado', null]], 'as puladas não entram em catalogo_itens');
+  assert.deepEqual(enviadas(s.db, id), ['MLB4000000001']);
+  semErro(s.db, id);
+
+  // a execução seguinte começa com o verificador desligado: a lista volta à validade de sempre (sem idade larga) e,
+  // como hoje, o catálogo sai sem conferência e sem linha de pulada (CA1.11). O Etiqueta falso não filtra a idade
+  s.links.requestLink = pedir;
+  s.eventos.length = 0;
+  const r2 = await s.scheduler.runRule(id);
+  assert.equal(s.ctxs[1].conferenciaNaHora, false);
+  assert.deepEqual([r2.offers, r2.puladas], [2, 0]);
+  assert.deepEqual(s.eventos, ['link 4000000002'], 'desligado: nada é lido na loja nem no Etiqueta');
+  assert.equal(logs(s.db, id).filter((l) => l.message === desligado).length, 2, 'nenhuma pulada nova');
+});
+
+test('CA1.11: ML com falha passageira pula e nunca sai sem conferência', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: dia(2, 14, 0) });
+  const agora = dia(2, 14, 0);
+  const s = montar({
+    // o preço do Etiqueta é de agora: mesmo fresco, o ML do catálogo não sai sem conferir
+    catalogo: [1, 2, 3].map((i) => doEtiqueta(i, 'ml', { precoEm: agora })),
+    loja: { 4000000001: 'falha', 4000000002: { price: null, disponivel: true }, 4000000003: { price: 100, disponivel: true } },
+  });
+  const id = regraCatalogo(s.db);
+
+  const r = await s.scheduler.runRule(id);
+  assert.deepEqual([r.offers, r.messages, r.puladas, r.revisao, r.descartadas], [1, 1, 2, 0, 0]);
+  assert.equal(r.porLoja.ml.pulada, 2);
+  assert.deepEqual(titulos(s.wa), ['*Produto 3*']);
+  assert.deepEqual(avisosDe(s.db, id), [
+    ['Produto 1', 'Pulada: não deu para conferir o preço (a loja não respondeu). O Mercado Livre não sai sem conferir; tenta de novo no próximo envio.'],
+    ['Produto 2', 'Pulada: não dá para saber o preço (a página não trouxe o preço). Fica 6 h fora da escolha desta regra.'],
+    [null, 'Saíram 1 de 5 ofertas; 2 puladas (1 preço sem conferência, 1 sem como saber o preço); não havia mais ofertas novas dentro dos filtros.'],
+  ]);
+  assert.deepEqual(itensDe(s.db, id), [['MLB4000000003', 'enviado', null]]);
+  assert.deepEqual(enviadas(s.db, id), ['MLB4000000003']);
+  assert.deepEqual(oksDe(s.db, id), [['Produto 3', 'Enviado com a etiqueta etiquetaA']], 'nenhuma saiu "sem conferir"');
+  semErro(s.db, id);
+
+  // a falha passageira volta na execução seguinte; a sem preço fica PAUSA_DESCARTADA_H fora da escolha desta regra
+  s.eventos.length = 0;
+  t.mock.timers.setTime(agora + 60000);
+  await s.scheduler.runRule(id);
+  assert.deepEqual(s.eventos, ['conferir 4000000001']);
+  s.eventos.length = 0;
+  t.mock.timers.setTime(agora + PAUSA_DESCARTADA_H * HORA + 60000);
+  await s.scheduler.runRule(id);
+  assert.deepEqual(s.eventos, ['conferir 4000000001', 'conferir 4000000002'], 'depois da pausa a sem preço volta');
+  assert.equal(s.wa.simulated.length, 1, 'nada saiu sem conferência');
+});
+
+test('CA1.11: fonte afiliados mantém a regra do frescor', async () => {
+  // Central: sem releitura nas opções; sem conferência e com dados frescos, sai com o sufixo de sempre
+  const s = montar({ loja: { 9000001: 'falha', 9000002: { price: 29.9, disponivel: true } } });
+  const opcoes = [];
+  const conferir = s.verificador.conferir;
+  s.verificador.conferir = (oferta, o) => { opcoes.push(o); return conferir(oferta, o); };
+  const id = regraCentral(s.db);
+  const r = await s.scheduler.runRule(id);
+  assert.deepEqual([r.offers, r.puladas, r.descartadas], [2, 0, 0]);
+  assert.equal(opcoes.length, 2);
+  for (const o of opcoes) {
+    assert.equal(Object.hasOwn(o, 'releitura'), false, 'a releitura é só da regra do catálogo');
+    assert.equal(typeof o.lidoEm, 'number', 'a idade dos dados vai como sempre');
+  }
+  assert.equal(oksDe(s.db, id)[0][1], 'Enviado com a etiqueta etiquetaA · preço não conferido (a loja não respondeu)');
+
+  // lista com preço digitado (idade desconhecida): continua "Descartada", nunca "Pulada"
+  const l = montar({ loja: { 1000001: 'falha', 1000002: { price: 30.5, disponivel: true } } });
+  const lista = regraLista(l.db, [ITEM_FONE, ITEM_MOUSE]);
+  const rl = await l.scheduler.runRule(lista);
+  assert.deepEqual([rl.offers, rl.puladas, rl.descartadas], [1, 0, 1]);
+  assert.deepEqual(avisosDe(l.db, lista)[0], ['Fone A', 'Descartada: não deu para conferir o preço (a loja não respondeu)']);
 });
 
 // ------------------------------------------------------------------------------------------------------- D9

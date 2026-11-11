@@ -767,7 +767,8 @@ test('C6 CA5: 25 conferências simultâneas na fila e um link urgente: a extens�
   });
 });
 
-test('C7 CA1/CA2: regra do Catálogo com ML: o conferido sai sozinho, a verificação manda o resto para a revisão sem tocar a extensão, e nada é erro', async (t) => {
+// sem conferência o item do Catálogo deixou de ir à revisão: vira pulada (plano rodar-sozinho-entrega1, B6; CA1.5 e CA1.11)
+test('C7 CA1/CA2: regra do Catálogo com ML: o conferido sai sozinho, a verificação pula o resto sem tocar a extensão, e nada é erro', async (t) => {
   const paginas = (url) => (/MLB-2000000002/.test(url)
     ? { status: 200, url: `${ML}/gz/account-verification`, html: '' } : { status: 200, url, html: pagina(produto(100)) });
   await comExtensao(t, { paginas }, async (s, ext) => {
@@ -779,23 +780,25 @@ test('C7 CA1/CA2: regra do Catálogo com ML: o conferido sai sozinho, a verifica
       VALUES ('Catálogo', 1, ?, ?, ?, 'list', '{}', ?, 5, 60, '00:00', '23:59', 7, 0, ?)`)
       .run(s.tag, s.tpl, JSON.stringify([G1]), JSON.stringify([{ type: 'catalogo', tag_id: null, config: { ordem: 'relevancia' } }]), Date.now()).lastInsertRowid);
     const r = await s.scheduler.runRule(id);
-    assert.deepEqual([r.offers, r.messages, r.errors, r.revisao, r.descartadas], [1, 1, 0, 2, 0]);
+    assert.deepEqual([r.offers, r.messages, r.errors, r.revisao, r.descartadas, r.puladas], [1, 1, 0, 0, 0, 2]);
     const itens = s.db.prepare('SELECT chave, status, motivos FROM catalogo_itens WHERE rule_id = ? ORDER BY id').all(id).map((l) => [l.chave, l.status, JSON.parse(l.motivos)]);
-    assert.deepEqual(itens, [['MLB5257531512', 'enviado', []], ['MLB2000000002', 'revisao', ['nao_conferido']], ['MLB2000000003', 'revisao', ['nao_conferido']]]);
+    assert.deepEqual(itens, [['MLB5257531512', 'enviado', []]], 'as puladas não entram em catalogo_itens');
     assert.deepEqual(ext.tipos(), ['produto_ml', 'link', 'produto_ml'], 'o terceiro item não pediu nada à extensão (pausa)');
     const linhas = logs(s).map((l) => [l.level, l.message]);
+    const pulada = `Pulada: não deu para conferir o preço (${CAUSAS.ml_verificacao}). O Mercado Livre não sai sem conferir; tenta de novo no próximo envio.`;
     assert.deepEqual(linhas, [
       ['ok', 'Enviado com a etiqueta etiquetaA'],
-      ['aviso', `Separada para revisão: não deu para conferir o preço (${CAUSAS.ml_verificacao}).`],
-      ['aviso', `Separada para revisão: não deu para conferir o preço (${CAUSAS.ml_verificacao}).`],
+      ['aviso', pulada],
+      ['aviso', pulada],
       // a regra pediu 5 (plano rodar-sozinho-entrega1, CA1.8)
-      ['aviso', 'Saíram 1 de 5 ofertas; 2 separadas para revisão; não havia mais ofertas novas dentro dos filtros.'],
+      ['aviso', 'Saíram 1 de 5 ofertas; 2 puladas (preço sem conferência); não havia mais ofertas novas dentro dos filtros.'],
     ]);
     assert.ok(!linhas.some(([n]) => n === 'erro'));
   });
 });
 
-test('C8 CA4: regra do Catálogo com a extensão antiga: todos os itens do ML vão à revisão com "precisa ser recarregada", nenhum produto_ml é entregue', async (t) => {
+// sem conferência o item do Catálogo deixou de ir à revisão: vira pulada (plano rodar-sozinho-entrega1, B6; CA1.5)
+test('C8 CA4: regra do Catálogo com a extensão antiga: todos os itens do ML são pulados com "precisa ser recarregada", nenhum produto_ml é entregue', async (t) => {
   await comExtensao(t, { recursos: null }, async (s, ext) => {
     const of = (n) => ({ id: n, loja: 'ml', titulo: `Produto ${n}`, preco: 100, preco_antigo: 300, desconto_pct: 66, categoria: 'Casa', item_id: `MLB${n}`, link: 'https://meli.la/TerCeiro1' });
     const lista = [of(5257531512), of(2000000002)];
@@ -805,11 +808,12 @@ test('C8 CA4: regra do Catálogo com a extensão antiga: todos os itens do ML v�
       VALUES ('Catálogo', 1, ?, ?, ?, 'list', '{}', ?, 5, 60, '00:00', '23:59', 7, 0, ?)`)
       .run(s.tag, s.tpl, JSON.stringify([G1]), JSON.stringify([{ type: 'catalogo', tag_id: null, config: { ordem: 'relevancia' } }]), Date.now()).lastInsertRowid);
     const r = await s.scheduler.runRule(id);
-    assert.deepEqual([r.offers, r.errors, r.revisao], [0, 0, 2]);
+    assert.deepEqual([r.offers, r.errors, r.revisao, r.puladas], [0, 0, 0, 2]);
+    assert.equal(s.db.prepare('SELECT COUNT(*) AS n FROM catalogo_itens WHERE rule_id = ?').get(id).n, 0, 'nada vai à revisão');
     assert.deepEqual(ext.tipos(), []);
     // a regra pediu 5 e nada saiu: a última linha é a frase "saíram" (plano rodar-sozinho-entrega1, CA1.8)
-    assert.equal(logs(s).at(-1).message, 'Saíram 0 de 5 ofertas; 2 separadas para revisão; não havia mais ofertas novas dentro dos filtros.');
-    for (const l of logs(s).slice(0, -1)) assert.equal(l.message, `Separada para revisão: não deu para conferir o preço (${CAUSAS.extensao_antiga}).`);
+    assert.equal(logs(s).at(-1).message, 'Saíram 0 de 5 ofertas; 2 puladas (preço sem conferência); não havia mais ofertas novas dentro dos filtros.');
+    for (const l of logs(s).slice(0, -1)) assert.equal(l.message, `Pulada: não deu para conferir o preço (${CAUSAS.extensao_antiga}). O Mercado Livre não sai sem conferir; tenta de novo no próximo envio.`);
     assert.equal(logs(s).length, 3);
     assert.ok(!logs(s).some((l) => l.level === 'erro'));
   });
@@ -1066,7 +1070,8 @@ test('V7 R1: com o anúncio informado mas fora da página (esgotado e removido d
   assert.deepEqual([r.acao, r.conferido, r.sufixo], ['enviar', false, ` · preço não conferido (${CAUSAS.sem_preco})`]);
 });
 
-test('V8 R1: regra do Catálogo, item com anúncio cuja variante não está na página: vai à revisão (sem preço), sem erro e sem tomar o preço de outra versão', async (t) => {
+// o sem preço deixou de ir à revisão: vira pulada, 6 h fora da escolha (plano rodar-sozinho-entrega1, B6; CA1.5)
+test('V8 R1: regra do Catálogo, item com anúncio cuja variante não está na página: é pulado (sem preço), sem erro e sem tomar o preço de outra versão', async (t) => {
   const html = pagina(grupo(vs(90, 95)));
   await comExtensao(t, { paginas: (u) => ({ status: 200, url: u, html }) }, async (s, ext) => {
     const of = { id: 5257531512, loja: 'ml', titulo: 'Produto X', preco: 100, preco_antigo: 300, desconto_pct: 66, categoria: 'Casa', item_id: 'MLB5257531512', link: 'https://meli.la/TerCeiro1' };
@@ -1076,8 +1081,9 @@ test('V8 R1: regra do Catálogo, item com anúncio cuja variante não está na p
       VALUES ('Catálogo', 1, ?, ?, ?, 'list', '{}', ?, 5, 60, '00:00', '23:59', 7, 0, ?)`)
       .run(s.tag, s.tpl, JSON.stringify([G1]), JSON.stringify([{ type: 'catalogo', tag_id: null, config: { ordem: 'relevancia' } }]), Date.now()).lastInsertRowid);
     const r = await s.scheduler.runRule(id);
-    // o item do catálogo tem anúncio (MLB5257531512) e URL de anúncio: não há resumo; sem a variante dele na página, "sem preço" → revisão
-    assert.deepEqual([r.offers, r.errors, r.revisao], [0, 0, 1]);
+    // o item do catálogo tem anúncio (MLB5257531512) e URL de anúncio: não há resumo; sem a variante dele na página, "sem preço" → pulada
+    assert.deepEqual([r.offers, r.errors, r.revisao, r.puladas], [0, 0, 0, 1]);
+    assert.ok(logs(s).some((l) => l.message === `Pulada: não dá para saber o preço (${CAUSAS.sem_preco}). Fica 6 h fora da escolha desta regra.`));
     assert.ok(!logs(s).some((l) => l.level === 'erro'));
   });
 });
