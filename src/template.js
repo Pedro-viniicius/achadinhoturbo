@@ -6,7 +6,7 @@
 import { abreviarTitulo, TITULO_MAX_PADRAO } from './titulo.js';
 
 export const PLACEHOLDERS = [
-  'TITULO_PRODUTO', 'TITULO_COMPLETO', 'PRECO_ANTIGO', 'PRECO_PRODUTO', 'DESCONTO_PRODUTO',
+  'TITULO_PRODUTO', 'TITULO_COMPLETO', 'PRECO_ANTIGO', 'PRECO_PRODUTO', 'PRECO_ULTIMO_ENVIO', 'DESCONTO_PRODUTO',
   'NUMERO_VENDAS', 'FRETE', 'CUPOM', 'LINK', 'HORA_PRECO',
 ];
 
@@ -41,6 +41,17 @@ function horaCurta(ts) {
   return `${dois(d.getHours())}h${dois(d.getMinutes())}`;
 }
 
+/**
+ * Preço (R$) do último envio do mesmo produto, só quando é maior que o preço atual (queda). Quem calcula se a queda
+ * passa do mínimo é `baixouDe` (src/parecido.js); aqui o campo só nunca mostra um "baixou" que não baixou.
+ */
+function precoUltimoEnvio(o) {
+  const anterior = Number(o.precoUltimoEnvio);
+  const atual = Number(o.price);
+  if (o.precoUltimoEnvio == null || o.precoUltimoEnvio === '' || !(atual > 0) || !Number.isFinite(anterior)) return '';
+  return anterior > atual ? brl(anterior) : '';
+}
+
 /** opts.tituloMax: tamanho máximo de {TITULO_PRODUTO} (0 = inteiro). {TITULO_COMPLETO} é sempre o nome inteiro. */
 export function offerValues(o, opts = {}) {
   const pct = o.discountPct ?? discountPct(o.price, o.oldPrice);
@@ -50,6 +61,8 @@ export function offerValues(o, opts = {}) {
     TITULO_COMPLETO: completo,
     PRECO_ANTIGO: o.oldPrice && o.oldPrice > o.price ? brl(o.oldPrice) : '',
     PRECO_PRODUTO: brl(o.price),
+    // Preço do último envio deste produto pela regra (`precoUltimoEnvio`, em reais); vazio sem queda.
+    PRECO_ULTIMO_ENVIO: precoUltimoEnvio(o),
     DESCONTO_PRODUTO: pct > 0 ? `${pct}%` : '',
     NUMERO_VENDAS: vendas(o.sold),
     FRETE: o.freeShipping ? 'Frete grátis' : '',
@@ -94,18 +107,50 @@ function renderizarLinha(linha, vals) {
 }
 
 /**
- * O {HORA_PRECO} deste template derrubaria o {LINK}? Sem conferência de preço o {HORA_PRECO} fica vazio: fora de `[ ]`
- * a linha inteira some, e dentro de um `[ ]` some o trecho. Se o {LINK} está na mesma linha (fora do trecho, no caso
- * da hora fora de `[ ]`; no mesmo trecho, no da hora dentro), a mensagem sairia sem o link de afiliado.
+ * O `{campo}` deste template derrubaria o {LINK}? Campo que pode ficar vazio ({HORA_PRECO} sem conferência de preço,
+ * {PRECO_ULTIMO_ENVIO} sem queda): fora de `[ ]` a linha inteira some, e dentro de um `[ ]` some o trecho. Se o {LINK}
+ * está na mesma linha (fora do trecho, no caso do campo fora de `[ ]`; no mesmo trecho, no do campo dentro), a mensagem
+ * sairia sem o link de afiliado.
  */
-export function horaPrecoDerrubaOLink(body) {
+export function campoDerrubaOLink(body, campo) {
   const TEM = (t, k) => t.includes(`{${k}}`);
   return String(body ?? '').split('\n').some((linha) => {
-    if (!TEM(linha, 'HORA_PRECO') || !TEM(linha, 'LINK')) return false;
+    if (!TEM(linha, campo) || !TEM(linha, 'LINK')) return false;
     const partes = linha.split(RE_OPCIONAL); // fora, dentro, fora, …
-    if (partes.some((t, i) => i % 2 === 0 && TEM(t, 'HORA_PRECO'))) return true;
-    return partes.some((t, i) => i % 2 === 1 && TEM(t, 'HORA_PRECO') && TEM(t, 'LINK'));
+    if (partes.some((t, i) => i % 2 === 0 && TEM(t, campo))) return true;
+    return partes.some((t, i) => i % 2 === 1 && TEM(t, campo) && TEM(t, 'LINK'));
   });
+}
+
+/** O {HORA_PRECO} deste template derrubaria o {LINK}? (ver `campoDerrubaOLink`) */
+export function horaPrecoDerrubaOLink(body) {
+  return campoDerrubaOLink(body, 'HORA_PRECO');
+}
+
+/** Trecho opcional "Baixou de … para …": some sozinho quando não houve queda (`{PRECO_ULTIMO_ENVIO}` vazio). */
+export const LINHA_ULTIMO_ENVIO = '[📉 Baixou de ~{PRECO_ULTIMO_ENVIO}~ para *{PRECO_PRODUTO}*]';
+
+/**
+ * O corpo com `LINHA_ULTIMO_ENVIO` logo abaixo da primeira linha que tem {PRECO_PRODUTO} e não tem {LINK}; `null` quando
+ * não há o que fazer (não é texto, já usa o campo, ou não existe essa linha). Só insere: nada do texto é trocado.
+ * Mantém a quebra de linha do próprio corpo (`\r\n` ou `\n`).
+ */
+export function comLinhaUltimoEnvio(body) {
+  if (typeof body !== 'string' || body.includes('{PRECO_ULTIMO_ENVIO}')) return null;
+  const crlf = body.includes('\r\n');
+  let inicio = 0;
+  const linhas = body.split('\n');
+  for (let i = 0; i < linhas.length; i++) {
+    const linha = linhas[i];
+    if (linha.includes('{PRECO_PRODUTO}') && !linha.includes('{LINK}')) {
+      const fim = inicio + linha.length; // a linha pode terminar em \r (corpo CRLF)
+      if (i === linhas.length - 1) return `${body}${crlf ? '\r\n' : '\n'}${LINHA_ULTIMO_ENVIO}`;
+      const eol = linha.endsWith('\r') ? '\r\n' : '\n';
+      return `${body.slice(0, fim + 1)}${LINHA_ULTIMO_ENVIO}${eol}${body.slice(fim + 1)}`;
+    }
+    inicio += linha.length + 1;
+  }
+  return null;
 }
 
 export function renderTemplate(body, offer, opts = {}) {
@@ -124,6 +169,7 @@ export const TEMPLATE_AMAZON = [
   '',
   '😱 De ~{PRECO_ANTIGO}~',
   '🔥 Por *{PRECO_PRODUTO}*[ ({DESCONTO_PRODUTO} OFF)]',
+  LINHA_ULTIMO_ENVIO,
   '🚚 {FRETE}',
   '🎟️ Cupom: *{CUPOM}*',
   '',
@@ -132,6 +178,9 @@ export const TEMPLATE_AMAZON = [
 
 // Instante de conferência das amostras: 14h32 na hora local (a prévia mostra "14h32" em qualquer fuso).
 const VISTO_EM_AMOSTRA = new Date(2026, 0, 15, 14, 32, 0).getTime();
+
+/** Preço do "último envio" da prévia dos Templates (a oferta de exemplo custa 89,90): "Baixou de R$ 99,90 para R$ 89,90". */
+export const SAMPLE_PRECO_ULTIMO_ENVIO = 99.9;
 
 export const SAMPLE_OFFER = {
   title: 'Fone de Ouvido Bluetooth TWS com Cancelamento de Ruído',

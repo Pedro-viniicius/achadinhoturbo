@@ -16,6 +16,8 @@ export const PALAVRAS_PARECIDO = 8;
 export const MIN_PALAVRAS = 3;
 /** Em %: o mesmo produto com outro código só sai antes do prazo se estiver pelo menos isto mais barato (D11). */
 export const DESCONTO_MINIMO_MAIS_BARATA = 5;
+/** Quantos dias para trás vale o "último envio" do `{PRECO_ULTIMO_ENVIO}` (plano baixou-de-para, CA1). */
+export const DIAS_ULTIMO_ENVIO = 30;
 export const FRASE_MAIS_BARATA = '🔎 Nossa busca achou esta oportunidade ainda melhor, caso você ainda não tenha aproveitado a primeira.';
 
 const TITULO_GUARDADO_MAX = 200;
@@ -87,6 +89,36 @@ export function lerEnviados(db, ruleId, desde) {
   return db.prepare(
     'SELECT offer_key, title, price_cents, sent_at FROM sent_offers WHERE rule_id = ? AND sent_at > ? AND title IS NOT NULL ORDER BY sent_at, id',
   ).all(ruleId, desde).map((l) => ({ ...l }));
+}
+
+/**
+ * Preço, em CENTAVOS, do envio mais recente do MESMO produto pela regra nos últimos `DIAS_ULTIMO_ENVIO` dias: a mesma
+ * chave, ou o título igual (`comparar === 'mesmo'`) com outra chave. Parecido não conta. Devolve null quando não há
+ * esse envio ou quando o mais recente não tem preço guardado (não cai para um mais antigo). `agora` em ms. Nunca
+ * lança: erro de banco vira null, e o console só recebe o `code`, nunca a mensagem (que pode trazer parâmetros).
+ */
+export function precoDoUltimoEnvio(db, ruleId, { key, title } = {}, agora = Date.now()) {
+  try {
+    const desde = agora - DIAS_ULTIMO_ENVIO * DIA_MS;
+    const linhas = db.prepare(
+      'SELECT offer_key, title, price_cents FROM sent_offers WHERE rule_id = ? AND sent_at > ? ORDER BY sent_at DESC, id DESC',
+    ).all(ruleId, desde);
+    const chave = key == null ? null : String(key);
+    const igual = linhas.find((l) => (chave !== null && l.offer_key === chave) || comparar(title, l.title) === 'mesmo');
+    const c = igual?.price_cents;
+    return Number.isSafeInteger(c) && c > 0 ? c : null;
+  } catch (e) {
+    console.error(`[parecido] último envio: ${e?.code ?? 'erro'}`);
+    return null;
+  }
+}
+
+/**
+ * O preço da mensagem (`precoReais`) está pelo menos `DESCONTO_MINIMO_MAIS_BARATA`% abaixo do último envio
+ * (`anteriorCentavos`)? Devolve o preço anterior em REAIS, para o `{PRECO_ULTIMO_ENVIO}`, ou null (sem linha).
+ */
+export function baixouDe(anteriorCentavos, precoReais) {
+  return maisBarataOBastante(centavos(precoReais), anteriorCentavos) ? anteriorCentavos / 100 : null;
 }
 
 /**

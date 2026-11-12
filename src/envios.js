@@ -62,7 +62,7 @@ import { mesclarOferta } from './oferta-texto.js';
 import { hostPermitido } from './ml.js';
 import { montarEnquete } from './whatsapp.js';
 import { renderTemplate, discountPct } from './template.js';
-import { centavos, comFraseMaisBarata, maisBarataOBastante, textoNaoMaisBarata, textoPassou } from './parecido.js';
+import { baixouDe, centavos, comFraseMaisBarata, maisBarataOBastante, textoNaoMaisBarata, textoPassou } from './parecido.js';
 import { precoSuspeito } from './catalogo-itens.js';
 import { quedaDePreco, QUEDA_REVISAO_PCT } from './catalogo.js';
 import { sleep, jitter } from './util.js';
@@ -1381,13 +1381,17 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
       const pa = p.parecida_anterior;
       const passou = precoAnterior !== null && pa && typeof pa.titulo === 'string' && pa.titulo.trim() && Number.isFinite(pa.enviada_em)
         ? textoPassou({ title: pa.titulo, preco: precoAnterior, sent_at: pa.enviada_em }, offer.price, Date.now()) : null;
+      // "Baixou de … para …" ({PRECO_ULTIMO_ENVIO}): valor gravado pelo "Enviar" do Catálogo (centavos), só nessa origem; vale
+      // se o preço conferido continua pelo menos 5% abaixo dele. Valor ruim ou de outra origem vira "sem linha" (enfeite:
+      // nunca descarta nem trava a oferta). `baixouDe` já devolve null para não inteiro, zero ou negativo
+      const precoUltimoEnvio = p.origem?.tipo === 'catalogo' ? baixouDe(p.preco_ultimo_envio, offer.price) : null;
       let porGrupo; const avisos = [];
       // Amazon: sempre https://www.amazon.com.br/dp/<ASIN>?tag=<tag>, montado do ASIN (nunca o link que veio)
       try { porGrupo = await linksPorGrupo(p, etiqueta, jids, avisos); } catch (e) { throw semLink(e); }
       const textos = new Map(); // link → texto: um por código, não por grupo
       const textoDe = (link) => {
         if (!textos.has(link)) {
-          const t = renderTemplate(tpl.body, { ...offer, link }, tplOpts(db));
+          const t = renderTemplate(tpl.body, { ...offer, link, precoUltimoEnvio }, tplOpts(db));
           textos.set(link, precoAnterior !== null ? comFraseMaisBarata(t) : t); // a frase só sai com a marca já conferida
         }
         return textos.get(link);
@@ -1406,6 +1410,7 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
       return {
         avisos,
         passou,
+        precoConferido: centavos(offer.price), // o que o grupo viu (centavos); null se ilegível
         falha(jid) {
           const l = porGrupo.get(jid);
           if (l?.link) return null;
@@ -1581,6 +1586,7 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
           if (!ritmo && i < faltam.length - 1) await sleep(jitter(pausa));
         }
         if (envio.passou && okAntes === 0 && ok > 0) log({ level: 'info', message: envio.passou });
+        if (okAntes === 0 && ok > 0) guardarPrecoVisto(e, p, envio.precoConferido);
       }
     } catch (err) {
       // falha inesperada (banco, JSON): registra e não deixa o envio preso em 'enviando'
@@ -1592,6 +1598,22 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
       finalizar(e, ocorrencia, { ok, erro, motivo, descartado, adiado });
     }
     return adiado ? { ok, erro, adiado: true } : { ok, erro };
+  }
+
+  /**
+   * Oferta do Catálogo: a reserva em `sent_offers` nasce com o preço aprovado na revisão; quando o envio sai para ao menos
+   * um grupo, ela passa a guardar o preço conferido, o que o grupo de fato viu (o "Baixou de … para …" e a trava de
+   * parecidos comparam com ele). A reserva é a linha que o "Enviar" gravou: mesma regra, chave e instante
+   * (`decidido_em` do item deste envio). Enfeite: falha daqui nunca desfaz nem marca erro no envio, e não vai a log.
+   */
+  function guardarPrecoVisto(e, p, precoCents) {
+    if (p.origem?.tipo !== 'catalogo' || !Number.isInteger(precoCents) || precoCents <= 0) return;
+    try {
+      const item = db.prepare('SELECT rule_id, chave, decidido_em FROM catalogo_itens WHERE envio_id = ?').get(e.id);
+      if (!item || item.decidido_em == null) return;
+      db.prepare('UPDATE sent_offers SET price_cents = ? WHERE rule_id = ? AND offer_key = ? AND sent_at = ?')
+        .run(precoCents, item.rule_id, item.chave, item.decidido_em);
+    } catch { /* a reserva fica com o preço aprovado */ }
   }
 
   /**

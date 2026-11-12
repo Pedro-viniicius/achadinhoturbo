@@ -7,7 +7,7 @@ import { DatabaseSync } from 'node:sqlite';
 import {
   LIMIAR_PARECIDO, HORAS_ENTRE_PARECIDOS, PALAVRAS_PARECIDO, MIN_PALAVRAS, FRASE_MAIS_BARATA, DESCONTO_MINIMO_MAIS_BARATA,
   palavras, comparar, centavos, maisBarataOBastante, tituloParaGuardar, lerEnviados, criarTrava, comFraseMaisBarata,
-  textoConflito, textoPassou, textoConferencia, textoNaoMaisBarata,
+  textoConflito, textoPassou, textoConferencia, textoNaoMaisBarata, DIAS_ULTIMO_ENVIO, precoDoUltimoEnvio, baixouDe,
 } from '../src/parecido.js';
 
 const H = 3600000;
@@ -534,5 +534,131 @@ test('as frases só levam título de produto e preço: sem número, JID nem nome
   ];
   for (const t of textos) {
     assert.ok(!/@|\d{8,}|undefined|NaN|\[object/.test(t), t);
+  }
+});
+
+// ----------------------------------------------------------- "Baixou de … para …" (plano baixou-de-para, etapa 2)
+/** Banco em memória com `sent_offers` e as linhas dadas: [rule_id, offer_key, sent_at, title, price_cents]. */
+function bancoDeEnvios(linhas) {
+  const db = new DatabaseSync(':memory:');
+  db.exec('CREATE TABLE sent_offers (id INTEGER PRIMARY KEY, rule_id INTEGER, offer_key TEXT, sent_at INTEGER, title TEXT, price_cents INTEGER)');
+  const ins = db.prepare('INSERT INTO sent_offers (rule_id, offer_key, sent_at, title, price_cents) VALUES (?,?,?,?,?)');
+  for (const l of linhas) ins.run(...l);
+  return db;
+}
+
+test('baixou: a janela é de 30 dias', () => {
+  assert.equal(DIAS_ULTIMO_ENVIO, 30);
+});
+
+test('precoDoUltimoEnvio: a mesma chave devolve o preço em centavos, mesmo com o título mudado', () => {
+  const db = bancoDeEnvios([[1, 'MLB1', AGORA - 3 * D, SHAMPOO, 29900]]);
+  assert.equal(precoDoUltimoEnvio(db, 1, { key: 'MLB1', title: SHAMPOO }, AGORA), 29900);
+  assert.equal(precoDoUltimoEnvio(db, 1, { key: 'MLB1', title: 'Título Totalmente Diferente Agora' }, AGORA), 29900);
+  assert.equal(precoDoUltimoEnvio(db, 1, { key: 'MLB1' }, AGORA), 29900, 'só a chave');
+  assert.equal(precoDoUltimoEnvio(db, 1, { key: 1, title: 'Outro Produto Qualquer Aqui' }, AGORA), null);
+  db.close();
+});
+
+test('precoDoUltimoEnvio: título igual com outra chave conta; parecido não conta', () => {
+  const db = bancoDeEnvios([[1, 'K1', AGORA - 2 * D, AREIA_FINA, 5000]]);
+  assert.equal(precoDoUltimoEnvio(db, 1, { key: 'K2', title: AREIA_FINA_2 }, AGORA), 5000);
+  assert.equal(precoDoUltimoEnvio(db, 1, { key: 'K2', title: AREIA_FINA_3 }, AGORA), 5000);
+  assert.equal(precoDoUltimoEnvio(db, 1, { key: 'K2', title: AREIA_MISTA }, AGORA), null, 'areia mista é parecida, não a mesma');
+  assert.equal(precoDoUltimoEnvio(db, 1, { key: 'K2', title: CONDICIONADOR }, AGORA), null);
+  // título curto demais (menos de 3 palavras) nunca é "mesmo": só a chave vale
+  const curto = bancoDeEnvios([[1, 'K1', AGORA - D, 'Fone X', 1000]]);
+  assert.equal(precoDoUltimoEnvio(curto, 1, { key: 'K2', title: 'Fone X' }, AGORA), null);
+  assert.equal(precoDoUltimoEnvio(curto, 1, { key: 'K1', title: 'Fone X' }, AGORA), 1000);
+  db.close(); curto.close();
+});
+
+test('precoDoUltimoEnvio: outra regra não conta', () => {
+  const db = bancoDeEnvios([[2, 'MLB1', AGORA - D, SHAMPOO, 5000]]);
+  assert.equal(precoDoUltimoEnvio(db, 1, { key: 'MLB1', title: SHAMPOO }, AGORA), null);
+  assert.equal(precoDoUltimoEnvio(db, 2, { key: 'MLB1', title: SHAMPOO }, AGORA), 5000);
+  db.close();
+});
+
+test('precoDoUltimoEnvio: 29 dias conta, 31 não, e no exato limite de 30 não (sent_at > agora − 30 d)', () => {
+  const db = bancoDeEnvios([
+    [1, 'A29', AGORA - 29 * D, 'Produto Vinte Nove Dias', 2900],
+    [1, 'A31', AGORA - 31 * D, 'Produto Trinta Um Dias', 3100],
+    [1, 'A30', AGORA - 30 * D, 'Produto Trinta Dias Exato', 3000],
+    [1, 'A30M', AGORA - 30 * D + 1, 'Produto Trinta Menos Um', 3001],
+  ]);
+  const p = (key) => precoDoUltimoEnvio(db, 1, { key, title: 'x' }, AGORA);
+  assert.equal(p('A29'), 2900);
+  assert.equal(p('A31'), null);
+  assert.equal(p('A30'), null);
+  assert.equal(p('A30M'), 3001);
+  assert.equal(precoDoUltimoEnvio(db, 1, { key: 'A31', title: 'Produto Trinta Um Dias' }, AGORA), null, 'nem pelo título');
+  db.close();
+});
+
+test('precoDoUltimoEnvio: vale o envio mais recente (chave ou título igual), mesmo que o mais antigo tenha preço', () => {
+  const db = bancoDeEnvios([
+    [1, 'K1', AGORA - 10 * D, AREIA_FINA, 6000],
+    [1, 'K2', AGORA - 2 * D, AREIA_FINA_2, 5500], // mesmo título, outra chave, mais recente
+    [1, 'K1', AGORA - 5 * D, AREIA_FINA, 5800],
+  ]);
+  assert.equal(precoDoUltimoEnvio(db, 1, { key: 'K1', title: AREIA_FINA }, AGORA), 5500);
+  assert.equal(precoDoUltimoEnvio(db, 1, { key: 'K3', title: AREIA_FINA }, AGORA), 5500);
+  db.close();
+  // empate no instante: o último inserido (maior id)
+  const empate = bancoDeEnvios([[1, 'K1', AGORA - D, AREIA_FINA, 100], [1, 'K1', AGORA - D, AREIA_FINA, 200]]);
+  assert.equal(precoDoUltimoEnvio(empate, 1, { key: 'K1', title: AREIA_FINA }, AGORA), 200);
+  empate.close();
+});
+
+test('precoDoUltimoEnvio: o mais recente sem preço guardado dá null (não cai para um mais antigo com preço)', () => {
+  for (const ruim of [null, 0, -5]) {
+    const db = bancoDeEnvios([
+      [1, 'K1', AGORA - 9 * D, AREIA_FINA, 6000],
+      [1, 'K1', AGORA - 1 * D, AREIA_FINA, ruim],
+    ]);
+    assert.equal(precoDoUltimoEnvio(db, 1, { key: 'K1', title: AREIA_FINA }, AGORA), null, String(ruim));
+    db.close();
+  }
+  // linha sem título (envio antigo, antes da coluna) ainda vale pela chave
+  const semTitulo = bancoDeEnvios([[1, 'K1', AGORA - D, null, 4200]]);
+  assert.equal(precoDoUltimoEnvio(semTitulo, 1, { key: 'K1', title: AREIA_FINA }, AGORA), 4200);
+  assert.equal(precoDoUltimoEnvio(semTitulo, 1, { key: 'K9', title: AREIA_FINA }, AGORA), null);
+  semTitulo.close();
+});
+
+test('precoDoUltimoEnvio: sem nada, sem banco, banco fechado ou tabela ausente dá null sem lançar e sem vazar a mensagem', (t) => {
+  const vazio = bancoDeEnvios([]);
+  assert.equal(precoDoUltimoEnvio(vazio, 1, { key: 'K1', title: AREIA_FINA }, AGORA), null);
+  assert.equal(precoDoUltimoEnvio(vazio, 1, undefined, AGORA), null);
+  const escrito = [];
+  t.mock.method(console, 'error', (...a) => escrito.push(a.join(' ')));
+  vazio.close();
+  assert.equal(precoDoUltimoEnvio(vazio, 1, { key: 'K1', title: AREIA_FINA }, AGORA), null, 'banco fechado');
+  assert.equal(precoDoUltimoEnvio(new DatabaseSync(':memory:'), 1, { key: 'K1', title: 'segredo-no-titulo' }, AGORA), null, 'sem a tabela');
+  assert.equal(precoDoUltimoEnvio(null, 1, { key: 'K1' }, AGORA), null);
+  assert.equal(escrito.length, 3);
+  assert.ok(escrito.every((l) => l.startsWith('[parecido] último envio: ')));
+  assert.ok(!escrito.join('\n').includes('segredo-no-titulo') && !/sent_offers|no such table/i.test(escrito.join('\n')), 'só o code');
+});
+
+test('baixouDe: 5% exato passa e 4,99% não; devolve o anterior em reais', () => {
+  assert.equal(baixouDe(10000, 95), 100);
+  assert.equal(baixouDe(29900, 252), 299);
+  assert.equal(baixouDe(10000, 95.01), null);
+  assert.equal(baixouDe(10000, 95.0), 100);
+  assert.equal(baixouDe(10000, 50), 100);
+  assert.equal(baixouDe(24990, 237.4), 249.9);
+  assert.equal(baixouDe(24990, 237.5), null);
+});
+
+test('baixouDe: preço igual, maior, ausente ou inválido, ou anterior inválido, dá null', () => {
+  assert.equal(baixouDe(10000, 100), null);
+  assert.equal(baixouDe(10000, 120), null);
+  for (const ruim of [null, undefined, 0, -1, NaN, Infinity, '', 'abc', {}]) {
+    assert.equal(baixouDe(10000, ruim), null, `preço ${String(ruim)}`);
+  }
+  for (const ruim of [null, undefined, 0, -100, NaN, Infinity, 99.5, '10000', 2 ** 60]) {
+    assert.equal(baixouDe(ruim, 50), null, `anterior ${String(ruim)}`);
   }
 });

@@ -25,7 +25,7 @@ import { createVerificador, LIMITE_MAX_PCT } from './verificador.js';
 import { montarRotas as rotasRastreio, apagarDoBloco as apagarRastreioDoBloco, blocoTemCodigo, etiquetaEmUso, MENSAGENS_RASTREIO, limpar as limparRastreio } from './rastreio.js';
 import { montarRotas as rotasImportador } from './importador.js';
 import { montarRotas as rotasGanhos, blocoTemGasto, MENSAGENS_GANHOS } from './ganhos.js';
-import { renderTemplate, SAMPLE_OFFER, SAMPLE_OFFER_AMAZON, PLACEHOLDERS, horaPrecoDerrubaOLink } from './template.js';
+import { renderTemplate, SAMPLE_OFFER, SAMPLE_OFFER_AMAZON, PLACEHOLDERS, campoDerrubaOLink, SAMPLE_PRECO_ULTIMO_ENVIO } from './template.js';
 import { CATEGORIAS, ORDENS, POR_PAGINA } from './afiliados.js';
 import { overview, resumo, evasaoDoDia, periodRange, startOfDay, dayOf } from './analytics.js';
 import { MODOS, LIMITE_MAX, LOTACAO_PCT, slugify, parseLink, pickGroup, statusDosGrupos, verificarLotacao, encaixarGrupoNovo } from './rotador.js';
@@ -101,6 +101,8 @@ export const AVISO_VERIFICADOR_DESLIGADO = 'Verificador desligado em Ajustes';
 export const AVISO_VERIFICADOR_LIGADO = 'Verificador ligado em Ajustes';
 const ERRO_VERIFICADOR_LIMITE = `Informe um número inteiro de 0 a ${LIMITE_MAX_PCT}.`;
 export const ERRO_TEMPLATE_HORA_PRECO = 'Ponha o {HORA_PRECO} em outra linha, ou entre [ ] sem o {LINK}: sem conferência de preço, a linha some e a mensagem sai sem o link de afiliado.';
+/** O {PRECO_ULTIMO_ENVIO} só vem quando o produto caiu de preço: quase sempre vazio, então no {LINK} derrubaria a linha. */
+export const ERRO_TEMPLATE_ULTIMO_ENVIO = 'Ponha o {PRECO_ULTIMO_ENVIO} em outra linha, ou entre [ ] sem o {LINK}: quase sempre ele fica vazio, a linha some e a mensagem sai sem o link de afiliado.';
 const ERRO_VERIFICADOR_ATIVO = 'Conferir preço e estoque: informe ligado ou desligado.';
 /** Limite de alta do verificador vindo do painel: inteiro de 0 a LIMITE_MAX_PCT (número ou só dígitos). Senão, null. */
 function limiteVerificador(v) {
@@ -639,7 +641,9 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
     if (!String(b.name || '').trim()) throw new Error('Dê um nome ao template.');
     if (!String(b.body || '').includes('{LINK}')) throw new Error('O template precisa ter {LINK}, senão a mensagem sai sem o link de afiliado.');
     // sem conferência de preço o {HORA_PRECO} fica vazio e a linha (ou o trecho) dele some: com o {LINK} junto, sairia sem link
-    if (horaPrecoDerrubaOLink(b.body)) throw new Error(ERRO_TEMPLATE_HORA_PRECO);
+    if (campoDerrubaOLink(b.body, 'HORA_PRECO')) throw new Error(ERRO_TEMPLATE_HORA_PRECO);
+    // idem o {PRECO_ULTIMO_ENVIO}, que fica vazio sempre que não houve queda de preço
+    if (campoDerrubaOLink(b.body, 'PRECO_ULTIMO_ENVIO')) throw new Error(ERRO_TEMPLATE_ULTIMO_ENVIO);
   };
   app.get('/api/templates', wrap(() => all('SELECT * FROM templates ORDER BY id')));
   app.post('/api/templates', wrap((req) => {
@@ -668,7 +672,12 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
     if (one('SELECT COUNT(*) AS n FROM templates').n <= 1) throw new Error('Mantenha ao menos um template.');
     db.prepare('DELETE FROM templates WHERE id = ?').run(req.params.id);
   }));
-  app.post('/api/templates/preview', wrap((req) => ({ texto: renderTemplate(String(req.body.body || ''), { ...SAMPLE_OFFER, ...(req.body.amostra || {}) }, { tituloMax: Number(getSetting(db, 'titulo_max', 60)) }) })));
+  // Só o editor de Templates manda `ultimo_envio: true` e vê a linha "Baixou de…" na prévia; o Disparo manual (antes de
+  // identificar o link), o espelhamento e o remetente não mandam, e o campo fica vazio e o trecho some, como nas mensagens reais.
+  app.post('/api/templates/preview', wrap((req) => {
+    const base = req.body.ultimo_envio === true ? { ...SAMPLE_OFFER, precoUltimoEnvio: SAMPLE_PRECO_ULTIMO_ENVIO } : SAMPLE_OFFER;
+    return { texto: renderTemplate(String(req.body.body || ''), { ...base, ...(req.body.amostra || {}) }, { tituloMax: Number(getSetting(db, 'titulo_max', 60)) }) };
+  }));
 
   // ---------- regras ----------
   const ruleFromBody = (b) => {

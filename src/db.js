@@ -2,7 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { TEMPLATE_AMAZON } from './template.js';
+import { TEMPLATE_AMAZON, LINHA_ULTIMO_ENVIO, comLinhaUltimoEnvio } from './template.js';
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
@@ -234,12 +234,14 @@ UPDATE sent_offers SET
 WHERE title IS NULL OR price_cents IS NULL`;
 
 // "[ … ]" é um pedaço opcional: some sozinho quando algum placeholder dentro dele está vazio (renderTemplate).
-// Só vale para instalações novas; quem já tem o template "Padrão" no banco continua com o texto de antes.
+// Só vale para instalações novas; quem já tem o template "Padrão" no banco continua com o texto de antes, só com a
+// LINHA_ULTIMO_ENVIO a mais, posta uma vez pela migração acrescentarLinhaUltimoEnvio.
 export const DEFAULT_TEMPLATE = [
   '*{TITULO_PRODUTO}*',
   '',
   '😱 De ~{PRECO_ANTIGO}~',
   '🔥 Por *{PRECO_PRODUTO}*[ ({DESCONTO_PRODUTO} OFF)]',
+  LINHA_ULTIMO_ENVIO,
   '⭐ {NUMERO_VENDAS}',
   '🚚 {FRETE}',
   '🎟️ Cupom: *{CUPOM}*',
@@ -282,6 +284,7 @@ export function openDb(dir) {
   semearTemplateAmazon(db);
   migrarNaoConferido(db);
   migrarFalhaLink(db);
+  acrescentarLinhaUltimoEnvio(db);
   if (!getSetting(db, 'ext_token')) setSetting(db, 'ext_token', crypto.randomBytes(24).toString('hex'));
   return db;
 }
@@ -371,6 +374,44 @@ function tirarDaRevisaoSo(db, { marca, motivos, texto, quais }) {
     if (aberta) { try { db.exec('ROLLBACK'); } catch { /* a transação já foi desfeita */ } }
     // sem e.message: a mensagem do banco pode trazer dados. Os itens ficam na revisão até a próxima abertura.
     console.error(`[db] não consegui tirar da revisão as ofertas ${quais}:`, e?.code || e?.name || 'erro');
+  }
+}
+
+/** Marca da migração da linha "📉 Baixou de … para …": lista JSON dos ids de template que ganharam a linha. */
+const MARCA_ULTIMO_ENVIO = 'tpl_ultimo_envio_migrado';
+
+/**
+ * Acrescenta LINHA_ULTIMO_ENVIO nos templates que já existem, uma única vez por banco (plano baixou-de-para, CA3).
+ * Só insere, logo abaixo da 1ª linha com {PRECO_PRODUTO} e sem {LINK} (comLinhaUltimoEnvio); pula o template que já
+ * tem o campo ou não tem essa linha. O UPDATE confere o corpo lido, para não pisar em edição feita no meio.
+ * A marca guarda os ids alterados (para desfazer) e impede rodar de novo: se o dono apagar a linha, ela não volta.
+ * Em erro: ROLLBACK, só o código no console (nunca corpo de template) e o openDb segue; sem a linha, nada quebra,
+ * e a migração tenta de novo na próxima abertura.
+ */
+function acrescentarLinhaUltimoEnvio(db) {
+  let aberta = false;
+  try {
+    if (getSetting(db, MARCA_ULTIMO_ENVIO) !== null) return;
+    db.exec('BEGIN IMMEDIATE');
+    aberta = true;
+    const ids = [];
+    if (getSetting(db, MARCA_ULTIMO_ENVIO) === null) {
+      const atualizar = db.prepare('UPDATE templates SET body = ? WHERE id = ? AND body = ?');
+      for (const { id, body } of db.prepare('SELECT id, body FROM templates ORDER BY id').all()) {
+        const novo = comLinhaUltimoEnvio(body);
+        if (novo !== null && Number(atualizar.run(novo, id, body).changes) === 1) ids.push(Number(id));
+      }
+      setSetting(db, MARCA_ULTIMO_ENVIO, JSON.stringify(ids));
+    }
+    db.exec('COMMIT');
+    aberta = false;
+    if (ids.length) console.log(`[db] linha "Baixou de … para …" acrescentada em ${ids.length} template(s)`);
+  } catch (e) {
+    if (aberta) {
+      try { db.exec('ROLLBACK'); } catch { /* a transação já foi desfeita pelo próprio banco */ }
+    }
+    // sem e.message: a mensagem do banco pode trazer os parâmetros (o corpo dos templates)
+    console.error('[db] não consegui acrescentar a linha "Baixou de … para …" nos templates:', e?.code || e?.name || 'erro');
   }
 }
 
