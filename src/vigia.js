@@ -4,8 +4,9 @@
 // Este arquivo tem duas partes:
 // - a parte PURA (etapa 2), aqui embaixo: `avaliar`, as mensagens, a linha de saúde e o estado. Sem banco, sem rede,
 //   sem relógio próprio: tudo entra por parâmetro (o `agora` inclusive) e sai como valor;
-// - `createVigia` (etapa 3), que lê e grava o estado em `settings`, confere o silêncio e o WhatsApp e entrega as
-//   mensagens. Ainda não existe.
+// - `createVigia` (etapa 3), no fim do arquivo: lê e grava o estado em `settings.vigia_estado`, lê `execucoes`, as
+//   regras ativas, a revisão e o estado da extensão e da Central, confere o silêncio e o WhatsApp e entrega as
+//   mensagens pelo `entregar` injetado (o entregarAosDeErro de src/avisos.js, que passa pelo wa embrulhado do ritmo).
 //
 // Regras que valem nas duas partes:
 // - nenhuma linha do vigia é `erro` (o `erro` dispara o aviso de erro e criaria um laço, CA3.7);
@@ -15,6 +16,7 @@
 
 import { semNumero } from './avisos.js';
 import { TESTE_ESPERA_MIN } from './links.js';
+import { addLog, getSetting, setSetting } from './db.js';
 
 // ---------- limites (Decisão 2; spec §1; números que aparecem nos Docs e no FATOS) ----------
 /** Loja parada: execuções seguidas com atividade da loja, nenhuma saída e alguma oferta dela fora. */
@@ -154,6 +156,8 @@ export function nomeSeguro(v) {
 // - causa: { tipo, desdeEm, avisadaEm, n, … } — `avisadaEm` é quando o aviso de problema saiu (null = ainda não);
 // - caladas: derivadas calada pela causa-raiz (a linha `info` sai uma vez por mudança, não por execução);
 // - voltas: causas que fecharam depois de avisadas e cujo "voltou" ainda não saiu (D9).
+// O createVigia grava junto `segurado: { motivo: 'silencio'|'whatsapp', desde }` enquanto há aviso devido esperando
+// (lido por seguradoDe; lerEstado o ignora).
 const RE_CHAVE = /^(?:loja:(?:ml|amazon)|ml_fora|revisao|regra:[1-9]\d{0,14})$/;
 const RE_ID_REGRA = /^[1-9]\d{0,14}$/;
 const RE_MOTIVO = /^[a-z][A-Za-z_]{0,39}$/;
@@ -721,4 +725,183 @@ export function linhaDeSaude({ execucoes = [], revisao = 0, abertas = [], temReg
   else linhas.push(`Puladas: ${num(puladas)} · Descartadas: ${num(descartadas)} · Falhas: ${num(falhas)}`, `Esperando revisão: ${nRev ? num(nRev) : 'nenhuma'}`);
   if (emAberto) linhas.push(emAberto);
   return linhas.join('\n');
+}
+
+// ---------- o serviço (etapa 3; Decisão 3, 4 e 6 do plano) ----------
+
+/** Chave de `settings` com o estado do vigia (o de lerEstado, mais `segurado`). */
+export const CHAVE_ESTADO = 'vigia_estado';
+/** Linha `aviso` do Histórico quando o vigia não consegue ler: uma por sequência de falhas (spec §3, CA3.11). */
+export const TEXTO_SEM_LEITURA = 'O vigia não conseguiu verificar agora. Tentando de novo no próximo ciclo.';
+const TEXTO_SEM_ENTREGA = 'Aviso do vigia não chegou a nenhum número: confira em Relatórios e avisos quem recebe “Erro de disparo”.';
+const ORIGEM = Object.freeze({ id: null, name: 'Vigia' }); // coluna "Regra" do Histórico
+/** Por que a mensagem esperou → o texto da linha "Aviso do vigia segurado (…)." (spec, "Linhas do Histórico"). */
+const SEGURADO_POR = Object.freeze({ silencio: 'silêncio', whatsapp: 'WhatsApp fora' });
+/** O `oQue` do entregar: vai para a linha do Histórico de cada destino ("Enviei o aviso do vigia para “Pedro”."). */
+const O_QUE = Object.freeze({ problema: 'o aviso do vigia', volta: 'o aviso de volta do vigia' });
+/** Execuções lidas por passada (são ~50 por dia; o resto fica para a passada seguinte, pelo cursor). */
+const MAX_EXECUCOES_PASSADA = 500;
+const MAX_FONTES = 5; // o MAX_SOURCES de src/db.js
+
+const lerJson = (texto) => { try { return JSON.parse(texto); } catch { return null; } };
+
+/**
+ * Lojas pedidas por uma regra (linha de `rules`): as das fontes catálogo. Qualquer fonte que não é catálogo (fonte
+ * antiga), catálogo com a lista vazia ou JSON ilegível → [] (= todas: Amazon e Mercado Livre, como em mapaDeRegras).
+ * Nunca lança. A etapa 5 usa a mesma função para `execucoes.lojas_pedidas`.
+ */
+export function lojasDaRegra(row) {
+  let fontes = lerJson(row?.sources ?? 'null');
+  if (!Array.isArray(fontes) || !fontes.length) {
+    const config = lerJson(row?.source_config || '{}');
+    fontes = [{ type: row?.source_type || 'list', config: objeto(config) ? config : {} }];
+  }
+  const lojas = new Set();
+  for (const f of fontes.slice(0, MAX_FONTES)) {
+    if (f?.type !== 'catalogo') return [];
+    const l = f.config?.lojas;
+    if (!Array.isArray(l) || !l.length) return [];
+    for (const x of l) if (typeof x === 'string') lojas.add(x);
+  }
+  return [...lojas];
+}
+
+/** `segurado` gravado → { motivo, desde } ou null. */
+function seguradoDe(o, agora) {
+  const s = objeto(o) && objeto(o.segurado) ? o.segurado : null;
+  if (!s || typeof s.motivo !== 'string' || !Object.hasOwn(SEGURADO_POR, s.motivo)) return null;
+  return { motivo: s.motivo, desde: instante(s.desde, agora) ?? agora };
+}
+
+/**
+ * O vigia ligado ao programa. Uma passada (`tick` ou `aposExecucao`, a mesma coisa: o agendador chama no tick, logo
+ * depois dos avisos, e depois de cada regra):
+ * 1. lê o estado (`settings.vigia_estado`), as execuções novas (id acima do cursor), as regras ativas com as lojas,
+ *    a revisão (catalogo_itens 'revisao', todas as lojas, D6) e, de `links.status()`, a extensão e a Central (nunca
+ *    o `ultimoErro`); a falta da extensão conta de max(lastPollAt, `inicio`) (D5);
+ * 2. avalia (avaliar, puro) e, se há aviso devido: no silêncio do ritmo ou com o WhatsApp fora, não manda nem marca
+ *    nada (uma linha "segurado" por episódio, gravada no estado); senão marca as causas e manda no máximo uma
+ *    mensagem de problema e uma de "voltou", reavaliadas na hora, dizendo por que esperaram (§1.8);
+ * 3. grava o estado (só se mudou) e as linhas do Histórico (só `aviso` e `info`, nunca `erro`: CA3.7).
+ * A marca vem ANTES da entrega (como o aviso de erro): uma entrega que falha não se repete, nem na mesma passada nem
+ * na seguinte; vale o freio. Entrega sem nenhum destinatário vira uma linha `info`.
+ *
+ * Falha da leitura (banco, links, entrada inválida): `ok = false`, uma linha `aviso` por sequência de falhas, só o
+ * código do erro no console; nunca lança e nunca rejeita (CA3.11).
+ *
+ * `tick(now)` devolve undefined quando não há nada a mandar (quase sempre) e uma promise, que nunca rejeita, quando há
+ * entrega: o agendador faz `const r = vigia.tick(); if (r) await r` e não ganha voltas de microtask à toa.
+ *
+ * `estado()` (para o /api/state): { ok, causas: causasAbertas(), avaliadoEm }; na falha (ou se o próprio estado()
+ * falhar), { ok: false, causas: [], avaliadoEm }. Nunca lança.
+ *
+ * Injeções: `links` (status(), modo()), `ritmo` (silencio()), `wa` (isReady(); o embrulhado), `entregar(texto, oQue)`
+ * (→ quantos receberam; não deveria lançar, mas se lançar vale 0), `inicio` (quando o serviço ligou) e `agora` (relógio).
+ */
+export function createVigia({ db, links = null, ritmo = null, wa = null, entregar = null, inicio = Date.now(), agora = Date.now } = {}) {
+  let ok = true;          // a última passada leu tudo
+  let falhando = false;   // já escreveu a linha desta sequência de falhas
+  let avaliadoEm = null;  // quando foi a última passada boa (só em memória: muda a cada tick)
+
+  /** Linha do Histórico do vigia. Nível só `aviso` ou `info`; falha do banco vai ao console só pelo código. */
+  function linha(level, message) {
+    try { addLog(db, { rule: ORIGEM, level: level === 'aviso' ? 'aviso' : 'info', message }); } catch (e) {
+      console.error('[vigia] não gravei uma linha no Histórico:', e?.code || e?.name || 'erro');
+    }
+  }
+
+  const regrasAtivas = () => db.prepare('SELECT id, name, sources, source_type, source_config FROM rules WHERE enabled = 1 ORDER BY id').all()
+    .map((r) => ({ id: r.id, nome: r.name, lojas: lojasDaRegra(r) }));
+
+  /** Por que segurar agora: 'silencio' (o do ritmo, o mesmo de Ajustes), 'whatsapp' (fora) ou null. */
+  function porQueSegurar(now) {
+    if (ritmo?.silencio?.(now)?.agora === true) return 'silencio';
+    if (wa?.isReady?.() !== true) return 'whatsapp';
+    return null;
+  }
+
+  /** A parte síncrona da passada (lê, avalia, grava). Lança na falha. → { problema, volta } a entregar, ou null */
+  function passada(now) {
+    const bruto = getSetting(db, CHAVE_ESTADO);
+    const cru = typeof bruto === 'string' ? lerJson(bruto) : null;
+    const base = lerEstado(cru, now);
+    let segurado = seguradoDe(cru, now);
+
+    // cursor: tabela vazia → 0 (o que vier é novo); à frente do maior id (tabela esvaziada e refeita) → o maior id
+    const maxId = db.prepare('SELECT MAX(id) AS id FROM execucoes').get()?.id ?? null;
+    if (maxId === null) base.cursor = 0;
+    else if (base.cursor !== null && base.cursor > maxId) base.cursor = maxId;
+    const execucoes = base.cursor === null
+      ? db.prepare('SELECT * FROM execucoes WHERE id = ?').all(maxId) // estado novo ou perdido: só marca, não avalia o passado
+      : db.prepare('SELECT * FROM execucoes WHERE id > ? ORDER BY id LIMIT ?').all(base.cursor, MAX_EXECUCOES_PASSADA);
+
+    const rev = db.prepare("SELECT COUNT(*) AS n, MIN(criado_em) AS desde FROM catalogo_itens WHERE status = 'revisao'").get();
+    const st = links?.status?.() ?? null;
+    const extensao = st ? { online: st.online === true, desde: Math.max(Number(st.lastPollAt) || 0, inicio) } : null;
+    const central = objeto(st?.central) ? { estado: st.central.estado, emEsperaDesde: st.central.emEsperaDesde } : null;
+
+    const r = avaliar({
+      execucoes, estado: base, revisao: { n: Number(rev?.n), maisAntigaEm: rev?.desde ?? null }, extensao, central,
+      regrasAtivas: regrasAtivas(), modoLink: links?.modo?.() ?? null, agora: now,
+    });
+    let e = r.estado;
+    const { problemas, voltas } = r.devidos;
+    const extras = [];
+    let envio = null;
+    if (problemas.length || voltas.length) {
+      const motivo = porQueSegurar(now);
+      if (motivo) {
+        if (segurado?.motivo !== motivo) {
+          extras.push({ level: 'info', message: `Aviso do vigia segurado (${SEGURADO_POR[motivo]}).` });
+          segurado = { motivo, desde: now };
+        }
+      } else {
+        envio = { problema: mensagemProblemas(problemas, { motivo: segurado?.motivo ?? null, agora: now }), volta: mensagemVoltas(voltas, now) };
+        e = marcarVoltas(marcarAvisados(e, problemas, now), voltas, now);
+        segurado = null;
+      }
+    } else segurado = null; // nada mais devido: o episódio acabou (a causa fechou sem aviso)
+
+    const novo = JSON.stringify(segurado ? { ...e, segurado } : e);
+    if (novo !== bruto) setSetting(db, CHAVE_ESTADO, novo);
+    for (const l of [...r.linhas, ...extras]) linha(l.level, l.message);
+    return envio;
+  }
+
+  /** Entrega o que a passada marcou: uma tentativa por mensagem; sem destinatário, uma linha `info`. Nunca rejeita. */
+  async function entregarTudo(envio) {
+    for (const [texto, oQue] of [[envio.problema, O_QUE.problema], [envio.volta, O_QUE.volta]]) {
+      if (!texto) continue;
+      let n = 0;
+      try { n = Number(await entregar?.(texto, oQue)) || 0; } catch { n = 0; } // o entregar já escreveu o motivo, sem número
+      if (n <= 0) linha('info', TEXTO_SEM_ENTREGA);
+    }
+  }
+
+  function tick(now = agora()) {
+    let envio;
+    const t = Number.isFinite(now) ? now : agora();
+    try {
+      envio = passada(t);
+    } catch (e) {
+      ok = false;
+      console.error('[vigia] sem leitura agora:', e?.code || e?.name || 'erro'); // nunca a mensagem: a do banco traz valores
+      if (!falhando) { falhando = true; linha('aviso', TEXTO_SEM_LEITURA); }
+      return undefined;
+    }
+    ok = true; falhando = false; avaliadoEm = t;
+    return envio ? entregarTudo(envio) : undefined;
+  }
+
+  function estado() {
+    if (!ok) return { ok: false, causas: [], avaliadoEm };
+    try {
+      return { ok: true, causas: causasAbertas(getSetting(db, CHAVE_ESTADO), { regrasAtivas: regrasAtivas(), agora: agora() }), avaliadoEm };
+    } catch (e) {
+      console.error('[vigia] estado sem leitura:', e?.code || e?.name || 'erro');
+      return { ok: false, causas: [], avaliadoEm };
+    }
+  }
+
+  return { tick, aposExecucao: tick, estado };
 }
