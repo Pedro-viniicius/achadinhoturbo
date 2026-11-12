@@ -14,7 +14,7 @@ import { createRotinas } from './rotinas.js';
 import { createRitmo, pausaGrupoGravada, pausaOfertaGravada } from './ritmo.js';
 import { proximoHorario, horarioDe, resolverVencido, proximoEnvio, qtdDaLinha, templateDaLinha } from './grade.js';
 import { sleep, jitter, inWindow, alignToWindow } from './util.js';
-import { criarTrava, lerEnviados, comparar, centavos, maisBarataOBastante, tituloParaGuardar, comFraseMaisBarata, textoConflito, textoPassou, textoConferencia, HORAS_ENTRE_PARECIDOS } from './parecido.js';
+import { criarTrava, lerEnviados, comparar, centavos, maisBarataOBastante, tituloParaGuardar, comFraseMaisBarata, precoDoUltimoEnvio, baixouDe, textoConflito, textoPassou, textoConferencia, HORAS_ENTRE_PARECIDOS } from './parecido.js';
 import { PAUSA_DESCARTADA_H, RESERVA_AMAZON_H, MOTIVOS_VERIFICADOR, CAUSAS, reservaValida } from './verificador.js';
 import { ErroLinkML, CAUSAS_CENTRAL, TESTE_ESPERA_MIN } from './links.js';
 
@@ -1156,9 +1156,12 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
           }
         }
         const textos = new Map(); // um texto por link
+        // "Baixou de … para …": preço do último envio deste produto pela regra, só se o preço conferido está pelo menos 5%
+        // abaixo (null = campo vazio e linha some). Uma busca por oferta, depois da conferência, antes de gravar o envio
+        const precoUltimoEnvio = ultimoEnvio(rule, offer, o.key);
         const textoDe = (link) => {
           if (!textos.has(link)) {
-            const texto = renderTemplate(tpl.body, { ...offer, link }, tplOpts());
+            const texto = renderTemplate(tpl.body, { ...offer, link, precoUltimoEnvio }, tplOpts());
             textos.set(link, maisBarata ? comFraseMaisBarata(texto) : texto); // CA5: só quem saiu por ser mais barata
           }
           return textos.get(link);
@@ -1333,6 +1336,9 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
     return barrado ? { barrado: textoEnviarAgoraBarrado(barrado) } : { iniciado: true };
   }
 
+  /** `{PRECO_ULTIMO_ENVIO}` da oferta (reais) ou null: ver `baixouDe`. Nunca lança (a busca devolve null em erro). */
+  const ultimoEnvio = (rule, o, key) => baixouDe(precoDoUltimoEnvio(db, rule.id, { key, title: o.title }, Date.now()), o.price);
+
   async function previewOffers(id) {
     const rule = getRule(id);
     if (!rule) throw new Error('Regra não encontrada');
@@ -1347,7 +1353,7 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
       : o.loja === 'amazon' ? `https://www.amazon.com.br/dp/${o.asin}?tag=•••` : o.link);
     // a que sairia por ser mais barata mostra a frase (sem conferir na loja, o preço é o da escolha)
     const textoDaPrevia = (tpl, o, link) => {
-      const texto = renderTemplate(tpl.body, { ...o, link, vistoEm: Date.now() }, tplOpts());
+      const texto = renderTemplate(tpl.body, { ...o, link, vistoEm: Date.now(), precoUltimoEnvio: ultimoEnvio(rule, o, o.key) }, tplOpts());
       return o.maisBarata ? comFraseMaisBarata(texto) : texto;
     };
     return picked.map((o) => {

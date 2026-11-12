@@ -18,6 +18,7 @@ import { createCatalogo, filtroDe } from '../src/catalogo.js';
 import { createCatalogoItens } from '../src/catalogo-itens.js';
 import { createAmazon } from '../src/amazon.js';
 import { FRASE_MAIS_BARATA } from '../src/parecido.js';
+import { LINHA_ULTIMO_ENVIO } from '../src/template.js';
 import * as mlReal from '../src/ml.js';
 
 // ------------------------------------------------------------------------------------------- sem rede nenhuma
@@ -441,8 +442,17 @@ function oferta(i, titulo, preco, loja = 'amazon', mais = {}) {
 function etiquetaFalsa(db, estado) {
   const caminho = path.join(tmp('pareg-token'), 'api_token.txt');
   fs.writeFileSync(caminho, `${TOKEN}\n`, { mode: 0o600 });
-  const fetchFalso = async (url) => {
+  const fetchFalso = async (url, init = {}) => {
     const u = new URL(String(url));
+    // releitura da Amazon pelo Etiqueta (rodar-sozinho-entrega1): `estado.releitura[asin]` = preço lido agora na página
+    const relida = /^\/api\/v1\/amazon\/([A-Z0-9]{10})\/confirmar-preco$/.exec(u.pathname);
+    if (init.method === 'POST' && relida) {
+      const preco = estado.releitura?.[relida[1]];
+      if (preco == null) return new Response('{}', { status: 404 });
+      const d = new Date(); const p2 = (n) => String(n).padStart(2, '0');
+      const precoEm = `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}T${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}`;
+      return new Response(JSON.stringify({ versao: 1, resultado: 'confirmado', preco, preco_antigo: null, desconto_pct: null, preco_em: precoEm }), { status: 200, headers: { 'content-type': 'application/json; charset=utf-8' } });
+    }
     const limite = Number(u.searchParams.get('limite') ?? 50);
     const ordem = u.searchParams.get('ordem') ?? 'atualizacao';
     const cursor = u.searchParams.get('cursor');
@@ -461,7 +471,7 @@ function etiquetaFalsa(db, estado) {
 
 /** Agendador com o catálogo real (`estado.ofertas` troca as ofertas entre as execuções). `ml`: troca o módulo do ML. */
 function montarCatalogo(t, { ofertas = [], ...opcoes } = {}) {
-  const estado = { ofertas };
+  const estado = { ofertas, releitura: opcoes.releitura ?? null };
   // o catálogo precisa do banco do agendador: cria o agendador, depois liga o catálogo no mesmo banco
   const dir = tmp('pareg-cat'); const db = openDb(dir);
   t.mock.timers.enable({ apis: ['Date'], now: opcoes.agora ?? AGORA });
@@ -472,8 +482,9 @@ function montarCatalogo(t, { ofertas = [], ...opcoes } = {}) {
   links.requestLink = async (p) => { eventos.push(`link ${idDe(p.url)}`); return pedirLink(p); };
   const amazon = createAmazon({ db, fetch: async () => { throw new Error('rede proibida (Amazon)'); }, esperar: async () => {}, lerConexao: () => ({ tag: 'achadinho-20' }) });
   const loja = opcoes.loja ?? {};
-  const verificador = opcoes.verificar ? createVerificador({ db, amazon, ml: { async conferirProduto(url) { eventos.push(`conferir ${idDe(url)}`); const r = loja[idDe(url)]; if (!r) throw new Error('fora'); return r; } } }) : null;
   const catalogo = etiquetaFalsa(db, estado);
+  // `releitura`: o verificador relê a Amazon do catálogo pelo Etiqueta (estado.releitura), como em src/server.js
+  const verificador = opcoes.verificar ? createVerificador({ db, amazon, ml: { async conferirProduto(url) { eventos.push(`conferir ${idDe(url)}`); const r = loja[idDe(url)]; if (!r) throw new Error('fora'); return r; } }, ...(opcoes.releitura ? { catalogo } : {}) }) : null;
   const catalogoItens = createCatalogoItens({ db, wa, links, amazon });
   const scheduler = createScheduler({ db, wa, links, fast: true, amazon, verificador, catalogo, catalogoItens, ...(opcoes.ml ? { ml: opcoes.ml } : {}) });
   db.prepare('INSERT INTO groups (jid, name, size, updated_at) VALUES (?,?,?,?)').run('111@g.us', 'Achadinhos', 10, Date.now());
@@ -845,3 +856,206 @@ test('Q5: no catálogo (Relevância), a pulada na conferência fica fora da esco
   assert.deepEqual(s.eventos.filter((e) => e.startsWith('conferir')), ['conferir 4000000001', 'conferir 4000000002'], 'a 1 não foi conferida de novo');
   assert.equal(infos(s.db, id).filter((l) => l.message.startsWith('Pulada: na conferência')).length, 1);
 });
+
+// ------------------------------------------------------------------ "Baixou de … para …" (plano baixou-de-para, etapa 5)
+
+const DIAS = 24 * HORA;
+const CORPO_BAIXOU = `*{TITULO_PRODUTO}*\n🔥 Por *{PRECO_PRODUTO}*\n${LINHA_ULTIMO_ENVIO}\n{LINK}`;
+const LINHA_BAIXOU = (de, para) => `📉 Baixou de ~R$ ${de}~ para *R$ ${para}*`;
+/** Regra da lista com o template que tem a linha. A mesma chave já passou do `dedupe_days` (7) nos casos de "8 dias". */
+const regraBaixou = (db, itens, opcoes = {}) => regraLista(db, itens, { per: 1, tpl: template(db, CORPO_BAIXOU), ...opcoes });
+
+test('baixou: a mesma chave 8 dias antes por R$ 299,00 e agora a R$ 252,00 sai com a linha "Baixou de"; o mesmo produto, sem a frase da mais barata', async (t) => {
+  const s = montar(t);
+  const id = regraBaixou(s.db, [linha(1, A, 252)]);
+  semear(s.db, id, { key: 'MLB1000001', titulo: A, preco: 29900, em: AGORA - 8 * DIAS });
+
+  const r = await s.scheduler.runRule(id);
+  assert.deepEqual([r.offers, r.messages, r.errors], [1, 1, 0]);
+  const [texto] = textos(s.wa);
+  assert.match(texto, /^\*Fone de Ouvido Bluetooth JBL Tune 510BT Preto\*\n🔥 Por \*R\$ 252,00\*\n📉 Baixou de ~R\$ 299,00~ para \*R\$ 252,00\*\nhttps:\/\/meli\.la\/\S+$/);
+  assert.equal(texto.includes(FRASE_MAIS_BARATA), false, 'mesma chave: a frase 🔎 é só da exceção do mais barato');
+  assert.equal(enviadas(s.db, id).at(-1).price_cents, 25200, 'o envio grava o preço novo: o próximo "último envio"');
+  semAlerta(s.db, id);
+});
+
+test('baixou: limite de 5% (R$ 300,00 → R$ 285,00 mostra; R$ 285,01 não); preço igual ou maior não mostra', async (t) => {
+  for (const [antes, agora, mostra] of [[30000, 285, true], [30000, 285.01, false], [30000, 300, false], [30000, 320, false], [30000, 280, true]]) {
+    await t.test(`${antes / 100} → ${agora}`, async (t2) => {
+      const s = montar(t2);
+      const id = regraBaixou(s.db, [linha(1, A, agora)]);
+      semear(s.db, id, { key: 'MLB1000001', titulo: A, preco: antes, em: AGORA - 8 * DIAS });
+      assert.equal((await s.scheduler.runRule(id)).messages, 1);
+      const [texto] = textos(s.wa);
+      if (mostra) assert.ok(texto.includes(LINHA_BAIXOU('300,00', agora.toFixed(2).replace('.', ','))), texto);
+      else {
+        assert.doesNotMatch(texto, /Baixou|📉|\[|\]|~/, 'sem queda o trecho some inteiro');
+        assert.match(texto, /^\*Fone[^\n]*\*\n🔥 Por \*R\$ [\d,]+\*\nhttps:\/\/meli\.la\/\S+$/, 'sem linha em branco no lugar');
+      }
+    });
+  }
+});
+
+test('baixou: o mesmo título com outra chave conta; título parecido não; outra regra não; mais de 30 dias não; sem preço guardado não', async (t) => {
+  const casos = [
+    // [nome, semente (relativa à regra), mostra]
+    ['título igual, outra chave (8 dias)', { key: 'MLB999', titulo: A, preco: 29900, em: AGORA - 8 * DIAS }, true],
+    ['29 dias atrás ainda vale', { key: 'MLB1000001', titulo: A, preco: 29900, em: AGORA - 29 * DIAS }, true],
+    ['31 dias atrás não vale', { key: 'MLB1000001', titulo: A, preco: 29900, em: AGORA - 31 * DIAS }, false],
+    ['parecido (outro modelo da mesma família) não conta', { key: 'MLB998', titulo: B, preco: 29900, em: AGORA - 8 * DIAS }, false],
+    ['último envio sem preço guardado não mostra', { key: 'MLB1000001', titulo: A, preco: null, em: AGORA - 8 * DIAS }, false],
+    ['outra regra não conta', { key: 'MLB1000001', titulo: A, preco: 29900, em: AGORA - 8 * DIAS, outraRegra: true }, false],
+  ];
+  for (const [nome, semente, mostra] of casos) {
+    await t.test(nome, async (t2) => {
+      const s = montar(t2);
+      const id = regraBaixou(s.db, [linha(1, A, 252)]);
+      const outra = regraBaixou(s.db, [linha(7, D, 99)]);
+      semear(s.db, semente.outraRegra ? outra : id, semente);
+      assert.equal((await s.scheduler.runRule(id)).messages, 1);
+      const [texto] = textos(s.wa);
+      if (mostra) assert.ok(texto.includes(LINHA_BAIXOU('299,00', '252,00')), texto);
+      else assert.doesNotMatch(texto, /Baixou|📉/, texto);
+    });
+  }
+});
+
+test('baixou: o envio mais recente do produto é a referência (não o mais barato nem o mais antigo)', async (t) => {
+  const s = montar(t);
+  const id = regraBaixou(s.db, [linha(1, A, 252)]);
+  semear(s.db, id, { key: 'MLB1000001', titulo: A, preco: 40000, em: AGORA - 20 * DIAS });
+  semear(s.db, id, { key: 'MLB1000001', titulo: A, preco: 29900, em: AGORA - 9 * DIAS });
+  await s.scheduler.runRule(id);
+  assert.ok(textos(s.wa)[0].includes(LINHA_BAIXOU('299,00', '252,00')));
+});
+
+test('baixou: a oferta liberada como "mais barata" sai com a frase 🔎 e com a linha 📉', async (t) => {
+  const s = montar(t);
+  const id = regraBaixou(s.db, [linha(2, A, 44.9)]);
+  semear(s.db, id, { key: 'MLB1000001', titulo: A, preco: 4990, em: AGORA - 3 * HORA });
+  assert.equal((await s.scheduler.runRule(id)).messages, 1);
+  const [texto] = textos(s.wa);
+  assert.ok(texto.startsWith(`${FRASE_MAIS_BARATA}\n\n*${A}*`), texto);
+  assert.ok(texto.includes(LINHA_BAIXOU('49,90', '44,90')), texto);
+});
+
+test('baixou: o preço da MENSAGEM é o conferido na loja: sobe para fora dos 5% → sem linha; continua dentro → linha com o preço novo', async (t) => {
+  const loja = { 9000001: { price: 71, disponivel: true } };
+  const s = montar(t, { verificar: true, loja });
+  const id = regraCentral(s.db, { per: 1, tpl: template(s.db, CORPO_BAIXOU) });
+  // 69,90 na escolha e 74,00 antes: a 5,5%; conferida a 71,00 são só 4,05%
+  semear(s.db, id, { key: 'MLB9000001', titulo: POTES, preco: 7400, em: AGORA - 8 * DIAS });
+  assert.equal((await s.scheduler.runRule(id)).messages, 1);
+  assert.doesNotMatch(textos(s.wa)[0], /Baixou|📉/, 'a conferência subiu o preço: sem a linha, e o envio sai');
+  assert.ok(textos(s.wa)[0].includes('R$ 71,00'), 'mensagem com o preço conferido');
+
+  t.mock.timers.setTime(AGORA + 8 * DIAS); // a mesma chave volta: o envio acima (R$ 71,00) é agora a referência
+  loja[9000001] = { price: 67, disponivel: true };
+  assert.equal((await s.scheduler.runRule(id)).messages, 1);
+  assert.ok(textos(s.wa)[1].includes(LINHA_BAIXOU('71,00', '67,00')), textos(s.wa)[1]);
+});
+
+test('baixou: template sem o campo sai igual ao de antes (sem a linha) mesmo com queda', async (t) => {
+  const s = montar(t);
+  const id = regraLista(s.db, [linha(1, A, 252)], { per: 1 }); // CORPO padrão do arquivo
+  semear(s.db, id, { key: 'MLB1000001', titulo: A, preco: 29900, em: AGORA - 8 * DIAS });
+  await s.scheduler.runRule(id);
+  assert.match(textos(s.wa)[0], /^\*Fone de Ouvido Bluetooth JBL Tune 510BT Preto\*\nR\$ 252,00\nhttps:\/\/meli\.la\/\S+$/);
+});
+
+test('baixou: "Ver ofertas" mostra a linha, sem devolver o campo interno, sem gravar nem logar', async (t) => {
+  const s = montar(t);
+  const id = regraBaixou(s.db, [linha(1, A, 252), linha(4, C, 199.9)], { per: 2 });
+  semear(s.db, id, { key: 'MLB1000001', titulo: A, preco: 29900, em: AGORA - 8 * DIAS });
+  const antes = JSON.stringify([s.db.prepare('SELECT * FROM log').all(), s.db.prepare('SELECT * FROM sent_offers').all()]);
+
+  const previa = await s.scheduler.previewOffers(id);
+  assert.deepEqual(previa.map((o) => o.key), ['MLB1000001', 'MLB1000004']);
+  assert.ok(previa[0].text.includes(LINHA_BAIXOU('299,00', '252,00')), previa[0].text);
+  assert.doesNotMatch(previa[1].text, /Baixou|📉/, 'o produto sem envio anterior fica sem a linha');
+  for (const o of previa) assert.equal(Object.hasOwn(o, 'precoUltimoEnvio'), false, 'a prévia não devolve o campo interno');
+  assert.equal(JSON.stringify([s.db.prepare('SELECT * FROM log').all(), s.db.prepare('SELECT * FROM sent_offers').all()]), antes, 'a prévia não grava');
+  assert.equal(s.wa.simulated.length, 0);
+});
+
+test('baixou: "Enviar agora" (execução manual) também mostra a linha', async (t) => {
+  const s = montar(t);
+  const id = regraBaixou(s.db, [linha(1, A, 252)]);
+  semear(s.db, id, { key: 'MLB1000001', titulo: A, preco: 29900, em: AGORA - 8 * DIAS });
+  const r = await s.scheduler.runRule(id, { manual: true });
+  assert.equal(r.messages, 1);
+  assert.ok(textos(s.wa)[0].includes(LINHA_BAIXOU('299,00', '252,00')));
+});
+
+test('baixou: erro ao ler o histórico não derruba o envio: sai sem a linha, e o console só recebe o código', async (t) => {
+  const s = montar(t);
+  const id = regraBaixou(s.db, [linha(1, A, 252)]);
+  semear(s.db, id, { key: 'MLB1000001', titulo: A, preco: 29900, em: AGORA - 8 * DIAS });
+  // a trava lê `sent_offers` antes (com a mesma tabela): o gatilho só falha na busca do último envio (ela lê price_cents por último)
+  const original = s.db.prepare.bind(s.db);
+  const saida = [];
+  t.mock.method(console, 'error', (...a) => saida.push(a.join(' ')));
+  s.db.prepare = (sql) => {
+    if (/SELECT offer_key, title, price_cents FROM sent_offers/.test(sql)) { const e = new Error('falhou com 5535999990000'); e.code = 'ERR_SQLITE_ERROR'; throw e; }
+    return original(sql);
+  };
+  const r = await s.scheduler.runRule(id);
+  assert.deepEqual([r.messages, r.errors], [1, 0]);
+  assert.doesNotMatch(textos(s.wa)[0], /Baixou|📉/);
+  assert.ok(saida.some((l) => l.includes('ERR_SQLITE_ERROR')), saida.join('|'));
+  assert.ok(saida.every((l) => !l.includes('5535999990000')), 'a mensagem do erro não vai ao console');
+});
+
+// Junção da entrega 1 do "Rodar sozinho" com o "Baixou de … para …": a Amazon do catálogo é relida pelo Etiqueta na hora
+// do envio, e a linha e a regra dos 5% usam o preço relido (o da mensagem), não o da lista
+test('baixou + releitura da Amazon (rodar-sozinho E1): a linha usa o preço relido pelo Etiqueta, nos dois sentidos', async (t) => {
+  // lista a R$ 280,00 (6,4% abaixo de R$ 299,00, mostraria); relida a R$ 252,00 → linha com R$ 252,00
+  // lista a R$ 280,00; relida a R$ 290,00 (+3,6%, dentro do limite do verificador, mas só 3% abaixo de R$ 299,00) → sem linha
+  for (const [relido, linhaEsperada] of [[252, LINHA_BAIXOU('299,00', '252,00')], [290, null]]) {
+    await t.test(`relida a R$ ${relido}`, async (t2) => {
+      const s = montarCatalogo(t2, { verificar: true, releitura: { [asin(1)]: relido }, ofertas: [oferta(1, A, 280)] });
+      const id = regraCatalogo(s.db, { per: 1, tpl: template(s.db, CORPO_BAIXOU) });
+      semear(s.db, id, { key: `ASIN:${asin(1)}`, titulo: A, preco: 29900, em: AGORA - 8 * DIAS });
+
+      const r = await s.scheduler.runRule(id);
+      assert.deepEqual([r.offers, r.messages, r.errors], [1, 1, 0]);
+      const [texto] = textos(s.wa);
+      const reais = `R$ ${relido},00`;
+      assert.ok(texto.includes(`🔥 Por *${reais}*`), `a mensagem sai com o preço relido: ${texto}`);
+      if (linhaEsperada) assert.ok(texto.includes(linhaEsperada), texto);
+      else assert.doesNotMatch(texto, /Baixou|📉|R\$ 280/, texto);
+      assert.equal(enviadas(s.db, id).at(-1).price_cents, relido * 100, 'o envio grava o preço relido: o próximo "último envio"');
+    });
+  }
+});
+
+// Junção da entrega 2 (queda de QUEDA_REVISAO_PCT% em relação à lista, CA2.11/CA2.12) com o "Baixou de … para …": a
+// queda grande vira revisão (catálogo) ou descarte por preço suspeito (fontes antigas) ANTES da mensagem; nunca sai com a
+// linha 📉, mesmo havendo um envio anterior muito mais caro
+test('baixou × queda de 50% (rodar-sozinho E2): a oferta 50% ou mais abaixo da lista não sai com "Baixou de"', async (t) => {
+  await t.test('catálogo (Amazon relida pelo Etiqueta): vai à revisão com queda_preco', async (t2) => {
+    // lista a R$ 280,00, relida a R$ 130,00 (53% abaixo); o envio anterior a R$ 299,00 daria "Baixou de"
+    const s = montarCatalogo(t2, { verificar: true, releitura: { [asin(1)]: 130 }, ofertas: [oferta(1, A, 280)] });
+    const id = regraCatalogo(s.db, { per: 1, tpl: template(s.db, CORPO_BAIXOU) });
+    semear(s.db, id, { key: `ASIN:${asin(1)}`, titulo: A, preco: 29900, em: AGORA - 8 * DIAS });
+    const r = await s.scheduler.runRule(id);
+    assert.deepEqual([r.offers, r.messages, r.revisao], [0, 0, 1]);
+    assert.equal(s.wa.simulated.length, 0, 'nenhuma mensagem');
+    const item = s.db.prepare('SELECT status, motivos FROM catalogo_itens WHERE rule_id = ?').get(id);
+    assert.equal(item.status, 'revisao');
+    assert.ok(JSON.parse(item.motivos).includes('queda_preco'), item.motivos);
+    assert.equal(enviadas(s.db, id).length, 1, 'nada novo em sent_offers');
+  });
+  await t.test('fonte antiga (Central): descartada por preço suspeito', async (t2) => {
+    // R$ 69,90 na escolha, R$ 30,00 na loja (57% abaixo); o envio anterior a R$ 74,00 daria "Baixou de"
+    const s = montar(t2, { verificar: true, loja: { 9000001: { price: 30, disponivel: true } } });
+    const id = regraCentral(s.db, { per: 1, tpl: template(s.db, CORPO_BAIXOU) });
+    semear(s.db, id, { key: 'MLB9000001', titulo: POTES, preco: 7400, em: AGORA - 8 * DIAS });
+    const r = await s.scheduler.runRule(id);
+    assert.equal(r.descartadas, 1);
+    // a vaga vai à próxima candidata da Central (outro produto, sem envio anterior): o kit não sai nem leva a linha
+    assert.ok(textos(s.wa).every((x) => !x.includes(POTES) && !/Baixou|📉/.test(x)), textos(s.wa).join(' | '));
+    assert.ok(logs(s.db, id).some((l) => l.level === 'aviso' && l.message.startsWith('Descartada: preço suspeito')), JSON.stringify(logs(s.db, id)));
+  });
+});
+
