@@ -1377,7 +1377,10 @@ test('parecido CA2/CA4/CA6: parecida há 3 h com qualquer preço, ou o mesmo tí
   assert.equal(s.logs().length, 0, 'nada no Histórico antes da fila');
 });
 
-test('parecido CA4/CA5/CA6: o mesmo título 5% abaixo do menor preço dele sai com a marca no payload, a frase na mensagem e, quando sai, a linha no Histórico', async () => {
+test('parecido CA4/CA5/CA6: o mesmo título 5% abaixo do menor preço dele sai com a marca no payload, a frase na mensagem e, quando sai, a linha no Histórico', async (t) => {
+  // relógio fixo ao meio-dia: com o relógio de verdade, entre 00:00 e 03:00 o envio "3 h atrás" cai no dia anterior e a
+  // frase ganha " de DD/MM" (o teste falhava só nessa janela da madrugada)
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 10, 11, 12, 0, 0).getTime() });
   const s = montar();
   const regra = s.regra({ dedupe_days: 7 });
   jaSaiu(s, regra, { key: 'MLB1001', title: AREIA_FINA, preco: 5990, ha: 5 * HORA });
