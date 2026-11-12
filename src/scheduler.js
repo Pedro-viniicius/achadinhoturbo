@@ -17,6 +17,7 @@ import { sleep, jitter, inWindow, alignToWindow } from './util.js';
 import { criarTrava, lerEnviados, comparar, centavos, maisBarataOBastante, tituloParaGuardar, comFraseMaisBarata, textoConflito, textoPassou, textoConferencia, HORAS_ENTRE_PARECIDOS } from './parecido.js';
 import { PAUSA_DESCARTADA_H, RESERVA_AMAZON_H, MOTIVOS_VERIFICADOR, CAUSAS, reservaValida } from './verificador.js';
 import { ErroLinkML, CAUSAS_CENTRAL, TESTE_ESPERA_MIN } from './links.js';
+import { createVigia, linhaDeSaude, lojasDaRegra, MOTIVO_VIGIA } from './vigia.js';
 
 // Pausas entre mensagens e horário de funcionamento: moram em ./util.js (src/envios.js usa o mesmo ritmo anti-bloqueio);
 // reexportados aqui.
@@ -106,8 +107,12 @@ function avisoDaFalha(n, catalogo) {
   const depois = catalogo ? 'ela vai para a revisão' : `ela fica ${PAUSA_DESCARTADA_H} h fora da escolha desta regra`;
   return ` É a ${ordinal(n)} vez que falha; na ${ordinal(FALHAS_DA_OFERTA)} ${depois}.`;
 }
-/** Frase curta da causa da falha do link do ML (CAUSAS_CENTRAL de src/links.js); sem causa conhecida, "não respondeu". */
-const causaDoLink = (causa) => (Object.hasOwn(CAUSAS_CENTRAL, causa ?? '') ? CAUSAS_CENTRAL[causa] : CAUSAS_CENTRAL.central_sem_resposta);
+/**
+ * Frase curta da causa da falha do link do ML: as de CAUSAS_CENTRAL (src/links.js) e a da extensão que caiu entre dois
+ * pedidos (`extensao_off`, a frase de CAUSAS; achado R8 da entrega 2). Sem causa conhecida, "não respondeu".
+ */
+const FRASE_DA_CAUSA_DO_LINK = Object.freeze({ ...CAUSAS_CENTRAL, extensao_off: CAUSAS.extensao_off });
+const causaDoLink = (causa) => (Object.hasOwn(FRASE_DA_CAUSA_DO_LINK, causa ?? '') ? FRASE_DA_CAUSA_DO_LINK[causa] : CAUSAS_CENTRAL.central_sem_resposta);
 /** "2 descartadas (esgotada na loja)" ou, com motivos diferentes, "2 descartadas (1 esgotada na loja, 1 preço subiu)". */
 function pedacoDeFalta(n, singular, plural, motivos) {
   const lista = [...motivos];
@@ -151,6 +156,31 @@ const LOJAS_RESUMO = ['ml', 'amazon', 'shopee'];
  * espera já na escolha nem chega a ser escolhida).
  */
 const contadoresPorLoja = () => Object.fromEntries(LOJAS_RESUMO.map((l) => [l, { saiu: 0, pulada: 0, descartada: 0, revisao: 0, esperou: 0 }]));
+
+// ---------- execuções para o vigia (plano rodar-sozinho-entrega3, decisão 1; src/vigia.js)
+/** `execucoes` guarda RETENCAO_EXECUCOES_DIAS dias: o resto é apagado a cada gravação. */
+export const RETENCAO_EXECUCOES_DIAS = 35;
+const RETENCAO_EXECUCOES_MS = RETENCAO_EXECUCOES_DIAS * 86400000;
+const CAMPOS_EXECUCAO = ['saiu', 'pulada', 'descartada', 'revisao', 'esperou'];
+/** Motivos das ofertas que ficaram de fora, por loja (chave → n), só para `execucoes.por_loja`. */
+const motivosPorLoja = () => Object.fromEntries(LOJAS_RESUMO.map((l) => [l, {}]));
+/** Frase da falta ("saíram X de Y") → a chave dela em PULADA_POR ou DESCARTADA_POR (que são chaves de MOTIVO_VIGIA). */
+const CHAVE_DA_FALTA = new Map([...Object.entries(PULADA_POR), ...Object.entries(DESCARTADA_POR)].map(([k, frase]) => [frase, k]));
+/** Só chaves de MOTIVO_VIGIA vão ao banco; outra qualquer vira 'outro' (o vigia a lê como "outro motivo"). */
+const chaveDoMotivo = (k) => (typeof k === 'string' && Object.hasOwn(MOTIVO_VIGIA, k) ? k : 'outro');
+/**
+ * `execucoes.por_loja` de uma execução: os contadores de summary.porLoja com os motivos e, em `esperou`, as filtradas
+ * antes da escolha que são falta de loja (a Amazon sem conferência e o ML com a leitura em pausa), que nunca chegam a
+ * ser escolhidas. O summary.porLoja não muda.
+ */
+function porLojaDoRegistro(exec) {
+  const r = {};
+  for (const l of LOJAS_RESUMO) r[l] = { ...exec.porLoja[l], motivos: { ...exec.motivos[l] } };
+  for (const [l, chave, n] of [['amazon', 'semConferencia', exec.filtradas.semConferencia], ['ml', 'mlPausa', exec.filtradas.mlPausa]]) {
+    if (n > 0) { r[l].esperou += n; r[l].motivos[chave] = (r[l].motivos[chave] || 0) + n; }
+  }
+  return r;
+}
 
 // Grade de horários (plano grade-de-disparos, D3 e D4): textos do Histórico
 const pad2 = (n) => String(n).padStart(2, '0');
@@ -243,7 +273,13 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
   let acordado = false; // um "agora" chegou com o tick em andamento: ele passa nos envios de novo antes de terminar
   // O "agora" não envia por conta própria: grava pendente e acorda o tick, que manda um envio de cada vez (S14)
   const envios = createEnvios({ db, wa, links, ml, fast, dir, acordar, amazon, shopee, magalu, verificador, ritmo });
-  const avisos = createAvisos({ db, wa, estadoBackup: dir && path.join(dir, 'backup-estado.json') });
+  // Vigia (plano rodar-sozinho-entrega3, decisões 4, 6 e 7): entrega pelos destinos de "Erro de disparo" dos avisos e dá
+  // ao resumo diário as causas em aberto (função tardia: um nasce precisando do outro)
+  let vigia = null;
+  const avisos = createAvisos({
+    db, wa, estadoBackup: dir && path.join(dir, 'backup-estado.json'), linhaDeSaude, abertas: () => vigia?.estado().causas ?? [],
+  });
+  vigia = createVigia({ db, links, ritmo, wa, entregar: (texto, oQue) => avisos.entregarAosDeErro(texto, oQue) });
   // receber() (ouvinte do WhatsApp) e cada envio que o espelho cria chamam acordar(): a oferta sai neste tick
   const espelho = createEspelho({ db, wa, amazon, envios, acordar });
   // idem para a mensagem privada de um remetente cadastrado (receber) e para cada envio que ela cria
@@ -569,15 +605,23 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
   const novaExecucao = () => ({
     paginas: new Map(), recusadas: new Set(), esperando: new Map(), vistas: new Set(), puladas: [],
     filtradas: { filtros: 0, pausa: 0, parecidas: 0, semConferencia: 0, mlPausa: 0, mlPausaCausa: null }, conferenciaNaHora: false, porLoja: contadoresPorLoja(),
+    motivos: motivosPorLoja(),
   });
   // a regra apagada no meio da execução não grava nada do catálogo: o id pode ser reaproveitado por uma regra nova
   const regraExiste = (id) => !!db.prepare('SELECT 1 FROM rules WHERE id = ?').get(id);
   /** Loja da escolhida nos contadores: as fontes antigas são do Mercado Livre. */
   const lojaDoResumo = (o) => (o?.catalogo ? o.loja : 'ml');
   const contarNaLoja = (exec, loja, campo) => { if (Object.hasOwn(exec.porLoja, loja ?? '')) exec.porLoja[loja][campo]++; };
+  /** Motivo de `n` ofertas da loja que ficaram de fora (execucoes.por_loja). A revisão não tem: é decisão do dono. */
+  const anotarMotivo = (exec, loja, chave, n = 1) => {
+    if (!chave || !Object.hasOwn(exec.motivos, loja ?? '')) return;
+    const k = chaveDoMotivo(chave);
+    exec.motivos[loja][k] = (exec.motivos[loja][k] || 0) + n;
+  };
   const esperar = (exec, motivo, loja = null) => {
     exec.esperando.set(motivo, (exec.esperando.get(motivo) || 0) + 1);
     contarNaLoja(exec, loja, 'esperou');
+    anotarMotivo(exec, loja, motivo);
   };
   /** O verificador está ligado agora? Na dúvida (sem verificador, sem ativo(), erro ao ler os Ajustes), não. */
   const conferenciaLigada = () => {
@@ -924,17 +968,21 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
       // orçamento (CA2.14): o tempo gasto com as escolhidas que caíram fora, cada uma desde a vez dela (depois da pausa
       // entre ofertas, que é do ritmo e não da falha) até cair fora
       let gastoFora = 0; let inicioDaVez = Date.now(); let semTempo = false;
-      /** A escolhida `o` caiu fora: `tipo` 'pulada' | 'descartada' | 'revisao'; `naLoja`: o contador de summary.porLoja. */
-      const faltou = (o, tipo, motivo = null, naLoja = tipo) => {
+      /**
+       * A escolhida `o` caiu fora: `tipo` 'pulada' | 'descartada' | 'revisao'; `naLoja`: o contador de summary.porLoja;
+       * `chave`: o motivo em execucoes.por_loja (a causa, quando há; senão a chave da frase `motivo`).
+       */
+      const faltou = (o, tipo, motivo = null, naLoja = tipo, chave = CHAVE_DA_FALTA.get(motivo) ?? motivo) => {
         if (tipo === 'revisao') faltas.revisao++;
         else faltas[tipo].set(motivo, (faltas[tipo].get(motivo) || 0) + 1);
         if (tipo === 'pulada') summary.puladas++;
         contarNaLoja(exec, lojaDoResumo(o), naLoja);
+        if (tipo !== 'revisao') anotarMotivo(exec, lojaDoResumo(o), chave);
         gastoFora += Math.max(0, Date.now() - inicioDaVez);
       };
       // descarte do verificador (D8): uma linha 'aviso' por oferta, nunca 'erro'; a vaga é reposta (CA1.7)
       const descartar = (o, c) => {
-        summary.descartadas++; faltou(o, 'descartada', DESCARTADA_POR[c.motivo] ?? c.motivo);
+        summary.descartadas++; faltou(o, 'descartada', DESCARTADA_POR[c.motivo] ?? c.motivo, 'descartada', c.causa ?? c.motivo);
         log(rule, { level: 'aviso', offer_title: o.title, message: c.texto });
       };
       /**
@@ -944,22 +992,22 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
        * execução); na FALHAS_DA_OFERTA-ésima vai à revisão (catálogo, `falhas_repetidas`) ou fica PAUSA_DESCARTADA_H fora
        * (fonte antiga). `pulada(fim)`: a linha "Pulada…" com o fim dado; `separada`: a linha da revisão. Linhas 'aviso'.
        */
-      const falhaDaOfertaMl = (o, offer, { teste, motivoPulada, pulada, separada }) => {
+      const falhaDaOfertaMl = (o, offer, { teste, motivoPulada, causa, pulada, separada }) => {
         if (teste) {
           pausar(rule, o.key);
-          faltou(o, 'pulada', motivoPulada);
+          faltou(o, 'pulada', motivoPulada, 'pulada', causa);
           log(rule, { level: 'aviso', offer_title: o.title, message: pulada(FICA_FORA) });
           return;
         }
         const n = contarFalhaMl(rule, o.key);
         if (n < FALHAS_DA_OFERTA) {
-          faltou(o, 'pulada', motivoPulada);
+          faltou(o, 'pulada', motivoPulada, 'pulada', causa);
           log(rule, { level: 'aviso', offer_title: o.title, message: pulada(`${TENTA_DE_NOVO}${avisoDaFalha(n, !!o.catalogo)}`) });
           return;
         }
         if (!o.catalogo) {
           esquecerFalhaMl(rule, o.key); pausar(rule, o.key);
-          faltou(o, 'pulada', motivoPulada);
+          faltou(o, 'pulada', motivoPulada, 'pulada', causa);
           log(rule, { level: 'aviso', offer_title: o.title, message: pulada(`Falhou em ${FALHAS_DA_OFERTA} envios seguidos: fica ${PAUSA_DESCARTADA_H} h fora da escolha desta regra.`) });
           return;
         }
@@ -984,7 +1032,7 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
           return;
         }
         falhaDaOfertaMl(o, offer, {
-          teste, motivoPulada: PULADA_POR.link_central,
+          teste, motivoPulada: PULADA_POR.link_central, causa: r.causa,
           pulada: (fim) => `Pulada: não deu para gerar o link de afiliado (${causa}). ${fim}`,
           separada: `Separada para revisão: o link falhou em ${FALHAS_DA_OFERTA} envios seguidos (${causa}). Abra a oferta em Histórico > Catálogo, confira e envie à mão.`,
         });
@@ -1002,8 +1050,12 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
         let o;
         try { o = await escolha.proxima(); } catch (e) {
           // a fonte "Central de Afiliados" com o Mercado Livre em espera (src/ml.js marca `espera`): nenhum pedido saiu e a
-          // linha da espera já está no Histórico; sem linha `erro` por execução, que alertaria no WhatsApp (achado Q2, P2)
-          if (e?.espera === true) return summary;
+          // linha da espera já está no Histórico; sem linha `erro` por execução, que alertaria no WhatsApp (achado Q2, P2).
+          // As vagas que faltavam esperaram o ML (o vigia vê a Central fora também por esta fonte)
+          if (e?.espera === true) {
+            exec.porLoja.ml.esperou += want - saidas; anotarMotivo(exec, 'ml', 'ml_espera', want - saidas);
+            return summary;
+          }
           log(rule, { level: 'erro', message: 'Não consegui buscar ofertas: ' + e.message }); summary.errors++; return summary;
         }
         logarPuladas();
@@ -1089,7 +1141,7 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
               if (o.loja === 'ml' && CAUSAS_DA_OFERTA_ML.has(c.causa)) {
                 const porque = CAUSAS[c.causa];
                 falhaDaOfertaMl(o, offer, {
-                  teste, motivoPulada: PULADA_POR.conferencia,
+                  teste, motivoPulada: PULADA_POR.conferencia, causa: c.causa,
                   pulada: (fim) => `Pulada: não deu para conferir o preço (${porque}). O Mercado Livre não sai sem conferir; ${fim.charAt(0).toLowerCase()}${fim.slice(1)}`,
                   separada: `Separada para revisão: a conferência do preço falhou em ${FALHAS_DA_OFERTA} envios seguidos (${porque}). Abra a oferta em Histórico > Catálogo, confira o preço na loja e envie à mão.`,
                 });
@@ -1100,7 +1152,7 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
               const semPreco = CAUSAS_SEM_PRECO.has(c.causa);
               const foraDaEscolha = semPreco || c.releu === true;
               if (foraDaEscolha) pausar(rule, o.key);
-              faltou(o, 'pulada', semPreco ? PULADA_POR.sem_preco : PULADA_POR.conferencia);
+              faltou(o, 'pulada', semPreco ? PULADA_POR.sem_preco : PULADA_POR.conferencia, 'pulada', c.causa);
               const texto = textoPuladaSemConferencia(o, c.causa, Date.now(), { pelaReleitura: c.pelaReleitura === true, foraDaEscolha: c.releu === true });
               log(rule, { level: 'aviso', offer_title: o.title, message: texto });
               continue;
@@ -1112,7 +1164,7 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
           }
           if (!motivos.length) {
             const r = await linksPorCodigo(offer, etq, jids);
-            if (r.espera) { esperar(exec, r.espera); faltou(o, 'pulada', r.espera === 'ml_espera' ? PULADA_POR.ml_espera : PULADA_POR.espera, 'esperou'); continue; }
+            if (r.espera) { esperar(exec, r.espera); faltou(o, 'pulada', r.espera === 'ml_espera' ? PULADA_POR.ml_espera : PULADA_POR.espera, 'esperou', r.espera); continue; }
             if (r.algum) gerados = r;
             // o link do ML que falha nunca vai à revisão por isso (CA2.1): pulada, descartada pela recusa ou, na 3ª, revisão
             else if (offer.loja === 'ml') { linkMlFalhou(o, offer, r, teste); continue; }
@@ -1152,7 +1204,7 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
             if (gerados.classe === 'recusa' || gerados.classe === 'passageira') { linkMlFalhou(o, offer, gerados, teste); continue; }
             // extensão desconectada ou erro sem classe: como antes
             log(rule, { level: 'erro', offer_title: offer.title, message: 'Link de afiliado não gerado: ' + gerados.falha });
-            summary.errors++; faltou(o, 'pulada', PULADA_POR.link); continue;
+            summary.errors++; faltou(o, 'pulada', PULADA_POR.link, 'pulada', gerados.causa); continue;
           }
         }
         const textos = new Map(); // um texto por link
@@ -1252,8 +1304,30 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
           : alignToWindow(now + rule.interval_min * 60000, rule.window_start, rule.window_end);
         db.prepare('UPDATE rules SET last_run_at = ?, next_run_at = ? WHERE id = ?').run(now, next, id);
       }
+      registrarExecucao(rule, exec, summary, { linha, parada }, now); // para o vigia; nunca lança
       running.delete(id);
     }
+  }
+
+  /**
+   * Linha de `execucoes` no fim de cada execução da regra (vigia, plano rodar-sozinho-entrega3, decisão 1; o "Enviar
+   * agora" também, D10). Conta (conta = 1) a que teve escolhida ou espera (algum contador de por_loja andou). Não contam
+   * "sem ofertas novas", "regra incompleta" e "WhatsApp desconectado" (saem antes de qualquer contador andar) nem a parada
+   * pelo silêncio ou pelo teto antes de qualquer saída. Apaga o que passa de RETENCAO_EXECUCOES_DIAS dias. Nunca lança: a
+   * falha vai ao console só com o código (o erro do banco traz os valores da query) e não derruba a regra.
+   */
+  function registrarExecucao(rule, exec, summary, { linha, parada }, now) {
+    try {
+      const por = porLojaDoRegistro(exec);
+      const soma = (campos) => LOJAS_RESUMO.reduce((a, l) => a + campos.reduce((b, c) => b + por[l][c], 0), 0);
+      const saidas = soma(['saiu']);
+      const conta = soma(CAMPOS_EXECUCAO) > 0 && !(parada && saidas === 0);
+      db.prepare('INSERT INTO execucoes (ts, rule_id, conta, want, saidas, erros, lojas_pedidas, por_loja) VALUES (?,?,?,?,?,?,?,?)').run(
+        now, rule.id, conta ? 1 : 0, qtdDa(rule, linha), saidas, summary.errors,
+        JSON.stringify(lojasDaRegra({ sources: JSON.stringify(rule.sources) })), JSON.stringify(por),
+      );
+      db.prepare('DELETE FROM execucoes WHERE ts < ?').run(now - RETENCAO_EXECUCOES_MS);
+    } catch (e) { console.error('[agendador] execuções:', e?.code || e?.name || 'erro'); }
   }
 
   /**
@@ -1404,10 +1478,17 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
    * mensagem do erro no console (semDetalhe): a do banco pode trazer o texto da rotina.
    */
   const passoRotinas = () => passo('grupo vivo', semDetalhe(() => rotinas.processarPendentes()));
+  /**
+   * Vigia (plano rodar-sozinho-entrega3, decisão 6): uma passada no tick, logo depois dos avisos, e outra depois de cada
+   * regra. A falha dele vira ok=false e uma linha `aviso` (CA3.11); se lançar assim mesmo, o tick segue e o console leva
+   * só o código (semDetalhe).
+   */
+  const passoVigia = () => passo('vigia', semDetalhe(() => vigia.tick()));
+  const passoVigiaAposRegra = () => passo('vigia', semDetalhe(() => vigia.aposExecucao()));
 
-  // Ordem: envios vencidos → espelho → remetentes → avisos → rotinas → regras, com espelho, remetentes, rotinas e envios
-  // de novo depois de cada regra (um agendado, uma oferta espelhada, um link de remetente ou uma rotina do Grupo vivo
-  // espera no máximo a regra em andamento).
+  // Ordem: envios vencidos → espelho → remetentes → avisos → vigia → rotinas → regras, com espelho, remetentes, rotinas,
+  // envios e vigia de novo depois de cada regra (um agendado, uma oferta espelhada, um link de remetente ou uma rotina do
+  // Grupo vivo espera no máximo a regra em andamento).
   async function tick() {
     if (ticking) return; ticking = true; acordado = false;
     try {
@@ -1417,6 +1498,7 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
       await passoEspelho();
       await passoRemetentes();
       await passo('avisos', () => avisos.tick());
+      await passoVigia();
       await passoRotinas();
       const rules = db.prepare('SELECT * FROM rules WHERE enabled = 1').all().map(parseRule);
       for (const r of rules) {
@@ -1436,6 +1518,7 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
           await passoRemetentes();
           await passoRotinas();
           await passoEnvios();
+          await passoVigiaAposRegra();
           continue;
         }
         if (running.has(r.id) || (r.next_run_at && r.next_run_at > now)) continue;
@@ -1458,6 +1541,7 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
         await passoRemetentes();
         await passoRotinas();
         await passoEnvios();
+        await passoVigiaAposRegra();
       }
       // "agora" criado (ou mensagem espelhada ou de remetente recebida) depois da última passada: sai neste tick, não
       // no próximo (até 15 s depois). Espelho e remetentes vêm antes dos envios: o envio que eles criarem sai na mesma
@@ -1470,6 +1554,8 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
   return {
     // acordar: o "Enviar" aprovado na revisão do catálogo (src/catalogo-itens.js) pede o tick já
     runRule, enviarAgora, previewOffers, tick, acordar, envios, avisos, amazon, shopee, espelho, remetentes, rotinas, catalogo, catalogoItens,
+    // vigia: o /api/state lê vigia.estado() (src/server.js)
+    vigia,
     // proteção do número: `ritmo` (uso do teto e silêncio para o /state) e o `wa` embrulhado, o mesmo dos módulos daqui;
     // quem manda mensagem fora do agendador usa este `wa`, para contar no teto e respeitar a pausa mínima
     ritmo, wa,

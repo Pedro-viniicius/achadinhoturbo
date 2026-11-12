@@ -1589,14 +1589,15 @@ test('saúde (CA3.3): dia sem execução, regra ativa sem execução, dia sem na
     'Puladas: 0 · Descartadas: 0 · Falhas: 0', 'Esperando revisão: 1'].join('\n'), 'uma na revisão já é algo a relatar');
 });
 
-test('saúde: sem as opções o resumo é o de hoje (prévia inclusive); abertas que falha não esconde o bloco; linhaDeSaude que falha não derruba o resumo diário', async () => {
+test('saúde: sem as opções o resumo é o de hoje (o agendador as passa desde a etapa 5); abertas que falha não esconde o bloco; linhaDeSaude que falha não derruba o resumo diário', async () => {
   const s = await subir();
   try {
     diaDoExemplo(s.db);
     const api = await cliente(s);
     const sem = createAvisos({ db: s.db, wa: s.wa }).montarResumo([], at(10, 21, 0));
     assert.ok(!sem.includes('🩺') && sem.endsWith('🔗 Cliques: 0'), sem);
-    assert.ok(!(await api('/api/avisos/previa')).json.texto.includes('🩺'), 'agendador sem as opções: a prévia como hoje');
+    // etapa 5: o agendador cria os avisos com linhaDeSaude e abertas, então a prévia já traz o bloco (CA3.3)
+    assert.ok((await api('/api/avisos/previa')).json.texto.includes('🩺'), 'o agendador passa as opções: a prévia traz a saúde');
     s.scheduler.avisos = comSaude(s.db, s.wa);
     const previa = (await api('/api/avisos/previa')).json.texto;
     assert.match(previa, /\n\n🩺 \*Saúde dos envios\* \(todas as regras\)\n/, 'a prévia chama o mesmo montarResumo');

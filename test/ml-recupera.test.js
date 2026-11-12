@@ -668,6 +668,23 @@ test('S5: a linha "Rastreio: a etiqueta … não gerou o link" leva a frase fixa
   assert.ok(!mensagens(s, id).some((m) => m.includes('fulano') || m.includes('<script>')));
 });
 
+test('R8 (entrega 2): a extensão que caiu entre os dois pedidos dá a frase dela na linha "Rastreio", não "a Central não respondeu"', async (t) => {
+  const { links, estado } = linksDuble();
+  // fonte antiga (sem espera na escolha): o pedido da associada é recusado com a extensão desconectada; o da padrão sai
+  estado.link = (p, i) => {
+    if (p.tag === 'etiquetaB') throw new ErroLinkML('A extensão do Chrome não está conectada.', { classe: 'desconectada', causa: 'extensao_off' });
+    return `https://meli.la/Ok${i}x`;
+  };
+  const s = montar(t, { ofertas: [], links, grupos: GRUPOS_MISTOS });
+  s.db.prepare('INSERT INTO tags (name, created_at) VALUES (?,?)').run('etiquetaB', Date.now());
+  salvarRastreio(s.db, { loja: 'mercadolivre', alvo_tipo: 'grupo', alvo: '222@g.us', codigo: 'etiquetaB' });
+  const id = regraLista(s.db, [1], { per: 1, grupos: B_PRIMEIRO });
+  await s.scheduler.runRule(id);
+  const linha = mensagens(s, id).find((m) => m.startsWith('Rastreio: '));
+  assert.equal(linha, 'Rastreio: a etiqueta etiquetaB não gerou o link (a extensão do Chrome não está conectada); o grupo recebeu o da etiqueta etiquetaA.');
+  assert.deepEqual(s.saiu(), [titulo(1), titulo(1)], 'os dois grupos receberam o link da etiqueta padrão');
+});
+
 // ======================================================================================================= CA2.14
 
 test('CA2.14: passados 120 s em ofertas que caíram, a execução para de escolher com a frase do orçamento', async (t) => {

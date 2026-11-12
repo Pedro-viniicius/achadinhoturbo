@@ -349,6 +349,8 @@ export function buildApp({ db, wa, links, scheduler, publicHost = PUBLIC_HOST, p
     amostras: { amazon: SAMPLE_OFFER_AMAZON }, // oferta de exemplo para a prévia do template (sem tag no link)
     catalogo: estadoCatalogo(),
     protecao: estadoProtecao(), // as pausas continuam em `ajustes`
+    // vigia (plano rodar-sozinho-entrega3, decisão 8): { ok, causas, avaliadoEm }; estado() nunca lança (null sem agendador)
+    vigia: scheduler?.vigia?.estado?.() ?? null,
     // limites da grade de horários do Disparo automático (src/grade.js) e das rotinas do Grupo vivo (src/rotinas.js),
     // para os editores e o contador do painel
     grade: { max_horarios: MAX_HORARIOS_GRADE, intervalo_min: INTERVALO_MIN_GRADE, tolerancia_min: TOLERANCIA_MIN, max_qtd: MAX_QTD_GRADE,
