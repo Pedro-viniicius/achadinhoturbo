@@ -296,7 +296,10 @@ test('CA7: ignorar_silencio gravado fora do "agora" do painel (agendado, espelho
   assert.deepEqual([agendado, espelho, rotina, texto].map((id) => envio(s.db, id).status), ['erro', 'pendente', 'erro', 'pendente']);
 });
 
-test('CA7/P5: criar aceita ignorar_silencio só com "agora" (senão, erro claro) e grava no payload só o true', async () => {
+test('CA7/P5: criar aceita ignorar_silencio só com "agora" (senão, erro claro) e grava no payload só o true', async (t) => {
+  // relógio fixo ao meio-dia: o agendado sem data é "hoje às HH:MM", então "daqui a 2 h" não pode atravessar a meia-noite
+  // (depois das 22h o teste dependia da hora do dia e a rota respondia "Esse horário já passou")
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 10, 11, 12, 0, 0).getTime() });
   const s = montar();
   const base = { tipo: 'mensagem', texto: 'Oi', group_jids: [GRUPOS[0]] };
   const futuro = new Date(Date.now() + 2 * HORA);

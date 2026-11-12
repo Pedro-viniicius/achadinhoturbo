@@ -22,6 +22,7 @@ import { createAmazon } from '../src/amazon.js';
 import { createEnvios } from '../src/envios.js';
 import { paraCandidato, quedaDePreco, motivosDeRevisao, QUEDA_REVISAO_PCT } from '../src/catalogo.js';
 import { createVerificador, PAUSA_DESCARTADA_H } from '../src/verificador.js';
+import { salvar as salvarRastreio } from '../src/rastreio.js';
 
 // ------------------------------------------------------------------------------------------- sem rede nenhuma
 const fetchOriginal = globalThis.fetch;
@@ -236,6 +237,74 @@ test('CA2.4 a extensão que cai com a espera aberta: nada muda no estado da Cent
   ext = await extensao(t, links, linkOk);
   assert.equal((await links.requestLink({ url: 'https://produto.mercadolivre.com.br/MLB-9', tag: 'etiquetaA' })).startsWith('https://meli.la/'), true);
   assert.equal(links.central().estado, 'respondendo');
+  void ext;
+});
+
+// ======================================================================================================== grupos de etiquetas diferentes (R1)
+
+test('R1 ponta a ponta com grupos de etiquetas diferentes: a candidata de teste que falha fica 6 h fora e o teste seguinte usa outra, nas duas ordens dos grupos', async (t) => {
+  for (const ordem of [['111@g.us', '222@g.us'], ['222@g.us', '111@g.us']]) {
+    await t.test(ordem.join(' → '), async (st) => {
+      st.mock.timers.enable({ apis: ['Date'], now: dia(11, 14) });
+      const dir = tmp(); const db = openDb(dir);
+      const links = createLinkService({ getMode: () => 'extension', db, agora: () => Date.now() });
+      const central = { responde: false };
+      const ext = await extensao(st, links, (job) => (job.type === 'produto_ml' ? lido(100) : central.responde ? linkOk(job) : SEM_RESPOSTA));
+      const s = montar(st, { ofertas: [1, 2, 3, 4, 5, 6].map((i) => oferta(i)), links, db, dir, grupos: [['111@g.us', 'Achadinhos'], ['222@g.us', 'Tech']] });
+      db.prepare('INSERT INTO tags (name, created_at) VALUES (?,?)').run('etiquetaB', Date.now());
+      salvarRastreio(db, { loja: 'mercadolivre', alvo_tipo: 'grupo', alvo: '222@g.us', codigo: 'etiquetaB' });
+      const id = Number(db.prepare(`INSERT INTO rules (name, enabled, tag_id, template_id, group_jids, source_type, source_config, sources, per_run, interval_min, window_start, window_end, dedupe_days, send_image, created_at)
+        VALUES ('Misto', 1, 1, 1, ?, 'list', '{}', ?, 1, 60, '00:00', '23:59', 7, 0, ?)`)
+        .run(JSON.stringify(ordem), JSON.stringify([{ type: 'catalogo', tag_id: null, config: { ordem: 'relevancia', lojas: ['ml'] } }]), Date.now()).lastInsertRowid);
+      // a Central cai: com 1 oferta por execução e 2 códigos por oferta, a espera abre dentro da 2ª oferta
+      await s.scheduler.runRule(id);
+      assert.equal(links.central().estado, 'em_espera');
+      const abriu = Date.now();
+      // teste liberado: a candidata é uma oferta; os outros códigos dela são recusados sem pedido
+      await irPara(st, links, abriu + TESTE_ESPERA_MIN * MIN);
+      ext.limpar();
+      const r = await s.scheduler.runRule(id);
+      assert.equal(ext.de('link').length, 1, 'um pedido de link só: o teste');
+      assert.equal(r.revisao, 0);
+      const candidata = n(idDe(ext.de('link')[0].url));
+      assert.ok(linhaDe(s, id, candidata).some((m) => m.includes(`Fica ${PAUSA_DESCARTADA_H} h fora da escolha`)), `candidata ${candidata}: ${s.logs(id).map((l) => l.message).join(' | ')}`);
+      assert.deepEqual(itens(db, id).filter((i) => i.status === 'revisao'), []);
+      // o teste seguinte usa OUTRA oferta
+      await irPara(st, links, Date.now() + TESTE_ESPERA_MIN * MIN);
+      ext.limpar();
+      await s.scheduler.runRule(id);
+      const outra = n(idDe(ext.de('link')[0].url));
+      assert.notEqual(outra, candidata, 'a veneno não segura o teste seguinte');
+      // a Central volta: as ofertas saem (menos a que está em pausa de 6 h)
+      central.responde = true;
+      await irPara(st, links, Date.now() + TESTE_ESPERA_MIN * MIN);
+      await s.scheduler.runRule(id);
+      assert.equal(links.central().estado, 'respondendo');
+      assert.ok(s.wa.simulated.length >= 1);
+      assert.ok(!s.saiu().includes(titulo(candidata)), 'a candidata que falhou no teste segue 6 h fora');
+      assert.ok(!db.prepare("SELECT 1 FROM log WHERE level = 'erro'").get());
+    });
+  }
+});
+
+test('S2 recusa não definitiva do ML: a Central respondeu — três seguidas não abrem a espera e uma, com a espera aberta, a fecha; a oferta é que falha', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: dia(11, 14) });
+  const dir = tmp(); const db = openDb(dir);
+  const links = createLinkService({ getMode: () => 'extension', db, agora: () => Date.now() });
+  const resp = { atual: { ok: false, error: 'Error: etiqueta inválida (etiqueta "etiquetaA")', tipo: 'recusa' } };
+  const ext = await extensao(t, links, () => resp.atual);
+  const pedir = () => links.requestLink({ url: 'https://produto.mercadolivre.com.br/MLB-9', tag: 'etiquetaA' }).catch((e) => e);
+  for (let k = 0; k < 4; k++) { const e = await pedir(); assert.equal(e.causa, 'recusa_ml'); assert.equal(e.classe, 'passageira', 'segue passageira para a oferta (D6)'); }
+  assert.deepEqual([links.central().estado, links.central().falhasSeguidas], ['sem_teste', 0], 'a Central respondeu: nada de espera, nada de falha acumulada (e ainda sem link gerado)');
+  // com a espera aberta por falhas de verdade, a recusa que chega no teste a fecha
+  resp.atual = SEM_RESPOSTA;
+  for (let k = 0; k < FALHAS_PARA_ESPERA; k++) await pedir();
+  assert.equal(links.central().estado, 'em_espera');
+  await irPara(t, links, Date.now() + TESTE_ESPERA_MIN * MIN);
+  resp.atual = { ok: false, error: 'Error: etiqueta inválida (etiqueta "etiquetaA")', tipo: 'recusa' };
+  await pedir();
+  assert.equal(links.central().estado, 'respondendo');
+  assert.equal(geral(db).at(-1).level, 'info');
   void ext;
 });
 
