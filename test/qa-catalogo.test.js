@@ -253,7 +253,8 @@ test('CA1/CA4/CA5/CA7: ML, Amazon, Shopee, 100%, preço antigo 10× e falha de l
   const id = await s.regra({ per_run: 20 });
 
   const r = await s.scheduler.runRule(id);
-  assert.deepEqual([r.offers, r.messages, r.errors, r.revisao], [4, 4, 0, 4], JSON.stringify(logs(s.db, id)));
+  // a falha do link do ML é pulada, sem revisão (rodar-sozinho entrega 2, CA2.1)
+  assert.deepEqual([r.offers, r.messages, r.errors, r.revisao, r.puladas], [4, 4, 0, 3, 1], JSON.stringify(logs(s.db, id)));
 
   const msgs = s.msgs();
   assert.equal(msgs.length, 4);
@@ -276,20 +277,21 @@ test('CA1/CA4/CA5/CA7: ML, Amazon, Shopee, 100%, preço antigo 10× e falha de l
   assert.deepEqual(itens(s.db, id).map((i) => [i.chave, i.status, i.motivos]), [
     [mlb(1), 'enviado', []], [`ASIN:${asin(2)}`, 'enviado', []], [`ASIN:${asin(3)}`, 'enviado', []],
     ['SHOPEE:123.4', 'revisao', ['shopee']], [`ASIN:${asin(5)}`, 'revisao', ['desconto_100', 'preco_antigo']],
-    [mlb(6), 'revisao', ['preco_antigo']], [mlb(7), 'revisao', ['falha_link']], [`ASIN:${asin(8)}`, 'enviado', []],
+    [mlb(6), 'revisao', ['preco_antigo']], [`ASIN:${asin(8)}`, 'enviado', []],
   ]);
+  assert.ok(logs(s.db, id).some((l) => l.message === 'Pulada: não deu para gerar o link de afiliado (a Central de Afiliados não respondeu). Tenta de novo no próximo envio.'));
   assert.deepEqual(enviadas(s.db, id), [mlb(1), `ASIN:${asin(2)}`, `ASIN:${asin(3)}`, `ASIN:${asin(8)}`], 'só o que saiu entra em sent_offers');
   assert.equal(contar(s.db, 'SELECT COUNT(*) AS n FROM envios'), 0, 'a revisão não cria envio sozinha');
 
-  // a lista do painel (Dono): 4 para revisar, link para conferir por loja, foto só do CDN
+  // a lista do painel (Dono): 3 para revisar, link para conferir por loja, foto só do CDN
   const rev = await s.get(`/api/catalogo/itens?regra=${id}&status=revisao`);
   assert.equal(rev.status, 200);
-  assert.equal(rev.json.itens.length, 4);
+  assert.equal(rev.json.itens.length, 3);
   const shp = rev.json.itens.find((i) => i.loja === 'shopee');
   assert.equal(shp.oferta.link, 'https://s.shopee.com.br/Ab4cd');
   assert.equal(shp.oferta.image, 'https://down-br.img.susercontent.com/file/4');
   assert.equal(rev.json.itens.find((i) => i.loja === 'amazon').oferta.link, `https://www.amazon.com.br/dp/${asin(5)}`, 'Amazon sem tag na tela');
-  assert.equal(rev.json.contadores_24h.para_revisar, 4);
+  assert.equal(rev.json.contadores_24h.para_revisar, 3);
 
   // o pedido ao Etiqueta: limite=200, a ordem da fonte, só Authorization (sem Origin, sem token na URL)
   const p = s.et.pedidos[0];
@@ -297,11 +299,14 @@ test('CA1/CA4/CA5/CA7: ML, Amazon, Shopee, 100%, preço antigo 10× e falha de l
   assert.equal(p.headers.origin, undefined);
   assert.ok(!p.url.includes(TOKEN));
 
-  // repetir a regra não repete nada nem duplica a fila
+  // repetir a regra não repete nada nem duplica a fila; só a do link que falhou é tentada de novo (2ª falha dela)
   const r2 = await s.scheduler.runRule(id);
   assert.equal(r2.offers, 0); assert.equal(s.msgs().length, 4);
-  assert.equal(itens(s.db, id).length, 8);
-  assert.equal(logs(s.db, id).at(-1).message, 'Sem ofertas novas dentro dos filtros desta vez.');
+  assert.equal(itens(s.db, id).length, 7);
+  assert.deepEqual(logs(s.db, id).slice(-2).map((l) => l.message), [
+    'Pulada: não deu para gerar o link de afiliado (a Central de Afiliados não respondeu). Tenta de novo no próximo envio. É a 2ª vez que falha; na 3ª ela vai para a revisão.',
+    'Saíram 0 de 20 ofertas; 1 pulada (Central sem resposta); não havia mais ofertas novas dentro dos filtros.',
+  ]);
 });
 
 test('CA4: o link do ML da regra vem da extensão pelas rotas HTTP /api/ext/poll e /api/ext/result (a volta de verdade)', async (t) => {
@@ -450,23 +455,26 @@ test('CA7/P4: 100% e preço antigo 10× só saem com o preço corrigido à mão;
 });
 
 test('CA4: "Enviar" de ML da revisão gera o link na hora pela extensão; modo direto e Amazon sem tag recusam e nada é gravado', async (t) => {
-  const s = await montar(t, { ofertas: [oferta(7, 'ml'), oferta(8, 'amazon', { preco: 1, preco_antigo: 1000, desconto_pct: 100 })] });
-  const ext = extensao(s, (job) => (job.url.includes('MLB-4000000007') && ext.jobs.length === 1 ? { ok: false, error: 'a Central recusou' } : { ok: true, link: 'https://meli.la/Revisao1' }));
+  // o ML vai à revisão pelo preço antigo de 10× (a falha do link não manda mais à revisão: rodar-sozinho entrega 2, CA2.1)
+  const s = await montar(t, { ofertas: [oferta(7, 'ml', { preco: 20, preco_antigo: 200, desconto_pct: 90 }), oferta(8, 'amazon', { preco: 1, preco_antigo: 1000, desconto_pct: 100 })] });
+  const ext = extensao(s, () => ({ ok: true, link: 'https://meli.la/Revisao1' }));
   t.after(() => ext.parar());
   const id = await s.regra({ per_run: 5 });
   await s.scheduler.runRule(id);
-  assert.deepEqual(itens(s.db, id).map((i) => [i.chave, i.status, i.motivos]), [[mlb(7), 'revisao', ['falha_link']], [`ASIN:${asin(8)}`, 'revisao', ['desconto_100', 'preco_antigo']]]);
+  assert.deepEqual(itens(s.db, id).map((i) => [i.chave, i.status, i.motivos]), [[mlb(7), 'revisao', ['preco_antigo']], [`ASIN:${asin(8)}`, 'revisao', ['desconto_100', 'preco_antigo']]]);
+  assert.equal(ext.jobs.length, 0, 'a que vai à revisão não pede link');
   const ml = idDoItem(s.db, id, mlb(7)); const am = idDoItem(s.db, id, `ASIN:${asin(8)}`);
+  const corrigido = { ajustes: { oldPrice: '30,00' } }; // o dono corrige o preço antigo
 
   // modo direto: link comum (sem comissão) nunca sai
   s.ctl.modo = 'direct';
-  const d = await s.post(`/api/catalogo/itens/${ml}/enviar`, {});
+  const d = await s.post(`/api/catalogo/itens/${ml}/enviar`, corrigido);
   assert.equal(d.status, 400); assert.match(d.json.erro, /modo direto/);
   assert.equal(itemDe(s.db, id, mlb(7)).status, 'revisao');
   assert.equal(contar(s.db, 'SELECT COUNT(*) AS n FROM envios'), 0);
   // de volta à extensão: o link é gerado na hora e a oferta sai
   s.ctl.modo = 'extension';
-  const ok = await s.post(`/api/catalogo/itens/${ml}/enviar`, {});
+  const ok = await s.post(`/api/catalogo/itens/${ml}/enviar`, corrigido);
   assert.equal(ok.status, 200, ok.txt);
   await assentar(s);
   assert.ok(s.textos().some((x) => x.includes('https://meli.la/Revisao1')));

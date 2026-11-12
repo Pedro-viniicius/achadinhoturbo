@@ -15,6 +15,7 @@ import { proximoHorario, horarioDe, resolverVencido, proximoEnvio, qtdDaLinha, t
 import { sleep, jitter, inWindow, alignToWindow } from './util.js';
 import { criarTrava, lerEnviados, comparar, centavos, maisBarataOBastante, tituloParaGuardar, comFraseMaisBarata, textoConflito, textoPassou, textoConferencia, HORAS_ENTRE_PARECIDOS } from './parecido.js';
 import { PAUSA_DESCARTADA_H, RESERVA_AMAZON_H, MOTIVOS_VERIFICADOR, CAUSAS, reservaValida } from './verificador.js';
+import { ErroLinkML, CAUSAS_CENTRAL, TESTE_ESPERA_MIN } from './links.js';
 
 // Pausas entre mensagens e horário de funcionamento: moram em ./util.js (src/envios.js usa o mesmo ritmo anti-bloqueio);
 // reexportados aqui.
@@ -33,6 +34,7 @@ const TEXTO_MOTIVO = {
 const TEXTO_ESPERA = {
   ml_direto: 'do Mercado Livre esperando: os links estão no modo direto, sem comissão. Volte ao modo da extensão em Ajustes.',
   ml_extensao: 'do Mercado Livre esperando a extensão do Chrome conectar.',
+  ml_espera: `do Mercado Livre esperando: a Central de Afiliados não está respondendo. O programa testa de novo a cada ${TESTE_ESPERA_MIN} min e elas saem sozinhas quando ela voltar.`,
   etiqueta: 'do Mercado Livre esperando: escolha uma etiqueta na regra.',
   amazon: 'da Amazon esperando: falta a tag de associado em Conexões → Amazon.',
   revisao_cheia: 'esperando: a revisão desta regra está cheia. Revise ou descarte as ofertas pendentes.',
@@ -45,16 +47,43 @@ const PAUSA_DESCARTADA_MS = PAUSA_DESCARTADA_H * 3600000;
 // revisão) dá lugar à próxima candidata, até as vagas da execução ou até TETO_REPOSICAO × as vagas de reposição (no
 // máximo vagas × (1 + TETO_REPOSICAO) escolhidas por execução)
 export const TETO_REPOSICAO = 3;
+/**
+ * Mercado Livre que se recupera (plano rodar-sozinho-entrega2, decisão 4): a falha passageira do link ou da conferência
+ * de uma oferta do ML a pula (a vaga vai à próxima) e conta 1 para ela, no máximo 1 por execução; na FALHAS_DA_OFERTA-ésima
+ * ela vai à revisão (catálogo, motivo `falhas_repetidas`) ou fica PAUSA_DESCARTADA_H fora da escolha (fontes antigas).
+ */
+export const FALHAS_DA_OFERTA = 3;
+/** Tempo gasto com escolhidas que caíram fora: passado dele, a execução não escolhe mais nenhuma (CA2.14, D8). */
+export const ORCAMENTO_FALHAS_S = 120;
+const ORCAMENTO_FALHAS_MS = ORCAMENTO_FALHAS_S * 1000;
 /** Por que a escolhida não saiu, na frase "saíram X de Y" (CA1.8). Frases curtas, sem jargão. */
 const PULADA_POR = {
   parecido: 'produto parecido', filtros: 'preço fora dos filtros', espera: 'falta conexão com a loja',
   revisao_cheia: 'revisão cheia', link: 'link não gerado', envio: 'falha no envio',
   conferencia: 'preço sem conferência', sem_preco: 'sem como saber o preço', desligado: 'verificador desligado',
+  // `link` fica para o erro sem classe (outras lojas, extensão desconectada nas fontes antigas); o ML usa `link_central`.
+  // `orcamento` não é motivo de pulada: é o fim da frase quando o tempo para repor vagas acabou (CA2.14)
+  link_central: 'Central sem resposta', ml_espera: 'Mercado Livre em espera', orcamento: 'o tempo para repor vagas acabou',
 };
 const DESCARTADA_POR = {
   esgotado: 'esgotada na loja', preco_subiu: 'preço subiu', nao_conferido: 'loja sem resposta e dados antigos',
   indisponivel: 'indisponível na loja', outro_produto: 'outro produto na página',
+  recusada_ml: 'recusada pelo Mercado Livre',
 };
+// Falhas que contam para a oferta do ML (decisão 4): a conferência que falhou por a loja não responder ou demorar. As
+// outras causas (extensão fora, leitura em pausa, verificação) não são da oferta: só a pulam.
+const CAUSAS_DA_OFERTA_ML = new Set(['loja_fora', 'demorou']);
+// as falhas da oferta ficam guardadas por até 7 dias sem uma nova (só em memória; um reinício as zera, premissa P1)
+const VIDA_FALHAS_MS = 7 * 86400000;
+const ordinal = (n) => `${n}ª`;
+/** Fim da linha "Pulada" na falha `n` da oferta (só na penúltima: aviso do que vem). `catalogo`: vai à revisão; senão, pausa. */
+function avisoDaFalha(n, catalogo) {
+  if (n !== FALHAS_DA_OFERTA - 1) return '';
+  const depois = catalogo ? 'ela vai para a revisão' : `ela fica ${PAUSA_DESCARTADA_H} h fora da escolha desta regra`;
+  return ` É a ${ordinal(n)} vez que falha; na ${ordinal(FALHAS_DA_OFERTA)} ${depois}.`;
+}
+/** Frase curta da causa da falha do link do ML (CAUSAS_CENTRAL de src/links.js); sem causa conhecida, "não respondeu". */
+const causaDoLink = (causa) => (Object.hasOwn(CAUSAS_CENTRAL, causa ?? '') ? CAUSAS_CENTRAL[causa] : CAUSAS_CENTRAL.central_sem_resposta);
 /** "2 descartadas (esgotada na loja)" ou, com motivos diferentes, "2 descartadas (1 esgotada na loja, 1 preço subiu)". */
 function pedacoDeFalta(n, singular, plural, motivos) {
   const lista = [...motivos];
@@ -231,6 +260,25 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
     descartadas.set(chavePausa(rule, key), agora + PAUSA_DESCARTADA_MS);
   }
 
+  // ---------- falhas passageiras do Mercado Livre por oferta (plano rodar-sozinho-entrega2, decisão 4; CA2.3)
+  // "regra\0chave" → { n, exec, em }: quantas execuções diferentes falharam com a oferta (link ou conferência), a última
+  // execução que contou e quando. Só em memória (P1): um reinício zera, no pior caso 2 tentativas a mais.
+  const falhasMl = new Map();
+  let execucoes = 0; // id de cada execução (novaExecucao): duas falhas na mesma execução contam uma
+  /** Conta a falha da oferta `key` na execução `execId`. → quantas execuções já falharam com ela (com esta). */
+  function contarFalhaMl(rule, key, execId) {
+    const agora = Date.now();
+    for (const [k, f] of falhasMl) if (agora - f.em > VIDA_FALHAS_MS) falhasMl.delete(k); // sem crescer para sempre
+    const k = chavePausa(rule, key);
+    const f = falhasMl.get(k) ?? { n: 0, exec: null, em: agora };
+    if (f.exec !== execId) { f.n++; f.exec = execId; }
+    f.em = agora;
+    falhasMl.set(k, f);
+    return f.n;
+  }
+  /** A oferta saiu, foi descartada ou foi à revisão: a contagem recomeça. */
+  const esquecerFalhaMl = (rule, key) => { falhasMl.delete(chavePausa(rule, key)); };
+
   // ---------- produto igual ou parecido (plano nao-repetir-produto-parecido): uma linha "Pulada" por conflito
   // Fora das Novidades a mesma candidata volta a cada execução e seria pulada de novo pelo mesmo motivo (achados R4/S1):
   // "regra\0chave\0conflito" → até quando a linha não se repete (só em memória; um reinício loga de novo, uma vez).
@@ -307,12 +355,49 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
     try { amazon.montarLink(SONDA_ASIN); return true; } catch { return false; }
   }
 
-  /** O Mercado Livre gera link de afiliado agora? null = sim; senão o motivo da espera (modo direto = link comum, CA4). */
+  /**
+   * Estado da Central de Afiliados (src/links.js central(): estado e testeLiberado), só no modo da extensão. Só consulta:
+   * não gasta o teste da espera. Nunca lança (null = sem estado).
+   */
+  function centralAgora() {
+    if (links?.modo?.() !== 'extension') return null;
+    try { return links.central?.() ?? null; } catch { return null; }
+  }
+  /**
+   * O Mercado Livre gera link de afiliado agora? null = sim; senão o motivo da espera (modo direto = link comum, CA4). A
+   * Central em espera (plano rodar-sozinho-entrega2, CA2.4) segura o ML na escolha, salvo quando o teste está liberado:
+   * então a próxima oferta escolhida é a candidata de teste.
+   */
   function esperaDoMl() {
     const modo = links?.modo?.();
     if (modo === 'fake') return null;
-    if (modo === 'extension') return links.status?.().online ? null : 'ml_extensao';
+    if (modo === 'extension') {
+      if (!links.status?.().online) return 'ml_extensao';
+      const c = centralAgora();
+      return c?.estado === 'em_espera' && c.testeLiberado !== true ? 'ml_espera' : null;
+    }
     return 'ml_direto';
+  }
+  /** A Central está em espera com o teste liberado: a oferta do ML escolhida agora é a candidata de teste (D2). */
+  const candidataDeTeste = () => { const c = centralAgora(); return c?.estado === 'em_espera' && c.testeLiberado === true; };
+
+  /**
+   * Falha de um pedido de link do ML → o resultado de linkDoCatalogo/linkDoCodigo. ErroLinkML (src/links.js): a espera
+   * da Central e a extensão desconectada viram { espera } quando `comEspera` (catálogo); a recusa e a falha passageira,
+   * { falha, classe, causa }. Erro sem classe: { falha } (como antes).
+   */
+  function falhaDoLink(e, comEspera) {
+    if (e instanceof ErroLinkML) {
+      if (comEspera && (e.classe === 'espera' || e.classe === 'desconectada')) {
+        return { espera: esperaDoMl() ?? (e.classe === 'espera' ? 'ml_espera' : 'ml_extensao') };
+      }
+      return { falha: e.message || 'erro', classe: e.classe, causa: e.causa };
+    }
+    if (comEspera) {
+      const depois = esperaDoMl(); // a extensão caiu no meio: espera, não vai à revisão (P8)
+      if (depois && depois !== 'ml_espera') return { espera: depois };
+    }
+    return { falha: e?.message || 'erro' };
   }
 
   /** Loja da oferta do catálogo indisponível agora (espera, sem revisão)? A Shopee sai só pela revisão: nunca espera. */
@@ -331,10 +416,7 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
     const antes = esperaDoMl();
     if (antes) return { espera: antes };
     if (!etq) return { espera: 'etiqueta' };
-    try { return { link: await links.requestLink({ url: offer.url, tag: etq.name }) }; } catch (e) {
-      const depois = esperaDoMl(); // a extensão caiu no meio: espera, não vai à revisão (P8)
-      return depois ? { espera: depois } : { falha: e?.message || 'erro' };
-    }
+    try { return { link: await links.requestLink({ url: offer.url, tag: etq.name }) }; } catch (e) { return falhaDoLink(e, true); }
   }
 
   // ---------- rastreio por grupo (plano dashboard-ganhos, etapa 8: D1, D4, D6; CA1, CA3, CA4, CA9)
@@ -356,7 +438,7 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
     }
     if (offer.catalogo) return linkDoCatalogo(offer, codigo ? { name: codigo } : null);
     if (!codigo) return { falha: 'escolha uma etiqueta' }; // nunca pede link sem etiqueta
-    try { return { link: await links.requestLink({ url: offer.url, tag: codigo }) }; } catch (e) { return { falha: e.message }; }
+    try { return { link: await links.requestLink({ url: offer.url, tag: codigo }) }; } catch (e) { return falhaDoLink(e, false); }
   }
 
   /**
@@ -366,7 +448,7 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
    * 'falha_link' (D4: nunca link comum); o padrão que falha deixa sem link só os grupos que dependem dele.
    * → { espera } | { porJid: Map(jid → destino), algum, falha, avisos }, destino = { link, codigo, nivel,
    * bloco_id, esperado, motivo } ou { falha } (sem link). `falha`: a do padrão (ou a primeira), para quando
-   * nenhum grupo tem link.
+   * nenhum grupo tem link; `classe` e `causa` dela (ErroLinkML do ML), quando houver.
    */
   async function linksPorCodigo(offer, etq, jids) {
     const loja = lojaDaOferta(offer);
@@ -384,15 +466,21 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
       if (!gerados.has(chave)) gerados.set(chave, await linkDoCodigo(offer, etq, codigo, padrao));
       return gerados.get(chave);
     };
-    const porJid = new Map(); const avisos = []; let primeira = null; let algum = false;
+    const porJid = new Map(); const avisos = []; let primeira = null; let algum = false; let propria = null;
+    // a Central entrou em espera por causa de um pedido DESTA oferta (o código associado falhou e o padrão foi recusado
+    // pela espera): vale a falha dela, não a espera (a candidata de teste não segura o teste; D2)
+    const esperaOuFalha = (r) => (propria && !algum
+      ? { porJid: new Map(), algum: false, avisos: [], falha: propria.falha, classe: propria.classe ?? null, causa: propria.causa ?? null }
+      : { espera: r.espera });
     for (const e of entradas) {
       let destino = { codigo: e.codigo, nivel: e.nivel, bloco_id: e.bloco_id, esperado: e.esperado, motivo: e.motivo };
       let r = await gerar(e.codigo, !ATRIBUIDO.has(e.nivel));
-      if (r.espera) return { espera: r.espera };
+      if (r.espera) return esperaOuFalha(r);
       if (!r.link && ATRIBUIDO.has(e.nivel)) {
         const falhou = r.falha;
+        propria ??= r;
         r = await gerar(codigoPadrao, true);
-        if (r.espera) return { espera: r.espera };
+        if (r.espera) return esperaOuFalha(r);
         destino = { codigo: codigoPadrao, nivel: 'padrao', bloco_id: null, esperado: 1, motivo: 'falha_link' };
         if (r.link) {
           avisos.push(loja === 'amazon'
@@ -405,12 +493,13 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
         if (loja === 'amazon' && destino.nivel === 'padrao') destino.codigo = tagDoLink(r.link);
         for (const jid of e.jids) porJid.set(jid, { ...destino, link: r.link });
       } else {
-        primeira ??= r.falha;
+        primeira ??= r;
         for (const jid of e.jids) porJid.set(jid, { falha: r.falha });
       }
     }
     const chavePadrao = loja === 'amazon' ? null : codigoPadrao;
-    return { porJid, algum, avisos, falha: gerados.get(chavePadrao)?.falha ?? primeira };
+    const ruim = gerados.get(chavePadrao)?.falha != null ? gerados.get(chavePadrao) : primeira;
+    return { porJid, algum, avisos, falha: ruim?.falha, classe: ruim?.classe ?? null, causa: ruim?.causa ?? null };
   }
 
   /** Linha de rastreio_envios do grupo que recebeu (D6, CA1). Nunca lança: o envio já saiu (no console só o código). */
@@ -440,10 +529,10 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
    * `filtradas`: quantas candidatas a escolha deixou de fora, por quê (a linha "Antes da escolha…"). `conferenciaNaHora`:
    * o verificador estava ligado no começo (o catálogo pode pedir preços mais velhos, cada oferta é conferida antes de sair).
    * `porLoja`: o que aconteceu com as escolhidas de cada loja e, em `esperou`, as que esperaram, escolhidas ou não (vai no
-   * summary).
+   * summary). `id`: identifica a execução na contagem das falhas do ML por oferta (falhasMl).
    */
   const novaExecucao = () => ({
-    paginas: new Map(), recusadas: new Set(), esperando: new Map(), vistas: new Set(), puladas: [],
+    id: ++execucoes, paginas: new Map(), recusadas: new Set(), esperando: new Map(), vistas: new Set(), puladas: [],
     filtradas: { filtros: 0, pausa: 0, parecidas: 0, semConferencia: 0 }, conferenciaNaHora: false, porLoja: contadoresPorLoja(),
   });
   // a regra apagada no meio da execução não grava nada do catálogo: o id pode ser reaproveitado por uma regra nova
@@ -757,17 +846,73 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
       const jids = groups.map((g) => g.jid);
       // por que as escolhidas não saíram, para a frase "saíram X de Y" (CA1.8)
       const faltas = { pulada: new Map(), descartada: new Map(), revisao: 0 };
+      // orçamento (CA2.14): o tempo gasto com as escolhidas que caíram fora, cada uma desde a vez dela (depois da pausa
+      // entre ofertas, que é do ritmo e não da falha) até cair fora
+      let gastoFora = 0; let inicioDaVez = Date.now(); let semTempo = false;
       /** A escolhida `o` caiu fora: `tipo` 'pulada' | 'descartada' | 'revisao'; `naLoja`: o contador de summary.porLoja. */
       const faltou = (o, tipo, motivo = null, naLoja = tipo) => {
         if (tipo === 'revisao') faltas.revisao++;
         else faltas[tipo].set(motivo, (faltas[tipo].get(motivo) || 0) + 1);
         if (tipo === 'pulada') summary.puladas++;
         contarNaLoja(exec, lojaDoResumo(o), naLoja);
+        gastoFora += Math.max(0, Date.now() - inicioDaVez);
       };
       // descarte do verificador (D8): uma linha 'aviso' por oferta, nunca 'erro'; a vaga é reposta (CA1.7)
       const descartar = (o, c) => {
         summary.descartadas++; faltou(o, 'descartada', DESCARTADA_POR[c.motivo] ?? c.motivo);
         log(rule, { level: 'aviso', offer_title: o.title, message: c.texto });
+      };
+      /**
+       * Falha passageira do ML com a escolhida `o` (link ou conferência; plano rodar-sozinho-entrega2, decisão 4 e D2).
+       * `teste`: ela foi escolhida com a espera da Central aberta e o teste liberado; a falha não conta e ela fica
+       * PAUSA_DESCARTADA_H fora da escolha (uma oferta que sempre falha não segura o teste). Senão conta 1 (uma por
+       * execução); na FALHAS_DA_OFERTA-ésima vai à revisão (catálogo, `falhas_repetidas`) ou fica PAUSA_DESCARTADA_H fora
+       * (fonte antiga). `pulada(fim)`: a linha "Pulada…" com o fim dado; `separada`: a linha da revisão. Linhas 'aviso'.
+       */
+      const falhaDaOfertaMl = (o, offer, { teste, motivoPulada, pulada, separada }) => {
+        if (teste) {
+          pausar(rule, o.key);
+          faltou(o, 'pulada', motivoPulada);
+          log(rule, { level: 'aviso', offer_title: o.title, message: pulada(FICA_FORA) });
+          return;
+        }
+        const n = contarFalhaMl(rule, o.key, exec.id);
+        if (n < FALHAS_DA_OFERTA) {
+          faltou(o, 'pulada', motivoPulada);
+          log(rule, { level: 'aviso', offer_title: o.title, message: pulada(`${TENTA_DE_NOVO}${avisoDaFalha(n, !!o.catalogo)}`) });
+          return;
+        }
+        if (!o.catalogo) {
+          esquecerFalhaMl(rule, o.key); pausar(rule, o.key);
+          faltou(o, 'pulada', motivoPulada);
+          log(rule, { level: 'aviso', offer_title: o.title, message: pulada(`Falhou em ${FALHAS_DA_OFERTA} envios seguidos: fica ${PAUSA_DESCARTADA_H} h fora da escolha desta regra.`) });
+          return;
+        }
+        if (!regraExiste(rule.id)) return;
+        if (catalogoItens.registrar(rule, offer, 'revisao', ['falhas_repetidas'])) {
+          esquecerFalhaMl(rule, o.key);
+          summary.revisao++; faltou(o, 'revisao');
+          log(rule, { level: 'aviso', offer_title: offer.title, message: separada });
+        } else { esperar(exec, 'revisao_cheia'); faltou(o, 'pulada', PULADA_POR.revisao_cheia, 'esperou'); }
+      };
+      /** O link do ML não saiu para nenhum grupo (`r` de linksPorCodigo, sem espera): descarte pela recusa ou falha da oferta. */
+      const linkMlFalhou = (o, offer, r, teste) => {
+        const causa = causaDoLink(r.causa);
+        if (r.classe === 'recusa') {
+          // a Central respondeu: o anúncio é que não serve (CA2.2). Catálogo: descartado; fonte antiga: 6 h fora
+          esquecerFalhaMl(rule, o.key);
+          if (o.catalogo) {
+            if (!regraExiste(rule.id)) return;
+            catalogoItens.registrar(rule, offer, 'descartado', []);
+          } else pausar(rule, o.key);
+          descartar(offer, { motivo: 'recusada_ml', texto: `Descartada: o Mercado Livre recusou gerar o link (${causa}).` });
+          return;
+        }
+        falhaDaOfertaMl(o, offer, {
+          teste, motivoPulada: PULADA_POR.link_central,
+          pulada: (fim) => `Pulada: não deu para gerar o link de afiliado (${causa}). ${fim}`,
+          separada: `Separada para revisão: o link falhou em ${FALHAS_DA_OFERTA} envios seguidos (${causa}). Abra a oferta em Histórico > Catálogo, confira e envie à mão.`,
+        });
       };
       // vaga reposta (CA1.7): até `want` ofertas saírem, com no máximo want × (1 + TETO_REPOSICAO) escolhidas
       const tetoEscolhidas = want * (1 + TETO_REPOSICAO);
@@ -777,6 +922,8 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
       const fecharAtual = () => { if (atual && !atual.saiu) escolha.devolver(atual.key); atual = null; };
       while (saidas < want && escolhidas < tetoEscolhidas) {
         fecharAtual();
+        // passado o orçamento, nenhuma outra é escolhida (CA2.14); a proteção do número continua valendo por oferta
+        if (gastoFora >= ORCAMENTO_FALHAS_MS) { semTempo = true; break; }
         let o;
         try { o = await escolha.proxima(); } catch (e) {
           log(rule, { level: 'erro', message: 'Não consegui buscar ofertas: ' + e.message }); summary.errors++; return summary;
@@ -787,6 +934,9 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
         atual = { key: o.key, saiu: false };
         // a pausa entre ofertas vem antes da próxima que vai ser tentada (nunca depois da última)
         if (pausaAntes) { pausaAntes = false; await sleep(jitter(d.offer)); }
+        inicioDaVez = Date.now();
+        // a vez dela com a Central em espera e o teste liberado (D2): é a candidata de teste
+        const teste = lojaDoResumo(o) === 'ml' && candidataDeTeste();
         const reservada = reservadaDurante(o);
         if (reservada) {
           // a reservada pelo Catálogo conta como tratada no cursor das Novidades, como a barrada na escolha
@@ -794,6 +944,13 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
           // a mesma chave já está na fila do Catálogo: sem linha, como a chave exata (wasSent/tratada)
           if (!reservada.mesmaChave) logarPuladaUmaVez(rule, { key: o.key, title: o.title, r: reservada }, Date.now());
           faltou(o, 'pulada', PULADA_POR.parecido);
+          continue;
+        }
+        // a Central entrou em espera depois da escolha (ou a oferta é de uma fonte antiga, que não espera na escolha): o ML
+        // espera sem pedido à extensão, nem de conferência nem de link (CA2.4). Fonte antiga: sem linha de espera (P2)
+        if (lojaDoResumo(o) === 'ml' && esperaDoMl() === 'ml_espera') {
+          if (o.catalogo) esperar(exec, 'ml_espera');
+          faltou(o, 'pulada', PULADA_POR.ml_espera, 'esperou');
           continue;
         }
         // proteção do número antes de cada oferta (nem conferência nem link), também na reposta: sem vaga para os grupos
@@ -821,7 +978,8 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
         let gerados; // um link por código de rastreio distinto (linksPorCodigo)
         let sufixo = ''; // do verificador, na linha 'ok' de cada grupo (D8)
         if (offer.catalogo) {
-          // revisão em vez de envio (D5): Shopee, preço suspeito ou falha do link deste item (nenhum grupo com link)
+          // revisão em vez de envio (D5): Shopee, preço suspeito, falha do link da Amazon (nenhum grupo com link) ou a 3ª
+          // falha da mesma oferta do ML (falhas_repetidas, rodar-sozinho entrega 2)
           let motivos = offer.motivos; let detalhe = '';
           if (!motivos.length) {
             // a lista veio com a idade larga (o verificador estava ligado no começo, decisão 5) e o verificador foi
@@ -846,9 +1004,19 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
               if (!motivos.length && naoMaisBarata(offer)) { puladaNaConferencia(offer); exec.recusadas.add(o.key); continue; }
             } else if (c.motivo === 'nao_conferido') {
               // falha técnica nunca vai à revisão (plano rodar-sozinho-entrega1, decisão 4; CA1.5): pulada, sem
-              // catalogo_itens e sem sent_offers, e a vaga vai à próxima candidata. O preço impossível de conhecer e a
-              // Amazon cuja página falhou agora (`releu`, achados Q1/R2: a "veneno" não prende a cabeça da lista) ficam
-              // PAUSA_DESCARTADA_H fora da escolha; o resto pode voltar já
+              // catalogo_itens e sem sent_offers, e a vaga vai à próxima candidata. O Mercado Livre que não respondeu ou
+              // demorou (plano rodar-sozinho-entrega2, CA2.1 e CA2.3) conta como falha da oferta: na 3ª ela vai à revisão
+              if (o.loja === 'ml' && CAUSAS_DA_OFERTA_ML.has(c.causa)) {
+                const porque = CAUSAS[c.causa];
+                falhaDaOfertaMl(o, offer, {
+                  teste, motivoPulada: PULADA_POR.conferencia,
+                  pulada: (fim) => `Pulada: não deu para conferir o preço (${porque}). O Mercado Livre não sai sem conferir; ${fim.charAt(0).toLowerCase()}${fim.slice(1)}`,
+                  separada: `Separada para revisão: a conferência do preço falhou em ${FALHAS_DA_OFERTA} envios seguidos (${porque}). Abra a oferta em Histórico > Catálogo, confira o preço na loja e envie à mão.`,
+                });
+                continue;
+              }
+              // o preço impossível de conhecer e a Amazon cuja página falhou agora (`releu`, achados Q1/R2: a "veneno" não
+              // prende a cabeça da lista) ficam PAUSA_DESCARTADA_H fora da escolha; o resto pode voltar já
               const semPreco = CAUSAS_SEM_PRECO.has(c.causa);
               const foraDaEscolha = semPreco || c.releu === true;
               if (foraDaEscolha) pausar(rule, o.key);
@@ -864,8 +1032,10 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
           }
           if (!motivos.length) {
             const r = await linksPorCodigo(offer, etq, jids);
-            if (r.espera) { esperar(exec, r.espera); faltou(o, 'pulada', PULADA_POR.espera, 'esperou'); continue; }
+            if (r.espera) { esperar(exec, r.espera); faltou(o, 'pulada', r.espera === 'ml_espera' ? PULADA_POR.ml_espera : PULADA_POR.espera, 'esperou'); continue; }
             if (r.algum) gerados = r;
+            // o link do ML que falha nunca vai à revisão por isso (CA2.1): pulada, descartada pela recusa ou, na 3ª, revisão
+            else if (offer.loja === 'ml') { linkMlFalhou(o, offer, r, teste); continue; }
             else { motivos = ['falha_link']; detalhe = ` (${r.falha})`; }
           }
           if (motivos.length) {
@@ -887,6 +1057,11 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
           if (naoMaisBarata(offer)) { puladaNaConferencia(offer); continue; }
           gerados = await linksPorCodigo(offer, etq, jids);
           if (!gerados.algum) {
+            // a Central fechou a espera para este pedido (o teste foi usado por outro): espera, sem contar nem linha (P2)
+            if (gerados.classe === 'espera') { faltou(o, 'pulada', PULADA_POR.ml_espera, 'esperou'); continue; }
+            // recusa ou falha passageira da Central (ErroLinkML): como no catálogo, sem revisão (pausa de 6 h na 3ª)
+            if (gerados.classe === 'recusa' || gerados.classe === 'passageira') { linkMlFalhou(o, offer, gerados, teste); continue; }
+            // extensão desconectada ou erro sem classe: como antes
             log(rule, { level: 'erro', offer_title: offer.title, message: 'Link de afiliado não gerado: ' + gerados.falha });
             summary.errors++; faltou(o, 'pulada', PULADA_POR.link); continue;
           }
@@ -934,6 +1109,7 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
         if (okCount) {
           // chegou a um grupo: ocupa a vaga e fica na trava da rodada (as parecidas dela seguem barradas)
           atual.saiu = true; saidas++; contarNaLoja(exec, lojaDoResumo(o), 'saiu');
+          esquecerFalhaMl(rule, o.key);
         } else if (!parada) faltou(o, 'pulada', PULADA_POR.envio);
         if (okCount && !(offer.catalogo && !regraExiste(rule.id))) {
           gravadas.add(Number(db.prepare('INSERT INTO sent_offers (rule_id, offer_key, sent_at, title, price_cents) VALUES (?,?,?,?,?)')
@@ -961,7 +1137,8 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
         // na regra por intervalo parada pelo silêncio, a linha do adiamento (abaixo) já diz o motivo: sem repeti-lo, a
         // frase só sai se alguma escolhida caiu fora
         const adiada = parada?.motivo === 'silencio' && !rule.grade;
-        const fim = adiada ? null : parada ? motivoDaParada(parada) : acabou ? 'não havia mais ofertas novas dentro dos filtros' : null;
+        const fim = adiada ? null : parada ? motivoDaParada(parada) : semTempo ? PULADA_POR.orcamento
+          : acabou ? 'não havia mais ofertas novas dentro dos filtros' : null;
         if (!adiada || faltas.revisao || faltas.pulada.size || faltas.descartada.size) {
           const frase = fraseSairam(saidas, want, faltas, fim);
           log(rule, { level: 'aviso', message: prefixo ? `${prefixo}s${frase}` : `S${frase}` });

@@ -1118,42 +1118,52 @@ for (const [nome, freioForcado, pausaMs] of casosDePausa) {
   });
 }
 
-test('R1: 429 `intervalo` ou `ocupado` com espera longa (tentar_em_s 100) ou sem o campo — não espera, não pausa a releitura; a oferta é pulada sem 6 h de pausa', async (t) => {
+// Desde a entrega 2 de "Rodar sozinho" (CA2.15), `intervalo`/`ocupado` que sobram depois das novas tentativas pausam a
+// releitura por PAUSA_ETIQUETA_OCUPADO_S (60 s): a Amazon seguinte não espera de novo (reserva, se o preço tem menos de
+// 6 h; senão fica fora da escolha sem gastar tentativa). A oferta que esbarrou no freio continua sem 6 h de pausa.
+test('R1: 429 `intervalo` ou `ocupado` com espera longa (tentar_em_s 100) ou sem o campo — não espera na fila, pausa a releitura 60 s (a seguinte vai à reserva sem chamar o Etiqueta); a oferta é pulada sem 6 h de pausa', async (t) => {
   for (const corpo of [{ motivo: 'intervalo', segundos: 100 }, { motivo: 'intervalo', corpo: '{"versao":1,"resultado":"freio","motivo":"intervalo"}' }, { motivo: 'ocupado', segundos: 0 }]) {
-    const s = montarFreio(t, { itens: itensVelhos([1, 2]), extra: { forcar: (asin, n) => (asin === asinDe(1) && n === 1 ? corpo : null) } });
+    // 1: preço de 18 h (precisa da releitura); 2: preço de 2 h (sai pela reserva); 3: 18 h, atrás da 2
+    const lista = { ...itensVelhos([1]), ...itensVelhos([2], { precoEm: dia(2, 12) }), ...itensVelhos([3]) };
+    const s = montarFreio(t, { itens: lista, extra: { forcar: (asin, n) => (asin === asinDe(1) && n === 1 ? corpo : null) } });
     const id = regraAmazonCat(s.db, { per: 1 });
     const r = await s.scheduler.runRule(id);
     assert.deepEqual(s.estado.esperas, [], JSON.stringify(corpo));
-    assert.equal(r.offers, 1, `${JSON.stringify(corpo)}: a vaga vai à 2ª, que é lida na mesma execução (sem pausa da releitura)`);
+    assert.equal(r.offers, 1, `${JSON.stringify(corpo)}: a vaga vai à 2ª, pela reserva`);
     assert.deepEqual(enviadas(s.db, id), ['ASIN:' + asinDe(2)]);
-    // a 1ª não ficou 6 h fora: na execução seguinte ela volta a ser escolhida
+    assert.equal(s.estado.posts, 1, `${JSON.stringify(corpo)}: a releitura pausada não chama o Etiqueta para a 2ª`);
+    assert.deepEqual(itens(s.db, id).filter((i) => i.status === 'revisao'), []);
+    // dentro dos 60 s a releitura segue pausada: a 1ª (18 h) fica fora da escolha, sem pedido
+    s.avancar(30 * 1000);
+    await s.scheduler.runRule(id);
+    assert.equal(s.estado.posts, 1, `${JSON.stringify(corpo)}: 30 s depois o Etiqueta ainda não é perguntado`);
+    // a 1ª não ficou 6 h fora: passada a pausa de 60 s, ela volta a ser escolhida
     s.avancar(HORA);
     await s.scheduler.runRule(id);
     assert.ok(s.estado.porAsin.get(asinDe(1)) >= 2, `${JSON.stringify(corpo)}: a oferta que esbarrou no freio curto volta na execução seguinte`);
   }
 });
 
-test('R1: `ocupado` que não acaba — cada oferta escolhida custa 2 esperas de 3 s e vira "Pulada"; a execução é limitada pelo teto de escolhidas e nada vai à revisão', async (t) => {
+test('R1: `ocupado` que não acaba — só a 1ª escolhida custa 2 esperas de 3 s e vira "Pulada"; a releitura pausa 60 s e as outras ficam fora da escolha sem chamar o Etiqueta; nada vai à revisão', async (t) => {
   const s = montarFreio(t, { itens: itensVelhos([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]), extra: { forcar: () => ({ motivo: 'ocupado', segundos: 3 }) } });
   const id = regraAmazonCat(s.db, { per: 2 });
   const antes = s.logs(id).length;
   const r = await s.scheduler.runRule(id);
-  const tentadas = r.puladas;
   assert.equal(r.offers, 0);
-  assert.equal(tentadas, 8, 'no máximo 4× as vagas (2 × (1 + 3))');
-  assert.equal(s.estado.posts, tentadas * 3, 'três pedidos por oferta (1 + 2 novas tentativas)');
-  assert.equal(s.estado.esperas.length, tentadas * 2);
-  assert.ok(s.estado.esperas.every((ms) => ms === 3000));
+  assert.equal(r.puladas, 1, 'a pausa de 60 s (CA2.15) tira as Amazon velhas seguintes da escolha: uma só é tentada');
+  assert.equal(s.estado.posts, 3, 'três pedidos (1 + 2 novas tentativas), e nenhum para as outras nove');
+  assert.deepEqual(s.estado.esperas, [3000, 3000]);
   const esperaTotalS = s.estado.esperas.reduce((a, b) => a + b, 0) / 1000;
-  assert.equal(esperaTotalS, 48, 'pior caso desta regra: 48 s presos esperando, sem contar a leitura');
+  assert.equal(esperaTotalS, 6, 'pior caso desta regra: 6 s presos esperando (era 48 s antes da pausa de 60 s)');
   assert.deepEqual(enviadas(s.db, id), []);
   assert.deepEqual(itens(s.db, id), []);
   const linhas = s.logs(id).slice(antes);
-  assert.ok(linhas.length <= 10, `linhas gravadas: ${linhas.length}`);
-  assert.ok(linhas.filter((l) => l.message.startsWith('Pulada')).length === 8);
+  assert.ok(linhas.length <= 4, `linhas gravadas: ${linhas.length}`);
+  assert.equal(linhas.filter((l) => l.message.startsWith('Pulada')).length, 1);
   assert.ok(linhas.every((l) => /Etiqueta estava ocupado/.test(l.message) || !l.message.startsWith('Pulada')), linhas.map((l) => l.message).join(' | '));
-  // não pausou a releitura: a execução seguinte tenta de novo (e de novo gasta o mesmo)
-  s.avancar(HORA);
+  assert.ok(linhas.some((l) => l.message === 'Antes da escolha, 9 ofertas ficaram de fora: 9 da Amazon que não dá para conferir agora.'), linhas.map((l) => l.message).join(' | '));
+  // a pausa é curta: passados os 60 s, a execução seguinte tenta de novo
+  s.avancar(61 * 1000);
   const postsAntes = s.estado.posts;
   await s.scheduler.runRule(id);
   assert.ok(s.estado.posts > postsAntes);

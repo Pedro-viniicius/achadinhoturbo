@@ -220,7 +220,7 @@ test('CA3: recusada pelos filtros da regra conta como tratada para o cursor; a q
   assert.deepEqual(cursor(s.db, id, cfg), { cursor: 'c3', pronto: 1 });
 });
 
-test('CA4: ML pela extensão — off-line espera; on-line pede o link com a etiqueta; falha do item vai à revisão', async (t) => {
+test('CA4: ML pela extensão — off-line espera; on-line pede o link com a etiqueta; falha do item é pulada, sem revisão', async (t) => {
   const s = await montar(t, { ofertas: [oferta(1, 'ml')], modoLinks: 'extension' });
   const id = regra(s.db, { cfg: { ordem: 'relevancia', lojas: ['ml'] } });
 
@@ -240,17 +240,18 @@ test('CA4: ML pela extensão — off-line espera; on-line pede o link com a etiq
   assert.match(s.wa.simulated[0].text, /https:\/\/meli\.la\/Afil01/);
   assert.deepEqual(itens(s.db, id).map((i) => i.status), ['enviado']);
 
-  // outro item: a Central recusa o link → revisão com falha_link, nada enviado
+  // outro item: o link falha → pulada (falha passageira, rodar-sozinho entrega 2, CA2.1), sem revisão e nada enviado
   s.estado.ofertas.push(oferta(2, 'ml'));
   const rodando3 = s.scheduler.runRule(id);
   const job3 = await s.links.poll(3000);
   s.links.submit(job3.id, { ok: false, error: 'a Central recusou' });
   const r3 = await rodando3;
-  assert.deepEqual([r3.offers, r3.revisao], [0, 1]);
+  assert.deepEqual([r3.offers, r3.revisao, r3.puladas], [0, 0, 1]);
   assert.equal(s.wa.simulated.length, 1);
-  assert.deepEqual(itens(s.db, id)[1], { chave: mlb(2), loja: 'ml', status: 'revisao', motivos: ['falha_link'] });
+  assert.equal(itens(s.db, id).length, 1, 'nenhum item novo no Catálogo');
   assert.ok(!enviadas(s.db, id).includes(mlb(2)));
-  assert.ok(logs(s.db, id).some((l) => l.message === 'Separada para revisão: não consegui gerar o link (a Central recusou).'));
+  assert.ok(logs(s.db, id).some((l) => l.level === 'aviso'
+    && l.message === 'Pulada: não deu para gerar o link de afiliado (a Central de Afiliados não respondeu). Tenta de novo no próximo envio.'));
 });
 
 test('CA4: Amazon sem tag espera; Shopee vai sempre à revisão, sem pedir link', async (t) => {

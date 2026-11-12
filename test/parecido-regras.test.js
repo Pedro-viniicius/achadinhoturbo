@@ -755,25 +755,56 @@ test('R1: a escolhida que vai à revisão do Catálogo (Shopee) não fica "saind
   ]);
 });
 
-test('mesma chave (seguranca): o "Enviar de novo" de um envio que falhou, no meio da execução que escolheu a mesma oferta, recebe 409 "saindo agora"; ela sai uma vez', async (t) => {
-  const s = montarCatalogo(t, { ofertas: [oferta(1, A, 50, 'ml')] });
-  const id = regraCatalogo(s.db, { per: 1 }); // Relevância: o item 'enviado' cujo envio falhou volta a valer para a regra
-  const pedir = s.links.requestLink;
-  s.links.requestLink = async () => { throw new Error('falha de teste'); };
-  assert.equal((await s.scheduler.runRule(id)).revisao, 1, 'o link falhou: foi à revisão');
-  s.links.requestLink = pedir;
-  const item = s.db.prepare('SELECT id, chave FROM catalogo_itens WHERE rule_id = ?').get(id);
-  const { envio_id: envioId } = await s.catalogoItens.enviar(item.id, {});
+// Desde a entrega 2 de "Rodar sozinho" (CA2.8), o "Enviar" que falha em todos os grupos devolve o item à revisão (na mesma
+// transação em que tira a reserva) e o agendador roda esse liberarFalhos antes de cada escolha: a regra não escolhe mais
+// a oferta de um envio do Catálogo que falhou, então a corrida antiga ("Enviar de novo" × a regra mandando a mesma) deixou
+// de existir. O primeiro teste prova isso; o segundo prova o 409 "saindo agora" da mesma chave na corrida que sobra (a
+// regra a escolhe por outra fonte enquanto o item espera revisão).
+const reservasDe = (s, chave) => s.db.prepare('SELECT COUNT(*) AS n FROM sent_offers WHERE offer_key = ?').get(chave).n;
+
+test('mesma chave (seguranca): o "Enviar" que falhou em todos os grupos volta à revisão e a regra não escolhe mais a oferta; o "Enviar" no meio da execução passa e ela sai uma vez', async (t) => {
+  const s = montarCatalogo(t, { ofertas: [oferta(1, A, 50, 'ml'), oferta(2, C, 199.9, 'amazon')] });
+  const id = regraCatalogo(s.db, { per: 2 }); // Relevância: antes, o item 'enviado' cujo envio falhou voltava a valer para a regra
+  const item = naRevisao(s, id, itemML(4000000001, A, 50)); // a mesma chave da oferta 1 do Etiqueta
+  const { envio_id: envioId } = await s.catalogoItens.enviar(item, {});
   s.db.prepare("UPDATE envios SET status = 'erro' WHERE id = ?").run(envioId); // terminou sem nenhum grupo ok (R3)
   t.mock.timers.setTime(Date.now() + HORA);
   const reais = s.wa.sendText;
   let durante = null;
-  s.wa.sendText = async (...a) => { durante = await tentar(s, item.id); return reais(...a); };
+  // o dono clica "Enviar" de novo enquanto a regra manda a outra oferta (C)
+  s.wa.sendText = async (...a) => { durante ??= await tentar(s, item); return reais(...a); };
   const r = await s.scheduler.runRule(id);
-  assert.equal(r.offers, 1, 'a regra mandou a oferta de novo (a reserva do envio que falhou saiu)');
+  assert.equal(durante, 'enviou', 'a regra não está mandando a oferta do item: o "Enviar" passa');
+  assert.deepEqual([r.offers, r.messages], [1, 1], 'só a C saiu pela regra');
+  assert.ok(textos(s.wa).every((x) => !x.includes(`*${A}*`)), 'a regra não mandou a oferta do item');
+  assert.ok(!s.eventos.includes('link 4000000001'), 'a regra nem pediu o link da oferta do item');
+  assert.equal(s.db.prepare('SELECT COUNT(*) AS n FROM envios').get().n, 2, 'o envio que falhou e o novo "Enviar"');
+  assert.equal(reservasDe(s, 'MLB4000000001'), 1, 'uma reserva só, a do novo "Enviar"');
+  // a execução seguinte também não a escolhe (a reserva do novo "Enviar" vale)
+  await s.scheduler.runRule(id);
+  assert.equal(reservasDe(s, 'MLB4000000001'), 1);
+  assert.ok(textos(s.wa).every((x) => !x.includes(`*${A}*`)));
+});
+
+test('mesma chave (seguranca): a regra que escolheu a mesma oferta por outra fonte faz o "Enviar" do item em revisão receber 409 "saindo agora"; ela sai uma vez', async (t) => {
+  const s = montarCatalogo(t, { ofertas: [] });
+  // fonte 1: o Catálogo (o item em revisão vem dele); fonte 2: a Lista de links, com a mesma oferta do ML
+  const id = Number(s.db.prepare(`INSERT INTO rules (name, enabled, tag_id, template_id, group_jids, source_type, source_config, sources, per_run,
+    interval_min, window_start, window_end, dedupe_days, send_image, created_at) VALUES ('Duas fontes', 1, 1, ?, ?, 'list', '{}', ?, 1, 60, '00:00', '23:59', 7, 0, ?)`)
+    .run(template(s.db, CORPO), JSON.stringify(['111@g.us']), JSON.stringify([
+      { type: 'catalogo', tag_id: null, config: { ordem: 'relevancia' } },
+      { type: 'list', tag_id: null, config: { items: linha(1, A, 50) } },
+    ]), Date.now()).lastInsertRowid);
+  const item = naRevisao(s, id, itemML(1000001, A, 50)); // a mesma chave da linha da Lista
+  const reais = s.wa.sendText;
+  let durante = null;
+  s.wa.sendText = async (...a) => { durante ??= await tentar(s, item); return reais(...a); };
+  const r = await s.scheduler.runRule(id);
+  assert.equal(r.offers, 1, 'a regra mandou a da Lista');
   assert.equal(durante, saindoAgora(A));
-  assert.equal(s.db.prepare('SELECT COUNT(*) AS n FROM envios').get().n, 1, 'nenhum envio novo do Catálogo');
-  assert.deepEqual(enviadas(s.db, id).map((e) => e.offer_key), [item.chave], 'uma reserva só, a da regra');
+  assert.equal(s.db.prepare('SELECT COUNT(*) AS n FROM envios').get().n, 0, 'nenhum envio do Catálogo');
+  assert.equal(reservasDe(s, 'MLB1000001'), 1, 'uma reserva só, a da regra');
+  assert.equal(s.db.prepare('SELECT status FROM catalogo_itens WHERE id = ?').get(item).status, 'revisao', 'o item continua esperando o dono');
 });
 
 // ------------------------------------------------------------------- achado Q5: pulada na conferência
