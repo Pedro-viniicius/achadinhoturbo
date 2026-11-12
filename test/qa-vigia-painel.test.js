@@ -244,15 +244,15 @@ test('CA3.4 linhaVigia: sem causas, "Nenhum problema em aberto."; o ícone de aj
 test('CA3.4 linhaVigia: lista as causas em aberto com os nomes curtos e ignora a calada', () => {
   const v = ok(LOJA_AMAZON, REGRA, REVISAO, EXTENSAO, { ...LOJA_ML, calada: true });
   const { linhaVigia } = carregarRelatorios(v);
-  assert.match(texto(linhaVigia({ destinos: COM_ERRO })), /Em aberto agora: Amazon parada; Regra “Black_Operação” saiu vazia; 12 ofertas esperando revisão; Extensão do Chrome fora\. /);
+  assert.match(texto(linhaVigia({ destinos: COM_ERRO })), /Em aberto agora: Amazon parada; Regra “Black_Operação” saiu vazia; 12 ofertas esperando revisão; Extensão do Chrome desconectada\. /);
   assert.doesNotMatch(texto(linhaVigia({ destinos: COM_ERRO })), /Mercado Livre parado/);
   const c = carregarRelatorios(ok(CENTRAL)).linhaVigia({ destinos: COM_ERRO });
   assert.match(texto(c), /Em aberto agora: Mercado Livre em espera\./);
 });
 
-test('CA3.11 linhaVigia: ok:false mostra "Sem leitura agora; tentando de novo no próximo ciclo." e não lista causas', () => {
+test('CA3.11 linhaVigia: ok:false mostra "Sem leitura agora; tentando de novo daqui a pouco." e não lista causas', () => {
   const html = carregarRelatorios({ ok: false, causas: [LOJA_AMAZON] }).linhaVigia({ destinos: COM_ERRO });
-  assert.match(texto(html), /Sem leitura agora; tentando de novo no próximo ciclo\./);
+  assert.match(texto(html), /Sem leitura agora; tentando de novo daqui a pouco\./);
   assert.doesNotMatch(texto(html), /Amazon parada|Nenhum problema/);
 });
 

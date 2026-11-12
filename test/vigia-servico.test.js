@@ -29,13 +29,13 @@ const VAZAMENTO = /@s\.whatsapp\.net|\d{8,}|[\w.+-]+@[\w-]+\.[\w.]+|fulano|falho
 
 /**
  * Banco, relógio, extensão, WhatsApp e `entregar` de mentira, e o vigia. `r` controla tudo: r.agora (relógio),
- * r.pronto (WhatsApp de pé), r.online/r.lastPollAt/r.central/r.modo (links), r.devolve (o que o entregar devolve; uma
+ * r.dormiu (quanto tempo o PC passou suspenso: o relógio monotônico é r.agora − r.dormiu), r.pronto (WhatsApp de pé), r.online/r.lastPollAt/r.central/r.modo (links), r.devolve (o que o entregar devolve; uma
  * função lança). A primeira passada roda em `inicio`, com a tabela vazia: o cursor fica em 0.
  */
 function montar({ inicio = T(8), dir = tmp(), wa = null, entregar = null } = {}) {
   const db = openDb(dir);
   const r = {
-    agora: inicio, pronto: true, online: true, lastPollAt: inicio, modo: 'extension',
+    agora: inicio, dormiu: 0, pronto: true, online: true, lastPollAt: inicio, modo: 'extension',
     central: { estado: 'respondendo', emEsperaDesde: null }, devolve: 1, entregas: [], statusLanca: false,
   };
   const links = {
@@ -53,7 +53,8 @@ function montar({ inicio = T(8), dir = tmp(), wa = null, entregar = null } = {})
     if (typeof r.devolve === 'function') return r.devolve();
     return r.devolve;
   });
-  const novo = (mais = {}) => createVigia({ db, links, ritmo, wa: waFalso, entregar: entregarFalso, inicio, agora: () => r.agora, ...mais });
+  const novo = (mais = {}) => createVigia({ db, links, ritmo, wa: waFalso, entregar: entregarFalso, inicio, agora: () => r.agora,
+    monotonico: () => r.agora - r.dormiu, ...mais });
   const m = { dir, db, r, links, ritmo, novo, vigia: novo() };
   /** Uma passada em `ts` (o relógio anda junto). Devolve o que o tick devolveu, já esperado. */
   m.tick = async (ts, v = m.vigia) => { r.agora = ts; return v.tick(ts); };
@@ -103,20 +104,26 @@ async function amazonParada(m, h = 9) {
   for (const k of [0, 1, 2]) await m.rodar(T(h + k), QUEDA);
 }
 
-const segurado = (motivo) => ({ level: 'info', message: `Aviso do vigia segurado (${motivo}).` });
+const adiado = (motivo) => ({ level: 'info', message: `Aviso do vigia adiado: ${motivo}.` });
 
 // ---------- regras ativas ----------
 
-test('lojasDaRegra: lojas da fonte catálogo; lista vazia, fonte antiga ou JSON ruim = todas ([])', () => {
+test('lojasDaRegra: lojas da fonte catálogo; fonte antiga = Mercado Livre (somada na regra mista); catálogo com lista vazia = todas ([])', () => {
   const fonte = (...f) => ({ sources: JSON.stringify(f) });
   assert.deepEqual(lojasDaRegra(fonte({ type: 'catalogo', config: { lojas: ['amazon'] } })), ['amazon']);
   assert.deepEqual(lojasDaRegra(fonte({ type: 'catalogo', config: { lojas: ['amazon'] } }, { type: 'catalogo', config: { lojas: ['ml', 'amazon'] } })), ['amazon', 'ml']);
   assert.deepEqual(lojasDaRegra(fonte({ type: 'catalogo', config: { lojas: [] } })), []);
-  assert.deepEqual(lojasDaRegra(fonte({ type: 'catalogo', config: { lojas: ['amazon'] } }, { type: 'afiliados', config: {} })), [], 'uma fonte antiga pede todas');
-  assert.deepEqual(lojasDaRegra({ sources: null, source_type: 'list', source_config: '{}' }), [], 'regra de fonte única antiga');
+  // achado R1/Q1: o agendador conta a oferta da fonte antiga como ML; o vigia também (hierarquia do CA3.8)
+  assert.deepEqual(lojasDaRegra(fonte({ type: 'catalogo', config: { lojas: ['amazon'] } }, { type: 'afiliados', config: {} })), ['amazon', 'ml'], 'catálogo da Amazon + Central de Afiliados');
+  assert.deepEqual(lojasDaRegra(fonte({ type: 'list', config: {} }, { type: 'afiliados', config: {} })), ['ml'], 'só fontes antigas');
+  assert.deepEqual(lojasDaRegra(fonte({ type: 'catalogo', config: { lojas: [] } }, { type: 'list', config: {} })), [], 'catálogo com lista vazia pede todas, com ou sem fonte antiga');
+  assert.deepEqual(lojasDaRegra(fonte({ type: 'catalogo', config: { lojas: ['shopee'] } }, { type: 'list', config: {} })), ['shopee', 'ml']);
+  assert.deepEqual(lojasDaRegra({ sources: null, source_type: 'list', source_config: '{}' }), ['ml'], 'regra de fonte única antiga (Lista de links)');
+  assert.deepEqual(lojasDaRegra({ sources: null, source_type: 'afiliados', source_config: '{}' }), ['ml'], 'regra de fonte única antiga (Central de Afiliados)');
   assert.deepEqual(lojasDaRegra({ sources: null, source_type: 'catalogo', source_config: '{"lojas":["ml"]}' }), ['ml']);
-  assert.deepEqual(lojasDaRegra({ sources: '{lixo', source_type: 'catalogo', source_config: '{lixo' }), [], 'JSON ruim não lança');
+  assert.deepEqual(lojasDaRegra({ sources: '{lixo', source_type: 'catalogo', source_config: '{lixo' }), [], 'JSON ruim não lança (catálogo sem lista = todas)');
   assert.deepEqual(lojasDaRegra(null), []);
+  assert.deepEqual(lojasDaRegra('lixo'), []);
 });
 
 // ---------- estado em settings ----------
@@ -182,7 +189,7 @@ test('CA3.2 serviço: um aviso ao abrir, um "voltou" ao fechar e o freio de 3 h 
   // reabre 1 h 30 min depois do "voltou": o freio (contado do último aviso, de problema ou de volta) segura
   for (const t of [T(12, 30), T(13), T(13, 30)]) await m.rodar(t, QUEDA);
   assert.equal(m.r.entregas.length, 2);
-  assert.deepEqual(m.linhas().at(-1), { level: 'info', message: `Aviso do vigia sobre Amazon parada segurado (freio de ${FREIO_VIGIA_H} h).` });
+  assert.deepEqual(m.linhas().at(-1), { level: 'info', message: `Aviso do vigia sobre Amazon parada não enviado: freio de ${FREIO_VIGIA_H} h para essa causa.` });
   await m.tick(T(14, 59));
   assert.equal(m.r.entregas.length, 2);
   await m.tick(T(15));
@@ -270,7 +277,7 @@ test('CA3.7 nenhuma linha do vigia é erro, nem a falha do próprio vigia (uma l
 
     const linhas = m.linhas();
     assert.deepEqual(linhas.filter((l) => l.message === TEXTO_SEM_LEITURA), [{ level: 'aviso', message: TEXTO_SEM_LEITURA }, { level: 'aviso', message: TEXTO_SEM_LEITURA }]);
-    assert.equal(TEXTO_SEM_LEITURA, 'O vigia não conseguiu verificar agora. Tentando de novo no próximo ciclo.');
+    assert.equal(TEXTO_SEM_LEITURA, 'O vigia não conseguiu verificar agora. Tentando de novo daqui a pouco.');
     for (const tipo of ['aviso', 'info']) assert.ok(linhas.some((l) => l.level === tipo), `há linhas ${tipo}`);
     assert.ok(linhas.some((l) => l.message.startsWith('Aviso do vigia não chegou a nenhum número')), 'entrega vazia vira linha');
     assert.equal(Number(m.db.prepare("SELECT COUNT(*) AS n FROM log WHERE level = 'erro'").get().n), 0, 'nenhum erro no Histórico');
@@ -328,16 +335,16 @@ test('CA3.9 causas abertas no silêncio saem numa só mensagem ao fim dele, só 
   await m.tick(T(4, 0, 13));
   await m.tick(T(6, 59, 13));
   assert.deepEqual(m.r.entregas, []);
-  assert.deepEqual(m.linhas().filter((l) => l.message.startsWith('Aviso do vigia segurado')), [segurado('silêncio')], 'uma linha por episódio');
+  assert.deepEqual(m.linhas().filter((l) => l.message.startsWith('Aviso do vigia adiado')), [adiado('horário de silêncio')], 'uma linha por episódio');
   await m.tick(T(7, 0, 13));
   assert.equal(m.r.entregas.length, 1, 'uma mensagem só');
   assert.equal(m.r.entregas[0].texto.split('\n').slice(0, 2).join('\n'),
-    '⚠️ *2 problemas: Amazon parada, regra “Só ML” vazia*\nO programa estava em silêncio e agora vai avisando.');
+    '⚠️ *2 problemas: Amazon parada, regra “Só ML” vazia*\nO programa segurou estes avisos durante o horário de silêncio.');
   assert.doesNotMatch(m.r.entregas[0].texto, /revisão/, 'a revisão fechou na madrugada: fica fora');
   await m.tick(T(7, 1, 13));
   assert.equal(m.r.entregas.length, 1);
   assert.equal(m.estadoGravado().segurado, undefined);
-  assert.equal(m.linhas().filter((l) => l.message.includes('revisão em dia')).length, 1, 'o fechamento fica no Histórico');
+  assert.equal(m.linhas().filter((l) => l.message.includes('revisão voltou ao normal')).length, 1, 'o fechamento fica no Histórico');
 });
 
 test('abre às 22:59 e silêncio às 23:00: sai às 07:00, reavaliado', async () => {
@@ -380,7 +387,7 @@ test('CA3.9 WhatsApp fora segura e manda ao voltar (o "voltou" também), com uma
   m.vigia = m.novo();
   await m.tick(T(11, 50));
   assert.deepEqual(m.r.entregas, []);
-  assert.deepEqual(m.linhas().filter((l) => l.message.startsWith('Aviso do vigia segurado')), [segurado('WhatsApp fora')]);
+  assert.deepEqual(m.linhas().filter((l) => l.message.startsWith('Aviso do vigia adiado')), [adiado('WhatsApp desconectado')]);
   m.r.pronto = true;
   await m.tick(T(12));
   assert.equal(m.r.entregas.length, 1);
@@ -392,7 +399,7 @@ test('CA3.9 WhatsApp fora segura e manda ao voltar (o "voltou" também), com uma
   await m.rodar(T(13), VOLTA);
   await m.tick(T(13, 30));
   assert.equal(m.r.entregas.length, 1);
-  assert.equal(m.linhas().filter((l) => l.message.startsWith('Aviso do vigia segurado')).length, 2, 'episódio novo, linha nova');
+  assert.equal(m.linhas().filter((l) => l.message.startsWith('Aviso do vigia adiado')).length, 2, 'episódio novo, linha nova');
   m.r.pronto = true;
   await m.tick(T(14));
   assert.equal(m.r.entregas.length, 2);
@@ -423,7 +430,7 @@ test('CA3.9 sem silêncio ligado, nada segura', async () => {
   regra(n.db, 'Achados');
   await n.rodar(T(23, 10), QUEDA); await n.rodar(T(23, 20), QUEDA); await n.rodar(T(23, 30), QUEDA);
   assert.equal(n.r.entregas.length, 1);
-  assert.deepEqual(n.linhas().filter((l) => l.message.startsWith('Aviso do vigia segurado')), []);
+  assert.deepEqual(n.linhas().filter((l) => l.message.startsWith('Aviso do vigia adiado')), []);
 });
 
 // ---------- CA3.10: reinício ----------
@@ -465,8 +472,74 @@ test('CA3.10 extensão off-line logo depois do reinício não abre (desde ≥ in
   await m.rodar(T(9, 31), esperou);
   assert.deepEqual(m.vigia.estado().causas.map((c) => c.chave), ['ml_fora']);
   assert.equal(m.r.entregas.length, 1);
-  assert.match(m.r.entregas[0].texto, /^⚠️ \*Extensão do Chrome fora desde 09:00\*/);
+  assert.match(m.r.entregas[0].texto, /^⚠️ \*Extensão do Chrome desconectada desde 09:00\*/);
   assert.ok(m.linhas().every((l) => !/regra “Só ML” saiu vazia 2 vezes/.test(l.message)), 'a regra só de ML fica calada pela extensão');
+});
+
+// ---------- Q2: volta da suspensão do computador ----------
+
+test('Q2 suspensão: ao acordar, a extensão com o último contato da véspera não conta como fora a noite toda; a falta conta do despertar', async () => {
+  const m = montar({ inicio: T(20, 0, 11) });
+  const soMl = regra(m.db, 'Só ML', ['ml']);
+  const esperou = { regra: soMl, ml: { esperou: 2, motivos: { ml_extensao: 2 } } };
+  await m.rodar(T(21, 0, 11), { regra: soMl, ml: { saiu: 1 } });         // 21:00: tudo bem, a extensão acabou de falar
+  m.r.lastPollAt = T(21, 0, 11);
+  // o PC suspende às 21:00 e acorda às 08:00: o relógio de parede anda 11 h, o monotônico não
+  m.r.dormiu += T(8, 0, 12) - T(21, 0, 11);
+  m.r.online = false;
+  await m.rodar(T(8, 0, 12), esperou);                                    // a regra vencida roda antes de a extensão reconectar
+  assert.deepEqual(m.vigia.estado().causas, [], 'nada de "desconectada desde 21:00 de 11/11"');
+  m.r.online = true; m.r.lastPollAt = T(8, 1, 12);
+  await m.tick(T(8, 2, 12));
+  assert.deepEqual(m.r.entregas, [], 'nenhum aviso, nem "voltou"');
+  assert.ok(m.linhas().every((l) => !/extensão/.test(l.message)), JSON.stringify(m.linhas()));
+
+  // a extensão que NÃO reconecta depois de acordar avisa 30 min depois do despertar, "desde" o despertar
+  const n = montar({ inicio: T(20, 0, 11) });
+  const r2 = regra(n.db, 'Só ML', ['ml']);
+  const esp2 = { regra: r2, ml: { esperou: 2, motivos: { ml_extensao: 2 } } };
+  n.r.lastPollAt = T(21, 0, 11); await n.tick(T(21, 0, 11));
+  n.r.dormiu += T(8, 0, 12) - T(21, 0, 11); n.r.online = false;
+  await n.rodar(T(8, 0, 12), esp2);
+  await n.rodar(T(8, 20, 12), esp2);
+  assert.deepEqual(n.r.entregas, []);
+  await n.rodar(T(8, 31, 12), esp2);
+  assert.equal(n.r.entregas.length, 1);
+  assert.match(n.r.entregas[0].texto, /^⚠️ \*Extensão do Chrome desconectada desde 08:00\*/);
+});
+
+test('Q2 sem suspensão: uma execução demorada (40 min entre duas passadas, os dois relógios andando juntos) não recomeça a falta; a extensão fora há horas avisa', async () => {
+  const m = montar({ inicio: T(9) });
+  const soMl = regra(m.db, 'Só ML', ['ml']);
+  const esperou = { regra: soMl, ml: { esperou: 2, motivos: { ml_extensao: 2 } } };
+  m.r.online = false; m.r.lastPollAt = T(7);
+  await m.rodar(T(9, 5), esperou);
+  assert.deepEqual(m.r.entregas, []);
+  await m.rodar(T(9, 45), esperou);                                       // a regra levou 40 min (pausas longas entre ofertas)
+  assert.equal(m.r.entregas.length, 1, 'a falta conta do início do serviço (09:00), não da passada depois da execução longa');
+  assert.match(m.r.entregas[0].texto, /^⚠️ \*Extensão do Chrome desconectada desde 09:00\*/);
+  // horas depois, com execuções acontecendo e o PC acordado: a causa segue aberta, nada se repete
+  for (const h of [11, 13, 15]) await m.rodar(T(h), esperou);
+  assert.deepEqual(m.vigia.estado().causas.map((c) => [c.chave, c.desdeEm]), [['ml_fora', T(9)]]);
+  assert.equal(m.r.entregas.length, 1);
+});
+
+test('Q2 suspensão curta (menos de 5 min além do monotônico) não muda nada; o relógio monotônico que falha não derruba a passada', async () => {
+  const m = montar({ inicio: T(9) });
+  const soMl = regra(m.db, 'Só ML', ['ml']);
+  const esperou = { regra: soMl, ml: { esperou: 1, motivos: { ml_extensao: 1 } } };
+  m.r.online = false; m.r.lastPollAt = T(7);
+  await m.rodar(T(9, 10), esperou);
+  m.r.dormiu += 4 * 60000;                                                // 4 min de suspensão: abaixo do salto
+  await m.rodar(T(9, 40), esperou);
+  assert.equal(m.r.entregas.length, 1, 'a falta segue contando do início (09:00)');
+  const n = montar({ inicio: T(9) });
+  const v = n.novo({ monotonico: () => { throw new Error('sem relógio'); } });
+  n.r.online = false; n.r.lastPollAt = T(7);
+  const r2 = regra(n.db, 'Só ML', ['ml']);
+  await n.rodar(T(9, 40), { regra: r2, ml: { esperou: 1, motivos: { ml_extensao: 1 } } }, { v });
+  assert.equal(v.estado().ok, true);
+  assert.deepEqual(v.estado().causas.map((c) => c.chave), ['ml_fora']);
 });
 
 // ---------- estado() ----------

@@ -315,7 +315,8 @@ export function createAvisos({ db, wa, estadoBackup = null, inicio = Date.now(),
       if (typeof texto !== 'string' || !texto.trim()) return null;
       return texto.split('\n').slice(0, MAX_LINHAS_SAUDE).join('\n');
     } catch (e) {
-      console.error(`[avisos] linha de saúde: ${semNumero(e)}`); // só no console: a linha 'erro' viraria aviso de erro
+      // só no console (a linha 'erro' viraria aviso de erro) e só o código: a mensagem do banco traz os valores da query
+      console.error('[avisos] linha de saúde:', e?.code || e?.name || 'erro');
       return null;
     }
   }

@@ -262,7 +262,7 @@ function textoPulados(pulados, { seguinte, saiAgora }, agora) {
  * `verificador` (src/verificador.js, createVerificador; plano verificador-preco-estoque D1 e D9): confere preço e
  * estoque de cada oferta da regra logo antes de gerar o link, e vai também à fila de envios. null = nada é conferido.
  */
-export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast = false, dir = null, amazon = null, shopee = null, magalu = null, catalogo = null, catalogoItens = null, verificador = null, ritmo = null }) {
+export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast = false, dir = null, amazon = null, shopee = null, magalu = null, catalogo = null, catalogoItens = null, verificador = null, ritmo = null, monotonico = () => performance.now() }) {
   // Proteção do número (plano anti-banimento, ADR-012): todo módulo daqui recebe o `wa` embrulhado, que conta cada
   // mensagem no teto e espera a pausa mínima entre quaisquer duas (regra, fila, avisos, resposta ao remetente). Teto e
   // silêncio são perguntados (ritmo.liberado) só por quem manda a grupos: as regras (aqui) e a fila (envios.js).
@@ -279,7 +279,8 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
   const avisos = createAvisos({
     db, wa, estadoBackup: dir && path.join(dir, 'backup-estado.json'), linhaDeSaude, abertas: () => vigia?.estado().causas ?? [],
   });
-  vigia = createVigia({ db, links, ritmo, wa, entregar: (texto, oQue) => avisos.entregarAosDeErro(texto, oQue) });
+  // `monotonico`: o vigia compara com o relógio de parede para ver a volta da suspensão do PC (a falta da extensão recomeça)
+  vigia = createVigia({ db, links, ritmo, wa, monotonico, entregar: (texto, oQue) => avisos.entregarAosDeErro(texto, oQue) });
   // receber() (ouvinte do WhatsApp) e cada envio que o espelho cria chamam acordar(): a oferta sai neste tick
   const espelho = createEspelho({ db, wa, amazon, envios, acordar });
   // idem para a mensagem privada de um remetente cadastrado (receber) e para cada envio que ela cria
@@ -1304,7 +1305,7 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
           : alignToWindow(now + rule.interval_min * 60000, rule.window_start, rule.window_end);
         db.prepare('UPDATE rules SET last_run_at = ?, next_run_at = ? WHERE id = ?').run(now, next, id);
       }
-      registrarExecucao(rule, exec, summary, { linha, parada }, now); // para o vigia; nunca lança
+      registrarExecucao(rule, exec, summary, { linha, parada, horario }, now); // para o vigia; nunca lança
       running.delete(id);
     }
   }
@@ -1313,17 +1314,19 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
    * Linha de `execucoes` no fim de cada execução da regra (vigia, plano rodar-sozinho-entrega3, decisão 1; o "Enviar
    * agora" também, D10). Conta (conta = 1) a que teve escolhida ou espera (algum contador de por_loja andou). Não contam
    * "sem ofertas novas", "regra incompleta" e "WhatsApp desconectado" (saem antes de qualquer contador andar) nem a parada
-   * pelo silêncio ou pelo teto antes de qualquer saída. Apaga o que passa de RETENCAO_EXECUCOES_DIAS dias. Nunca lança: a
-   * falha vai ao console só com o código (o erro do banco traz os valores da query) e não derruba a regra.
+   * pelo silêncio ou pelo teto antes de qualquer saída. `ts`: na regra com grade, o horário da grade que a execução
+   * cumpriu (o vigia diz "Às 12:00 e às 13:00", não a hora em que a execução acabou); sem grade (e no "Enviar agora"), o
+   * fim da execução. Apaga o que passa de RETENCAO_EXECUCOES_DIAS dias (contados de agora). Nunca lança: a falha vai ao
+   * console só com o código (o erro do banco traz os valores da query) e não derruba a regra.
    */
-  function registrarExecucao(rule, exec, summary, { linha, parada }, now) {
+  function registrarExecucao(rule, exec, summary, { linha, parada, horario = null }, now) {
     try {
       const por = porLojaDoRegistro(exec);
       const soma = (campos) => LOJAS_RESUMO.reduce((a, l) => a + campos.reduce((b, c) => b + por[l][c], 0), 0);
       const saidas = soma(['saiu']);
       const conta = soma(CAMPOS_EXECUCAO) > 0 && !(parada && saidas === 0);
       db.prepare('INSERT INTO execucoes (ts, rule_id, conta, want, saidas, erros, lojas_pedidas, por_loja) VALUES (?,?,?,?,?,?,?,?)').run(
-        now, rule.id, conta ? 1 : 0, qtdDa(rule, linha), saidas, summary.errors,
+        rule.grade && Number.isFinite(horario) && horario <= now ? horario : now, rule.id, conta ? 1 : 0, qtdDa(rule, linha), saidas, summary.errors,
         JSON.stringify(lojasDaRegra({ sources: JSON.stringify(rule.sources) })), JSON.stringify(por),
       );
       db.prepare('DELETE FROM execucoes WHERE ts < ?').run(now - RETENCAO_EXECUCOES_MS);

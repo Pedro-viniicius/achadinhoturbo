@@ -1371,7 +1371,7 @@ test('S1 (tela): no Editar do Operador o número fica travado e “Erro de dispa
   assert.match(op, /<input name="numero"[^>]* disabled>/, 'número travado');
   assert.match(op, /Hoje: \+55 11 •••••-4321\. Só o Dono troca o número\./);
   assert.match(op, /<input type="checkbox" name="aviso" value="erro" checked disabled/);
-  assert.match(op, /Uma mensagem não saiu, o backup está atrasado ou algo parou[^<]*Só o Dono tira este aviso\./);
+  assert.match(op, /Avisa quando uma mensagem não sai[^<]*Só o Dono tira este aviso\./);
   assert.match(op, /<input type="checkbox" name="aviso" value="lotacao"  style/, '“Grupo lotando” continua livre');
   // sem "Erro de disparo" marcado, o Operador pode marcar
   assert.match(abrir(false, ze), /<input type="checkbox" name="aviso" value="erro"  style/);
@@ -1569,7 +1569,7 @@ test('saúde (CA3.3): o resumo traz os números do dia de todas as regras, uma v
 test('saúde (CA3.3): dia sem execução, regra ativa sem execução, dia sem nada a relatar e a virada do dia', () => {
   const { db, wa } = montar(); const avisos = createAvisos({ db, wa, linhaDeSaude, abertas: () => [] });
   const bloco = (now) => avisos.montarResumo([], now).split('\n\n').at(-1);
-  const NENHUMA = '🩺 *Saúde dos envios*\nNenhuma regra rodou hoje: não havia regra ativa com horário no dia.';
+  const NENHUMA = '🩺 *Saúde dos envios*\nNenhuma regra rodou hoje: não há regra ativa.';
   assert.equal(bloco(at(10, 21, 0)), NENHUMA);
   regraNoBanco(db, 0);
   assert.equal(bloco(at(10, 21, 0)), NENHUMA, 'regra desligada não é regra ativa');
@@ -1612,9 +1612,14 @@ test('saúde: sem as opções o resumo é o de hoje (o agendador as passa desde 
 
     // linhaDeSaude que lança ou não devolve texto: o resumo sai sem o bloco, e nada vira "erro"
     const erros = () => s.db.prepare("SELECT COUNT(*) AS n FROM log WHERE level = 'erro'").get().n;
-    for (const f of [() => { throw new Error('quebrou para 5511987654321@s.whatsapp.net'); }, () => null, () => 42, () => '', 'não é função']) {
+    const consoleAntes = saidaConsole.length;
+    const doBanco = () => { throw Object.assign(new Error('UNIQUE falhou: Ana 11987654321'), { code: 'ERR_SQLITE_ERROR' }); };
+    for (const f of [() => { throw new Error('quebrou para 5511987654321@s.whatsapp.net'); }, doBanco, () => null, () => 42, () => '', 'não é função']) {
       assert.equal(createAvisos({ db: s.db, wa: s.wa, linhaDeSaude: f, abertas: () => [] }).montarResumo([], at(10, 21, 0)), sem);
     }
+    // achado S2: o console leva só o código (ou o nome) do erro, nunca a mensagem (a do banco traz os valores da query)
+    assert.deepEqual(saidaConsole.slice(consoleAntes).filter((l) => l.startsWith('[avisos] linha de saúde')),
+      ['[avisos] linha de saúde: Error', '[avisos] linha de saúde: ERR_SQLITE_ERROR']);
     destino(s.db, { blocos: [] });
     const quebrado = createAvisos({ db: s.db, wa: s.wa, linhaDeSaude: () => { throw new Error('quebrou'); }, abertas: () => [] });
     await quebrado.tick(at(10, 21, 0));
@@ -1676,7 +1681,7 @@ test('entregarAosDeErro (CA3.7): falha de entrega vira "aviso" sem número, nunc
   let tentativas = 0;
   const original = wa.sendText.bind(wa);
   wa.sendText = async (jid) => { tentativas++; throw new Error(`não entregue para ${jid} (+55 11 98765-4321)`); };
-  assert.equal(await avisos.entregarAosDeErro('⚠️ *Extensão do Chrome fora desde 09:10*', 'o aviso do vigia'), 0);
+  assert.equal(await avisos.entregarAosDeErro('⚠️ *Extensão do Chrome desconectada desde 09:10*', 'o aviso do vigia'), 0);
   assert.equal(tentativas, 2, 'uma tentativa por destino, sem repetir');
   assert.deepEqual(db.prepare("SELECT message FROM log WHERE level = 'aviso' ORDER BY id").all().map((l) => l.message),
     ['Não consegui enviar o aviso do vigia para “Ana”: não entregue para … (…)', 'Não consegui enviar o aviso do vigia para “Pedro”: não entregue para … (…)']);

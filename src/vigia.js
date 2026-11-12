@@ -48,8 +48,11 @@ const LOJAS = Object.freeze({
 });
 const ORDEM_LOJAS = Object.freeze(['ml', 'amazon', 'shopee', 'magalu']);
 const CAMPOS_LOJA = Object.freeze(['saiu', 'pulada', 'descartada', 'revisao', 'esperou']);
-/** Esperas do ML que são a falta da extensão ou da Central (src/scheduler.js TEXTO_ESPERA). */
-const ESPERAS_DA_FALTA = Object.freeze(['ml_extensao', 'ml_espera']);
+/**
+ * Motivos do ML que são a falta da extensão ou da Central: as esperas (src/scheduler.js TEXTO_ESPERA) e, na fonte antiga,
+ * o link que falhou com a extensão desconectada (`extensao_off`: lá a oferta é pulada, não espera).
+ */
+const ESPERAS_DA_FALTA = Object.freeze(['ml_extensao', 'ml_espera', 'extensao_off']);
 
 // ---------- motivo e ação (spec §1.6: lista fechada, na ordem da tabela; o empate fica com o primeiro) ----------
 const MUDARAM = 'Em geral passa sozinho: são ofertas que mudaram. Se continuar por mais de um dia, confira o catálogo do Etiqueta.';
@@ -129,14 +132,24 @@ const plural = (n, um, varios) => `${num(n)} ${n === 1 ? um : varios}`;
 /** A ação da tabela depois de "O que fazer:" e "Fazer:" começa com minúscula, como nos textos da spec. */
 const minuscula = (s) => s.charAt(0).toLowerCase() + s.slice(1);
 
+/** 8 ou mais dígitos (de qualquer escrita) separados só por o que não é letra: "11_98765_4321", "11 9 8765.4321". */
+const RE_DIGITOS_SEPARADOS = /\p{Nd}(?:[^\p{L}\p{Nd}]*\p{Nd}){7,}/gu;
+/** Esquema de link ("https://"): sai inteiro. */
+const RE_ESQUEMA = /[a-z][a-z0-9+.-]*:\/\//giu;
+/** Ponto de domínio ("bit.ly", "chat.whatsapp.com"): ganha um espaço depois, para o WhatsApp não fazer link. */
+const RE_PONTO_DOMINIO = /(?<=[\p{L}\p{Nd}])\.(?=\p{L})/gu;
+
 /**
- * Nome de regra que pode ir para o WhatsApp e para o Histórico: uma linha, sem número de telefone nem e-mail
- * (semNumero), sem `*` (negrito do WhatsApp) e com até MAX_NOME_VIGIA caracteres (reticências no corte). Vazio → "sem nome".
+ * Nome de regra que pode ir para o WhatsApp e para o Histórico: uma linha, normalizado (NFKC: dígitos e "＠" de largura
+ * inteira viram os comuns), sem número de telefone nem e-mail (semNumero e qualquer sequência de 8 ou mais dígitos
+ * separados por não letras), sem link (o esquema sai e o ponto de domínio ganha um espaço), sem `*` (negrito do
+ * WhatsApp) e com até MAX_NOME_VIGIA caracteres (reticências no corte). Vazio → "sem nome".
  */
 export function nomeSeguro(v) {
-  const bruto = String(v ?? '').slice(0, 500).replace(/[\p{Cc}\p{Cf}\u2028\u2029]+/gu, ' ').trim();
+  const bruto = String(v ?? '').slice(0, 500).normalize('NFKC').replace(/[\p{Cc}\p{Cf}\u2028\u2029]+/gu, ' ').trim();
   if (!bruto) return 'sem nome';
-  let t = semNumero(bruto).replace(/\*/g, '').replace(/\s+/g, ' ').trim();
+  let t = semNumero(bruto).replace(RE_DIGITOS_SEPARADOS, '…').replace(RE_ESQUEMA, '').replace(RE_PONTO_DOMINIO, '. ')
+    .replace(/\*/g, '').replace(/\s+/g, ' ').trim();
   if (!t) return 'sem nome';
   if (t.length > MAX_NOME_VIGIA) {
     t = t.slice(0, MAX_NOME_VIGIA - 1);
@@ -272,7 +285,7 @@ function execucaoLimpa(row) {
     erros: inteiro(row.erros), lojas: pedidas.length ? pedidas : [...LOJAS_VIGIADAS], pl,
   };
 }
-/** Regras ativas → Map(id → { id, nome seguro, vigiadas }). Lista de lojas vazia (ou fonte antiga) = Amazon e ML. */
+/** Regras ativas → Map(id → { id, nome seguro, vigiadas }). Lista de lojas vazia = Amazon e ML (lojasDaRegra). */
 function mapaDeRegras(regrasAtivas) {
   const m = new Map();
   for (const r of regrasAtivas) {
@@ -341,7 +354,7 @@ export function marcarVoltas(estado, causas, agora) {
 /** Nome curto da causa (título de várias causas, linha do freio, saúde). */
 function nomeCurto(c) {
   if (c.tipo === 'loja') return `${LOJAS[c.loja].nome} ${LOJAS[c.loja].parada}`;
-  if (c.tipo === 'extensao') return 'extensão fora';
+  if (c.tipo === 'extensao') return 'extensão desconectada';
   if (c.tipo === 'central') return 'Mercado Livre em espera';
   if (c.tipo === 'revisao') return 'revisão acumulada';
   return `regra “${nomeSeguro(c.regra)}” vazia`;
@@ -356,7 +369,7 @@ function nomeCurto(c) {
  *   estado, a passada só marca o maior id e não avalia o passado;
  * - `estado`: o gravado (texto ou objeto; lido por lerEstado);
  * - `revisao`: { n, maisAntigaEm } das ofertas esperando revisão (n fora do formato = revisão não avaliada);
- * - `extensao`: { online, desde } — `desde` = max(lastPollAt, início do serviço) (D5);
+ * - `extensao`: { online, desde } — `desde` = max(lastPollAt, início do serviço ou volta da suspensão) (D5);
  * - `central`: { estado, emEsperaDesde } de links.status().central (o `ultimoErro` nunca é lido);
  * - `regrasAtivas`: [{ id, nome, lojas }] — `lojas` vazia = Amazon e Mercado Livre;
  * - `modoLink`: 'extension' | 'direct' | 'fake' (a causa da extensão só existe no modo da extensão);
@@ -397,7 +410,7 @@ export function avaliar({ execucoes = [], estado = null, revisao = null, extensa
     e.abertas[chave] = causa;
     delete e.caladas[chave];
     aviso(texto);
-    if (causa.avisadaEm === null && !freioLivre(chave)) info(`Aviso do vigia sobre ${nomeDe(causa)} segurado (freio de ${FREIO_VIGIA_H} h).`);
+    if (causa.avisadaEm === null && !freioLivre(chave)) info(`Aviso do vigia sobre ${nomeDe(causa)} não enviado: freio de ${FREIO_VIGIA_H} h para essa causa.`);
   }
   /** Fecha a causa (linha info). Só a avisada deixa um "voltou" devido; `semVolta`: fechou por perder o objeto (CA3.12). */
   function fechar(chave, texto, { fechadaEm = agora, saiu = 0, semVolta = false } = {}) {
@@ -416,7 +429,7 @@ export function avaliar({ execucoes = [], estado = null, revisao = null, extensa
   function raizDoMl() {
     const tipo = e.abertas.ml_fora?.tipo ?? falta?.tipo;
     if (tipo === 'central') return 'o Mercado Livre está em espera';
-    if (tipo === 'extensao') return 'a extensão do Chrome está fora';
+    if (tipo === 'extensao') return 'a extensão do Chrome está desconectada';
     return null;
   }
   /** O que cala a regra vazia: só a regra que pede uma loja vigiada (só ML: a falta do ML; a loja parada dela). */
@@ -443,6 +456,8 @@ export function avaliar({ execucoes = [], estado = null, revisao = null, extensa
     }
   }
   for (const id of Object.keys(e.seq.regras)) if (!regras.has(Number(id))) delete e.seq.regras[id];
+  // o freio da regra que saiu também: um id reaproveitado por uma regra nova não herda o "último aviso" da antiga
+  for (const chave of Object.keys(e.ultimoAviso)) if (chave.startsWith('regra:') && !regras.has(Number(chave.slice(6)))) delete e.ultimoAviso[chave];
   for (const l of Object.keys(e.seq.lojas)) if (!pedidas.has(l)) delete e.seq.lojas[l];
   for (const chave of Object.keys(e.voltas)) if (e.voltas[chave].tipo === 'regra' && !regras.has(e.voltas[chave].rule_id)) delete e.voltas[chave];
   for (const chave of Object.keys(e.caladas)) {
@@ -472,7 +487,7 @@ export function avaliar({ execucoes = [], estado = null, revisao = null, extensa
         && ESPERAS_DA_FALTA.some((k) => ml.motivos[k] > 0)) {
         const texto = falta.tipo === 'central'
           ? `Vigia: Mercado Livre em espera desde ${quando(falta.desde, agora)} (a Central de Afiliados não está respondendo).`
-          : `Vigia: extensão do Chrome fora desde ${quando(falta.desde, agora)} (o Mercado Livre não envia sem ela).`;
+          : `Vigia: extensão do Chrome desconectada desde ${quando(falta.desde, agora)} (o Mercado Livre não envia sem ela).`;
         abrir('ml_fora', { tipo: falta.tipo, desdeEm: falta.desde, n: ml.esperou }, texto);
       }
     }
@@ -540,11 +555,11 @@ export function avaliar({ execucoes = [], estado = null, revisao = null, extensa
     if (aberta) {
       aberta.n = nRevisao; aberta.maisAntigaEm = maisAntiga;
       if (nRevisao <= REVISAO_FECHA) {
-        fechar('revisao', `Vigia: revisão em dia (${nRevisao === 0 ? 'nenhuma oferta esperando' : `${nRevisao === 1 ? 'resta' : 'restam'} ${plural(nRevisao, 'oferta esperando', 'ofertas esperando')}`}).`);
+        fechar('revisao', `Vigia: revisão voltou ao normal (${nRevisao === 0 ? 'nenhuma oferta esperando' : `${nRevisao === 1 ? 'resta' : 'restam'} ${plural(nRevisao, 'oferta esperando', 'ofertas esperando')}`}).`);
       }
     } else if (ultimaQueConta !== null && nRevisao >= REVISAO_ABRE) {
       abrir('revisao', { tipo: 'revisao', desdeEm: ultimaQueConta, n: nRevisao, maisAntigaEm: maisAntiga },
-        `Vigia: ${plural(nRevisao, 'oferta esperando', 'ofertas esperando')} revisão (o aviso abre com ${REVISAO_ABRE}).`);
+        `Vigia: ${plural(nRevisao, 'oferta esperando', 'ofertas esperando')} revisão (o vigia avisa a partir de ${REVISAO_ABRE}).`);
     }
   }
 
@@ -552,8 +567,7 @@ export function avaliar({ execucoes = [], estado = null, revisao = null, extensa
   const fora = e.abertas.ml_fora;
   if (fora) {
     if (extensao?.online === true && central?.estado === 'respondendo') {
-      const quem = fora.tipo === 'central' ? 'a Central de Afiliados' : 'a extensão do Chrome';
-      fechar('ml_fora', `Vigia: Mercado Livre voltou a enviar (${quem} respondeu de novo; esteve fora por ${duracao(agora - fora.desdeEm)}).`);
+      fechar('ml_fora', `Vigia: Mercado Livre voltou a enviar (${voltouQuem(fora.tipo)}; esteve fora por ${duracao(agora - fora.desdeEm)}).`);
     } else if (falta) fora.tipo = falta.tipo; // a redação acompanha o estado da hora (spec §1.2)
   }
 
@@ -569,7 +583,7 @@ export function avaliar({ execucoes = [], estado = null, revisao = null, extensa
 const ACAO_EXTENSAO = 'abra o Chrome com a extensão instalada e entre na Central de Afiliados com a sua conta.';
 const ACAO_CENTRAL = 'nada, a menos que passe de 1 hora. Aí abra a Central no Chrome e veja se a página carrega e se a sua conta está logada.';
 const SOB_O_TITULO = Object.freeze({
-  silencio: 'O programa estava em silêncio e agora vai avisando.',
+  silencio: 'O programa segurou estes avisos durante o horário de silêncio.',
   whatsapp: 'O WhatsApp ficou desconectado e agora voltou.',
 });
 const ficaram = (n) => `${num(n)} ${n === 1 ? 'ficou' : 'ficaram'} de fora`;
@@ -597,8 +611,8 @@ function partes(c, agora) {
   }
   if (c.tipo === 'extensao') {
     return {
-      linhas: [`⚠️ *Extensão do Chrome fora desde ${desde}*`, `O Mercado Livre não envia sem ela${esperando(c.n)}.`, `O que fazer: ${ACAO_EXTENSAO}`],
-      item: `*Extensão do Chrome fora desde ${desde}.*`, detalhe: 'O Mercado Livre não envia sem ela.', fazer: ACAO_EXTENSAO,
+      linhas: [`⚠️ *Extensão do Chrome desconectada desde ${desde}*`, `O Mercado Livre não envia sem ela${esperando(c.n)}.`, `O que fazer: ${ACAO_EXTENSAO}`],
+      item: `*Extensão do Chrome desconectada desde ${desde}.*`, detalhe: 'O Mercado Livre não envia sem ela.', fazer: ACAO_EXTENSAO,
     };
   }
   if (c.tipo === 'central') {
@@ -649,6 +663,8 @@ export function mensagemProblemas(causas, { motivo = null, agora = null } = {}) 
   return linhas.join('\n');
 }
 
+/** Quem voltou, no "voltou" do Mercado Livre: a Central "respondeu de novo"; a extensão "voltou a se conectar". */
+const voltouQuem = (tipo) => (tipo === 'central' ? 'a Central de Afiliados respondeu de novo' : 'a extensão do Chrome voltou a se conectar');
 const saiuTexto = (n) => (n > 1 ? `Saíram ${num(n)} ofertas` : 'Saiu uma oferta');
 const restam = (n) => (n === 0 ? 'Nenhuma oferta esperando' : `${n === 1 ? 'Resta' : 'Restam'} ${plural(n, 'oferta esperando', 'ofertas esperando')}`);
 
@@ -662,11 +678,11 @@ function volta(c, agora) {
       nota: `esteve ${L.parada} por ${tempo}` };
   }
   if (c.tipo === 'extensao' || c.tipo === 'central') {
-    const quem = c.tipo === 'central' ? 'Central de Afiliados' : 'Extensão do Chrome';
-    return { titulo: 'Mercado Livre voltou a enviar', corpo: `A ${quem} respondeu de novo (esteve fora por ${tempo}). As ofertas saem sozinhas, nada a fazer.`,
-      nota: `${c.tipo === 'central' ? 'a Central de Afiliados' : 'a extensão do Chrome'} respondeu de novo; esteve fora por ${tempo}` };
+    const quem = voltouQuem(c.tipo);
+    return { titulo: 'Mercado Livre voltou a enviar', corpo: `${quem.charAt(0).toUpperCase()}${quem.slice(1)} (esteve fora por ${tempo}). As ofertas saem sozinhas, nada a fazer.`,
+      nota: `${quem}; esteve fora por ${tempo}` };
   }
-  if (c.tipo === 'revisao') return { titulo: 'Revisão em dia', corpo: `${restam(c.n)}. Nada a fazer.`, nota: minuscula(restam(c.n)) };
+  if (c.tipo === 'revisao') return { titulo: 'Revisão voltou ao normal', corpo: `${restam(c.n)}. Nada a fazer.`, nota: minuscula(restam(c.n)) };
   const s = `${saiuTexto(c.saiu)} às ${quando(fechada, agora)}`;
   return { titulo: `A regra “${nomeSeguro(c.regra)}” voltou a enviar`, corpo: `${s}. Nada a fazer.`, nota: minuscula(s) };
 }
@@ -685,7 +701,7 @@ export function mensagemVoltas(causas, agora) {
 
 // ---------- linha de saúde do resumo diário (spec §2; Decisão 7) ----------
 
-/** "Amazon parada desde 09:10", "extensão fora desde 14:20", "12 ofertas esperando revisão desde 08:30"… */
+/** "Amazon parada desde 09:10", "extensão desconectada desde 14:20", "12 ofertas esperando revisão desde 08:30"… */
 function abertaComDesde(c, agora) {
   const desde = `desde ${quando(c.desdeEm, agora)}`;
   if (c.tipo === 'revisao') return `${plural(c.n, 'oferta esperando', 'ofertas esperando')} revisão ${desde}`;
@@ -696,7 +712,8 @@ function abertaComDesde(c, agora) {
  * O bloco "Saúde dos envios" do resumo (no máximo 5 linhas), com as execuções do dia de negócio de todas as regras.
  * `revisao`: n (ou { n }) esperando revisão; `abertas`: causasAbertas(); `temRegraAtiva`: há regra ativa (sem
  * execução e sem regra ativa, a frase de "nenhuma regra rodou"; com regra ativa, os zeros). `agora`: só para a hora
- * das causas em aberto (sem ele, a data vai sempre junto). Puladas = puladas + as que esperaram; Falhas = `erros`.
+ * das causas em aberto (sem ele, a data vai sempre junto). Puladas = puladas + as que esperaram; Falhas = `erros` só
+ * das execuções que contam (com o WhatsApp fora a regra tenta a cada minuto e cada tentativa grava um erro).
  */
 export function linhaDeSaude({ execucoes = [], revisao = 0, abertas = [], temRegraAtiva = false, agora = null } = {}) {
   const dia = (Array.isArray(execucoes) ? execucoes : []).map(execucaoLimpa).filter(Boolean);
@@ -704,7 +721,7 @@ export function linhaDeSaude({ execucoes = [], revisao = 0, abertas = [], temReg
   const lista = ordenar(abertas);
   const emAberto = lista.length ? `Em aberto agora: ${lista.map((c) => abertaComDesde(c, agora)).join('; ')}.` : null;
   if (!dia.length && !temRegraAtiva) {
-    return ['🩺 *Saúde dos envios*', 'Nenhuma regra rodou hoje: não havia regra ativa com horário no dia.', ...(emAberto ? [emAberto] : [])].join('\n');
+    return ['🩺 *Saúde dos envios*', 'Nenhuma regra rodou hoje: não há regra ativa.', ...(emAberto ? [emAberto] : [])].join('\n');
   }
   const enviadas = Object.fromEntries(ORDEM_LOJAS.map((l) => [l, 0]));
   const pedidas = new Set();
@@ -714,7 +731,7 @@ export function linhaDeSaude({ execucoes = [], revisao = 0, abertas = [], temReg
     for (const l of ORDEM_LOJAS) {
       enviadas[l] += x.pl[l].saiu; puladas += x.pl[l].pulada + x.pl[l].esperou; descartadas += x.pl[l].descartada;
     }
-    falhas += x.erros;
+    if (x.conta) falhas += x.erros;
   }
   const lojas = ORDEM_LOJAS.filter((l) => pedidas.has(l) || enviadas[l] > 0)
     .sort((a, b) => enviadas[b] - enviadas[a] || ORDEM_LOJAS.indexOf(a) - ORDEM_LOJAS.indexOf(b)).slice(0, 6);
@@ -732,33 +749,40 @@ export function linhaDeSaude({ execucoes = [], revisao = 0, abertas = [], temReg
 /** Chave de `settings` com o estado do vigia (o de lerEstado, mais `segurado`). */
 export const CHAVE_ESTADO = 'vigia_estado';
 /** Linha `aviso` do Histórico quando o vigia não consegue ler: uma por sequência de falhas (spec §3, CA3.11). */
-export const TEXTO_SEM_LEITURA = 'O vigia não conseguiu verificar agora. Tentando de novo no próximo ciclo.';
+export const TEXTO_SEM_LEITURA = 'O vigia não conseguiu verificar agora. Tentando de novo daqui a pouco.';
 const TEXTO_SEM_ENTREGA = 'Aviso do vigia não chegou a nenhum número: confira em Relatórios e avisos quem recebe “Erro de disparo”.';
 const ORIGEM = Object.freeze({ id: null, name: 'Vigia' }); // coluna "Regra" do Histórico
-/** Por que a mensagem esperou → o texto da linha "Aviso do vigia segurado (…)." (spec, "Linhas do Histórico"). */
-const SEGURADO_POR = Object.freeze({ silencio: 'silêncio', whatsapp: 'WhatsApp fora' });
+/** Por que a mensagem esperou → o texto da linha "Aviso do vigia adiado: …." (spec, "Linhas do Histórico"). */
+const SEGURADO_POR = Object.freeze({ silencio: 'horário de silêncio', whatsapp: 'WhatsApp desconectado' });
 /** O `oQue` do entregar: vai para a linha do Histórico de cada destino ("Enviei o aviso do vigia para “Pedro”."). */
 const O_QUE = Object.freeze({ problema: 'o aviso do vigia', volta: 'o aviso de volta do vigia' });
 /** Execuções lidas por passada (são ~50 por dia; o resto fica para a passada seguinte, pelo cursor). */
 const MAX_EXECUCOES_PASSADA = 500;
 const MAX_FONTES = 5; // o MAX_SOURCES de src/db.js
+/**
+ * Volta da suspensão do computador: entre duas passadas, o relógio de parede andou isto além do monotônico (que não anda
+ * com o PC suspenso). A mesma ideia do BACKUP_SALTO_MS de src/avisos.js.
+ */
+const SALTO_MS = 5 * 60000;
 
 const lerJson = (texto) => { try { return JSON.parse(texto); } catch { return null; } };
 
 /**
- * Lojas pedidas por uma regra (linha de `rules`): as das fontes catálogo. Qualquer fonte que não é catálogo (fonte
- * antiga), catálogo com a lista vazia ou JSON ilegível → [] (= todas: Amazon e Mercado Livre, como em mapaDeRegras).
- * Nunca lança. A etapa 5 usa a mesma função para `execucoes.lojas_pedidas`.
+ * Lojas pedidas por uma regra (linha de `rules`): as das fontes catálogo e o Mercado Livre para cada fonte que não é
+ * catálogo (fonte antiga: Lista de links, Central de Afiliados; o agendador conta as ofertas dela como ML), somadas na
+ * regra mista. Catálogo com a lista de lojas vazia (ou ilegível) → [] (= todas: Amazon e Mercado Livre, como em
+ * mapaDeRegras); linha que não é objeto também. Nunca lança. O agendador usa a mesma função para `execucoes.lojas_pedidas`.
  */
 export function lojasDaRegra(row) {
-  let fontes = lerJson(row?.sources ?? 'null');
+  if (!objeto(row)) return [];
+  let fontes = lerJson(row.sources ?? 'null');
   if (!Array.isArray(fontes) || !fontes.length) {
-    const config = lerJson(row?.source_config || '{}');
-    fontes = [{ type: row?.source_type || 'list', config: objeto(config) ? config : {} }];
+    const config = lerJson(row.source_config || '{}');
+    fontes = [{ type: row.source_type || 'list', config: objeto(config) ? config : {} }];
   }
   const lojas = new Set();
   for (const f of fontes.slice(0, MAX_FONTES)) {
-    if (f?.type !== 'catalogo') return [];
+    if (f?.type !== 'catalogo') { lojas.add('ml'); continue; }
     const l = f.config?.lojas;
     if (!Array.isArray(l) || !l.length) return [];
     for (const x of l) if (typeof x === 'string') lojas.add(x);
@@ -778,9 +802,11 @@ function seguradoDe(o, agora) {
  * depois dos avisos, e depois de cada regra):
  * 1. lê o estado (`settings.vigia_estado`), as execuções novas (id acima do cursor), as regras ativas com as lojas,
  *    a revisão (catalogo_itens 'revisao', todas as lojas, D6) e, de `links.status()`, a extensão e a Central (nunca
- *    o `ultimoErro`); a falta da extensão conta de max(lastPollAt, `inicio`) (D5);
+ *    o `ultimoErro`); a falta da extensão conta de max(lastPollAt, `inicio`) (D5), e a volta da suspensão do PC (o
+ *    relógio de parede andou mais de SALTO_MS além do `monotonico` desde a passada anterior) vale como um novo início:
+ *    ao acordar, a extensão tem o último contato da véspera e ainda não reconectou, mas não esteve fora com o PC ligado;
  * 2. avalia (avaliar, puro) e, se há aviso devido: no silêncio do ritmo ou com o WhatsApp fora, não manda nem marca
- *    nada (uma linha "segurado" por episódio, gravada no estado); senão marca as causas e manda no máximo uma
+ *    nada (uma linha "Aviso do vigia adiado" por episódio, gravada no estado); senão marca as causas e manda no máximo uma
  *    mensagem de problema e uma de "voltou", reavaliadas na hora, dizendo por que esperaram (§1.8);
  * 3. grava o estado (só se mudou) e as linhas do Histórico (só `aviso` e `info`, nunca `erro`: CA3.7).
  * A marca vem ANTES da entrega (como o aviso de erro): uma entrega que falha não se repete, nem na mesma passada nem
@@ -796,12 +822,24 @@ function seguradoDe(o, agora) {
  * falhar), { ok: false, causas: [], avaliadoEm }. Nunca lança.
  *
  * Injeções: `links` (status(), modo()), `ritmo` (silencio()), `wa` (isReady(); o embrulhado), `entregar(texto, oQue)`
- * (→ quantos receberam; não deveria lançar, mas se lançar vale 0), `inicio` (quando o serviço ligou) e `agora` (relógio).
+ * (→ quantos receberam; não deveria lançar, mas se lançar vale 0), `inicio` (quando o serviço ligou), `agora` (relógio)
+ * e `monotonico` (relógio que só anda com o PC acordado: o `performance.now()` do Linux não conta a suspensão).
  */
-export function createVigia({ db, links = null, ritmo = null, wa = null, entregar = null, inicio = Date.now(), agora = Date.now } = {}) {
+export function createVigia({ db, links = null, ritmo = null, wa = null, entregar = null, inicio = Date.now(), agora = Date.now, monotonico = () => performance.now() } = {}) {
   let ok = true;          // a última passada leu tudo
   let falhando = false;   // já escreveu a linha desta sequência de falhas
   let avaliadoEm = null;  // quando foi a última passada boa (só em memória: muda a cada tick)
+  let inicioFalta = inicio; // início da carência da extensão: o serviço ligou ou o PC voltou da suspensão
+  let anterior = null;      // { now, mono } da passada anterior (lidos juntos, no começo da passada)
+
+  /** O PC voltou da suspensão desde a passada anterior? Então a falta da extensão passa a contar de `now`. */
+  function notarSuspensao(now) {
+    let mono;
+    try { mono = Number(monotonico()); } catch { mono = NaN; }
+    if (!Number.isFinite(mono)) { anterior = null; return; }
+    if (anterior && (now - anterior.now) - (mono - anterior.mono) > SALTO_MS) inicioFalta = Math.max(inicioFalta, now);
+    anterior = { now, mono };
+  }
 
   /** Linha do Histórico do vigia. Nível só `aviso` ou `info`; falha do banco vai ao console só pelo código. */
   function linha(level, message) {
@@ -837,7 +875,7 @@ export function createVigia({ db, links = null, ritmo = null, wa = null, entrega
 
     const rev = db.prepare("SELECT COUNT(*) AS n, MIN(criado_em) AS desde FROM catalogo_itens WHERE status = 'revisao'").get();
     const st = links?.status?.() ?? null;
-    const extensao = st ? { online: st.online === true, desde: Math.max(Number(st.lastPollAt) || 0, inicio) } : null;
+    const extensao = st ? { online: st.online === true, desde: Math.max(Number(st.lastPollAt) || 0, inicioFalta) } : null;
     const central = objeto(st?.central) ? { estado: st.central.estado, emEsperaDesde: st.central.emEsperaDesde } : null;
 
     const r = avaliar({
@@ -852,7 +890,7 @@ export function createVigia({ db, links = null, ritmo = null, wa = null, entrega
       const motivo = porQueSegurar(now);
       if (motivo) {
         if (segurado?.motivo !== motivo) {
-          extras.push({ level: 'info', message: `Aviso do vigia segurado (${SEGURADO_POR[motivo]}).` });
+          extras.push({ level: 'info', message: `Aviso do vigia adiado: ${SEGURADO_POR[motivo]}.` });
           segurado = { motivo, desde: now };
         }
       } else {
@@ -881,6 +919,7 @@ export function createVigia({ db, links = null, ritmo = null, wa = null, entrega
   function tick(now = agora()) {
     let envio;
     const t = Number.isFinite(now) ? now : agora();
+    notarSuspensao(t);
     try {
       envio = passada(t);
     } catch (e) {

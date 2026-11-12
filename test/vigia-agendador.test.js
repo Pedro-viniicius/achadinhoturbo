@@ -117,7 +117,8 @@ function montar(t, { agora = dia(12, 10), modo = 'fake', links = null, verificad
     avancar() {},
   };
   const catalogoItens = createCatalogoItens({ db, wa, links, amazon });
-  const agendador = (l = links) => createScheduler({ db, wa, links: l, fast: true, amazon, verificador, catalogo: fonte, catalogoItens });
+  // relógio monotônico = o Date falso: o PC fica acordado o tempo todo (a suspensão é outro teste)
+  const agendador = (l = links) => createScheduler({ db, wa, links: l, fast: true, amazon, verificador, catalogo: fonte, catalogoItens, monotonico: () => Date.now() });
   const scheduler = agendador();
   db.prepare('INSERT INTO groups (jid, name, size, updated_at) VALUES (?,?,?,?)').run(G1, 'Achadinhos', 10, Date.now());
   db.prepare('INSERT INTO tags (name, created_at) VALUES (?,?)').run('etiquetaA', Date.now());
@@ -225,14 +226,14 @@ test('por_loja do Mercado Livre: a espera e a falta (extensão, Central, leitura
     await s.scheduler.runRule(regraCatalogo(s.db));
     assert.deepEqual(s.execucoes()[0].por_loja.ml, zerada({ esperou: 1, motivos: { ml_espera: 1 } }));
   });
-  await t.test('Central em espera (Lista de links, fonte antiga): cada escolhida esperou, com ml_espera; lojas pedidas = []', async (tt) => {
+  await t.test('Central em espera (Lista de links, fonte antiga): cada escolhida esperou, com ml_espera; lojas pedidas = [ml]', async (tt) => {
     const { links } = linksDuble({ central: 'em_espera', desde: dia(12, 9) });
     const s = montar(tt, { links });
     await s.scheduler.runRule(regraAntiga(s.db, 'list', { ids: [1, 2] }));
     const [x] = s.execucoes();
     assert.deepEqual([x.conta, x.saidas, x.erros], [1, 0, 0]);
     assert.deepEqual(x.por_loja.ml, zerada({ esperou: 2, motivos: { ml_espera: 2 } }));
-    assert.deepEqual(x.lojas_pedidas, [], 'fonte antiga: lista vazia (o vigia lê como Amazon e Mercado Livre)');
+    assert.deepEqual(x.lojas_pedidas, ['ml'], 'fonte antiga: Mercado Livre (como o agendador conta as ofertas dela; achado R1)');
   });
   await t.test('Central em espera (fonte Central de Afiliados): a fonte inteira esperou, as vagas da execução contam, sem erro', async (tt) => {
     const { links } = linksDuble({ central: 'em_espera', desde: dia(12, 9) });
@@ -376,9 +377,9 @@ test('CA3.1: extensão fora — o aviso sai pelo tick na execução 30 min depoi
   assert.equal(s.execucoes().length, 2);
   const avisos = s.avisosDoVigia();
   assert.equal(avisos.length, 1, avisos.join('\n---\n'));
-  assert.match(avisos[0], /^⚠️ \*Extensão do Chrome fora desde 10:00\*\nO Mercado Livre não envia sem ela \(1 oferta esperando\)\./);
-  assert.ok(s.linhasVigia().some((l) => l.level === 'aviso' && l.message === 'Vigia: extensão do Chrome fora desde 10:00 (o Mercado Livre não envia sem ela).'));
-  assert.ok(s.linhasVigia().some((l) => l.level === 'info' && /^Vigia: a regra “Achados ML” saiu vazia, mas a extensão do Chrome está fora: sem aviso separado\.$/.test(l.message)),
+  assert.match(avisos[0], /^⚠️ \*Extensão do Chrome desconectada desde 10:00\*\nO Mercado Livre não envia sem ela \(1 oferta esperando\)\./);
+  assert.ok(s.linhasVigia().some((l) => l.level === 'aviso' && l.message === 'Vigia: extensão do Chrome desconectada desde 10:00 (o Mercado Livre não envia sem ela).'));
+  assert.ok(s.linhasVigia().some((l) => l.level === 'info' && /^Vigia: a regra “Achados ML” saiu vazia, mas a extensão do Chrome está desconectada: sem aviso separado\.$/.test(l.message)),
     'a regra só de ML é calada pela extensão (CA3.8)');
   assert.ok(s.linhasVigia().every((l) => l.level !== 'erro'));
 
@@ -390,7 +391,7 @@ test('CA3.1: extensão fora — o aviso sai pelo tick na execução 30 min depoi
   // CA3.3 (ligação): a prévia do resumo diário traz a saúde e a causa em aberto
   const previa = await req(p.port, '/api/avisos/previa');
   assert.match(previa.json.texto, /🩺 \*Saúde dos envios\* \(todas as regras\)\nMercado Livre: 0 enviadas\nPuladas: 2 · Descartadas: 0 · Falhas: 0\nEsperando revisão: nenhuma\nEm aberto agora: /);
-  assert.match(previa.json.texto, /Em aberto agora: extensão fora desde 10:00\./);
+  assert.match(previa.json.texto, /Em aberto agora: extensão desconectada desde 10:00\./);
 
   // CA3.10: reinício (agendador, vigia e serviço de links novos no mesmo banco): sem aviso novo, a causa continua
   const s2 = s.agendador(createLinkService({ getMode: () => 'extension' }));
@@ -399,7 +400,7 @@ test('CA3.1: extensão fora — o aviso sai pelo tick na execução 30 min depoi
   assert.equal(s.execucoes().length, 3);
   assert.equal(s.avisosDoVigia().length, 1, 'nada repetido nem aberto de novo');
   assert.deepEqual(s2.vigia.estado().causas.map((c) => [c.tipo, c.desdeEm]), [['extensao', dia(12, 10)]]);
-  assert.ok(s.linhasVigia().some((l) => /^Vigia: Mercado Livre parado \(3 execuções sem envio\), mas a extensão do Chrome está fora: sem aviso separado\.$/.test(l.message)));
+  assert.ok(s.linhasVigia().some((l) => /^Vigia: Mercado Livre parado \(3 execuções sem envio\), mas a extensão do Chrome está desconectada: sem aviso separado\.$/.test(l.message)));
 });
 
 test('CA3.1: Central em espera — "Mercado Livre em espera" sai na execução 30 min depois do início da espera', async (t) => {
@@ -427,6 +428,61 @@ test('CA3.1 (regra com horários marcados): o vigia passa logo depois do horári
   assert.deepEqual(s.execucoes().map((x) => [x.want, x.conta]), [[2, 1], [2, 1]]);
   assert.equal(s.avisosDoVigia().length, 1, 'o aviso saiu no mesmo tick do horário das 11:00');
   assert.match(s.avisosDoVigia()[0], /^⚠️ \*Mercado Livre em espera desde 10:00\*/);
+});
+
+test('R9 (regra com horários marcados): execucoes.ts é o horário da grade, não o fim da execução; a regra vazia diz "Às 12:00 e às 13:00"', async (t) => {
+  const VELHO = dia(11, 8);
+  const v = verificadorFalso({ semConferencia: new Set([VELHO]) });
+  const s = montar(t, { agora: dia(12, 12, 10), verificador: v, ofertas: [oferta(0, 'amazon', { precoEm: VELHO }), oferta(1, 'amazon', { precoEm: VELHO })] });
+  const id = regraCatalogo(s.db, { nome: 'Amazon', lojas: ['amazon'], per: 2 });
+  s.db.prepare('UPDATE rules SET grade = ?, next_run_at = ? WHERE id = ?').run(JSON.stringify({
+    dias: [0, 1, 2, 3, 4, 5, 6], horarios: [{ hora: '12:00', qtd: 2, template_id: null }, { hora: '13:00', qtd: 2, template_id: null }],
+  }), dia(12, 12), id);
+  await s.scheduler.tick();                                 // 12:10: cumpre o horário das 12:00, 10 min atrasado
+  s.avancar(HORA); await s.scheduler.tick();               // 13:10: cumpre o das 13:00
+  assert.deepEqual(s.execucoes().map((x) => x.ts), [dia(12, 12), dia(12, 13)], 'o horário cumprido, não 12:10 e 13:10');
+  const avisos = s.avisosDoVigia();
+  assert.equal(avisos.length, 1, avisos.join('\n---\n'));
+  assert.match(avisos[0], /^⚠️ \*A regra “Amazon” saiu vazia 2 vezes seguidas\*\nÀs 12:00 e às 13:00 nenhuma oferta saiu/);
+  // "Enviar agora" da mesma regra: sem horário cumprido, vale o instante da execução
+  s.avancar(10 * MIN);
+  await s.scheduler.runRule(id, { manual: true });
+  assert.equal(s.execucoes().at(-1).ts, dia(12, 13, 20));
+  // a saúde do dia conta as três (a janela do dia de negócio não muda: o horário cumprido é do mesmo dia)
+  const p = await subirPainel(t, s);
+  const previa = await req(p.port, '/api/avisos/previa');
+  assert.match(previa.json.texto, /Amazon: 0 enviadas\nPuladas: 6 · Descartadas: 0 · Falhas: 0/);
+});
+
+test('R1/Q1 fonte antiga (Lista de links) com a Central em espera: só "Mercado Livre em espera"; a regra vazia e a loja ML ficam caladas', async (t) => {
+  const { links } = linksDuble({ central: 'em_espera', desde: dia(12, 10) });
+  const s = montar(t, { links });
+  regraAntiga(s.db, 'list', { ids: [1, 2, 3, 4, 5] });
+  for (let k = 0; k < 3; k++) { await s.scheduler.tick(); s.avancar(HORA); }
+  assert.deepEqual(s.execucoes().map((x) => x.lojas_pedidas), [['ml'], ['ml'], ['ml']]);
+  const avisos = s.avisosDoVigia();
+  assert.equal(avisos.length, 1, avisos.join('\n---\n'));
+  assert.match(avisos[0], /^⚠️ \*Mercado Livre em espera desde 10:00\*\nA Central de Afiliados não está respondendo/);
+  assert.ok(s.linhasVigia().some((l) => l.level === 'info' && l.message === 'Vigia: a regra “Antiga” saiu vazia, mas o Mercado Livre está em espera: sem aviso separado.'));
+  assert.ok(s.linhasVigia().some((l) => l.level === 'info' && l.message === 'Vigia: Mercado Livre parado (3 execuções sem envio), mas o Mercado Livre está em espera: sem aviso separado.'));
+  assert.deepEqual(s.scheduler.vigia.estado().causas.map((c) => c.chave), ['ml_fora'], 'nem a Amazon entra na conta da regra de fonte antiga');
+});
+
+test('R1/Q1 fonte antiga (Lista de links) com a extensão desconectada: o link que falha (extensao_off) abre "Extensão do Chrome desconectada"; a regra e a loja ML ficam caladas', async (t) => {
+  const { links, d } = linksDuble({ online: false });
+  d.link = () => { throw new ErroLinkML('A extensão do Chrome não está conectada.', { classe: 'desconectada', causa: 'extensao_off' }); };
+  const s = montar(t, { links });
+  regraAntiga(s.db, 'list', { ids: [1, 2, 3, 4, 5] });
+  for (let k = 0; k < 3; k++) { await s.scheduler.tick(); s.avancar(HORA); }
+  // o summary e o por_loja da entrega 2 não mudam: pulada (a vaga é reposta), com a causa extensao_off
+  assert.deepEqual(s.execucoes().map((x) => [x.por_loja.ml.pulada, x.por_loja.ml.esperou, x.por_loja.ml.motivos]), Array(3).fill([4, 0, { extensao_off: 4 }]));
+  // o aviso de erro de disparo ("1 disparo falhou") é outro, de antes: a fonte antiga grava o link não gerado como erro
+  const avisos = s.avisosDoVigia().filter((m) => !/^⚠️ \*\d+ disparos? falh/.test(m));
+  assert.equal(avisos.length, 1, avisos.join('\n---\n'));
+  assert.match(avisos[0], /^⚠️ \*Extensão do Chrome desconectada desde 10:00\*\nO Mercado Livre não envia sem ela\.\n/);
+  assert.ok(s.linhasVigia().some((l) => l.level === 'info' && l.message === 'Vigia: a regra “Antiga” saiu vazia, mas a extensão do Chrome está desconectada: sem aviso separado.'));
+  assert.ok(s.linhasVigia().some((l) => l.level === 'info' && l.message === 'Vigia: Mercado Livre parado (3 execuções sem envio), mas a extensão do Chrome está desconectada: sem aviso separado.'));
+  assert.deepEqual(s.scheduler.vigia.estado().causas.map((c) => [c.chave, c.tipo]), [['ml_fora', 'extensao']]);
 });
 
 test('CA3.1: Amazon só filtrada (sem conferência) — a regra vazia sai na 2ª execução e a Amazon parada na 3ª', async (t) => {

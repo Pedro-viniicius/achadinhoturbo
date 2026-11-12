@@ -151,9 +151,9 @@ test('CA3.1 extensão e Central: só com execução e falta ≥ 30 min', () => {
   assert.deepEqual(chaves(r.devidos.problemas), ['ml_fora']);
   assert.equal(r.devidos.problemas[0].tipo, 'extensao');
   assert.equal(r.devidos.problemas[0].desdeEm, T(9));
-  assert.ok(r.linhas.some((l) => l.level === 'aviso' && l.message === 'Vigia: extensão do Chrome fora desde 09:00 (o Mercado Livre não envia sem ela).'));
+  assert.ok(r.linhas.some((l) => l.level === 'aviso' && l.message === 'Vigia: extensão do Chrome desconectada desde 09:00 (o Mercado Livre não envia sem ela).'));
   assert.equal(mensagemProblemas(r.devidos.problemas, { agora: T(10, 40) }), [
-    '⚠️ *Extensão do Chrome fora desde 09:00*',
+    '⚠️ *Extensão do Chrome desconectada desde 09:00*',
     'O Mercado Livre não envia sem ela (3 ofertas esperando).',
     'O que fazer: abra o Chrome com a extensão instalada e entre na Central de Afiliados com a sua conta.',
   ].join('\n'));
@@ -166,7 +166,7 @@ test('CA3.1 extensão e Central: só com execução e falta ≥ 30 min', () => {
   v.mudar({ central: { estado: 'respondendo', emEsperaDesde: null } });
   r = v.rodar([], { agora: T(11) });
   assert.deepEqual(v.abertas(), []);
-  assert.deepEqual(r.linhas, [{ level: 'info', message: 'Vigia: Mercado Livre voltou a enviar (a extensão do Chrome respondeu de novo; esteve fora por 2 h).' }]);
+  assert.deepEqual(r.linhas, [{ level: 'info', message: 'Vigia: Mercado Livre voltou a enviar (a extensão do Chrome voltou a se conectar; esteve fora por 2 h).' }]);
   assert.deepEqual(r.devidos.voltas, [], 'não foi avisada: sem "voltou"');
 
   // Central em espera desde as 09:00 (extensão conectada): 30 min exatos abrem
@@ -209,7 +209,7 @@ test('CA3.1 revisão: abre com 10 (e só numa execução que conta)', () => {
   assert.deepEqual(v.abertas(), []);
   const r = v.rodar([ex(T(9, 20), { ml: { saiu: 1 } })], { revisao: { n: 10, maisAntigaEm: T(7, 10) } });
   assert.deepEqual(chaves(r.devidos.problemas), ['revisao']);
-  assert.deepEqual(r.linhas, [{ level: 'aviso', message: 'Vigia: 10 ofertas esperando revisão (o aviso abre com 10).' }]);
+  assert.deepEqual(r.linhas, [{ level: 'aviso', message: 'Vigia: 10 ofertas esperando revisão (o vigia avisa a partir de 10).' }]);
   assert.equal(mensagemProblemas(r.devidos.problemas, { agora: T(9, 20) }), [
     '⚠️ *10 ofertas esperando a sua revisão*',
     'Elas não saem até você decidir. A mais antiga espera há 2 h 10 min.',
@@ -255,7 +255,7 @@ test('CA3.2 freio de 3 h segura o reabrir (contado do último aviso, de problema
   r = tresQuedas(v, [[12, 30], [13, 0], [13, 30]]);
   assert.deepEqual(v.abertas(), ['loja:amazon'], 'reabriu');
   assert.deepEqual(r.devidos.problemas, [], 'mas o freio segura: o último aviso (o "voltou") foi às 12:00');
-  assert.ok(r.linhas.some((l) => l.level === 'info' && l.message === 'Aviso do vigia sobre Amazon parada segurado (freio de 3 h).'), textos(r).join('\n'));
+  assert.ok(r.linhas.some((l) => l.level === 'info' && l.message === 'Aviso do vigia sobre Amazon parada não enviado: freio de 3 h para essa causa.'), textos(r).join('\n'));
   r = v.rodar([], { agora: T(14, 59) });
   assert.deepEqual(r.devidos.problemas, []);
   assert.deepEqual(r.linhas, [], 'a linha do freio sai uma vez, não a cada passada');
@@ -310,11 +310,11 @@ test('CA3.2 revisão fecha com 5, não com 9', () => {
   }
   r = v.rodar([], { revisao: { n: 5, maisAntigaEm: T(8) }, agora: T(11) });
   assert.deepEqual(v.abertas(), []);
-  assert.deepEqual(r.linhas, [{ level: 'info', message: 'Vigia: revisão em dia (restam 5 ofertas esperando).' }]);
-  assert.equal(mensagemVoltas(r.devidos.voltas, T(11)), '✅ *Revisão em dia*\nRestam 5 ofertas esperando. Nada a fazer.');
+  assert.deepEqual(r.linhas, [{ level: 'info', message: 'Vigia: revisão voltou ao normal (restam 5 ofertas esperando).' }]);
+  assert.equal(mensagemVoltas(r.devidos.voltas, T(11)), '✅ *Revisão voltou ao normal*\nRestam 5 ofertas esperando. Nada a fazer.');
   const so = (n) => mensagemVoltas([{ tipo: 'revisao', chave: 'revisao', n, desdeEm: T(9), fechadaEm: T(11) }], T(11));
-  assert.equal(so(1), '✅ *Revisão em dia*\nResta 1 oferta esperando. Nada a fazer.');
-  assert.equal(so(0), '✅ *Revisão em dia*\nNenhuma oferta esperando. Nada a fazer.');
+  assert.equal(so(1), '✅ *Revisão voltou ao normal*\nResta 1 oferta esperando. Nada a fazer.');
+  assert.equal(so(0), '✅ *Revisão voltou ao normal*\nNenhuma oferta esperando. Nada a fazer.');
 });
 
 // ---------- CA3.8: hierarquia ----------
@@ -353,6 +353,29 @@ test('CA3.8 Central em espera cala loja ML e regra só-ML; loja parada cala a re
   assert.deepEqual(w.abertas(), ['regra:3']);
   assert.deepEqual(chaves(r.devidos.problemas), ['regra:3']);
   assert.match(mensagemProblemas(r.devidos.problemas, { agora: T(15) }), /^⚠️ \*A regra “Só Amazon” saiu vazia 3 vezes seguidas\*\nDe 12:00 a 15:00 nenhuma oferta saiu/);
+});
+
+test('CA3.8 fonte antiga (achado R1/Q1): o link que falhou com a extensão desconectada (extensao_off, pulada) abre "extensão desconectada" e cala a regra dela', () => {
+  // regra 4: só fonte antiga; o agendador grava lojas_pedidas ['ml'] e lojasDaRegra dá ['ml'] (só ML entre as vigiadas)
+  const v = vigia({ extensao: { online: false, desde: T(8) }, regrasAtivas: [...REGRAS, { id: 4, nome: 'Minha lista', lojas: ['ml'] }] });
+  const falhou = (h) => ex(T(h), { regra: 4, lojas: ['ml'], ml: { pulada: 3, motivos: { extensao_off: 3 } } });
+  let r = v.rodar([falhou(9)]);
+  assert.deepEqual(chaves(r.devidos.problemas), ['ml_fora'], 'a falta começou às 08:00: 60 min na execução das 09:00');
+  assert.deepEqual(r.linhas, [{ level: 'aviso', message: 'Vigia: extensão do Chrome desconectada desde 08:00 (o Mercado Livre não envia sem ela).' }]);
+  assert.equal(mensagemProblemas(r.devidos.problemas, { agora: T(9) }), [
+    '⚠️ *Extensão do Chrome desconectada desde 08:00*',
+    'O Mercado Livre não envia sem ela.',
+    'O que fazer: abra o Chrome com a extensão instalada e entre na Central de Afiliados com a sua conta.',
+  ].join('\n'));
+  r = v.rodar([falhou(10)]);
+  assert.deepEqual(r.linhas, [{ level: 'info', message: 'Vigia: a regra “Minha lista” saiu vazia, mas a extensão do Chrome está desconectada: sem aviso separado.' }]);
+  r = v.rodar([falhou(11)]);
+  assert.deepEqual(r.linhas, [{ level: 'info', message: 'Vigia: Mercado Livre parado (3 execuções sem envio), mas a extensão do Chrome está desconectada: sem aviso separado.' }]);
+  assert.deepEqual(v.abertas(), ['ml_fora'], 'um problema, um aviso: a regra e a loja ficam caladas');
+  // com a extensão on-line, o mesmo motivo não abre nada (a falta é o estado da hora, não o motivo)
+  const w = vigia({ regrasAtivas: [{ id: 4, nome: 'Minha lista', lojas: ['ml'] }] });
+  w.rodar([falhou(9)]);
+  assert.deepEqual(w.abertas(), []);
 });
 
 // ---------- CA3.12: causa sem objeto ----------
@@ -412,6 +435,33 @@ test('CA3.12 regra apagada ou desligada fecha a regra vazia sem voltou; modo dir
   assert.deepEqual(y.abertas(), []);
   assert.deepEqual(r.devidos.voltas, []);
   assert.deepEqual(r.linhas, [{ level: 'info', message: 'Vigia: o aviso do Mercado Livre foi encerrado sem aviso de volta: nenhuma regra ativa pede o Mercado Livre.' }]);
+});
+
+test('freio da regra apagada (observação do seguranca): o id reaproveitado por uma regra nova não herda o "último aviso" da antiga', () => {
+  const v = vigia();
+  v.rodar([ex(T(9), { ml: { pulada: 1, motivos: { filtros: 1 } } })]);
+  let r = v.rodar([ex(T(10), { ml: { pulada: 1, motivos: { filtros: 1 } } })]);
+  assert.deepEqual(chaves(r.devidos.problemas), ['regra:1']);
+  v.avisar(r, T(10));
+  assert.equal(v.estado.ultimoAviso['regra:1'], T(10));
+  v.mudar({ regrasAtivas: REGRAS.filter((x) => x.id !== 1) });                   // apagada
+  v.rodar([], { agora: T(10, 30) });
+  assert.deepEqual(Object.keys(v.estado.ultimoAviso), [], 'o freio da regra que saiu some com ela, como a sequência');
+  // uma regra nova com o mesmo id: a 1ª regra vazia dela avisa já, sem esperar as 3 h da antiga
+  v.mudar({ regrasAtivas: [{ id: 1, nome: 'Nova', lojas: [] }, ...REGRAS.filter((x) => x.id !== 1)] });
+  v.rodar([ex(T(11), { ml: { pulada: 1, motivos: { filtros: 1 } } })]);
+  r = v.rodar([ex(T(12), { ml: { pulada: 1, motivos: { filtros: 1 } } })]);
+  const daRegra = r.devidos.problemas.filter((c) => c.tipo === 'regra'); // (a loja do ML, 4 execuções sem saída, abre junto)
+  assert.deepEqual(chaves(daRegra), ['regra:1'], 'às 12:00, dentro das 3 h do aviso da regra antiga');
+  assert.equal(daRegra[0].regra, 'Nova');
+  assert.ok(r.linhas.every((l) => !/freio/.test(l.message)), textos(r).join('\n'));
+  // a regra que segue ativa mantém o freio
+  const w = vigia();
+  w.rodar([ex(T(9), { regra: 3, amazon: { pulada: 1 } })]);
+  r = w.rodar([ex(T(10), { regra: 3, amazon: { pulada: 1 } })]);
+  w.avisar(r, T(10));
+  w.rodar([], { agora: T(10, 30) });
+  assert.equal(w.estado.ultimoAviso['regra:3'], T(10));
 });
 
 // ---------- CA3.5 e CA3.7: o que sai para fora e o nível das linhas ----------
@@ -492,6 +542,33 @@ test('CA3.7 avaliar só devolve linhas aviso ou info (nunca erro)', () => {
     assert.ok(/^(Vigia: |Aviso do vigia )/.test(l.message), l.message);
   }
   assert.ok(linhas.some((l) => l.level === 'aviso') && linhas.some((l) => l.level === 'info'));
+});
+
+test('S1: nome de regra com número disfarçado (separadores, largura inteira, outra escrita), e-mail de largura inteira ou link sem esquema não chega à mensagem', () => {
+  const DIGITOS_SEPARADOS = /\p{Nd}(?:[^\p{L}\p{Nd}]*\p{Nd}){7,}/u;
+  for (const nome of ['Grupo 11_98765_4321', 'Regra １１９８７６５４３２１', 'Promo ٠١١٩٨٧٦٥٤٣٢١', 'Ana 11.9.8765.4321 VIP', 'Zé (11) 9 8765 4321']) {
+    const n = nomeSeguro(nome);
+    assert.ok(!DIGITOS_SEPARADOS.test(n) && !/\d{8,}/.test(n), `${nome} → ${n}`);
+    assert.ok(n.includes('…'), `${nome} → ${n}`);
+  }
+  assert.equal(nomeSeguro('Grupo 11_98765_4321'), 'Grupo …');
+  assert.equal(nomeSeguro('Regra １１９８７６５４３２１'), 'Regra …');
+  for (const nome of ['fulano＠x.com', 'Ofertas fulano＠x.com', 'ana@exemplo.com.br']) {
+    const n = nomeSeguro(nome);
+    assert.ok(!/[@＠]/.test(n) && !/fulano|exemplo/.test(n), `${nome} → ${n}`);
+  }
+  assert.equal(nomeSeguro('Promo bit.ly/abc'), 'Promo bit. ly/abc');
+  assert.equal(nomeSeguro('chat.whatsapp.com/ABC'), 'chat. whatsapp. com/ABC');
+  assert.equal(nomeSeguro('https://chat.whatsapp.com/ABC'), 'chat. whatsapp. com/ABC', 'o esquema sai inteiro');
+  for (const nome of ['Promo bit.ly/abc', 'chat.whatsapp.com/ABC', 'HTTPS://Exemplo.COM/x', 'www.loja.com.br']) {
+    const n = nomeSeguro(nome);
+    assert.ok(!/[\p{L}\p{Nd}]\.\p{L}/u.test(n) && !n.includes('://'), `${nome} → ${n}`);
+  }
+  // nomes comuns ficam como estão
+  for (const nome of ['Achados do dia', 'Black 2026', 'Top 10 v1.5', 'Achados ML', 'Casa & Cozinha 50%']) assert.equal(nomeSeguro(nome), nome);
+  // na mensagem
+  const msg = mensagemProblemas([{ tipo: 'regra', chave: 'regra:9', rule_id: 9, regra: 'Grupo 11_98765_4321 bit.ly/x', desdeEm: T(9), n: 2, horas: [T(9), T(10)], fora: 1, motivos: {} }], { agora: T(10) });
+  assert.match(msg, /^⚠️ \*A regra “Grupo … bit\. ly\/x” saiu vazia 2 vezes seguidas\*/);
 });
 
 // ---------- estado, reinício e cursor ----------
@@ -583,7 +660,7 @@ const REGRA = { tipo: 'regra', chave: 'regra:1', rule_id: 1, regra: 'Achados do 
 test('mensagens: 2 causas juntas depois do silêncio, no molde da spec', () => {
   assert.equal(mensagemProblemas([REVISAO, AMAZON], { motivo: 'silencio', agora: T(7) }), [
     '⚠️ *2 problemas: Amazon parada, revisão acumulada*',
-    'O programa estava em silêncio e agora vai avisando.',
+    'O programa segurou estes avisos durante o horário de silêncio.',
     '',
     '1. *Amazon parada desde 22:40 de 10/11.* Nenhuma oferta saiu nas últimas 3 execuções. Fazer: nada por agora: o programa tenta de novo no próximo envio. Se continuar, abra a Amazon no Chrome e veja se pede verificação.',
     '2. *12 ofertas esperando a sua revisão.* Fazer: abra Histórico > Catálogo.',
@@ -598,11 +675,11 @@ test('mensagens: 2 causas juntas depois do silêncio, no molde da spec', () => {
 
 test('mensagens: 4 causas ficam curtas (título com 3 e "e mais 1"), WhatsApp de volta', () => {
   assert.equal(mensagemProblemas([REGRA, REVISAO, EXTENSAO, AMAZON], { motivo: 'whatsapp', agora: T(7) }), [
-    '⚠️ *4 problemas: Amazon parada, extensão fora, revisão acumulada e mais 1*',
+    '⚠️ *4 problemas: Amazon parada, extensão desconectada, revisão acumulada e mais 1*',
     'O WhatsApp ficou desconectado e agora voltou.',
     '',
     '1. *Amazon parada desde 22:40 de 10/11.* Fazer: nada por agora: o programa tenta de novo no próximo envio. Se continuar, abra a Amazon no Chrome e veja se pede verificação.',
-    '2. *Extensão do Chrome fora desde 23:00 de 10/11.* Fazer: abra o Chrome com a extensão instalada e entre na Central de Afiliados com a sua conta.',
+    '2. *Extensão do Chrome desconectada desde 23:00 de 10/11.* Fazer: abra o Chrome com a extensão instalada e entre na Central de Afiliados com a sua conta.',
     '3. *12 ofertas esperando a sua revisão.* Fazer: abra Histórico > Catálogo.',
     '4. *A regra “Achados do dia” saiu vazia 2 vezes seguidas.* Fazer: o catálogo está repetindo ofertas recentes. Em geral nada a fazer.',
     'Detalhes no painel, no Histórico.',
@@ -633,13 +710,13 @@ test('mensagens: vários "voltou" numa mensagem só', () => {
     '✅ *4 problemas voltaram ao normal*',
     '1. *Amazon voltou a enviar* (esteve parada por 2 h 30 min).',
     '2. *Mercado Livre voltou a enviar* (a Central de Afiliados respondeu de novo; esteve fora por 40 min).',
-    '3. *Revisão em dia* (restam 3 ofertas esperando).',
+    '3. *Revisão voltou ao normal* (restam 3 ofertas esperando).',
     '4. *A regra “Achados do dia” voltou a enviar* (saíram 2 ofertas às 09:00).',
     'Nada a fazer.',
   ].join('\n'));
   assert.equal(mensagemVoltas([voltas[0]], T(9)), '✅ *A regra “Achados do dia” voltou a enviar*\nSaíram 2 ofertas às 09:00. Nada a fazer.');
   assert.equal(mensagemVoltas([{ ...EXTENSAO, desdeEm: T(6), fechadaEm: T(6, 40) }], T(9)),
-    '✅ *Mercado Livre voltou a enviar*\nA Extensão do Chrome respondeu de novo (esteve fora por 40 min). As ofertas saem sozinhas, nada a fazer.');
+    '✅ *Mercado Livre voltou a enviar*\nA extensão do Chrome voltou a se conectar (esteve fora por 40 min). As ofertas saem sozinhas, nada a fazer.');
 });
 
 // ---------- motivo e ação (spec §1.6) ----------
@@ -690,7 +767,7 @@ test('resumo: a linha de saúde com os números do dia (exemplo da spec)', () =>
 
 test('resumo: dia sem execução, dia sem nada a relatar e dia com tudo zero', () => {
   assert.equal(linhaDeSaude({ execucoes: [], revisao: 0, abertas: [], temRegraAtiva: false, agora: T(21) }),
-    '🩺 *Saúde dos envios*\nNenhuma regra rodou hoje: não havia regra ativa com horário no dia.');
+    '🩺 *Saúde dos envios*\nNenhuma regra rodou hoje: não há regra ativa.');
   assert.equal(linhaDeSaude({ execucoes: [ex(T(9), { ml: { saiu: 2 } })], revisao: 0, abertas: [], temRegraAtiva: true, agora: T(21) }), [
     '🩺 *Saúde dos envios* (todas as regras)',
     'Mercado Livre: 2 enviadas · Amazon: 0 enviadas',
@@ -701,7 +778,7 @@ test('resumo: dia sem execução, dia sem nada a relatar e dia com tudo zero', (
     '🩺 *Saúde dos envios* (todas as regras)',
     'Puladas: 0 · Descartadas: 0 · Falhas: 0',
     'Esperando revisão: nenhuma',
-    'Em aberto agora: extensão fora desde 23:00; 12 ofertas esperando revisão desde 22:50.',
+    'Em aberto agora: extensão desconectada desde 23:00; 12 ofertas esperando revisão desde 22:50.',
   ].join('\n'));
   // regras rodaram sem nada novo (conta=0): as lojas pedidas aparecem com 0
   assert.equal(linhaDeSaude({ execucoes: [ex(T(9), { conta: 0, lojas: ['magalu'] })], revisao: 0, abertas: [], temRegraAtiva: true, agora: T(21) }), [
@@ -710,6 +787,19 @@ test('resumo: dia sem execução, dia sem nada a relatar e dia com tudo zero', (
     'Puladas: 0 · Descartadas: 0 · Falhas: 0',
     'Esperando revisão: nenhuma',
   ].join('\n'));
+});
+
+test('resumo (achado R7): "Falhas" soma os erros só das execuções que contam (o WhatsApp fora tenta a cada minuto)', () => {
+  const tentativas = Array.from({ length: 120 }, (_, i) => ex(T(9) + i * 60000, { conta: 0, erros: 1 })); // 2 h de WhatsApp fora
+  const dia = [...tentativas, ex(T(12), { ml: { saiu: 1, pulada: 1 }, erros: 2 })];
+  assert.equal(linhaDeSaude({ execucoes: dia, revisao: 0, abertas: [], temRegraAtiva: true, agora: T(21) }), [
+    '🩺 *Saúde dos envios* (todas as regras)',
+    'Mercado Livre: 1 enviada · Amazon: 0 enviadas',
+    'Puladas: 1 · Descartadas: 0 · Falhas: 2',
+    'Esperando revisão: nenhuma',
+  ].join('\n'));
+  // só tentativas que não contam: nenhuma falha e nada a relatar além dos zeros
+  assert.match(linhaDeSaude({ execucoes: tentativas, revisao: 0, abertas: [], temRegraAtiva: true, agora: T(21) }), /Puladas: 0 · Descartadas: 0 · Falhas: 0/);
 });
 
 test('resumo: singular, loja que enviou sem ser pedida, várias em aberto', () => {
