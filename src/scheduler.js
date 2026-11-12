@@ -869,15 +869,22 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
     return { proxima, devolver, variasFontes, daReserva };
   }
 
-  /** As `want` primeiras ofertas da escolha (a prévia): o laço de proxima(), sem devolver nenhuma. */
+  /**
+   * A prévia: a mesma conta do runRule. Contam como vaga só as que sairiam; a que iria à revisão aparece na lista, mas
+   * é devolvida (não entra na trava nem na contagem), como o `fecharAtual` do envio. O total de escolhidas tem o
+   * mesmo teto do envio (want × (1 + TETO_REPOSICAO)).
+   */
   async function pickOffers(rule, want, exec = novaExecucao(), opcoes = {}) {
     const escolha = criarEscolha(rule, want, exec, opcoes);
     const picked = [];
-    while (picked.length < want) {
-      // a guarda "não zera o envio": a lista acabou e nada foi escolhido (a mesma conta do runRule)
-      const o = (await escolha.proxima()) ?? (picked.length === 0 ? escolha.daReserva() : null);
+    let saem = 0;
+    while (saem < want && picked.length < want * (1 + TETO_REPOSICAO)) {
+      // a guarda "não zera o envio": a lista acabou e nada sairia (a mesma conta do runRule)
+      const o = (await escolha.proxima()) ?? (saem === 0 ? escolha.daReserva() : null);
       if (!o) break;
       picked.push(o);
+      if (o.catalogo && o.motivos?.length) escolha.devolver(o.key);
+      else saem++;
     }
     return picked;
   }

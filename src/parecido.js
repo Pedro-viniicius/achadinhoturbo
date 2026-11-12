@@ -70,6 +70,7 @@ export const UNIDADES_CONTAGEM = new Set(['pares', 'par', 'unidades', 'unidade',
  */
 export const GENERICAS_LINHA = new Set([
   ...CABECAS_GENERICAS,
+  ...UNIDADES_CONTAGEM,
   // público
   'masculino', 'masculina', 'masculinos', 'masculinas', 'feminino', 'feminina', 'femininos', 'femininas', 'unissex',
   'infantil', 'infantis', 'adulto', 'adulta', 'adultos', 'adultas', 'bebe', 'bebes', 'crianca', 'criancas', 'kids',

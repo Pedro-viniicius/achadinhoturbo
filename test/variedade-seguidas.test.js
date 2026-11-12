@@ -490,6 +490,26 @@ test('R1: a Shopee da revisão não segura a vaga: o outro perfume (barrado pelo
   semErro(s.db, id);
 });
 
+test('R7: a oferta que iria à revisão não ocupa vaga na prévia: ela aparece e as duas que saem vêm depois, como no envio', async (t) => {
+  const shopee = { ...oferta(1, PERFUMES[1]), loja: 'shopee', item_id: '123.1', link: 'https://s.shopee.com.br/Ab1cd', imagem: 'https://down-br.img.susercontent.com/file/1', preco_antigo: null, desconto_pct: 0, chave: 'shopee:123.1' };
+  const s = montarCatalogo(t, [shopee, oferta(2, PERFUMES[2]), oferta(3, LIQUIDIFICADOR), oferta(4, FRITADEIRA)]);
+  const id = regraCatalogo(s.db, { cfg: { ordem: 'relevancia', lojas: ['amazon', 'shopee'] }, per: 2 });
+  const previa = await s.scheduler.previewOffers(id);
+  assert.deepEqual(previa.map((o) => [o.title, o.revisao]), [[PERFUMES[1], true], [PERFUMES[2], false], [LIQUIDIFICADOR, false]]);
+  const r = await s.scheduler.runRule(id);
+  assert.deepEqual([r.revisao, r.offers], [1, 2], 'o envio: a Shopee à revisão e as duas vagas preenchidas');
+  assert.deepEqual(textos(s.wa).map((x) => x.split('*')[1]), [PERFUMES[2], LIQUIDIFICADOR]);
+});
+
+test('R7: a prévia para no teto de escolhidas do envio (want × 4) quando só há ofertas para a revisão', async (t) => {
+  const shopee = (i) => ({ ...oferta(i, `Produto Shopee Numero${i} Marca${i}`), loja: 'shopee', item_id: `123.${i}`, link: `https://s.shopee.com.br/A${i}`, imagem: `https://down-br.img.susercontent.com/file/${i}`, preco_antigo: null, desconto_pct: 0, chave: `shopee:123.${i}` });
+  const s = montarCatalogo(t, Array.from({ length: 12 }, (_, i) => shopee(i + 1)));
+  const id = regraCatalogo(s.db, { cfg: { ordem: 'relevancia', lojas: ['shopee'] }, per: 1 });
+  const previa = await s.scheduler.previewOffers(id);
+  assert.ok(previa.length > 0 && previa.length <= 4, `a prévia tem ${previa.length}, no máximo 1 × (1 + 3)`);
+  assert.ok(previa.every((o) => o.revisao === true));
+});
+
 // ------------------------------------------------------------------------------- a ligação (criarServicos)
 
 /** Sobe pelo mesmo caminho do servidor (criarServicos), sem a rede: só muda o `variedade`. */

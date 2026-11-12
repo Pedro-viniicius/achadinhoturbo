@@ -322,3 +322,39 @@ test('mesmaLinha: "Kit N Pares/Unidades/Peças de X" não é do mesmo tipo de "K
   assert.equal(mesmaLinha('Kit 10 Unidades Canetas Bic Azul', 'Kit 5 Unidades Cuecas Lupo Boxer'), null, 'unidades');
   assert.equal(mesmaLinha('Conjunto 3 Peças Panelas Tramontina', 'Conjunto 5 Peças Toalhas Karsten'), null, 'peças');
 });
+
+// ------------------------------------------------------------------------- R7: a prévia mostra o mesmo que o envio (CA9)
+
+for (const comRecente of [false, true]) {
+  const rotulo = comRecente ? 'com um perfume enviado 30 min antes' : 'sem envio anterior';
+  test(`R7/CA9: a Shopee da revisão vem antes de outro perfume (${rotulo}): a prévia mostra a Shopee (revisão) e a Lancome, como o envio`, async (t) => {
+    const shopee = { ...oferta(1, PERFUMES[1]), loja: 'shopee', item_id: '123.1', link: 'https://s.shopee.com.br/Ab1cd', imagem: 'https://down-br.img.susercontent.com/file/1', preco_antigo: null, desconto_pct: 0, chave: 'shopee:123.1' };
+    const s = montarCatalogo(t, [shopee, oferta(2, PERFUMES[2])]);
+    const id = regraCatalogo(s.db, { cfg: { ordem: 'relevancia', lojas: ['amazon', 'shopee'] }, per: 2 });
+    if (comRecente) semear(s.db, id, { key: `ASIN:${asin(9)}`, titulo: PERFUMES[0], em: AGORA - 30 * MIN });
+
+    const previa = await s.scheduler.previewOffers(id);
+    const r = await s.scheduler.runRule(id);
+    // o que o envio fez: a Shopee foi para a revisão e a Lancome saiu
+    assert.equal(r.revisao, 1, 'o envio: a Shopee foi à revisão');
+    assert.equal(r.offers, 1, 'o envio: a Lancome saiu');
+    assert.ok(textos(s.wa)[0].startsWith(`*${PERFUMES[2]}*`), 'o envio mandou a Lancome');
+    // a prévia tem de mostrar as duas: a Shopee marcada como revisão e a Lancome
+    assert.deepEqual(previa.map((o) => [o.title, o.revisao === true]), [[PERFUMES[1], true], [PERFUMES[2], false]], 'a prévia mostra o mesmo que o envio');
+  });
+}
+
+// ------------------------------------------- R8: unidade de contagem não é palavra de linha ("pares" + marca não é a mesma linha)
+
+test('R8: "Kit N Pares/Unidades/Peças" de coisas diferentes da mesma marca não são da mesma linha (a unidade não conta como palavra em comum)', () => {
+  assert.equal(mesmaLinha('Kit 3 Pares Meia Lupo Algodão', 'Kit 2 Pares Chinelo Lupo'), null, 'pares + lupo');
+  assert.equal(mesmaLinha('Kit 3 Unidades Meia Lupo Algodão', 'Kit 2 Unidades Chinelo Lupo'), null, 'unidades + lupo');
+  assert.equal(mesmaLinha('Kit 3 Peças Meia Lupo Algodão', 'Kit 2 Peças Chinelo Lupo'), null, 'peças + lupo');
+  assert.equal(mesmaLinha('Kit 3 Pares Meia Lupo Algodão', 'Kit 2 Pares Chinelo Lupo'), mesmaLinha('Kit 3 Meia Lupo Algodão', 'Kit 2 Chinelo Lupo'), 'a unidade não muda o resultado');
+});
+
+test('R8: duas ofertas da mesma marca e linha de verdade continuam barrando (o conserto não afrouxa demais)', () => {
+  assert.equal(mesmaLinha('Tênis Nike Air Max 90 Masculino', 'Camiseta Nike Air Max Dri-FIT'), 'linha', 'duas palavras de linha em comum (nike, air)');
+  assert.equal(mesmaLinha('Kit 3 Pares Meia Lupo Algodão Cano Alto', 'Kit 2 Pares Chinelo Lupo Algodão Macio'), 'linha', 'marca + material, mesmo com "pares" em ambos');
+  assert.equal(mesmaLinha('Kit 3 Pares Meia Lupo Algodão', 'Kit 5 Pares Meia Nike Esportiva'), 'tipo', 'mesmo tipo (meia)');
+});
