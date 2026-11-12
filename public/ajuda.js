@@ -159,6 +159,7 @@ const DICAS_PLACEHOLDERS = {
   TITULO_COMPLETO: 'Nome do produto inteiro, sem abreviar.',
   PRECO_ANTIGO: 'Preço de antes (“De R$”). Vazio quando não há desconto.',
   PRECO_PRODUTO: 'Preço atual (“Por R$”).',
+  PRECO_ULTIMO_ENVIO: 'Preço do último envio do mesmo produto por este disparo, até 30 dias atrás. Só vem quando o preço de agora está pelo menos 5% abaixo dele; senão fica vazio. Vale no Disparo automático e no Enviar do Catálogo, não no manual. Ponha entre [ ] e fora da linha do {LINK}.',
   DESCONTO_PRODUTO: 'Porcentagem de desconto, como 25%. Vazio quando não há preço antigo.',
   NUMERO_VENDAS: 'Quantidade de vendas, como +1 mil vendidos. Vazio quando a loja não informa.',
   FRETE: 'Informação de frete, como “Frete grátis”. Vazio quando não há.',

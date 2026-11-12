@@ -18,6 +18,7 @@ import { createCatalogo, filtroDe } from '../src/catalogo.js';
 import { createCatalogoItens } from '../src/catalogo-itens.js';
 import { createAmazon } from '../src/amazon.js';
 import { FRASE_MAIS_BARATA } from '../src/parecido.js';
+import { LINHA_ULTIMO_ENVIO } from '../src/template.js';
 import * as mlReal from '../src/ml.js';
 
 // ------------------------------------------------------------------------------------------- sem rede nenhuma
@@ -794,4 +795,153 @@ test('Q5: no catálogo (Relevância), a pulada na conferência fica fora da esco
   assert.ok(s.wa.simulated[0].text.includes(`*${C}*`), 'a próxima candidata sai');
   assert.deepEqual(s.eventos.filter((e) => e.startsWith('conferir')), ['conferir 4000000001', 'conferir 4000000002'], 'a 1 não foi conferida de novo');
   assert.equal(infos(s.db, id).filter((l) => l.message.startsWith('Pulada: na conferência')).length, 1);
+});
+
+// ------------------------------------------------------------------ "Baixou de … para …" (plano baixou-de-para, etapa 5)
+
+const DIAS = 24 * HORA;
+const CORPO_BAIXOU = `*{TITULO_PRODUTO}*\n🔥 Por *{PRECO_PRODUTO}*\n${LINHA_ULTIMO_ENVIO}\n{LINK}`;
+const LINHA_BAIXOU = (de, para) => `📉 Baixou de ~R$ ${de}~ para *R$ ${para}*`;
+/** Regra da lista com o template que tem a linha. A mesma chave já passou do `dedupe_days` (7) nos casos de "8 dias". */
+const regraBaixou = (db, itens, opcoes = {}) => regraLista(db, itens, { per: 1, tpl: template(db, CORPO_BAIXOU), ...opcoes });
+
+test('baixou: a mesma chave 8 dias antes por R$ 299,00 e agora a R$ 252,00 sai com a linha "Baixou de"; o mesmo produto, sem a frase da mais barata', async (t) => {
+  const s = montar(t);
+  const id = regraBaixou(s.db, [linha(1, A, 252)]);
+  semear(s.db, id, { key: 'MLB1000001', titulo: A, preco: 29900, em: AGORA - 8 * DIAS });
+
+  const r = await s.scheduler.runRule(id);
+  assert.deepEqual([r.offers, r.messages, r.errors], [1, 1, 0]);
+  const [texto] = textos(s.wa);
+  assert.match(texto, /^\*Fone de Ouvido Bluetooth JBL Tune 510BT Preto\*\n🔥 Por \*R\$ 252,00\*\n📉 Baixou de ~R\$ 299,00~ para \*R\$ 252,00\*\nhttps:\/\/meli\.la\/\S+$/);
+  assert.equal(texto.includes(FRASE_MAIS_BARATA), false, 'mesma chave: a frase 🔎 é só da exceção do mais barato');
+  assert.equal(enviadas(s.db, id).at(-1).price_cents, 25200, 'o envio grava o preço novo: o próximo "último envio"');
+  semAlerta(s.db, id);
+});
+
+test('baixou: limite de 5% (R$ 300,00 → R$ 285,00 mostra; R$ 285,01 não); preço igual ou maior não mostra', async (t) => {
+  for (const [antes, agora, mostra] of [[30000, 285, true], [30000, 285.01, false], [30000, 300, false], [30000, 320, false], [30000, 280, true]]) {
+    await t.test(`${antes / 100} → ${agora}`, async (t2) => {
+      const s = montar(t2);
+      const id = regraBaixou(s.db, [linha(1, A, agora)]);
+      semear(s.db, id, { key: 'MLB1000001', titulo: A, preco: antes, em: AGORA - 8 * DIAS });
+      assert.equal((await s.scheduler.runRule(id)).messages, 1);
+      const [texto] = textos(s.wa);
+      if (mostra) assert.ok(texto.includes(LINHA_BAIXOU('300,00', agora.toFixed(2).replace('.', ','))), texto);
+      else {
+        assert.doesNotMatch(texto, /Baixou|📉|\[|\]|~/, 'sem queda o trecho some inteiro');
+        assert.match(texto, /^\*Fone[^\n]*\*\n🔥 Por \*R\$ [\d,]+\*\nhttps:\/\/meli\.la\/\S+$/, 'sem linha em branco no lugar');
+      }
+    });
+  }
+});
+
+test('baixou: o mesmo título com outra chave conta; título parecido não; outra regra não; mais de 30 dias não; sem preço guardado não', async (t) => {
+  const casos = [
+    // [nome, semente (relativa à regra), mostra]
+    ['título igual, outra chave (8 dias)', { key: 'MLB999', titulo: A, preco: 29900, em: AGORA - 8 * DIAS }, true],
+    ['29 dias atrás ainda vale', { key: 'MLB1000001', titulo: A, preco: 29900, em: AGORA - 29 * DIAS }, true],
+    ['31 dias atrás não vale', { key: 'MLB1000001', titulo: A, preco: 29900, em: AGORA - 31 * DIAS }, false],
+    ['parecido (outro modelo da mesma família) não conta', { key: 'MLB998', titulo: B, preco: 29900, em: AGORA - 8 * DIAS }, false],
+    ['último envio sem preço guardado não mostra', { key: 'MLB1000001', titulo: A, preco: null, em: AGORA - 8 * DIAS }, false],
+    ['outra regra não conta', { key: 'MLB1000001', titulo: A, preco: 29900, em: AGORA - 8 * DIAS, outraRegra: true }, false],
+  ];
+  for (const [nome, semente, mostra] of casos) {
+    await t.test(nome, async (t2) => {
+      const s = montar(t2);
+      const id = regraBaixou(s.db, [linha(1, A, 252)]);
+      const outra = regraBaixou(s.db, [linha(7, D, 99)]);
+      semear(s.db, semente.outraRegra ? outra : id, semente);
+      assert.equal((await s.scheduler.runRule(id)).messages, 1);
+      const [texto] = textos(s.wa);
+      if (mostra) assert.ok(texto.includes(LINHA_BAIXOU('299,00', '252,00')), texto);
+      else assert.doesNotMatch(texto, /Baixou|📉/, texto);
+    });
+  }
+});
+
+test('baixou: o envio mais recente do produto é a referência (não o mais barato nem o mais antigo)', async (t) => {
+  const s = montar(t);
+  const id = regraBaixou(s.db, [linha(1, A, 252)]);
+  semear(s.db, id, { key: 'MLB1000001', titulo: A, preco: 40000, em: AGORA - 20 * DIAS });
+  semear(s.db, id, { key: 'MLB1000001', titulo: A, preco: 29900, em: AGORA - 9 * DIAS });
+  await s.scheduler.runRule(id);
+  assert.ok(textos(s.wa)[0].includes(LINHA_BAIXOU('299,00', '252,00')));
+});
+
+test('baixou: a oferta liberada como "mais barata" sai com a frase 🔎 e com a linha 📉', async (t) => {
+  const s = montar(t);
+  const id = regraBaixou(s.db, [linha(2, A, 44.9)]);
+  semear(s.db, id, { key: 'MLB1000001', titulo: A, preco: 4990, em: AGORA - 3 * HORA });
+  assert.equal((await s.scheduler.runRule(id)).messages, 1);
+  const [texto] = textos(s.wa);
+  assert.ok(texto.startsWith(`${FRASE_MAIS_BARATA}\n\n*${A}*`), texto);
+  assert.ok(texto.includes(LINHA_BAIXOU('49,90', '44,90')), texto);
+});
+
+test('baixou: o preço da MENSAGEM é o conferido na loja: sobe para fora dos 5% → sem linha; continua dentro → linha com o preço novo', async (t) => {
+  const loja = { 9000001: { price: 71, disponivel: true } };
+  const s = montar(t, { verificar: true, loja });
+  const id = regraCentral(s.db, { per: 1, tpl: template(s.db, CORPO_BAIXOU) });
+  // 69,90 na escolha e 74,00 antes: a 5,5%; conferida a 71,00 são só 4,05%
+  semear(s.db, id, { key: 'MLB9000001', titulo: POTES, preco: 7400, em: AGORA - 8 * DIAS });
+  assert.equal((await s.scheduler.runRule(id)).messages, 1);
+  assert.doesNotMatch(textos(s.wa)[0], /Baixou|📉/, 'a conferência subiu o preço: sem a linha, e o envio sai');
+  assert.ok(textos(s.wa)[0].includes('R$ 71,00'), 'mensagem com o preço conferido');
+
+  t.mock.timers.setTime(AGORA + 8 * DIAS); // a mesma chave volta: o envio acima (R$ 71,00) é agora a referência
+  loja[9000001] = { price: 67, disponivel: true };
+  assert.equal((await s.scheduler.runRule(id)).messages, 1);
+  assert.ok(textos(s.wa)[1].includes(LINHA_BAIXOU('71,00', '67,00')), textos(s.wa)[1]);
+});
+
+test('baixou: template sem o campo sai igual ao de antes (sem a linha) mesmo com queda', async (t) => {
+  const s = montar(t);
+  const id = regraLista(s.db, [linha(1, A, 252)], { per: 1 }); // CORPO padrão do arquivo
+  semear(s.db, id, { key: 'MLB1000001', titulo: A, preco: 29900, em: AGORA - 8 * DIAS });
+  await s.scheduler.runRule(id);
+  assert.match(textos(s.wa)[0], /^\*Fone de Ouvido Bluetooth JBL Tune 510BT Preto\*\nR\$ 252,00\nhttps:\/\/meli\.la\/\S+$/);
+});
+
+test('baixou: "Ver ofertas" mostra a linha, sem devolver o campo interno, sem gravar nem logar', async (t) => {
+  const s = montar(t);
+  const id = regraBaixou(s.db, [linha(1, A, 252), linha(4, C, 199.9)], { per: 2 });
+  semear(s.db, id, { key: 'MLB1000001', titulo: A, preco: 29900, em: AGORA - 8 * DIAS });
+  const antes = JSON.stringify([s.db.prepare('SELECT * FROM log').all(), s.db.prepare('SELECT * FROM sent_offers').all()]);
+
+  const previa = await s.scheduler.previewOffers(id);
+  assert.deepEqual(previa.map((o) => o.key), ['MLB1000001', 'MLB1000004']);
+  assert.ok(previa[0].text.includes(LINHA_BAIXOU('299,00', '252,00')), previa[0].text);
+  assert.doesNotMatch(previa[1].text, /Baixou|📉/, 'o produto sem envio anterior fica sem a linha');
+  for (const o of previa) assert.equal(Object.hasOwn(o, 'precoUltimoEnvio'), false, 'a prévia não devolve o campo interno');
+  assert.equal(JSON.stringify([s.db.prepare('SELECT * FROM log').all(), s.db.prepare('SELECT * FROM sent_offers').all()]), antes, 'a prévia não grava');
+  assert.equal(s.wa.simulated.length, 0);
+});
+
+test('baixou: "Enviar agora" (execução manual) também mostra a linha', async (t) => {
+  const s = montar(t);
+  const id = regraBaixou(s.db, [linha(1, A, 252)]);
+  semear(s.db, id, { key: 'MLB1000001', titulo: A, preco: 29900, em: AGORA - 8 * DIAS });
+  const r = await s.scheduler.runRule(id, { manual: true });
+  assert.equal(r.messages, 1);
+  assert.ok(textos(s.wa)[0].includes(LINHA_BAIXOU('299,00', '252,00')));
+});
+
+test('baixou: erro ao ler o histórico não derruba o envio: sai sem a linha, e o console só recebe o código', async (t) => {
+  const s = montar(t);
+  const id = regraBaixou(s.db, [linha(1, A, 252)]);
+  semear(s.db, id, { key: 'MLB1000001', titulo: A, preco: 29900, em: AGORA - 8 * DIAS });
+  // a trava lê `sent_offers` antes (com a mesma tabela): o gatilho só falha na busca do último envio (ela lê price_cents por último)
+  const original = s.db.prepare.bind(s.db);
+  const saida = [];
+  t.mock.method(console, 'error', (...a) => saida.push(a.join(' ')));
+  s.db.prepare = (sql) => {
+    if (/SELECT offer_key, title, price_cents FROM sent_offers/.test(sql)) { const e = new Error('falhou com 5535999990000'); e.code = 'ERR_SQLITE_ERROR'; throw e; }
+    return original(sql);
+  };
+  const r = await s.scheduler.runRule(id);
+  assert.deepEqual([r.messages, r.errors], [1, 0]);
+  assert.doesNotMatch(textos(s.wa)[0], /Baixou|📉/);
+  assert.ok(saida.some((l) => l.includes('ERR_SQLITE_ERROR')), saida.join('|'));
+  assert.ok(saida.every((l) => !l.includes('5535999990000')), 'a mensagem do erro não vai ao console');
 });

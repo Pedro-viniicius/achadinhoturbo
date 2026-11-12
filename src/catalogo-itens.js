@@ -49,7 +49,7 @@ import { LINK_SHOPEE } from './shopee.js';
 import { discountPct } from './template.js';
 import { emCentavos } from './catalogo.js';
 import { validarAjustesOferta } from './espelho.js';
-import { centavos, criarTrava, lerEnviados, textoConflito, tituloParaGuardar } from './parecido.js';
+import { centavos, criarTrava, lerEnviados, precoDoUltimoEnvio, textoConflito, tituloParaGuardar } from './parecido.js';
 
 const DIA = 86400000;
 export const TETO_REVISAO = 50;             // pendentes por regra (P5): acima, as novas esperam sem entrar
@@ -523,6 +523,11 @@ export function createCatalogoItens({ db, wa = null, links = null, amazon = null
       if (r.changes !== 1) throw new ErroCatalogoItem(409, JA_TRATADA);
       // a reserva do envio que falhou (se o agendador ainda não a tirou)
       if (reenvio && item.decidido_em != null) db.prepare('DELETE FROM sent_offers WHERE rule_id = ? AND offer_key = ? AND sent_at = ?').run(regra.id, item.chave, item.decidido_em);
+      // "Baixou de … para …" ({PRECO_ULTIMO_ENVIO}): o preço, em centavos, do último envio deste produto pela regra nos
+      // últimos 30 dias. Lido aqui, antes da reserva abaixo (que a esconderia, por ser a mais recente): a fila decide se
+      // o preço conferido ainda está pelo menos 5% abaixo e mostra a linha ou não. Sem envio anterior, sem a chave
+      const ultimo = precoDoUltimoEnvio(db, regra.id, { key: item.chave, title: oferta.title }, now);
+      if (ultimo !== null) payload.preco_ultimo_envio = ultimo;
       const novo = Number(db.prepare(`INSERT INTO envios (tipo, payload, group_jids, quando, repetir, status, next_run_at, user_id, created_at)
         VALUES ('oferta', ?, ?, 'agora', NULL, 'pendente', ?, ?, ?)`)
         .run(JSON.stringify(payload), JSON.stringify(destinos), now, Number.isInteger(userId) ? userId : null, now).lastInsertRowid);

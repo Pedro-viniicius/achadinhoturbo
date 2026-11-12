@@ -111,10 +111,13 @@ test('esquema: banco da versão anterior reabre com os dados intactos e ganha ta
   for (let abertura = 1; abertura <= 2; abertura++) {
     const db = openDb(dir);
     // A semente "Amazon" entrou em 02/11/2026 (etapa 1 do plano espelhamento-amazon): fora a marca e o template dela, nada muda.
-    const semSemente = { settings: " WHERE key <> 'tpl_amazon_seed'", templates: " WHERE name <> 'Amazon'" };
+    // A marca tpl_ultimo_envio_migrado entrou em 11/11/2026 (plano baixou-de-para, etapa 3): "Meu template" não tem linha
+    // de preço, então a migração da linha "Baixou de … para …" não mexe nele e a marca fica com a lista vazia.
+    const semSemente = { settings: " WHERE key NOT IN ('tpl_amazon_seed', 'tpl_ultimo_envio_migrado')", templates: " WHERE name <> 'Amazon'" };
     for (const t of ['settings', 'tags', 'templates']) {
       assert.deepEqual(linhas(db, `SELECT * FROM ${t}${semSemente[t] || ''} ORDER BY rowid`), antes[t], `${t} intacta (abertura ${abertura})`);
     }
+    assert.equal(getSetting(db, 'tpl_ultimo_envio_migrado'), '[]', `nenhum template ganhou a linha (abertura ${abertura})`);
     // A coluna groups.admins entrou em 10/11/2026 (plano anti-banimento, etapa 1): nula = contagem desconhecida.
     assert.deepEqual(linhas(db, 'SELECT * FROM groups ORDER BY rowid'), antes.groups.map((g) => ({ ...g, admins: null })), `groups intacta, com admins nulo (abertura ${abertura})`);
     // A coluna rules.grade entrou em 05/11/2026 (plano grade-de-disparos, etapa 1): nula = ritmo por intervalo, como antes.
@@ -418,8 +421,10 @@ const INDICES_ESPELHO = {
   idx_esp_dedupe: [['espelho_id', 'asin', 'status', 'decidido_em'], 0],
   idx_esp_status: [['status', 'espera_ate', 'ts'], 0],
 };
+// A linha "📉 Baixou de … para …" entrou em 11/11/2026 (plano baixou-de-para, etapas 1 e 3): o "Amazon" já nasce com ela.
+const LINHA_BAIXOU = '[📉 Baixou de ~{PRECO_ULTIMO_ENVIO}~ para *{PRECO_PRODUTO}*]';
 const TEXTO_AMAZON = [
-  '*{TITULO_PRODUTO}*', '', '😱 De ~{PRECO_ANTIGO}~', '🔥 Por *{PRECO_PRODUTO}*[ ({DESCONTO_PRODUTO} OFF)]',
+  '*{TITULO_PRODUTO}*', '', '😱 De ~{PRECO_ANTIGO}~', '🔥 Por *{PRECO_PRODUTO}*[ ({DESCONTO_PRODUTO} OFF)]', LINHA_BAIXOU,
   '🚚 {FRETE}', '🎟️ Cupom: *{CUPOM}*', '', '🛒 Compre aqui: {LINK}',
 ].join('\n');
 const DEFAULT_ANTERIOR = [
@@ -483,11 +488,12 @@ test('espelho etapa 1: template "Amazon" apagado ou renomeado pelo dono não vol
 test('espelho etapa 1: banco da versão anterior (sem as tabelas de espelho) migra com os dados intactos', () => {
   const dir = tmp();
   // Banco como o do serviço antes desta etapa: esquema atual sem espelhos/espelho_itens/índices, sem a semente
-  // e com o template "Padrão" no texto antigo, mais dados em várias tabelas.
+  // e com o template "Padrão" no texto antigo, mais dados em várias tabelas. Sem a marca tpl_ultimo_envio_migrado
+  // (plano baixou-de-para, etapa 3, 11/11/2026), que um banco daquela época também não tinha.
   const velho = openDb(dir);
   velho.exec(`
     DROP TABLE espelho_itens; DROP TABLE espelhos;
-    DELETE FROM templates; DELETE FROM settings WHERE key = 'tpl_amazon_seed';
+    DELETE FROM templates; DELETE FROM settings WHERE key IN ('tpl_amazon_seed', 'tpl_ultimo_envio_migrado');
     INSERT INTO templates (id, name, body, created_at) VALUES (1, 'Padrão', '${DEFAULT_ANTERIOR}', 1), (7, 'Meu template', '{TITULO_PRODUTO} {LINK}', 2);
     INSERT INTO groups (jid, name, size, updated_at) VALUES ('g1@g.us', 'Grupo 1', 250, 1);
     INSERT INTO rules (id, name, template_id, group_jids, created_at) VALUES (3, 'Regra', 7, '["g1@g.us"]', 1);
@@ -509,14 +515,20 @@ test('espelho etapa 1: banco da versão anterior (sem as tabelas de espelho) mig
       assert.deepEqual(linhas(db, `SELECT * FROM ${t} ORDER BY rowid`), antes[t], `${t} intacta (abertura ${abertura})`);
     }
     const templates = linhas(db, 'SELECT * FROM templates ORDER BY rowid');
-    assert.deepEqual(templates.slice(0, antes.templates.length), antes.templates, `templates existentes intactos, Padrão com o texto antigo (abertura ${abertura})`);
+    // Desde a migração do plano baixou-de-para (etapa 3, 11/11/2026), o Padrão antigo ganha só a linha "Baixou de … para …"
+    // abaixo do "🔥 Por"; o resto do texto e o "Meu template" (sem linha de preço) ficam como estavam.
+    const padraoMigrado = DEFAULT_ANTERIOR.replace('({DESCONTO_PRODUTO} OFF)\n', `({DESCONTO_PRODUTO} OFF)\n${LINHA_BAIXOU}\n`);
+    assert.notEqual(padraoMigrado, DEFAULT_ANTERIOR);
+    assert.deepEqual(templates.slice(0, antes.templates.length), antes.templates.map((t) => (t.id === 1 ? { ...t, body: padraoMigrado } : t)),
+      `templates existentes intactos, Padrão com o texto antigo e a linha nova (abertura ${abertura})`);
     assert.equal(templates.length, antes.templates.length + 1, `só o "Amazon" a mais (abertura ${abertura})`);
     assert.equal(templates.at(-1).name, 'Amazon');
     assert.equal(templates.at(-1).body, TEXTO_AMAZON);
     assert.ok(templates.at(-1).id > 7, 'id novo, sem reaproveitar o de um template existente');
     const settings = linhas(db, 'SELECT * FROM settings ORDER BY rowid');
-    assert.deepEqual(settings.filter((s) => s.key !== 'tpl_amazon_seed'), antes.settings, `settings intactas (abertura ${abertura})`);
+    assert.deepEqual(settings.filter((s) => !['tpl_amazon_seed', 'tpl_ultimo_envio_migrado'].includes(s.key)), antes.settings, `settings intactas (abertura ${abertura})`);
     assert.equal(getSetting(db, 'tpl_amazon_seed'), String(templates.at(-1).id));
+    assert.equal(getSetting(db, 'tpl_ultimo_envio_migrado'), '[1]', `só o Padrão ganhou a linha (abertura ${abertura})`);
     db.close();
   }
 });
@@ -548,13 +560,162 @@ test('espelho etapa 1: defaults das tabelas e índice único por mensagem e link
 });
 
 test('espelho etapa 1: DEFAULT_TEMPLATE só troca o desconto por pedaço opcional; o resto é o texto de antes', () => {
-  const novo = dbMod.DEFAULT_TEMPLATE.split('\n');
+  // Plano baixou-de-para, etapa 3 (11/11/2026): o DEFAULT_TEMPLATE ganhou a linha "Baixou de … para …" logo abaixo do "🔥 Por".
+  const comLinha = dbMod.DEFAULT_TEMPLATE.split('\n');
+  assert.equal(comLinha[comLinha.indexOf('🔥 Por *{PRECO_PRODUTO}*[ ({DESCONTO_PRODUTO} OFF)]') + 1], LINHA_BAIXOU, 'a linha nova fica abaixo do "🔥 Por"');
+  assert.equal(comLinha.filter((l) => l === LINHA_BAIXOU).length, 1);
+  const novo = comLinha.filter((l) => l !== LINHA_BAIXOU);
   const antigo = DEFAULT_ANTERIOR.split('\n');
   assert.equal(novo.length, antigo.length);
   const diferentes = novo.map((l, i) => [l, antigo[i]]).filter(([a, b]) => a !== b);
   assert.deepEqual(diferentes, [['🔥 Por *{PRECO_PRODUTO}*[ ({DESCONTO_PRODUTO} OFF)]', '🔥 Por *{PRECO_PRODUTO}* ({DESCONTO_PRODUTO} OFF)']]);
   const db = openDb(tmp());
   assert.equal(db.prepare("SELECT body FROM templates WHERE name = 'Padrão'").get().body, dbMod.DEFAULT_TEMPLATE, 'instalação nova recebe o texto novo');
+  db.close();
+});
+
+// ---------------------------------------------------------------------------------------------
+// "Baixou de/para", etapa 3 (docs/produto/planos/baixou-de-para.md, CA3 e CA6): migração única que acrescenta a linha
+// "[📉 Baixou de ~{PRECO_ULTIMO_ENVIO}~ para *{PRECO_PRODUTO}*]" nos templates existentes, marca tpl_ultimo_envio_migrado.
+const { renderTemplate } = await import('../src/template.js');
+
+/** Os 6 casos de template de um banco de antes da migração: [id, nome, corpo antes, corpo esperado depois]. */
+const TEMPLATES_ANTIGOS = [
+  [1, 'Padrão', DEFAULT_ANTERIOR, DEFAULT_ANTERIOR.replace('({DESCONTO_PRODUTO} OFF)\n', `({DESCONTO_PRODUTO} OFF)\n${LINHA_BAIXOU}\n`)],
+  [2, 'Sem preço', '*{TITULO_PRODUTO}*\n🛒 {LINK}', null],
+  [3, 'Preço e link juntos', '*{TITULO_PRODUTO}*\nSó {PRECO_PRODUTO}: {LINK}', null],
+  [4, 'Já tem o campo', '*{TITULO_PRODUTO}*\nPor {PRECO_PRODUTO}\n[Antes {PRECO_ULTIMO_ENVIO}]\n{LINK}', null],
+  [5, 'CRLF', '*{TITULO_PRODUTO}*\r\n🔥 Por {PRECO_PRODUTO}\r\n🛒 {LINK}', `*{TITULO_PRODUTO}*\r\n🔥 Por {PRECO_PRODUTO}\r\n${LINHA_BAIXOU}\r\n🛒 {LINK}`],
+  [6, 'Do dono', 'Olha isso!\n{TITULO_PRODUTO} por {PRECO_PRODUTO}\nDe {PRECO_ANTIGO} por {PRECO_PRODUTO}\n👉 {LINK}',
+    `Olha isso!\n{TITULO_PRODUTO} por {PRECO_PRODUTO}\n${LINHA_BAIXOU}\nDe {PRECO_ANTIGO} por {PRECO_PRODUTO}\n👉 {LINK}`],
+];
+const IDS_MIGRADOS = TEMPLATES_ANTIGOS.filter((t) => t[3] !== null).map((t) => t[0]);
+
+/** Banco como o do serviço antes desta etapa: sem a marca, com os 6 templates de TEMPLATES_ANTIGOS e o "Amazon" já semeado. */
+function bancoAntesDaLinha() {
+  const dir = tmp();
+  const velho = openDb(dir);
+  velho.exec("DELETE FROM templates; DELETE FROM settings WHERE key IN ('tpl_amazon_seed', 'tpl_ultimo_envio_migrado')");
+  const inserir = velho.prepare('INSERT INTO templates (id, name, body, created_at) VALUES (?, ?, ?, 1)');
+  for (const [id, nome, corpo] of TEMPLATES_ANTIGOS) inserir.run(id, nome, corpo);
+  assert.equal(getSetting(velho, 'tpl_ultimo_envio_migrado'), null, 'o banco simulado não tem a marca');
+  velho.close();
+  return dir;
+}
+const corpos = (db) => Object.fromEntries(linhas(db, 'SELECT id, body FROM templates ORDER BY id').map((t) => [t.id, t.body]));
+
+test('baixou etapa 3: instalação nova já nasce com a linha no Padrão e no Amazon e grava a marca vazia', (t) => {
+  const avisos = t.mock.method(console, 'log', () => {});
+  const db = openDb(tmp());
+  assert.equal(getSetting(db, 'tpl_ultimo_envio_migrado'), '[]', 'nada a migrar: a marca é a lista vazia');
+  for (const { name, body } of linhas(db, 'SELECT name, body FROM templates ORDER BY id')) {
+    assert.equal(body.split('\n').filter((l) => l === LINHA_BAIXOU).length, 1, `${name} tem a linha uma vez só`);
+  }
+  assert.equal(avisos.mock.callCount(), 0, 'sem template alterado, nada no console');
+  db.close();
+});
+
+test('baixou etapa 3: banco antigo só ganha a linha onde deve, a marca guarda os ids e reabrir não muda nada', (t) => {
+  const dir = bancoAntesDaLinha();
+  const avisos = t.mock.method(console, 'log', () => {});
+  const erros = t.mock.method(console, 'error', () => {});
+  const db = openDb(dir);
+  const depois = corpos(db);
+  for (const [id, nome, antes, esperado] of TEMPLATES_ANTIGOS) {
+    assert.equal(depois[id], esperado ?? antes, `${nome} (id ${id}) ${esperado ? 'ganha a linha' : 'fica como estava'}`);
+  }
+  const amazon = templatesAmazon(db);
+  assert.equal(amazon.length, 1);
+  assert.equal(amazon[0].body, TEXTO_AMAZON, 'o "Amazon" semeado nesta abertura não ganha uma segunda linha');
+  assert.deepEqual(JSON.parse(getSetting(db, 'tpl_ultimo_envio_migrado')), IDS_MIGRADOS, 'a marca guarda só os ids alterados');
+  assert.equal(erros.mock.callCount(), 0);
+  assert.equal(avisos.mock.callCount(), 1, 'a contagem vai ao console uma vez');
+  const dito = avisos.mock.calls[0].arguments.map(String).join(' ');
+  assert.match(dito, /\b3 template/, 'diz quantos mudaram');
+  assert.doesNotMatch(dito, /\{|Padrão|Do dono|CRLF/, 'sem corpo nem nome de template no console');
+
+  // sem queda (campo vazio), a mensagem sai igual à de antes, inclusive no corpo com CRLF
+  const oferta = { title: 'Fone Bluetooth', price: 252, oldPrice: 349, link: 'https://meli.la/abc', freeShipping: true };
+  for (const [id, nome, antes] of TEMPLATES_ANTIGOS) {
+    assert.equal(renderTemplate(depois[id], oferta), renderTemplate(antes, oferta), `${nome}: texto igual sem queda`);
+  }
+  assert.match(renderTemplate(depois[1], { ...oferta, precoUltimoEnvio: 299 }), /\n📉 Baixou de ~R\$ 299,00~ para \*R\$ 252,00\*\n/,
+    'com queda, a linha aparece no Padrão migrado');
+  const esquema = linhas(db, 'SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name');
+  const tudo = linhas(db, 'SELECT * FROM templates ORDER BY id');
+  const marcas = linhas(db, 'SELECT * FROM settings ORDER BY rowid');
+  db.close();
+
+  const db2 = openDb(dir);
+  assert.deepEqual(linhas(db2, 'SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name'), esquema);
+  assert.deepEqual(linhas(db2, 'SELECT * FROM templates ORDER BY id'), tudo, 'reabrir não muda nenhum template');
+  assert.deepEqual(linhas(db2, 'SELECT * FROM settings ORDER BY rowid'), marcas, 'nem as settings');
+  assert.equal(avisos.mock.callCount(), 1, 'a segunda abertura não diz nada');
+  db2.close();
+});
+
+test('baixou etapa 3: linha apagada pelo dono não volta; template criado depois não é tocado', () => {
+  const dir = bancoAntesDaLinha();
+  let db = openDb(dir);
+  db.prepare('UPDATE templates SET body = ? WHERE id = 1').run(DEFAULT_ANTERIOR); // o dono tira a linha no editor
+  const { lastInsertRowid } = db.prepare("INSERT INTO templates (name, body, created_at) VALUES ('Novo', 'Por {PRECO_PRODUTO}\n{LINK}', 2)").run();
+  const antes = linhas(db, 'SELECT * FROM templates ORDER BY id');
+  db.close();
+  db = openDb(dir);
+  assert.deepEqual(linhas(db, 'SELECT * FROM templates ORDER BY id'), antes, 'nada muda ao reabrir');
+  assert.equal(corpos(db)[1], DEFAULT_ANTERIOR, 'o Padrão continua sem a linha');
+  assert.equal(corpos(db)[Number(lastInsertRowid)], 'Por {PRECO_PRODUTO}\n{LINK}');
+  assert.deepEqual(JSON.parse(getSetting(db, 'tpl_ultimo_envio_migrado')), IDS_MIGRADOS, 'a marca é a da primeira vez');
+  db.close();
+});
+
+test('baixou etapa 3: erro no meio desfaz tudo, o console só leva o código, o openDb segue e a próxima abertura migra', (t) => {
+  const dir = bancoAntesDaLinha();
+  // gatilho falha no UPDATE do 2º template migrado (id 5): o do id 1, já feito, tem de ser desfeito pelo ROLLBACK
+  const velho = new DatabaseSync(path.join(dir, 'disparador.db'));
+  velho.exec("CREATE TRIGGER falha_tpl BEFORE UPDATE ON templates WHEN NEW.id = 5 BEGIN SELECT RAISE(ABORT, 'falhou 5531999990000 {PRECO_PRODUTO}'); END");
+  velho.close();
+  const erros = t.mock.method(console, 'error', () => {});
+  let db = openDb(dir);
+  assert.deepEqual(corpos(db), { ...Object.fromEntries(TEMPLATES_ANTIGOS.map(([id, , antes]) => [id, antes])), [templatesAmazon(db)[0].id]: TEXTO_AMAZON },
+    'nenhum template mudou');
+  assert.equal(getSetting(db, 'tpl_ultimo_envio_migrado'), null, 'sem a marca: tenta de novo na próxima abertura');
+  assert.ok(getSetting(db, 'ext_token'), 'o openDb terminou');
+  assert.equal(db.isTransaction, false, 'nenhuma transação ficou aberta');
+  assert.equal(erros.mock.callCount(), 1);
+  const dito = erros.mock.calls[0].arguments.map(String).join(' ');
+  assert.match(dito, /ERR_SQLITE_ERROR/);
+  assert.doesNotMatch(dito, /5531999990000|\{|falhou/, 'sem a mensagem do banco');
+  db.exec('DROP TRIGGER falha_tpl');
+  db.close();
+
+  db = openDb(dir);
+  for (const [id, nome, antes, esperado] of TEMPLATES_ANTIGOS) assert.equal(corpos(db)[id], esperado ?? antes, `${nome} migrado na abertura seguinte`);
+  assert.deepEqual(JSON.parse(getSetting(db, 'tpl_ultimo_envio_migrado')), IDS_MIGRADOS);
+  assert.equal(erros.mock.callCount(), 1);
+  db.close();
+});
+
+test('baixou etapa 3: banco ocupado por outra conexão não derruba o openDb; a linha entra na abertura seguinte', (t) => {
+  const dir = bancoAntesDaLinha();
+  const outra = new DatabaseSync(path.join(dir, 'disparador.db'));
+  outra.exec("INSERT INTO settings (key, value) VALUES ('tpl_amazon_seed', '99')"); // a semente do "Amazon" já rodou antes
+  outra.exec('BEGIN IMMEDIATE'); // outro processo escrevendo agora
+  const erros = t.mock.method(console, 'error', () => {});
+  let db;
+  try {
+    db = openDb(dir);
+  } finally {
+    outra.exec('ROLLBACK');
+    outra.close();
+  }
+  assert.equal(getSetting(db, 'tpl_ultimo_envio_migrado'), null);
+  assert.equal(corpos(db)[1], DEFAULT_ANTERIOR, 'Padrão sem a linha por enquanto');
+  assert.equal(erros.mock.callCount(), 1);
+  assert.match(erros.mock.calls[0].arguments.map(String).join(' '), /ERR_SQLITE_ERROR/);
+  db.close();
+  db = openDb(dir);
+  assert.deepEqual(JSON.parse(getSetting(db, 'tpl_ultimo_envio_migrado')), IDS_MIGRADOS);
   db.close();
 });
 
