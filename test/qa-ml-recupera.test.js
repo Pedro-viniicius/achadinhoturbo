@@ -6,7 +6,7 @@
 //  - `falhasMl` (contador por regra e oferta: separado entre regras, zera ao sair, vence em 7 dias);
 //  - bordas da queda de preço (CA2.11: 50% exato, centavos, R$ 0,00, queda_pct de 1 a 99) e a guarda da fila (CA2.12);
 //  - migração do `falha_link` em bancos de antes da entrega 1, de antes da 2 e já migrados (CA2.17);
-//  - versões da extensão (CA2.16) e o que fica aberto como bug (testes `todo`, para a suíte seguir verde).
+//  - versões da extensão (CA2.16) e os bugs achados na rodada 1 (Q1, Q2), corrigidos na rodada 2.
 // Nenhum teste chama Mercado Livre, Etiqueta nem WhatsApp reais: fetch global proibido, WhatsApp simulado.
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -337,7 +337,9 @@ test('CA2.11 queda em centavos: 50,00% exatos vão à revisão com queda_preco e
         assert.equal(item.oferta.queda_pct, quedaDePreco(lista, conferido));
         assert.equal(item.oferta.price, conferido, 'a revisão mostra o preço conferido');
         assert.equal(s.wa.simulated.length, 0);
-        assert.ok(mensagens(s, s.id).some((m) => m.startsWith('Separada para revisão: ') && m.includes(`o preço está ${item.oferta.queda_pct}% abaixo do preço da lista (o limite é ${QUEDA_REVISAO_PCT}%), confira o preço`)), mensagens(s, s.id).join(' | '));
+        // com 1 motivo a ação vem logo depois (", confira o preço."); com 2 ou mais, uma vez só no fim (". Confira o preço.", achado D1)
+        assert.ok(mensagens(s, s.id).some((m) => m.startsWith('Separada para revisão: ') && m.includes(`o preço está ${item.oferta.queda_pct}% abaixo do preço da lista (o limite é ${QUEDA_REVISAO_PCT}%)`)
+          && (item.motivos.length === 1 ? m.endsWith(', confira o preço.') : m.endsWith('. Confira o preço.'))), mensagens(s, s.id).join(' | '));
       } else {
         assert.deepEqual([r.offers, r.revisao], [1, 0]);
         assert.equal(item.status, 'enviado');
@@ -421,9 +423,12 @@ function montarFila(t) {
   const envios = createEnvios({ db, wa, links, ml, fast: true, dir, acordar: () => {}, verificador });
   db.prepare('INSERT INTO groups (jid, name, size, updated_at) VALUES (?,?,?,?)').run(G1, 'Achadinhos', 10, Date.now());
   db.prepare('INSERT INTO tags (name, created_at) VALUES (?, 1)').run('etiquetaA');
-  const tpl = Number(db.prepare('INSERT INTO templates (name, body, created_at) VALUES (?,?,?)').run('t', CORPO, Date.now()).lastInsertRowid);
+  // o envio guarda o created_at do template; um Date.now() próprio no gravar caía às vezes no milissegundo seguinte e a
+  // fila recusava com "o template foi apagado" (teste instável: 2 em 20)
+  const tplCriado = Date.now();
+  const tpl = Number(db.prepare('INSERT INTO templates (name, body, created_at) VALUES (?,?,?)').run('t', CORPO, tplCriado).lastInsertRowid);
   const gravar = (offer, precoLoja) => {
-    const payload = { url: URL_ML, loja: 'mercadolivre', preco_loja: precoLoja, tag_id: 1, etiqueta: 'etiquetaA', template_id: tpl, template_criado_em: Date.now(), enviar_foto: false,
+    const payload = { url: URL_ML, loja: 'mercadolivre', preco_loja: precoLoja, tag_id: 1, etiqueta: 'etiquetaA', template_id: tpl, template_criado_em: tplCriado, enviar_foto: false,
       offer: { key: 'MLB1234567890', title: 'Fone Bom', sold: null, freeShipping: false, coupon: null, image: null, ...offer } };
     const agora = Date.now();
     return Number(db.prepare(`INSERT INTO envios (tipo, payload, group_jids, quando, status, next_run_at, created_at) VALUES ('oferta', ?, ?, 'agora', 'pendente', ?, ?)`)
@@ -450,13 +455,13 @@ test('CA2.12 limite da guarda da fila (aceito pelo plano): só vale quando a con
   assert.equal(s2.wa.simulated.length, 0);
 });
 
-test('CA2.12 a queda de 50% ou mais NÃO é guarda da fila (só 100% e preço antigo 10×); a fonte antiga e o Catálogo a aplicam — divergência do texto do CA, aceita só se o dono confirmar', async (t) => {
+test('CA2.12 a queda de 50% ou mais também é guarda da fila (como na fonte antiga e no Catálogo; achados R3/S1)', async (t) => {
   const s = montarFila(t);
   s.estado.leitura = { price: 35.9, disponivel: true }; // 89,90 → 35,90: queda de 60%, sem preço antigo suspeito
   const id = s.gravar({ price: 89.9, oldPrice: 149.9, discountPct: 40 }, 89.9);
   await s.envios.processarPendentes();
-  assert.equal(s.resultado(id).status, 'concluido');
-  assert.match(s.wa.simulated.at(-1).text, /Por R\$ 35,90/);
+  assert.deepEqual([s.resultado(id).status, s.resultado(id).descartado], ['erro', 'preco_suspeito']);
+  assert.equal(s.wa.simulated.length, 0, 'nada sai');
 });
 
 test('CA2.12 a fila com a leitura R$ 0,00 ou inválida nunca manda preço zero (preço lido ≤ 0 é "sem preço", não 100% de queda)', async (t) => {
@@ -590,9 +595,9 @@ test('CA2.10 o passo de recarregar a extensão (atualizar a pasta extension, chr
   assert.match(ler('extension', 'popup.html') + ler('extension', 'popup.js'), /versao/i, 'o popup mostra a versão do manifest');
 });
 
-// ======================================================================================================== bugs abertos (todo)
+// ======================================================================================================== bugs da rodada 1 (eram `todo`)
 
-test('Q1 (baixo): HTTP 404 de UMA página de produto (anúncio que saiu do ar) não deveria contar como falha da CENTRAL — três seguidas abrem a espera "Central sem resposta" sem a Central ter falhado', { todo: 'Q1: produto_ml com erro HTTP de um anúncio conta para a espera da Central' }, async (t) => {
+test('Q1 (baixo): HTTP 404 de UMA página de produto (anúncio que saiu do ar) não conta como falha da CENTRAL — três seguidas não abrem a espera "Central sem resposta"', async (t) => {
   t.mock.timers.enable({ apis: ['Date'], now: dia(11, 14) });
   const dir = tmp(); const db = openDb(dir);
   const links = createLinkService({ getMode: () => 'extension', db, agora: () => Date.now() });
@@ -603,7 +608,7 @@ test('Q1 (baixo): HTTP 404 de UMA página de produto (anúncio que saiu do ar) n
   assert.notEqual(links.central().estado, 'em_espera', 'a Central de Afiliados não foi consultada: só páginas de produto devolveram 404');
 });
 
-test('Q2 (baixo): fonte "Central de Afiliados" na espera grava uma linha `erro` por execução (alerta no WhatsApp), ao contrário das linhas da espera (aviso)', { todo: 'Q2: regra com a fonte afiliados loga erro a cada execução durante a espera' }, async (t) => {
+test('Q2 (baixo): fonte "Central de Afiliados" na espera não grava linha `erro` por execução (alerta no WhatsApp), como as outras esperas', async (t) => {
   t.mock.timers.enable({ apis: ['Date'], now: dia(11, 14) });
   const dir = tmp(); const db = openDb(dir);
   const links = createLinkService({ getMode: () => 'extension', db, agora: () => Date.now() });
@@ -613,7 +618,19 @@ test('Q2 (baixo): fonte "Central de Afiliados" na espera grava uma linha `erro` 
   const id = Number(db.prepare(`INSERT INTO rules (name, enabled, tag_id, template_id, group_jids, source_type, source_config, per_run, interval_min, window_start, window_end, dedupe_days, send_image, created_at)
     VALUES ('Central', 1, 1, 1, ?, 'afiliados', '{}', 1, 60, '00:00', '23:59', 7, 0, ?)`).run(JSON.stringify(['111@g.us']), Date.now()).lastInsertRowid);
   ext.limpar();
+  const r = await s.scheduler.runRule(id);
   await s.scheduler.runRule(id);
   assert.deepEqual(ext.jobs, [], 'nenhum pedido à extensão (isto já vale)');
   assert.ok(!s.logs(id).some((l) => l.level === 'erro'), s.logs(id).map((l) => `${l.level}: ${l.message}`).join(' | '));
+  assert.deepEqual(s.logs(id), [], 'nenhuma linha por execução: a da espera (sem regra) já está no Histórico');
+  assert.equal(r.errors, 0);
+  assert.equal(geral(db).filter((l) => l.message.startsWith('Mercado Livre em espera')).length, 1);
+  // com outra fonte na regra, a Central em espera não vira "Fonte ignorada" a cada execução e a outra fonte segue
+  const outra = Number(db.prepare(`INSERT INTO rules (name, enabled, tag_id, template_id, group_jids, source_type, source_config, sources, per_run, interval_min, window_start, window_end, dedupe_days, send_image, created_at)
+    VALUES ('Duas fontes', 1, 1, 1, ?, 'list', '{}', ?, 1, 60, '00:00', '23:59', 7, 0, ?)`).run(JSON.stringify(['111@g.us']),
+    JSON.stringify([{ type: 'afiliados', config: {} }, { type: 'list', config: { items: 'https://produto.mercadolivre.com.br/MLB-4000000001-x | Panela | 50' } }]), Date.now()).lastInsertRowid);
+  const r2 = await s.scheduler.runRule(outra);
+  assert.equal(r2.errors, 0);
+  assert.ok(!s.logs(outra).some((l) => l.level === 'erro' || l.message.startsWith('Fonte ignorada')), s.logs(outra).map((l) => `${l.level}: ${l.message}`).join(' | '));
+  assert.deepEqual(ext.jobs, [], 'a oferta da lista espera junto (o ML está em espera), sem pedido');
 });

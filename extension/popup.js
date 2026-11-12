@@ -1,18 +1,21 @@
 const $ = (id) => document.getElementById(id);
+// só troca o texto que mudou (achado D9): as linhas ficam em role="status" e o leitor de tela as releria a cada mudança
+// do storage, mesmo com o mesmo texto
+const texto = (el, t) => { if (el.textContent !== t) el.textContent = t; };
 
 async function pintar() {
   const { conf = {}, st = {} } = await chrome.storage.local.get(['conf', 'st']);
   if (conf.servidor) $('servidor').value = conf.servidor;
   if (conf.token && !$('token').value) $('token').value = conf.token;
   $('linhaExtensao').className = 'linha' + (st.ok ? ' ok' : '');
-  $('msg').textContent = st.ok ? 'Conectado ao achadinhoturbo' : (st.erro || 'Desconectado');
+  texto($('msg'), st.ok ? 'Conectado ao achadinhoturbo' : (st.erro || 'Desconectado'));
   // Central de Afiliados: o resultado do último pedido que passou por ela (o background.js grava st.central), só com
   // a extensão conectada ao painel; antes do primeiro pedido, a linha não aparece
   const central = st.ok && (st.central === 'respondendo' || st.central === 'sem_resposta') ? st.central : null;
   $('linhaCentral').hidden = !central;
   $('linhaCentral').className = 'linha' + (central === 'respondendo' ? ' ok' : '');
-  $('msgCentral').textContent = central ? `Central de Afiliados: ${central === 'respondendo' ? 'respondendo' : 'sem resposta'}` : '';
-  $('erro').textContent = st.ultimoErro ? 'Último erro ao gerar link: ' + st.ultimoErro : '';
+  texto($('msgCentral'), central ? `Central de Afiliados: ${central === 'respondendo' ? 'respondendo' : 'sem resposta'}` : '');
+  texto($('erro'), st.ultimoErro ? 'Último erro ao gerar link: ' + st.ultimoErro : '');
 }
 
 try { $('versao').textContent = `Versão ${chrome.runtime.getManifest().version}`; } catch { /* sem manifest: sem rodapé */ }

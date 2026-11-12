@@ -364,7 +364,7 @@ test('CA2.11 revisão do Catálogo: o motivo da queda diz a % real (1 a 99) e, s
     assert.equal(hcatQuedaPct({ queda_pct: ruim }), null, `queda_pct=${String(ruim)}`);
     assert.equal(hcatMotivos(['queda_preco'], { queda_pct: ruim }), 'Preço muito abaixo da lista: confira o preço', String(ruim));
   }
-  assert.equal(hcatMotivos(['queda_preco', 'desconto_100'], { queda_pct: 60 }), 'Preço 60% abaixo da lista: confira o preço e Desconto de 100%: confira o preço');
+  assert.equal(hcatMotivos(['queda_preco', 'desconto_100'], { queda_pct: 60 }), 'preço 60% abaixo da lista e desconto de 100%. Confira o preço.');
   assert.equal(hcatMotivos(['falhas_repetidas']), 'Falhou 3 vezes seguidas: confira a oferta e envie');
   assert.equal(hcatMotivos(['motivo_que_nao_existe', 'queda_preco'], { queda_pct: 70 }), 'Preço 70% abaixo da lista: confira o preço', 'motivo desconhecido não aparece');
   assert.equal(hcatMotivos(['__proto__', 'constructor', 'toString']), '', 'chave herdada do Object não vira texto');

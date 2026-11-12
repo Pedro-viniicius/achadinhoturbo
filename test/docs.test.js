@@ -836,7 +836,7 @@ const FATOS = [
   // Rodar sozinho, entrega 2 (plano rodar-sozinho-entrega2, etapa 11, CA2.10): o Mercado Livre que se recupera. Os números de uma frase só
   // têm texto montado específico: "3", "5" e "30 min" já são outros fatos acima, e o v + 1 do teste seguinte não pode casar com eles.
   { nome: 'falhas seguidas da Central de Afiliados até o Mercado Livre entrar em espera (forma "N falhas seguidas")', valor: 3, texto: (v) => new RegExp(`(?:com|de|Depois de) ${v} falhas seguidas`, 'i'), codigo: [['src/links.js', /export const FALHAS_PARA_ESPERA = (\d+);/]] },
-  { nome: 'falhas seguidas da Central de Afiliados até o Mercado Livre entrar em espera (forma "falhou N vezes seguidas")', valor: 3, texto: (v) => new RegExp(`Central de Afiliados (?:do Mercado Livre )?falhou ${v} vezes seguidas`), codigo: [['src/links.js', /export const FALHAS_PARA_ESPERA = (\d+);/]] },
+  { nome: 'falhas seguidas da Central de Afiliados até o Mercado Livre entrar em espera (forma "falhou/não respondeu N vezes seguidas")', valor: 3, texto: (v) => new RegExp(`Central de Afiliados (?:do Mercado Livre )?(?:falhou|não respondeu) ${v} vezes seguidas`), codigo: [['src/links.js', /export const FALHAS_PARA_ESPERA = (\d+);/]] },
   { nome: 'minutos entre os testes do Mercado Livre em espera', valor: 5, texto: (v) => new RegExp(`testa (?:de novo )?(?:a cada|em) ${v} min\\b`), codigo: [['src/links.js', /export const TESTE_ESPERA_MIN = (\d+);/]] },
   { nome: 'falha da mesma oferta que a manda para a revisão (forma "Nª falha")', valor: 3, texto: (v) => new RegExp(`\\b${v}ª falha\\b`), codigo: [['src/scheduler.js', /export const FALHAS_DA_OFERTA = (\d+);/]] },
   { nome: 'falha da mesma oferta que a manda para a revisão (forma "falhou em N envios seguidos")', valor: 3, texto: (v) => new RegExp(`falhou em ${v} envios seguidos`), codigo: [['src/scheduler.js', /export const FALHAS_DA_OFERTA = (\d+);/]] },
@@ -1826,8 +1826,9 @@ test('Verificador, ML pela extensão: as quatro causas novas, a versão 1.5.0 (q
   assert.match(ext, /sem abrir aba/); assert.match(ext, /não pede permissão nova/i);
   const inst = secaoTxt('primeiros-passos', 'extensao');
   assert.match(inst, /versão 1\.5\.0, conferir o preço e o estoque/);
-  // o passo de recarregar a extensão cita a versão do manifest (a 1.6.0), não a 1.5.0
-  assert.match(inst, new RegExp(`clique em recarregar \\(a seta circular\\) na extensão achadinhoturbo, que agora é a ${VERSAO.replace(/\./g, '\\.')}`));
+  // o passo de recarregar a extensão é o texto único (CA2.10, teste abaixo) e a nota cita a versão do manifest (a 1.6.0), não a 1.5.0
+  assert.ok(inst.includes(limpo(PASSO_RECARREGAR)), 'Docs: primeiros-passos/extensao: o passo de recarregar');
+  assert.match(inst, new RegExp(`mais antiga que a ${VERSAO.replace(/\./g, '\\.')}, a atual`));
   assert.doesNotMatch(inst, /1\.5\.0, clique em “Recarregar”/);
   const dica = limpo(tipsDoPainel()['ajustes.extensao']);
   assert.match(dica, /versão 1\.5\.0/); assert.match(dica, /preço e o estoque do Mercado Livre/); assert.match(dica, /chrome:\/\/extensions/);
@@ -1835,6 +1836,22 @@ test('Verificador, ML pela extensão: as quatro causas novas, a versão 1.5.0 (q
   // a linha de limites da Referência cita o teto e a pausa
   const limites = limpo(strings(CAPS.referencia.secoes.find((x) => x.id === 'limites').blocos).join('\n'));
   assert.match(limites, /Mercado Livre é conferido pela extensão, no máximo 120 vezes por hora, e para de pedir por 30 min/);
+});
+
+// CA2.10 (plano rodar-sozinho-entrega2, "texto único"): o passo de recarregar a extensão é a MESMA frase no README, nos três capítulos
+// que o citam e na ajuda do painel. Comparado sem a marcação (`limpo`: crases e negrito); a ajuda é texto puro e vem depois de dois
+// pontos, então a primeira letra pode ser minúscula. Mudar a frase num lugar só derruba o teste.
+const PASSO_RECARREGAR = 'Atualize a pasta `extension` do programa, abra `chrome://extensions` e clique em recarregar (a seta circular) na extensão achadinhoturbo.';
+test('CA2.10: o passo de recarregar a extensão é o mesmo texto no README, em cap-comecar, cap-conta, cap-referencia e na ajuda', () => {
+  const passo = limpo(PASSO_RECARREGAR);
+  const semPrimeira = passo.slice(1);
+  for (const arq of ['README.md', 'public/docs/cap-comecar.js', 'public/docs/cap-conta.js', 'public/docs/cap-referencia.js', 'public/ajuda.js']) {
+    const txt = limpo(lerRaiz(arq));
+    const achados = [...txt.matchAll(/[Aa](?=tualize a pasta extension do programa)/g)].map((m) => txt.slice(m.index, m.index + passo.length));
+    assert.ok(achados.length, `${arq}: não achei o passo de recarregar`);
+    for (const a of achados) assert.equal(a.slice(1), semPrimeira, `${arq}: o passo de recarregar mudou`);
+  }
+  assert.ok(limpo(lerRaiz('README.md')).includes(passo) && TEXTO_DOCS.includes(passo), 'README e Docs com a frase inteira, maiúscula');
 });
 
 // CA2.16 (plano rodar-sozinho-entrega2): a versão que o servidor espera (VERSAO_EXTENSAO, src/links.js), a do manifest e a que os Docs, o
@@ -1846,9 +1863,9 @@ test('CA2.16: VERSAO_EXTENSAO, o manifest e a versão citada nos Docs, no README
   assert.match(lerRaiz('src/links.js'), new RegExp(`export const VERSAO_EXTENSAO = '${VERSAO_EXTENSAO.replace(/\./g, '\\.')}';`));
   // todas as frases que dizem "a versão esperada/atual é X" citam a mesma X (a lista pega uma frase esquecida na versão antiga)
   const citacoes = [
-    ['Docs: primeiros-passos/extensao', secaoTxt('primeiros-passos', 'extensao'), /na extensão achadinhoturbo, que agora é a (\d+\.\d+\.\d+)/],
+    ['Docs: primeiros-passos/extensao', secaoTxt('primeiros-passos', 'extensao'), /mais antiga que a (\d+\.\d+\.\d+), a atual/],
     ['Docs: referencia/estados', secaoTxt('referencia', 'estados'), /mais antiga que a versão que o painel espera \((\d+\.\d+\.\d+)\)/],
-    ['Docs: manutencao/verificador', secaoTxt('manutencao', 'verificador'), /atualizar a pasta extension para a versão (\d+\.\d+\.\d+), recarregue/],
+    ['Docs: manutencao/verificador', secaoTxt('manutencao', 'verificador'), /a primeira versão que confere é a 1\.5\.0; a atual é a (\d+\.\d+\.\d+)\)/],
     ['TIPS ajustes.extensao', limpo(tipsDoPainel()['ajustes.extensao']), /“Extensão desatualizada” \(a atual é a (\d+\.\d+\.\d+)\)/],
     ['README: Conexões', README, /Extensão desatualizada\*? é a extensão conectada com versão abaixo da (\d+\.\d+\.\d+)/],
     ['README: Extensão do Chrome', readmeSecao('Extensão do Chrome'), /A versão (\d+\.\d+\.\d+) recupera a Central de Afiliados sozinha/],

@@ -76,6 +76,7 @@ import * as mlPadrao from './ml.js';
 import { urlProdutoML } from './ml.js';
 import { getSetting } from './db.js';
 import { brl, discountPct as calcularDesconto } from './template.js';
+import { CAUSAS_CENTRAL } from './links.js';
 
 export const LIMITE_PADRAO_PCT = 5;
 export const LIMITE_MAX_PCT = 50;
@@ -124,10 +125,8 @@ export const CAUSAS = Object.freeze({
   etiqueta_bloqueio: 'a Amazon bloqueou a leitura',
   etiqueta_sem_oferta: 'a oferta saiu do Etiqueta',
   etiqueta_ocupado: 'o Etiqueta estava ocupado com outra leitura da Amazon',
-  central_sem_resposta: 'a Central de Afiliados não respondeu',
-  central_aba: 'não deu para abrir a Central de Afiliados no Chrome',
-  central_login: 'a Central de Afiliados pediu login',
-  anuncio_inativo: 'o anúncio está pausado ou inativo',
+  // as da Central de Afiliados vêm de src/links.js, fonte única das frases (achado R6); `recusa_ml` não é causa daqui
+  ...Object.fromEntries(['central_sem_resposta', 'central_aba', 'central_login', 'anuncio_inativo'].map((k) => [k, CAUSAS_CENTRAL[k]])),
 });
 
 /** Falha nomeada de links.requestProduto → chave de CAUSAS (D8). Outra falha → 'loja_fora'. */

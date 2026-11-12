@@ -179,9 +179,11 @@ function versaoMenor(a, b) {
 
 /** Linha do Histórico ao abrir a espera (nível aviso). Nunca leva o erro real, só a frase fixa da causa. */
 export function textoEsperaAberta(causa) {
-  const frase = CAUSAS_CENTRAL[causa] ?? CAUSAS_CENTRAL.central_sem_resposta;
-  return `Mercado Livre em espera: a Central de Afiliados falhou ${FALHAS_PARA_ESPERA} vezes seguidas (${frase}). `
-    + `As ofertas do Mercado Livre esperam e o programa testa de novo em ${TESTE_ESPERA_MIN} min.`;
+  const c = Object.hasOwn(CAUSAS_CENTRAL, causa ?? '') ? causa : 'central_sem_resposta';
+  // sem resposta, a frase diz só isso (achado D6: "a Central falhou … (a Central não respondeu)" repetia o sujeito)
+  const oQue = c === 'central_sem_resposta' ? `a Central de Afiliados não respondeu ${FALHAS_PARA_ESPERA} vezes seguidas`
+    : `a Central de Afiliados falhou ${FALHAS_PARA_ESPERA} vezes seguidas (${CAUSAS_CENTRAL[c]})`;
+  return `Mercado Livre em espera: ${oQue}. As ofertas do Mercado Livre esperam e o programa testa de novo em ${TESTE_ESPERA_MIN} min.`;
 }
 
 /** "1 h 20 min", "25 min", "2 h", "menos de 1 min". */
@@ -264,8 +266,8 @@ export function createLinkService({ getMode, limiteShopeeHora = LIMITE_SHOPEE_HO
   }
 
   /**
-   * Um pedido à Central falhou (link ou lista que não veio, produto_ml que expirou ou deu erro). A 3ª seguida abre a
-   * espera (linha aviso); com ela aberta, cada falha empurra o próximo teste (sem linha).
+   * Um pedido à Central falhou (link ou lista que não veio, produto_ml entregue que expirou sem resposta). A 3ª seguida
+   * abre a espera (linha aviso); com ela aberta, cada falha empurra o próximo teste (sem linha).
    */
   function falhaDaCentral(detalhe, causa) {
     const t = agora();
@@ -493,8 +495,9 @@ export function createLinkService({ getMode, limiteShopeeHora = LIMITE_SHOPEE_HO
    * Resposta a um pedido produto_ml (D4): `data` passa por ml.lerProdutoDaExtensao com a URL do pedido (que escolhe a
    * variante). `{ bloqueado }` liga a pausa (ligarPausa) e tira da fila os produto_ml que ainda esperam (D7); uma
    * leitura válida volta a pausa ao primeiro degrau. Sempre resolve; lastOkAt/lastError ficam como estão (o selo de
-   * Conexões é dos links). O erro conta como falha da Central; a leitura e a verificação não mexem nela (a leitura não
-   * passa pela Central: fechar a espera com ela a abriria e fecharia em laço).
+   * Conexões é dos links). Nenhuma resposta mexe no estado da Central: a página do produto não passa por ela (a
+   * leitura fecharia a espera em laço; o erro da página, como um 404 de anúncio que saiu do ar, abriria a espera sem a
+   * Central ter falhado: achados R2/Q1). Só o estouro do prazo conta (em `ask`).
    */
   function respostaProduto(e, { ok, data, error }) {
     let r = null;
@@ -511,8 +514,7 @@ export function createLinkService({ getMode, limiteShopeeHora = LIMITE_SHOPEE_HO
       if (pausa.nivel !== 0) { pausa.nivel = 0; gravar(db, CHAVE_PAUSA, pausa); }
       e.resolve({ price: r.price, disponivel: r.disponivel, ...(r.varias === true ? { varias: true } : {}) });
     } else {
-      falhaDaCentral(!ok && error ? error : 'a leitura do produto não veio no formato esperado', 'central_sem_resposta');
-      e.resolve({ falha: 'erro' });
+      e.resolve({ falha: 'erro' }); // neutra para a Central (acima)
     }
     return true;
   }
@@ -551,7 +553,9 @@ export function createLinkService({ getMode, limiteShopeeHora = LIMITE_SHOPEE_HO
       lastError = erroCurto(error || 'a extensão não conseguiu');
       const real = error || lastError;
       const { classe, causa } = classificarFalhaLink(real, tipo, { recusaPossivel: e.type === 'link' });
-      if (classe !== 'recusa') return falhaPassageira(e, lastError, real, causa);
+      // recusa do ML, definitiva ou não (achado S2): a Central respondeu, então zera a contagem e fecha a espera. A que não
+      // está em RECUSAS_DEFINITIVAS segue passageira para a OFERTA (D6: conta para ela no agendador), não para a Central
+      if (classe !== 'recusa' && causa !== 'recusa_ml') return falhaPassageira(e, lastError, real, causa);
       respostaDaCentral({ ok: false }); // a Central respondeu: o anúncio é que não serve
       e.reject(new ErroLinkML(lastError, { classe, causa, detalhe: limparDetalhe(real) }));
       return true;

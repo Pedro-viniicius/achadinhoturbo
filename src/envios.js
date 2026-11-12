@@ -64,6 +64,7 @@ import { montarEnquete } from './whatsapp.js';
 import { renderTemplate, discountPct } from './template.js';
 import { centavos, comFraseMaisBarata, maisBarataOBastante, textoNaoMaisBarata, textoPassou } from './parecido.js';
 import { precoSuspeito } from './catalogo-itens.js';
+import { quedaDePreco, QUEDA_REVISAO_PCT } from './catalogo.js';
 import { sleep, jitter } from './util.js';
 import { pausaGrupoGravada } from './ritmo.js';
 import { OfertaDescartada, MOTIVOS_VERIFICADOR, FRESCOR_MIN, MARGEM_AGENDADO_MIN } from './verificador.js';
@@ -1309,10 +1310,13 @@ export function createEnvios({ db, wa, links, ml, fast = false, dir = null, acor
     const conferida = r.oferta && typeof r.oferta === 'object' ? r.oferta : {};
     for (const k of ['price', 'oldPrice', 'discountPct']) if (Object.hasOwn(conferida, k)) offer[k] = conferida[k];
     if (r.conferido === true && Number.isFinite(conferida.vistoEm)) offer.vistoEm = conferida.vistoEm;
-    // preço suspeito (CA2.12, a mesma regra do "Enviar" do Catálogo): só quando o preço que vai na mensagem veio da leitura
-    // de agora. O verificador só troca o preço quando ele não foi digitado (o digitado fica), então "trocou" = "veio da
-    // leitura"; preço digitado pelo dono, ou gravado e só confirmado, não passa pela guarda.
-    if (centavos(offer.price) !== centavos(gravada.price) && precoSuspeito(offer)) throw new OfertaDescartada('preco_suspeito');
+    // preço suspeito (CA2.12, a mesma regra do "Enviar" do Catálogo e da regra): só quando o preço que vai na mensagem veio
+    // da leitura de agora. O verificador só troca o preço quando ele não foi digitado (o digitado fica), então "trocou" =
+    // "veio da leitura"; preço digitado pelo dono, ou gravado e só confirmado, não passa pela guarda. Vale também a queda de
+    // QUEDA_REVISAO_PCT% ou mais em relação ao preço gravado (achados R3/S1: a parcela de 5× lida no lugar do preço, sem
+    // preço antigo, passava)
+    const trocou = centavos(offer.price) !== centavos(gravada.price);
+    if (trocou && (precoSuspeito(offer) || (quedaDePreco(gravada.price, offer.price) ?? -1) >= QUEDA_REVISAO_PCT)) throw new OfertaDescartada('preco_suspeito');
     return { offer, sufixo: typeof r.sufixo === 'string' ? r.sufixo : '' };
   }
 

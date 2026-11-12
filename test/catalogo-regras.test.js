@@ -332,6 +332,25 @@ test('CA6: catálogo só Amazon/Shopee dispensa a etiqueta do ML; com ML (ou tod
 // --------------------------------------------------------------------------------------------------------- CA7
 
 // a separada para revisão não ocupa a vaga: ela é reposta (plano rodar-sozinho-entrega1, CA1.7)
+test('D1: com 2 ou mais motivos a linha da revisão diz as descrições unidas por " e " e as ações uma vez só, no fim; com 1, como antes', async (t) => {
+  const s = await montar(t, {
+    ofertas: [
+      oferta(1, 'shopee', { desconto_pct: 100 }),
+      oferta(2, 'amazon', { preco: 10, preco_antigo: 100, desconto_pct: 100 }),
+      oferta(3, 'shopee'),
+    ],
+  });
+  const id = regra(s.db, { cfg: { ordem: 'relevancia' }, per: 3 });
+  await s.scheduler.runRule(id);
+  assert.deepEqual(itens(s.db, id).map((i) => i.motivos), [['shopee', 'desconto_100'], ['desconto_100', 'preco_antigo'], ['shopee']]);
+  const linhas = logs(s.db, id).map((l) => l.message).filter((m) => m.startsWith('Separada para revisão: '));
+  assert.deepEqual(linhas, [
+    'Separada para revisão: Shopee e desconto de 100%. Confirme o link e confira o preço.',
+    'Separada para revisão: desconto de 100% e preço antigo muito alto. Confira o preço.',
+    'Separada para revisão: Shopee, confirme o link.',
+  ]);
+});
+
 test('CA7: desconto de 100% ou preço antigo ≥ 10× vai à revisão (a vaga é reposta); revisão cheia faz esperar', async (t) => {
   const s = await montar(t, {
     ofertas: [

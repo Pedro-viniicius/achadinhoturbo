@@ -16,6 +16,7 @@ import { createEnvios, SEM_CONFERENCIA_AGENDADO } from '../src/envios.js';
 import { createMagalu } from '../src/magalu.js';
 import { createEspelho } from '../src/espelho.js';
 import { createVerificador, MOTIVOS_VERIFICADOR } from '../src/verificador.js';
+import { QUEDA_REVISAO_PCT } from '../src/catalogo.js';
 
 let acessosRede = 0;
 globalThis.fetch = async () => { acessosRede++; throw new Error('rede proibida no teste'); };
@@ -542,6 +543,41 @@ test('CA2.12: preço suspeito que veio da conferência descarta o envio antes do
     assert.equal(envio(sem, id2).status, 'concluido');
     assert.match(sem.wa.simulated.at(-1).text, /Por R\$ 8,99/);
   });
+});
+
+test('CA2.12 (R3/S1): a queda de QUEDA_REVISAO_PCT% ou mais em relação ao preço gravado também descarta o preço que veio da conferência', async (t) => {
+  const MOTIVO = 'Descartada: preço suspeito';
+  assert.equal(QUEDA_REVISAO_PCT, 50);
+  const comum = (s) => ({ tag_id: 2, etiqueta: 'etiquetaB', template_id: s.tpl, template_criado_em: s.tplCriado, enviar_foto: false });
+  const ml = (price, { oldPrice = null, precoLoja = price } = {}) => ({
+    url: URL_ML_PRODUTO, loja: 'mercadolivre', preco_loja: precoLoja,
+    offer: { key: 'MLB1234567890', title: 'Fone Bom', price, oldPrice, discountPct: oldPrice ? Math.round((1 - price / oldPrice) * 100) : null, sold: null, freeShipping: false, coupon: null, image: null },
+  });
+  const casos = [
+    ['199 → 39,80 sem preço antigo (parcela de 5×): descarta', ml(199), 39.8, null],
+    ['199 → 66,33 com antigo 249 (não chega a 10×): descarta', ml(199, { oldPrice: 249 }), 66.33, null],
+    ['200 → 100,00 (50% exatos): descarta', ml(200), 100, null],
+    ['199 → 100,00 (49%): sai', ml(199), 100, /Por R\$ 100,00/],
+    // o dono digitou 39,80 (o preço gravado difere do da loja): a conferência não troca, e a guarda não vale
+    ['preço digitado 39,80 com a loja em 199: sai com o digitado', ml(39.8, { precoLoja: 199 }), 199, /Por R\$ 39,80/],
+  ];
+  for (const [nome, payload, lido, sai] of casos) {
+    await t.test(nome, async () => {
+      const s = montar();
+      s.ml.estado.leitura = { price: lido, disponivel: true };
+      const id = gravar(s, { ...comum(s), ...payload });
+      await s.envios.processarPendentes();
+      if (sai) {
+        assert.equal(envio(s, id).status, 'concluido');
+        assert.match(s.wa.simulated.at(-1).text, sai);
+        return;
+      }
+      assert.deepEqual(resultadoDe(s, id), { ok: 0, erro: 1, motivo: MOTIVO, descartado: 'preco_suspeito' });
+      assert.deepEqual(s.pedidosDeLink, [], 'nenhum pedido de link');
+      assert.equal(s.wa.simulated.length, 0, 'nenhuma mensagem');
+      assert.ok(!niveis(s).includes('erro'), 'aviso, nunca erro');
+    });
+  }
 });
 
 test('CA6: nenhum teste deste arquivo acessou a rede', () => {

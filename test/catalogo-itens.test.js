@@ -1116,7 +1116,7 @@ test('CA2.8: "Enviar de novo" de um item enviado que falhou não recebe 409 quan
 
 // ------------------------------------------------------------- "Enviar" com o Mercado Livre em espera (etapa 5)
 
-const ML_EM_ESPERA = 'O Mercado Livre está em espera: a Central de Afiliados não está respondendo. O programa testa de novo sozinho; tente de novo quando ela voltar.';
+const ML_EM_ESPERA = 'O Mercado Livre está em espera: a Central de Afiliados não está respondendo. O programa testa sozinho; envie quando ela voltar.';
 
 test('E2 etapa 5: "Enviar" de oferta do ML com o Mercado Livre em espera recusa com frase fixa, sem pedido nem gravação', async () => {
   const s = montar({ modo: 'extension' });

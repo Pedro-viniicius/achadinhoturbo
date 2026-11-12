@@ -766,6 +766,25 @@ test('CA2.7: o erro real não leva endereço completo, token, caracteres de cont
   assert.ok(r.error.length <= 220, `erro com ${r.error.length} caracteres`);
 });
 
+test('S3: motivo de recusa enorme (400 mil caracteres sem espaço nem "://") não trava o service worker e sai cortado', async () => {
+  // sem o corte antes das trocas, a regex do endereço em erroReal é quadrática: ~300 ms com 40 mil caracteres, dezenas
+  // de segundos com 400 mil
+  const enorme = JSON.stringify({ urls: [{ error: { message: 'x-'.repeat(200_000) } }] });
+  const m = montar({ jobs: [jobLink(1)], pollVazio: 'cai', modoCentral: () => ({ status: 200, corpo: enorme }) });
+  const inicio = performance.now();
+  await m.avancar(60_000);
+  const gasto = performance.now() - inicio;
+  const [r] = plano(m.resultados);
+  assert.equal(r?.tipo, 'recusa', JSON.stringify(r)?.slice(0, 200));
+  assert.match(r.error, /^o Mercado Livre recusou o link: “(x-)+x?…” \(etiqueta "minhaetiqueta"\)$/);
+  assert.equal(/“([x-]+…)”/.exec(r.error)[1].length, 160, 'o erro real entre aspas fica com 160 caracteres');
+  assert.ok(gasto < 3000, `o pedido levou ${Math.round(gasto)} ms de CPU`);
+  // a função sozinha, com o texto que mais custa à regex (um começo de palavra a cada 2 caracteres, sem "://")
+  const t0 = performance.now();
+  assert.equal(m.ctx.erroReal('a-'.repeat(200_000)).length, 160);
+  assert.ok(performance.now() - t0 < 1000, 'erroReal com 400 mil caracteres');
+});
+
 test('CA2.9: nenhuma nova tentativa (aba descartada, sessão recarregada) aceita link fora de meli.la', async (t) => {
   const semAfiliacao = JSON.stringify({ urls: [{ short_url: 'https://www.mercadolivre.com.br/fone/p/MLB1' }] });
   const cenarios = [
@@ -898,4 +917,39 @@ test('popup: linha da Central só com a extensão conectada, respondendo ou sem 
 
   el = await abrirPopup({ ok: true }); // ainda sem pedido à Central
   assert.equal(el.linhaCentral.hidden, true);
+});
+
+test('D9: popup só reescreve o texto que mudou (role="status" não relê a mesma frase a cada mudança do storage)', async () => {
+  const ids = [...POPUP_HTML.matchAll(/\bid="([^"]+)"/g)].map((x) => x[1]);
+  const escritas = [];
+  const el = Object.fromEntries(ids.map((id) => {
+    let texto = '';
+    const e = { id, className: '', hidden: false, value: '', addEventListener() {} };
+    Object.defineProperty(e, 'textContent', { get: () => texto, set: (v) => { escritas.push(id); texto = v; } });
+    return [id, e];
+  }));
+  let st = { ok: true, central: 'sem_resposta', ultimoErro: 'a Central de Afiliados respondeu HTTP 502' };
+  let ouvinte = null;
+  const chrome = {
+    storage: { local: { get: async () => structuredClone({ conf: { servidor: SERVIDOR, token: 't' }, st }) }, onChanged: { addListener(f) { ouvinte = f; } } },
+    runtime: { getManifest: () => ({ version: VERSAO_TESTE }) },
+    permissions: { request: async () => true },
+  };
+  const ctx = vm.createContext({ chrome, document: { getElementById: (id) => el[id] || null }, setTimeout, URL, confirm: () => true });
+  vm.runInContext(POPUP, ctx, { filename: 'popup.js' });
+  const esperar = async () => { for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r)); };
+  await esperar();
+  assert.equal(el.msgCentral.textContent, 'Central de Afiliados: sem resposta');
+  for (const id of ['msg', 'msgCentral', 'erro']) assert.ok(escritas.includes(id), `primeira pintura de ${id}`);
+  // outra chave do storage mudou (ex.: a aba lembrada): o mesmo estado, nenhuma escrita nas linhas
+  escritas.length = 0;
+  ouvinte(); await esperar();
+  ouvinte(); await esperar();
+  assert.deepEqual(escritas.filter((id) => id !== 'versao'), [], 'nada foi reescrito');
+  // a Central voltou: só as linhas que mudaram
+  st = { ...st, central: 'respondendo', ultimoErro: null };
+  ouvinte(); await esperar();
+  assert.deepEqual(escritas.sort(), ['erro', 'msgCentral']);
+  assert.equal(el.msgCentral.textContent, 'Central de Afiliados: respondendo');
+  assert.equal(el.erro.textContent, '');
 });

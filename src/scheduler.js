@@ -33,7 +33,25 @@ const TEXTO_MOTIVO = {
   queda_preco: `o preço está muito abaixo do preço da lista (o limite é ${QUEDA_REVISAO_PCT}%), confira o preço`,
 };
 /** Motivo `queda_preco` com a queda medida (rodar-sozinho entrega 2, CA2.11; spec §2a). */
-const textoQueda = (pct) => `o preço está ${pct}% abaixo do preço da lista (o limite é ${QUEDA_REVISAO_PCT}%), confira o preço`;
+const descricaoQueda = (pct) => `o preço está ${pct}% abaixo do preço da lista (o limite é ${QUEDA_REVISAO_PCT}%)`;
+const textoQueda = (pct) => `${descricaoQueda(pct)}, confira o preço`;
+/** Com 2 ou mais motivos (achado D1): a descrição de cada um, e a ação, que vai uma vez só no fim da frase. */
+const MOTIVO_EM_LISTA = {
+  shopee: { descricao: 'Shopee', acao: 'confirme o link' },
+  desconto_100: { descricao: 'desconto de 100%', acao: 'confira o preço' },
+  preco_antigo: { descricao: 'preço antigo muito alto', acao: 'confira o preço' },
+  queda_preco: { descricao: `o preço está muito abaixo do preço da lista (o limite é ${QUEDA_REVISAO_PCT}%)`, acao: 'confira o preço' },
+};
+/**
+ * "Separada para revisão: preço antigo muito alto e o preço está 98% abaixo do preço da lista (o limite é 50%). Confira o
+ * preço." Só para 2 ou mais motivos: as descrições unidas por " e ", depois `detalhe`, e as ações sem repetir, a primeira
+ * com maiúscula. `queda`: a % medida (null = sem ela).
+ */
+function textoSeparadaVarios(motivos, detalhe, queda) {
+  const descricoes = motivos.map((m) => (m === 'queda_preco' && queda != null ? descricaoQueda(queda) : MOTIVO_EM_LISTA[m]?.descricao ?? TEXTO_MOTIVO[m] ?? m));
+  const acoes = [...new Set(motivos.map((m) => MOTIVO_EM_LISTA[m]?.acao).filter(Boolean))].join(' e ');
+  return `Separada para revisão: ${descricoes.join(' e ')}${detalhe}.${acoes ? ` ${acoes.charAt(0).toUpperCase()}${acoes.slice(1)}.` : ''}`;
+}
 /** Por que ofertas do catálogo esperam (não vão à revisão nem contam como enviadas): aviso a cada execução. */
 const TEXTO_ESPERA = {
   ml_direto: 'do Mercado Livre esperando: os links estão no modo direto, sem comissão. Volte ao modo da extensão em Ajustes.',
@@ -269,17 +287,18 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
   }
 
   // ---------- falhas passageiras do Mercado Livre por oferta (plano rodar-sozinho-entrega2, decisão 4; CA2.3)
-  // "regra\0chave" → { n, exec, em }: quantas execuções diferentes falharam com a oferta (link ou conferência), a última
-  // execução que contou e quando. Só em memória (P1): um reinício zera, no pior caso 2 tentativas a mais.
+  // "regra\0chave" → { n, em }: quantas execuções falharam com a oferta (link ou conferência) e quando foi a última. Só em
+  // memória (P1): um reinício zera, no pior caso 2 tentativas a mais. Uma por execução sem guarda própria (achado R5): a
+  // escolha trata cada chave uma vez por execução (ml.candidates tira as chaves repetidas entre as fontes e a lista é
+  // lida uma vez), e os vários pedidos de link da mesma oferta (um por código de rastreio) dão uma falha só
   const falhasMl = new Map();
-  let execucoes = 0; // id de cada execução (novaExecucao): duas falhas na mesma execução contam uma
-  /** Conta a falha da oferta `key` na execução `execId`. → quantas execuções já falharam com ela (com esta). */
-  function contarFalhaMl(rule, key, execId) {
+  /** Conta a falha da oferta `key`. → quantas execuções já falharam com ela (com esta). */
+  function contarFalhaMl(rule, key) {
     const agora = Date.now();
     for (const [k, f] of falhasMl) if (agora - f.em > VIDA_FALHAS_MS) falhasMl.delete(k); // sem crescer para sempre
     const k = chavePausa(rule, key);
-    const f = falhasMl.get(k) ?? { n: 0, exec: null, em: agora };
-    if (f.exec !== execId) { f.n++; f.exec = execId; }
+    const f = falhasMl.get(k) ?? { n: 0, em: agora };
+    f.n++;
     f.em = agora;
     falhasMl.set(k, f);
     return f.n;
@@ -475,17 +494,22 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
       return gerados.get(chave);
     };
     const porJid = new Map(); const avisos = []; let primeira = null; let algum = false; let propria = null;
-    // a Central entrou em espera por causa de um pedido DESTA oferta (o código associado falhou e o padrão foi recusado
-    // pela espera): vale a falha dela, não a espera (a candidata de teste não segura o teste; D2)
-    const esperaOuFalha = (r) => (propria && !algum
-      ? { porJid: new Map(), algum: false, avisos: [], falha: propria.falha, classe: propria.classe ?? null, causa: propria.causa ?? null }
-      : { espera: r.espera });
+    // a Central entrou em espera por causa de um pedido DESTA oferta (um código falhou, o associado ou o padrão de um grupo
+    // anterior, e o pedido seguinte foi recusado pela espera): vale a falha dela, não a espera. A candidata de teste não
+    // segura o teste e a falha que abriu a espera conta para a oferta (D2; achado R1, grupos de rastreio mistos)
+    const esperaOuFalha = (r) => {
+      const p = propria ?? primeira;
+      return p && !algum
+        ? { porJid: new Map(), algum: false, avisos: [], falha: p.falha, classe: p.classe ?? null, causa: p.causa ?? null }
+        : { espera: r.espera };
+    };
     for (const e of entradas) {
       let destino = { codigo: e.codigo, nivel: e.nivel, bloco_id: e.bloco_id, esperado: e.esperado, motivo: e.motivo };
       let r = await gerar(e.codigo, !ATRIBUIDO.has(e.nivel));
       if (r.espera) return esperaOuFalha(r);
       if (!r.link && ATRIBUIDO.has(e.nivel)) {
-        const falhou = r.falha;
+        // a frase fixa da causa (achado S5): o texto livre da extensão não vai ao Histórico
+        const falhou = causaDoLink(r.causa);
         propria ??= r;
         r = await gerar(codigoPadrao, true);
         if (r.espera) return esperaOuFalha(r);
@@ -506,7 +530,10 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
       }
     }
     const chavePadrao = loja === 'amazon' ? null : codigoPadrao;
-    const ruim = gerados.get(chavePadrao)?.falha != null ? gerados.get(chavePadrao) : primeira;
+    let ruim = gerados.get(chavePadrao)?.falha != null ? gerados.get(chavePadrao) : primeira;
+    // fonte antiga (sem espera no linkDoCodigo): o padrão recusado pela espera que a falha do código associado desta mesma
+    // oferta abriu ou empurrou. Vale a falha da oferta, não a espera (achado R1)
+    if (ruim?.classe === 'espera' && propria?.falha != null && propria.classe !== 'espera') ruim = propria;
     return { porJid, algum, avisos, falha: ruim?.falha, classe: ruim?.classe ?? null, causa: ruim?.causa ?? null };
   }
 
@@ -537,10 +564,10 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
    * `filtradas`: quantas candidatas a escolha deixou de fora, por quê (a linha "Antes da escolha…"). `conferenciaNaHora`:
    * o verificador estava ligado no começo (o catálogo pode pedir preços mais velhos, cada oferta é conferida antes de sair).
    * `porLoja`: o que aconteceu com as escolhidas de cada loja e, em `esperou`, as que esperaram, escolhidas ou não (vai no
-   * summary). `id`: identifica a execução na contagem das falhas do ML por oferta (falhasMl).
+   * summary).
    */
   const novaExecucao = () => ({
-    id: ++execucoes, paginas: new Map(), recusadas: new Set(), esperando: new Map(), vistas: new Set(), puladas: [],
+    paginas: new Map(), recusadas: new Set(), esperando: new Map(), vistas: new Set(), puladas: [],
     filtradas: { filtros: 0, pausa: 0, parecidas: 0, semConferencia: 0, mlPausa: 0, mlPausaCausa: null }, conferenciaNaHora: false, porLoja: contadoresPorLoja(),
   });
   // a regra apagada no meio da execução não grava nada do catálogo: o id pode ser reaproveitado por uma regra nova
@@ -924,7 +951,7 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
           log(rule, { level: 'aviso', offer_title: o.title, message: pulada(FICA_FORA) });
           return;
         }
-        const n = contarFalhaMl(rule, o.key, exec.id);
+        const n = contarFalhaMl(rule, o.key);
         if (n < FALHAS_DA_OFERTA) {
           faltou(o, 'pulada', motivoPulada);
           log(rule, { level: 'aviso', offer_title: o.title, message: pulada(`${TENTA_DE_NOVO}${avisoDaFalha(n, !!o.catalogo)}`) });
@@ -974,6 +1001,9 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
         if (gastoFora >= ORCAMENTO_FALHAS_MS) { semTempo = true; break; }
         let o;
         try { o = await escolha.proxima(); } catch (e) {
+          // a fonte "Central de Afiliados" com o Mercado Livre em espera (src/ml.js marca `espera`): nenhum pedido saiu e a
+          // linha da espera já está no Histórico; sem linha `erro` por execução, que alertaria no WhatsApp (achado Q2, P2)
+          if (e?.espera === true) return summary;
           log(rule, { level: 'erro', message: 'Não consegui buscar ofertas: ' + e.message }); summary.errors++; return summary;
         }
         logarPuladas();
@@ -1092,10 +1122,11 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
             if (!regraExiste(rule.id)) continue;
             if (catalogoItens.registrar(rule, offer, 'revisao', motivos, { quedaPct: queda })) {
               summary.revisao++; faltou(o, 'revisao');
-              // a queda medida vai na frase (spec §2a); os outros motivos, com o texto fixo
-              const message = motivos.includes('queda_preco') && queda != null
-                ? `Separada para revisão: ${motivos.map((m) => (m === 'queda_preco' ? textoQueda(queda) : TEXTO_MOTIVO[m] || m)).join(' e ')}${detalhe}.`
-                : `Separada para revisão: ${motivos.map((m) => TEXTO_MOTIVO[m] || m).join(' e ')}${detalhe}.`;
+              // a queda medida vai na frase (spec §2a); os outros motivos, com o texto fixo. Dois ou mais motivos: as
+              // descrições e, no fim, as ações sem repetir (achado D1)
+              const message = motivos.length > 1 ? textoSeparadaVarios(motivos, detalhe, queda)
+                : motivos.includes('queda_preco') && queda != null ? `Separada para revisão: ${textoQueda(queda)}${detalhe}.`
+                  : `Separada para revisão: ${motivos.map((m) => TEXTO_MOTIVO[m] || m).join(' e ')}${detalhe}.`;
               log(rule, { level: 'aviso', offer_title: offer.title, message });
             } else { esperar(exec, 'revisao_cheia'); faltou(o, 'pulada', PULADA_POR.revisao_cheia, 'esperou'); }
             continue;

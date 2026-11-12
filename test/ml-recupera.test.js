@@ -134,10 +134,10 @@ const regraCatalogo = (db, { per = 1, dedupe = 7, grupos = ['111@g.us'] } = {}) 
   VALUES ('Catálogo', 1, 1, 1, ?, 'list', '{}', ?, ?, 60, '00:00', '23:59', ?, 0, ?)`)
   .run(JSON.stringify(grupos), JSON.stringify([{ type: 'catalogo', tag_id: null, config: { ordem: 'relevancia', lojas: ['ml'] } }]), per, dedupe, Date.now()).lastInsertRowid);
 /** Regra da "Lista de links" (fonte antiga): linhas com preço digitado, MLB-400000000i. */
-const regraLista = (db, ids, { per = 1 } = {}) => Number(db.prepare(`INSERT INTO rules (name, enabled, tag_id, template_id, group_jids, source_type,
+const regraLista = (db, ids, { per = 1, grupos = ['111@g.us'] } = {}) => Number(db.prepare(`INSERT INTO rules (name, enabled, tag_id, template_id, group_jids, source_type,
   source_config, per_run, interval_min, window_start, window_end, dedupe_days, send_image, created_at)
   VALUES ('Lista', 1, 1, 1, ?, 'list', ?, ?, 60, '00:00', '23:59', 7, 0, ?)`)
-  .run(JSON.stringify(['111@g.us']), JSON.stringify({ items: ids.map((i) => `https://produto.mercadolivre.com.br/MLB-${4000000000 + i}-x | ${titulo(i)} | 50`).join('\n') }), per, Date.now()).lastInsertRowid);
+  .run(JSON.stringify(grupos), JSON.stringify({ items: ids.map((i) => `https://produto.mercadolivre.com.br/MLB-${4000000000 + i}-x | ${titulo(i)} | 50`).join('\n') }), per, Date.now()).lastInsertRowid);
 const itens = (db, id) => db.prepare('SELECT chave, status, motivos FROM catalogo_itens WHERE rule_id = ? ORDER BY id').all(id).map((l) => ({ ...l, motivos: JSON.parse(l.motivos) }));
 const enviadas = (db, id) => db.prepare('SELECT offer_key FROM sent_offers WHERE rule_id = ? ORDER BY id').all(id).map((l) => l.offer_key);
 const mensagens = (s, id) => s.logs(id).map((l) => l.message);
@@ -266,7 +266,7 @@ test('CA2.2/D6: recusa que não está na lista conta como falha da oferta (pulad
 
 // ======================================================================================================== CA2.3
 
-test('CA2.3: 3ª falha em execuções diferentes vai à revisão com falhas_repetidas; duas falhas na mesma execução contam uma', async (t) => {
+test('CA2.3: 3ª falha em execuções diferentes vai à revisão com falhas_repetidas; os dois pedidos de link que falham na mesma execução (associada e padrão) contam uma', async (t) => {
   const { links, estado } = linksDuble();
   estado.link = () => { throw passageira(); };
   // o grupo 222 tem etiqueta própria: dois pedidos de link por execução (a associada e, ao falhar, a padrão)
@@ -371,7 +371,7 @@ test('CA2.4: as 3 falhas abrem a espera (1 para cada oferta); com ela aberta, ne
   assert.deepEqual(ext.tipos(), ['produto_ml', 'link', 'produto_ml', 'link', 'produto_ml', 'link'], 'três ofertas, cada uma com a conferência e o link');
   for (const i of [1, 2, 3]) assert.deepEqual(linhaDe(s, id, i), [`${PULADA_LINK} Tenta de novo no próximo envio.`]);
   assert.deepEqual(s.logs(null).map((l) => [l.level, l.message]), [['aviso',
-    `Mercado Livre em espera: a Central de Afiliados falhou ${FALHAS_PARA_ESPERA} vezes seguidas (a Central de Afiliados não respondeu). As ofertas do Mercado Livre esperam e o programa testa de novo em ${TESTE_ESPERA_MIN} min.`]]);
+    `Mercado Livre em espera: a Central de Afiliados não respondeu ${FALHAS_PARA_ESPERA} vezes seguidas. As ofertas do Mercado Livre esperam e o programa testa de novo em ${TESTE_ESPERA_MIN} min.`]]);
   assert.ok(mensagens(s, id).includes(`Catálogo do Etiqueta: 2 ofertas do Mercado Livre esperando: a Central de Afiliados não está respondendo. O programa testa de novo a cada ${TESTE_ESPERA_MIN} min e elas saem sozinhas quando ela voltar.`), mensagens(s, id).join(' | '));
   assert.deepEqual(itens(db, id), []);
 
@@ -561,6 +561,111 @@ test('CA2.9: na espera, a etiqueta associada que falha cai na padrão; nunca lin
       assert.equal(links.central().estado, esperado.central);
     });
   }
+});
+
+// R1 (rodada 1): a oferta "veneno" com grupos de rastreio mistos (um grupo na etiqueta padrão, outro com a associada).
+// O 1º pedido é o teste e falha; o pedido seguinte da MESMA oferta é recusado pela espera. Vale a falha dela: fica 6 h
+// fora e o teste seguinte usa outra oferta, nas duas ordens dos grupos e também na fonte antiga.
+const A_PRIMEIRO = ['111@g.us', '222@g.us']; const B_PRIMEIRO = ['222@g.us', '111@g.us'];
+async function centralComVeneno(t) {
+  const r0 = relogio();
+  const dir = tmp(); const db = openDb(dir);
+  const links = createLinkService({ getMode: () => 'extension', db, agora: r0.agora });
+  const ext = await extensao(t, links, () => SEM_RESPOSTA);
+  for (let k = 0; k < FALHAS_PARA_ESPERA; k++) await links.requestLink({ url: 'https://produto.mercadolivre.com.br/MLB-9', tag: 'etiquetaA' }).catch(() => {});
+  assert.equal(links.central().estado, 'em_espera');
+  r0.avancar(TESTE_ESPERA_MIN * MIN);
+  ext.limpar();
+  // a Central só falha a oferta 1, com qualquer etiqueta
+  ext.responder = (job) => (idDe(job.url) === mlb(1).slice(3) ? SEM_RESPOSTA : linkOk(job));
+  const associar = (s) => {
+    s.db.prepare('INSERT INTO tags (name, created_at) VALUES (?,?)').run('etiquetaB', Date.now());
+    salvarRastreio(s.db, { loja: 'mercadolivre', alvo_tipo: 'grupo', alvo: '222@g.us', codigo: 'etiquetaB' });
+  };
+  return { r0, dir, db, links, ext, associar };
+}
+const GRUPOS_MISTOS = [['111@g.us', 'Achadinhos'], ['222@g.us', 'Tech']];
+
+test('R1: veneno com grupos mistos (catálogo), nas duas ordens: o teste que falha deixa a oferta 6 h fora e o teste seguinte usa outra', async (t) => {
+  for (const [nome, ordem] of [['padrão antes da associada', A_PRIMEIRO], ['associada antes da padrão', B_PRIMEIRO]]) {
+    await t.test(nome, async (tt) => {
+      const c = await centralComVeneno(tt);
+      const s = montar(tt, { ofertas: [oferta(1), oferta(2)], links: c.links, db: c.db, dir: c.dir, grupos: GRUPOS_MISTOS });
+      c.associar(s);
+      const id = regraCatalogo(c.db, { per: 1, grupos: ordem });
+      const r1 = await s.scheduler.runRule(id);
+      assert.deepEqual(c.ext.jobs.map((j) => [j.tag, n(idDe(j.url))]), [[ordem === A_PRIMEIRO ? 'etiquetaA' : 'etiquetaB', 1]], 'um pedido só: o teste');
+      assert.deepEqual([r1.offers, r1.puladas], [0, 1]);
+      assert.deepEqual(linhaDe(s, id, 1), [`${PULADA_LINK} Fica 6 h fora da escolha desta regra.`], 'a falha do teste, não a espera');
+      assert.equal(c.links.central().estado, 'em_espera');
+      // 5 min depois o teste é da 2ª: a Central responde, a espera fecha e ela sai
+      c.ext.limpar();
+      c.r0.avancar(TESTE_ESPERA_MIN * MIN);
+      const r2 = await s.scheduler.runRule(id);
+      assert.deepEqual([...new Set(c.ext.jobs.map((j) => n(idDe(j.url))))], [2], 'o teste seguinte usou outra oferta');
+      assert.equal(r2.offers, 1);
+      assert.deepEqual(s.saiu(), [titulo(2), titulo(2)]);
+      assert.equal(c.links.central().estado, 'respondendo');
+      assert.deepEqual(linhaDe(s, id, 1).length, 1, 'a 1ª não foi escolhida de novo');
+    });
+  }
+});
+
+test('R1/D2: fora do teste, a falha que abre a espera com grupos mistos conta para a oferta (2ª vez, não "esperando")', async (t) => {
+  const { links, estado } = linksDuble();
+  // a 1ª falha conta normalmente; na 2ª execução o pedido da padrão falha e "abre a espera": o da associada é recusado
+  let execucao = 0;
+  estado.link = (p) => {
+    if (execucao === 2 && p.tag === 'etiquetaB') throw new ErroLinkML('nenhum pedido saiu', { classe: 'espera', causa: 'central_sem_resposta' });
+    if (execucao === 2) estado.central = { estado: 'em_espera', testeLiberado: false };
+    throw passageira();
+  };
+  const s = montar(t, { ofertas: [oferta(1)], links, grupos: GRUPOS_MISTOS });
+  s.db.prepare('INSERT INTO tags (name, created_at) VALUES (?,?)').run('etiquetaB', Date.now());
+  salvarRastreio(s.db, { loja: 'mercadolivre', alvo_tipo: 'grupo', alvo: '222@g.us', codigo: 'etiquetaB' });
+  const id = regraCatalogo(s.db, { per: 1, grupos: A_PRIMEIRO });
+  execucao = 1; await s.scheduler.runRule(id);
+  execucao = 2; await s.scheduler.runRule(id);
+  assert.deepEqual(linhaDe(s, id, 1), [`${PULADA_LINK} Tenta de novo no próximo envio.`, `${PULADA_LINK} Tenta de novo no próximo envio.${SEGUNDA}`]);
+});
+
+test('R1 (fonte antiga): veneno com grupos mistos, nas duas ordens: a falha do teste vale (6 h fora) e o teste seguinte usa outra oferta', async (t) => {
+  for (const [nome, ordem] of [['padrão antes da associada', A_PRIMEIRO], ['associada antes da padrão', B_PRIMEIRO]]) {
+    await t.test(nome, async (tt) => {
+      const c = await centralComVeneno(tt);
+      const s = montar(tt, { ofertas: [], links: c.links, db: c.db, dir: c.dir, grupos: GRUPOS_MISTOS });
+      c.associar(s);
+      const id = regraLista(c.db, [1, 2], { per: 1, grupos: ordem });
+      const r1 = await s.scheduler.runRule(id);
+      assert.deepEqual(c.ext.jobs.map((j) => n(idDe(j.url))), [1], 'um pedido só: o teste');
+      // a 2ª é escolhida (a fonte antiga não espera na escolha) e pulada pela espera, sem pedido nem linha (P2)
+      assert.deepEqual([r1.offers, r1.puladas, r1.errors], [0, 2, 0]);
+      assert.deepEqual(linhaDe(s, id, 1), [`${PULADA_LINK} Fica 6 h fora da escolha desta regra.`]);
+      assert.deepEqual(linhaDe(s, id, 2), []);
+      c.ext.limpar();
+      c.r0.avancar(TESTE_ESPERA_MIN * MIN);
+      const r2 = await s.scheduler.runRule(id);
+      assert.deepEqual([...new Set(c.ext.jobs.map((j) => n(idDe(j.url))))], [2], 'o teste seguinte usou outra oferta');
+      assert.equal(r2.offers, 1);
+      assert.equal(c.links.central().estado, 'respondendo');
+    });
+  }
+});
+
+test('S5: a linha "Rastreio: a etiqueta … não gerou o link" leva a frase fixa da causa, nunca o texto livre da extensão', async (t) => {
+  const { links, estado } = linksDuble();
+  estado.link = (p, i) => {
+    if (p.tag === 'etiquetaB') throw new ErroLinkML('não há sessão para fulano@exemplo.com <script>', { classe: 'passageira', causa: 'central_login', detalhe: 'x' });
+    return `https://meli.la/Ok${i}x`;
+  };
+  const s = montar(t, { ofertas: [oferta(1)], links, grupos: GRUPOS_MISTOS });
+  s.db.prepare('INSERT INTO tags (name, created_at) VALUES (?,?)').run('etiquetaB', Date.now());
+  salvarRastreio(s.db, { loja: 'mercadolivre', alvo_tipo: 'grupo', alvo: '222@g.us', codigo: 'etiquetaB' });
+  const id = regraCatalogo(s.db, { per: 1, grupos: B_PRIMEIRO });
+  await s.scheduler.runRule(id);
+  const linha = mensagens(s, id).find((m) => m.startsWith('Rastreio: '));
+  assert.equal(linha, 'Rastreio: a etiqueta etiquetaB não gerou o link (a Central de Afiliados pediu login); o grupo recebeu o da etiqueta etiquetaA.');
+  assert.ok(!mensagens(s, id).some((m) => m.includes('fulano') || m.includes('<script>')));
 });
 
 // ======================================================================================================= CA2.14

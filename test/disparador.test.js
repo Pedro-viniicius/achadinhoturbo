@@ -637,7 +637,10 @@ test('rastreio, CA9: etiqueta associada que falha cai no link padrão da regra (
     ['333@g.us', 'etiquetaA', 'padrao', 0, null],
   ]);
   const logs = logsDaRegra(db, id);
-  assert.ok(logs.some((l) => l.level === 'aviso' && l.offer_title === 'Fone A' && /etiquetaB/.test(l.message) && /a etiqueta etiquetaB foi recusada/.test(l.message)), 'aviso da etiqueta que falhou');
+  // a causa vai pela frase fixa (achado S5): o texto livre do erro não chega ao Histórico; erro sem causa conhecida → "não respondeu"
+  assert.ok(logs.some((l) => l.level === 'aviso' && l.offer_title === 'Fone A'
+    && l.message === 'Rastreio: a etiqueta etiquetaB não gerou o link (a Central de Afiliados não respondeu); o grupo recebeu o da etiqueta etiquetaA.'), 'aviso da etiqueta que falhou');
+  assert.ok(!logs.some((l) => /foi recusada/.test(l.message)), 'o texto livre do erro não vai ao Histórico');
   assert.deepEqual(logs.filter((l) => l.level === 'ok').map((l) => l.message), Array(3).fill('Enviado com a etiqueta etiquetaA'));
   assert.equal(enviadasDaRegra(db, id).length, 1);
 });

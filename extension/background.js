@@ -55,7 +55,8 @@ async function status(p) {
  * MAX_ERRO_REAL caracteres. Vazio quando não há texto.
  */
 function erroReal(v) {
-  const bruto = typeof v === 'string' ? v : typeof v?.message === 'string' ? v.message : '';
+  // corta antes das trocas (achado S3): a regex do endereço é quadrática num texto longo sem espaço e travaria o worker
+  const bruto = (typeof v === 'string' ? v : typeof v?.message === 'string' ? v.message : '').slice(0, 4 * MAX_ERRO_REAL);
   const t = bruto
     .replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ')
     .replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s"'<>]+/gi, (u) => {
@@ -266,7 +267,8 @@ async function gerarLink(job, pedido) {
   const j = await naCentral(API_LINK, { urls: [job.url], tag: job.tag }, pedido);
   const u = j?.urls?.[0] || {};
   if (/^https:\/\/meli\.la\//.test(u.short_url || '')) return u.short_url;
-  const motivo = [u.error?.message, u.message, j?.message].find((v) => typeof v === 'string' && v.trim());
+  // a resposta da Central é de fora: o motivo é cortado já aqui (achado S3), antes de qualquer regex
+  const motivo = [u.error?.message, u.message, j?.message].find((v) => typeof v === 'string' && v.trim())?.slice(0, 4 * MAX_ERRO_REAL);
   if (motivo || j?.total_error) {
     const e = erroCentral('recusa', 'o Mercado Livre recusou o link', motivo);
     e.message += ` (etiqueta "${job.tag}")`;

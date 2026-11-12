@@ -587,8 +587,9 @@ test('S1: o preço da releitura passa de novo pela guarda do preço suspeito —
     { chave: 'ASIN:B000000002', motivos: '["desconto_100","queda_preco"]', price: 0, antigo: 150 },
   ]);
   assert.deepEqual(avisosDe(s.db, id).slice(0, 2), [
-    ['Produto 1', 'Separada para revisão: preço antigo muito alto, confira o preço e o preço está 98% abaixo do preço da lista (o limite é 50%), confira o preço.'],
-    ['Produto 2', 'Separada para revisão: desconto de 100%, confira o preço e o preço está 100% abaixo do preço da lista (o limite é 50%), confira o preço.'],
+    // dois motivos (achado D1): as descrições unidas por " e " e a ação uma vez só, no fim
+    ['Produto 1', 'Separada para revisão: preço antigo muito alto e o preço está 98% abaixo do preço da lista (o limite é 50%). Confira o preço.'],
+    ['Produto 2', 'Separada para revisão: desconto de 100% e o preço está 100% abaixo do preço da lista (o limite é 50%). Confira o preço.'],
   ]);
   semErro(s.db, id);
 });

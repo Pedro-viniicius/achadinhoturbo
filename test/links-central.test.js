@@ -224,10 +224,36 @@ test('CA2.2: recusa definitiva (anúncio pausado) sai como recusa, não conta pa
   db.close();
 });
 
-test('CA2.2/D6: recusa que não casa com a lista conta como falha (três abrem a espera)', async () => {
-  const links = await servico();
+test('CA2.2/D6/S2: recusa que não casa com a lista é falha da OFERTA (passageira, recusa_ml), mas a Central respondeu: zera a contagem e fecha a espera', async () => {
+  const db = banco();
+  const rel = relogio();
+  const links = await servico({ db, agora: rel.agora });
+  // pelo tipo da extensão 1.6.0 e pelo texto da antiga: nenhuma das duas conta para a espera
+  for (const resposta of [{ ok: false, error: 'Invalid tag (etiqueta "x")', tipo: 'recusa' }, { ok: false, error: 'Erro qualquer do ML (etiqueta "x")' }]) {
+    await falhar(links, 2);
+    const { erro } = await comExtensao(links, pedirLink(links), resposta);
+    assert.deepEqual([erro.classe, erro.causa], ['passageira', 'recusa_ml'], 'o agendador conta para a oferta (D6)');
+    assert.equal(links.central().falhasSeguidas, 0, 'a Central respondeu: a contagem zera');
+  }
+  // três recusas seguidas não abrem a espera
   await falhar(links, 3, { ok: false, error: 'Invalid tag (etiqueta "x")', tipo: 'recusa' });
+  assert.equal(links.central().estado, 'respondendo');
+  assert.equal(links.central().ultimoOkEm, 0, 'recusa não é link gerado');
+  // a espera aberta fecha com a recusa no teste (linha info), sem gravar ultimoOkEm
+  await falhar(links, 3);
   assert.equal(links.central().estado, 'em_espera');
+  rel.t += TESTE_ESPERA_MIN * MIN;
+  const teste = await comExtensao(links, pedirLink(links), { ok: false, error: 'Invalid tag', tipo: 'recusa' });
+  assert.deepEqual([teste.erro.classe, teste.erro.causa], ['passageira', 'recusa_ml']);
+  const c = links.central();
+  assert.deepEqual([c.estado, c.falhasSeguidas, c.emEsperaDesde, c.proximoTesteEm, c.ultimoOkEm], ['respondendo', 0, null, null, 0]);
+  assert.deepEqual(linhas(db).map((l) => l.level), ['aviso', 'info'], 'abriu e fechou');
+  // a lista de ofertas nunca é recusa: o mesmo texto conta como falha da Central
+  const pedirLista = () => links.requestOffers({ paginas: [{}], timeoutMs: 5000 });
+  const lista = await comExtensao(links, pedirLista, { ok: false, error: 'Invalid tag (etiqueta "x")', tipo: 'recusa' });
+  assert.deepEqual([lista.erro.classe, lista.erro.causa], ['passageira', 'central_sem_resposta']);
+  assert.equal(links.central().falhasSeguidas, 1);
+  db.close();
 });
 
 test('CA2.4: três falhas seguidas abrem a espera (linha aviso); com ela aberta, link e lista são recusados na hora, sem pedido', async () => {
@@ -244,7 +270,12 @@ test('CA2.4: três falhas seguidas abrem a espera (linha aviso); com ela aberta,
     ['em_espera', 3, rel.t, rel.t + 5 * MIN, false]);
   assert.deepEqual(linhas(db), [{ level: 'aviso', message: textoEsperaAberta('central_sem_resposta') }]);
   assert.equal(textoEsperaAberta('central_sem_resposta'),
-    'Mercado Livre em espera: a Central de Afiliados falhou 3 vezes seguidas (a Central de Afiliados não respondeu). As ofertas do Mercado Livre esperam e o programa testa de novo em 5 min.');
+    'Mercado Livre em espera: a Central de Afiliados não respondeu 3 vezes seguidas. As ofertas do Mercado Livre esperam e o programa testa de novo em 5 min.');
+  // as outras causas ficam entre parênteses (achado D6: só a "sem resposta" repetia o sujeito); causa desconhecida → sem resposta
+  assert.equal(textoEsperaAberta('central_login'),
+    'Mercado Livre em espera: a Central de Afiliados falhou 3 vezes seguidas (a Central de Afiliados pediu login). As ofertas do Mercado Livre esperam e o programa testa de novo em 5 min.');
+  assert.match(textoEsperaAberta('central_aba'), /falhou 3 vezes seguidas \(não deu para abrir a Central de Afiliados no Chrome\)\. /);
+  for (const outra of [undefined, 'toString', 'qualquer']) assert.equal(textoEsperaAberta(outra), textoEsperaAberta('central_sem_resposta'));
   // link e lista: recusa na hora, classe espera, nada na fila
   for (const pedir of [pedirLink(links), () => links.requestOffers({ paginas: [{}], timeoutMs: 5000 })]) {
     const { erro, valor } = await semPedido(links, pedir);
@@ -331,7 +362,7 @@ test('CA2.4: a lista de ofertas conta e fecha como o link', async () => {
   assert.equal(links.central().estado, 'em_espera');
 });
 
-test('central: produto_ml com tempo ou erro conta; lido não fecha a espera; verificação, desconectada e antiga são neutras', async () => {
+test('central: só o produto_ml que estourou o prazo conta; o erro da página é neutro (R2/Q1); lido não fecha a espera; verificação, desconectada e antiga são neutras', async () => {
   const rel = relogio();
   const links = await servico({ agora: rel.agora });
   const produto = async (resposta) => {
@@ -341,8 +372,16 @@ test('central: produto_ml com tempo ou erro conta; lido não fecha a espera; ver
     links.submit(job.id, resposta);
     return r;
   };
-  assert.deepEqual(await produto({ ok: false, error: 'a página do produto respondeu HTTP 500' }), { falha: 'erro' });
-  assert.equal(links.central().falhasSeguidas, 1);
+  // a página do produto não passa pela Central: erro dela (404 de anúncio que saiu, 500, página grande, rede) ou resposta
+  // fora do formato não conta, nem três seguidas
+  for (const resposta of [{ ok: false, error: 'a página do produto respondeu HTTP 404' }, { ok: false, error: 'a página do produto respondeu HTTP 500' },
+    { ok: false, error: 'a página do produto é grande demais' }, { ok: false }, { ok: true, data: { estado: 'outro' } }]) {
+    assert.deepEqual(await produto(resposta), { falha: 'erro' });
+  }
+  assert.deepEqual([links.central().falhasSeguidas, links.central().estado, links.central().ultimoErro], [0, 'sem_teste', ''], 'erro da página é neutro');
+  await falhar(links, 1);
+  assert.deepEqual(await produto({ ok: false, error: 'a página do produto respondeu HTTP 404' }), { falha: 'erro' });
+  assert.equal(links.central().falhasSeguidas, 1, 'o erro da página também não zera a contagem');
   assert.deepEqual(await produto({ ok: true, data: LIDO }), { price: 89.9, disponivel: true });
   assert.equal(links.central().falhasSeguidas, 1, 'produto lido é neutro');
   // tempo (entregue e sem resposta)
@@ -525,7 +564,9 @@ test('central: a linha de abrir a espera não leva o erro real (pode ter dado de
   const [linha] = linhas(db);
   assert.equal(linha.message, textoEsperaAberta('central_login'));
   assert.ok(!linha.message.includes('fulano'));
-  for (const causa of Object.keys(CAUSAS_CENTRAL)) assert.ok(textoEsperaAberta(causa).includes(`(${CAUSAS_CENTRAL[causa]})`));
+  // cada causa com a sua frase entre parênteses; a "sem resposta" vira o próprio verbo (achado D6)
+  for (const causa of Object.keys(CAUSAS_CENTRAL).filter((c) => c !== 'central_sem_resposta')) assert.ok(textoEsperaAberta(causa).includes(`(${CAUSAS_CENTRAL[causa]})`));
+  assert.ok(textoEsperaAberta('central_sem_resposta').includes('a Central de Afiliados não respondeu 3 vezes seguidas.'));
   assert.equal(textoEsperaAberta('outra'), textoEsperaAberta('central_sem_resposta'));
   db.close();
 });

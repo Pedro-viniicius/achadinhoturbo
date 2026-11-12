@@ -145,7 +145,7 @@ test('P6: o Operador vê a linha "Para revisar" sem o botão "Revisar" (no lugar
 
 test('resultado de cada item: para revisar (motivos do servidor), enviada sozinha, pela revisão, saindo, erro por grupo e descartada', () => {
   const t = tela(); const r = (x) => { t.ctx.__it = x; return json(t.rodar('hcatResultado(__it)')); };
-  assert.deepEqual(r(item({ motivos: ['shopee', 'desconto_100'] })), { cls: 'nivel-aviso', texto: 'Para revisar: Shopee: confirme o link e Desconto de 100%: confira o preço', detalhe: '', extra: [] });
+  assert.deepEqual(r(item({ motivos: ['shopee', 'desconto_100'] })), { cls: 'nivel-aviso', texto: 'Para revisar: Shopee e desconto de 100%. Confirme o link e confira o preço.', detalhe: '', extra: [] });
   assert.equal(r(item({ motivos: ['preco_antigo', 'inventado<b>'] })).texto, 'Para revisar: Preço antigo muito alto: confira o preço', 'motivo desconhecido não aparece');
   assert.equal(r(item({ motivos: ['falha_link'], loja: 'ml' })).texto, 'Para revisar: Não consegui gerar o link: confira a oferta');
   const sozinhaAmz = r(item({ status: 'enviado', loja: 'amazon', motivos: [], grupos: [] }));

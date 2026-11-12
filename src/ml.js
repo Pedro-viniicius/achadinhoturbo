@@ -680,7 +680,11 @@ export async function candidatesFor({ type, config }, deps = {}) {
     if (!deps.links) throw new Error('serviço de links indisponível');
     let pages;
     try { pages = await deps.links.requestOffers({ paginas: hubBodies(cfg) }); } catch (e) {
-      throw new Error(`a Central de Afiliados não devolveu a lista (${e.message})`);
+      const erro = new Error(`a Central de Afiliados não devolveu a lista (${e.message})`);
+      // a Central em espera (ErroLinkML de src/links.js, pelo nome: links.js importa este módulo) recusou sem pedido à
+      // extensão: `espera` deixa o agendador sem linha de erro (achado Q2; a linha da espera já está no Histórico)
+      if (e?.name === 'ErroLinkML' && e.classe === 'espera') erro.espera = true;
+      throw erro;
     }
     return parseHubPages(pages, hubCategorias(cfg).length);
   }
@@ -716,11 +720,17 @@ export async function candidates(rule, deps = {}) {
   const filas = []; const erros = [];
   for (const [i, f] of fontes.entries()) {
     try { filas.push(await buscar(f, i)); } catch (e) {
-      // a pré-visualização não escreve aviso do catálogo (só entra no erro se todas as fontes falharem)
-      erros.push({ texto: `fonte ${i + 1} (${NOME_FONTE[f.type] || f.type}): ${e.message}`, avisar: !(deps.previa && f.type === 'catalogo') });
+      // a pré-visualização não escreve aviso do catálogo (só entra no erro se todas as fontes falharem); a Central em
+      // espera também não (achado Q2): seria uma linha por execução enquanto ela durar
+      const espera = e?.espera === true;
+      erros.push({ texto: `fonte ${i + 1} (${NOME_FONTE[f.type] || f.type}): ${e.message}`, avisar: !(deps.previa && f.type === 'catalogo') && !espera, espera });
     }
   }
-  if (!filas.length) throw new Error(erros.map((e) => e.texto).join('; '));
+  if (!filas.length) {
+    const erro = new Error(erros.map((e) => e.texto).join('; '));
+    if (erros.every((e) => e.espera)) erro.espera = true;
+    throw erro;
+  }
   for (const e of erros) if (e.avisar) deps.onWarn?.(`Fonte ignorada neste envio: ${e.texto}`);
   const out = []; const seen = new Set();
   for (let i = 0; filas.some((f) => i < f.length); i++) {
