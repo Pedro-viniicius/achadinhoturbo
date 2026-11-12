@@ -9,6 +9,8 @@ import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 import { MOTIVOS } from '../src/catalogo-itens.js';
 import { MOTIVOS_VERIFICADOR, CAUSAS, RESERVA_AMAZON_H } from '../src/verificador.js';
+import { VERSAO_EXTENSAO } from '../src/links.js';
+import { QUEDA_REVISAO_PCT } from '../src/catalogo.js';
 import { PLACEHOLDERS } from '../src/template.js';
 import { pastaDeDados } from '../src/config.js';
 import { REMOTO_PADRAO } from '../scripts/backup.js';
@@ -726,7 +728,7 @@ const numero = (v) => [String(v), ...(PALAVRA[v] ? [PALAVRA[v]] : [])].join('|')
 
 /**
  * texto: (valor) → RegExp que o README e os Docs precisam conter. codigo: [arquivo, regex com 1 grupo numérico]:
- * cada constante tem de valer `valor`. `readme`/`docs` trocam o texto de um lado só quando a redação difere.
+ * cada constante tem de valer `valor`. `so: 'readme'` ou `so: 'docs'` confere o texto só de um lado, para o número que só um deles cita.
  */
 const FATOS = [
   { nome: 'limite máximo do grupo', valor: 1024, texto: (v) => new RegExp(milhar(v).replace('.', '\\.')), codigo: [['src/rotador.js', /export const LIMITE_MAX = (\d+);/]] },
@@ -831,6 +833,27 @@ const FATOS = [
   // a linha "Antes da escolha" diz a pausa do descarte pela constante (mesmo 6 da PAUSA_DESCARTADA_H, outra frase que a da reserva)
   { nome: 'horas da pausa na linha "Antes da escolha" (descarte e pulada por preço desconhecido)', valor: 6, texto: (v) => new RegExp(`em pausa de ${v} h\\b`), codigo: [['src/verificador.js', /export const PAUSA_DESCARTADA_H = (\d+);/]] },
   { nome: 'segundos até o programa desistir do pedido de produto', valor: 18, texto: (v) => new RegExp(`desiste em ${v} s\\b`), codigo: [['src/links.js', /export const PRAZO_PRODUTO_MS = (\d+)000;/]] },
+  // Rodar sozinho, entrega 2 (plano rodar-sozinho-entrega2, etapa 11, CA2.10): o Mercado Livre que se recupera. Os números de uma frase só
+  // têm texto montado específico: "3", "5" e "30 min" já são outros fatos acima, e o v + 1 do teste seguinte não pode casar com eles.
+  { nome: 'falhas seguidas da Central de Afiliados até o Mercado Livre entrar em espera (forma "N falhas seguidas")', valor: 3, texto: (v) => new RegExp(`(?:com|de|Depois de) ${v} falhas seguidas`, 'i'), codigo: [['src/links.js', /export const FALHAS_PARA_ESPERA = (\d+);/]] },
+  { nome: 'falhas seguidas da Central de Afiliados até o Mercado Livre entrar em espera (forma "falhou N vezes seguidas")', valor: 3, texto: (v) => new RegExp(`Central de Afiliados (?:do Mercado Livre )?falhou ${v} vezes seguidas`), codigo: [['src/links.js', /export const FALHAS_PARA_ESPERA = (\d+);/]] },
+  { nome: 'minutos entre os testes do Mercado Livre em espera', valor: 5, texto: (v) => new RegExp(`testa (?:de novo )?(?:a cada|em) ${v} min\\b`), codigo: [['src/links.js', /export const TESTE_ESPERA_MIN = (\d+);/]] },
+  { nome: 'falha da mesma oferta que a manda para a revisão (forma "Nª falha")', valor: 3, texto: (v) => new RegExp(`\\b${v}ª falha\\b`), codigo: [['src/scheduler.js', /export const FALHAS_DA_OFERTA = (\d+);/]] },
+  { nome: 'falha da mesma oferta que a manda para a revisão (forma "falhou em N envios seguidos")', valor: 3, texto: (v) => new RegExp(`falhou em ${v} envios seguidos`), codigo: [['src/scheduler.js', /export const FALHAS_DA_OFERTA = (\d+);/]] },
+  { nome: 'segundos gastos com ofertas que caíram fora até a execução parar de repor vagas', valor: 120, texto: (v) => new RegExp(`depois de ${v} s gastos com ofertas que caíram fora`), codigo: [['src/scheduler.js', /export const ORCAMENTO_FALHAS_S = (\d+);/]] },
+  // a queda que manda a oferta do Catálogo para a revisão; o painel guarda uma cópia (public/espelhamento.js) para escrever a faixa
+  { nome: 'queda de preço (%) que manda a oferta do Catálogo para a revisão', valor: 50, texto: (v) => new RegExp(`${v}% ou mais abaixo do preço da lista`), codigo: [['src/catalogo.js', /export const QUEDA_REVISAO_PCT = (\d+);/], ['public/espelhamento.js', /const HCAT_QUEDA_LIMITE = (\d+);/]] },
+  { nome: 'segundos de pausa da releitura quando o Etiqueta está ocupado', valor: 60, texto: (v) => new RegExp(`Etiqueta ocupado pausa a releitura por ${v} s`), codigo: [['src/verificador.js', /export const PAUSA_ETIQUETA_OCUPADO_S = (\d+);/]], so: 'docs' },
+  // prazos da extensão (README, "Extensão do Chrome"): "até 40 s no link do Mercado Livre, 55 s na lista de ofertas e 80 s no link da
+  // Shopee (antes dos 45 s, 60 s e 90 s que o painel espera)" e "até 20 s pela aba da Central". Os tetos moram em extension/background.js
+  // e os prazos do painel em src/links.js
+  { nome: 'segundos até a extensão desistir do link do Mercado Livre', valor: 40, texto: (v) => new RegExp(`até ${v} s no link do Mercado Livre`), codigo: [['extension/background.js', /const TETO_PEDIDO = (\d+)000;/]], so: 'readme' },
+  { nome: 'segundos até a extensão desistir da lista de ofertas', valor: 55, texto: (v) => new RegExp(`${v} s na lista de ofertas`), codigo: [['extension/background.js', /const TETO_OFERTAS = (\d+)000;/]], so: 'readme' },
+  { nome: 'segundos até a extensão desistir do link da Shopee', valor: 80, texto: (v) => new RegExp(`${v} s no link da Shopee`), codigo: [['extension/background.js', /const TETO_SHOPEE = (\d+)000;/]], so: 'readme' },
+  { nome: 'segundos que a extensão espera pela aba da Central', valor: 20, texto: (v) => new RegExp(`até ${v} s pela aba da Central`), codigo: [['extension/background.js', /const ESPERA_ABA = (\d+)000;/]], so: 'readme' },
+  { nome: 'segundos até o programa desistir do link do Mercado Livre', valor: 45, texto: (v) => new RegExp(`antes dos ${v} s, 60 s e 90 s que o painel espera`), codigo: [['src/links.js', /export const PRAZO_LINK_MS = (\d+)000;/]], so: 'readme' },
+  { nome: 'segundos até o programa desistir da lista de ofertas', valor: 60, texto: (v) => new RegExp(`antes dos 45 s, ${v} s e 90 s que o painel espera`), codigo: [['src/links.js', /async function requestOffers\(\{ paginas, timeoutMs = (\d+)000 \}\)/]], so: 'readme' },
+  { nome: 'segundos até o programa desistir do link da Shopee', valor: 90, texto: (v) => new RegExp(`antes dos 45 s, 60 s e ${v} s que o painel espera`), codigo: [['src/links.js', /async function requestLinkShopee\(\{ url, subId, timeoutMs = (\d+)000 \}\)/]], so: 'readme' },
 ];
 
 test('FATOS: cada número aparece nos Docs e no README e bate com a constante do código', () => {
@@ -843,9 +866,19 @@ test('FATOS: cada número aparece nos Docs e no README e bate com a constante do
       assert.equal(Number(m[1]), f.valor, `${f.nome}: ${arq} diz ${m[1]}, a tabela diz ${f.valor}`);
     }
     const texto = f.texto(f.valor);
-    assert.match(TEXTO_DOCS, texto, `${f.nome}: os Docs (public/docs/cap-*.js) não trazem ${texto}`);
-    assert.match(README, texto, `${f.nome}: o README não traz ${texto}`);
+    // `so`: o número é citado só num dos dois lados (os prazos da extensão só estão no README; a pausa do Etiqueta ocupado só nos Docs)
+    if (f.so !== 'readme') assert.match(TEXTO_DOCS, texto, `${f.nome}: os Docs (public/docs/cap-*.js) não trazem ${texto}`);
+    if (f.so !== 'docs') assert.match(README, texto, `${f.nome}: o README não traz ${texto}`);
   }
+});
+
+// O painel não importa de src/: public/espelhamento.js guarda uma cópia do limite da queda (HCAT_QUEDA_LIMITE) para escrever a faixa
+// "o limite é N%". Se as duas divergirem, a revisão diria um limite e o servidor aplicaria outro.
+test('QUEDA_REVISAO_PCT (src/catalogo.js) e HCAT_QUEDA_LIMITE (public/espelhamento.js) valem o mesmo', () => {
+  const copia = /const HCAT_QUEDA_LIMITE = (\d+);/.exec(fonte('espelhamento.js'));
+  assert.ok(copia, 'não achei HCAT_QUEDA_LIMITE em public/espelhamento.js');
+  assert.equal(Number(copia[1]), QUEDA_REVISAO_PCT, 'a cópia do painel diverge da constante do servidor');
+  assert.equal(QUEDA_REVISAO_PCT, 50);
 });
 
 test('FATOS: o texto montado do valor não casa com outro valor (a tabela de fato pega uma mudança de número)', () => {
@@ -1101,12 +1134,15 @@ test('referencia/estados: todo selo citado existe literalmente em public/conexoe
 });
 
 test('referencia/motivos: a primeira tabela cobre os MOTIVOS de src/catalogo-itens.js que mandam para a revisão, com o rótulo do Histórico', () => {
-  assert.equal(MOTIVOS.length, 5);
+  assert.equal(MOTIVOS.length, 7);
   const bloco = /motivos: \{([^}]*)\}/.exec(fonte('espelhamento.js'));
   assert.ok(bloco, 'não achei o mapa de rótulos dos motivos em public/espelhamento.js');
-  // `nao_conferido` continua em MOTIVOS (um item antigo ou um rollback ainda pode trazê-lo), mas a conferência que falha agora pula a
-  // oferta em vez de mandá-la à revisão (rodar-sozinho, entrega 1): o dono não o vê, e a tabela não o cita
-  const rotulos = MOTIVOS.filter((m) => m !== 'nao_conferido').map((m) => { const r = new RegExp(`\\b${m}: '([^']+)'`).exec(bloco[1]); assert.ok(r, `motivo ${m} sem rótulo em public/espelhamento.js`); return r[1]; });
+  // `nao_conferido` e `falha_link` continuam em MOTIVOS (um item antigo ou um rollback ainda pode trazê-los), mas a conferência ou o link
+  // que falham agora pulam a oferta em vez de mandá-la à revisão (rodar-sozinho, entregas 1 e 2): o dono não os vê, e a tabela não os
+  // cita. No lugar entram `queda_preco` (50% ou mais abaixo da lista) e `falhas_repetidas` (3ª falha seguida da mesma oferta).
+  const SO_DADO_ANTIGO = ['nao_conferido', 'falha_link'];
+  for (const m of ['queda_preco', 'falhas_repetidas']) assert.ok(MOTIVOS.includes(m), `MOTIVOS.${m}`);
+  const rotulos = MOTIVOS.filter((m) => !SO_DADO_ANTIGO.includes(m)).map((m) => { const r = new RegExp(`\\b${m}: '([^']+)'`).exec(bloco[1]); assert.ok(r, `motivo ${m} sem rótulo em public/espelhamento.js`); return r[1]; });
   const tabela = CAPS.referencia.secoes.find((s) => s.id === 'motivos').blocos.find((b) => b.tabela).tabela;
   assert.deepEqual(tabela.linhas.map((l) => l[0]).sort(), [...rotulos].sort());
 });
@@ -1633,7 +1669,7 @@ test('Verificador (rodada 1): as frases de R1, Q2 e S2 e a regra do descarte no 
 
 test('Verificador: a tabela de "motivos" de Referência que fala da conferência cobre MOTIVOS_VERIFICADOR, com o texto do Histórico', () => {
   // esgotado, preço subiu e não conferido já existiam; indisponível e outro produto vêm da releitura da Amazon pelo Etiqueta
-  assert.deepEqual(Object.keys(MOTIVOS_VERIFICADOR).sort(), ['esgotado', 'indisponivel', 'nao_conferido', 'outro_produto', 'preco_subiu']);
+  assert.deepEqual(Object.keys(MOTIVOS_VERIFICADOR).sort(), ['esgotado', 'indisponivel', 'nao_conferido', 'outro_produto', 'preco_subiu', 'preco_suspeito']);
   const tabelas = blocosDe('referencia', 'motivos').filter((b) => b.tabela).map((b) => b.tabela);
   // a tabela da conferência é a que traz a linha "Descartada: esgotado na loja" (a seção tem mais tabelas e a ordem pode mudar)
   const doVerificador = tabelas.filter((t) => t.linhas.some((l) => l[0].startsWith(MOTIVOS_VERIFICADOR.esgotado)));
@@ -1646,20 +1682,23 @@ test('Verificador: a tabela de "motivos" de Referência que fala da conferência
   }
   for (const l of tabela.linhas) assert.ok(l.every((c) => typeof c === 'string' && c.trim() !== ''), `linha sem coluna: ${l[0]}`);
   assert.match(CAPS.referencia.secoes.find((x) => x.id === 'motivos').onde, /\[\[Histórico\]\]/);
-  // o motivo do Catálogo `nao_conferido` segue em MOTIVOS (item antigo), mas deixou de mandar oferta para a revisão: a seção da
-  // revisão conta quatro motivos e o dono não vê mais a linha "Não deu para conferir o preço: confira na loja"
-  assert.ok(MOTIVOS.includes('nao_conferido'));
-  assert.match(secaoTxt('revisao', 'motivos'), /Quatro motivos mandam a oferta para a revisão/);
-  assert.equal(blocosDe('revisao', 'motivos').find((b) => b.tabela).tabela.linhas.length, 4);
-  assert.doesNotMatch(TEXTO_DOCS, /\b(?:Cinco|cinco|5) motivos\b/);
+  // os motivos do Catálogo `nao_conferido` e `falha_link` seguem em MOTIVOS (item antigo), mas deixaram de mandar oferta para a revisão:
+  // a seção da revisão traz uma linha por motivo vivo (o resto de MOTIVOS) e o dono não vê mais a linha "Não deu para conferir o
+  // preço: confira na loja". A frase não conta os motivos em palavras, para não envelhecer a cada motivo novo.
+  assert.ok(MOTIVOS.includes('nao_conferido') && MOTIVOS.includes('falha_link'));
+  assert.match(secaoTxt('revisao', 'motivos'), /Estes motivos mandam a oferta para a revisão/);
+  assert.equal(blocosDe('revisao', 'motivos').find((b) => b.tabela).tabela.linhas.length, MOTIVOS.length - 2);
+  assert.equal(blocosDe('revisao', 'motivos').find((b) => b.tabela).tabela.linhas.length, 5);
+  assert.doesNotMatch(TEXTO_DOCS, /\b(?:Quatro|quatro|Cinco|cinco|[45]) motivos mandam\b/);
   assert.doesNotMatch(TEXTO_DOCS, /Não deu para conferir o preço: confira na loja/, 'a linha da revisão que ficou sem uso');
 });
 
 test('Verificador: toda causa de CAUSAS e as frases fixas do código aparecem nos Docs e no README', () => {
   const ver = lerRaiz('src/verificador.js'); const server = lerRaiz('src/server.js'); const sched = lerRaiz('src/scheduler.js');
-  // as doze de antes mais as quatro do Etiqueta (o Etiqueta não respondeu, a Amazon bloqueou a leitura, a oferta saiu do Etiqueta,
-  // o Etiqueta estava ocupado com outra leitura da Amazon)
-  assert.equal(Object.keys(CAUSAS).length, 16);
+  // as doze de antes, mais as quatro do Etiqueta (o Etiqueta não respondeu, a Amazon bloqueou a leitura, a oferta saiu do Etiqueta,
+  // o Etiqueta estava ocupado com outra leitura da Amazon), mais as quatro da Central de Afiliados (não respondeu, não deu para abrir
+  // no Chrome, pediu login, o anúncio está pausado ou inativo): vinte
+  assert.equal(Object.keys(CAUSAS).length, 20);
   for (const causa of Object.values(CAUSAS)) {
     assert.ok(TEXTO_DOCS.includes(causa), `Docs: causa “${causa}”`);
     assert.ok(README.includes(causa), `README: causa “${causa}”`);
@@ -1745,7 +1784,7 @@ test('Verificador, Rodar sozinho (entrega 1): descartes novos, reserva, pulada, 
   assert.match(REF, /Pulada, descartada e separada para revisão/);
 });
 
-test('Verificador, ML pela extensão: as quatro causas novas, a versão 1.5.0 e o que ainda lê pelo servidor estão nos Docs, no README e no TIPS', () => {
+test('Verificador, ML pela extensão: as quatro causas novas, a versão 1.5.0 (que confere o preço) e a 1.6.0 que o painel espera, e o que ainda lê pelo servidor, estão nos Docs, no README e no TIPS', () => {
   const NOVAS = ['extensao_off', 'extensao_antiga', 'ml_verificacao', 'limite_hora'];
   const ver = readmeSecao('Conferência de preço e estoque antes do envio');
   const secoes = [['Docs: manutencao/verificador', secaoTxt('manutencao', 'verificador')], ['Docs: referencia/motivos', secaoTxt('referencia', 'motivos')], ['README: Conferência', ver]];
@@ -1753,7 +1792,7 @@ test('Verificador, ML pela extensão: as quatro causas novas, a versão 1.5.0 e 
     assert.ok(Object.hasOwn(CAUSAS, k), `CAUSAS.${k}`);
     for (const [onde, txt] of secoes) assert.ok(txt.includes(CAUSAS[k]), `${onde}: causa “${CAUSAS[k]}”`);
   }
-  // a lista "Entre parênteses…" de cada lugar traz as dezesseis causas (a causa também aparece em outros parágrafos: não basta achar a frase na seção)
+  // a lista "Entre parênteses…" de cada lugar traz as vinte causas (a causa também aparece em outros parágrafos: não basta achar a frase na seção)
   const listas = [
     ['Docs: manutencao/verificador', strings(CAPS.manutencao.secoes.find((x) => x.id === 'verificador').blocos).find((t) => t.includes('a causa pode ser'))],
     ['Docs: referencia/motivos', strings(CAPS.referencia.secoes.find((x) => x.id === 'motivos').blocos).find((t) => t.includes('Entre parênteses vai a causa'))],
@@ -1777,20 +1816,48 @@ test('Verificador, ML pela extensão: as quatro causas novas, a versão 1.5.0 e 
     assert.match(txt, /não abre aba, não tenta de novo e não resolve CAPTCHA/, onde);
     assert.match(txt, /passe você mesmo pela verificação/, onde);
   }
-  // versão 1.5.0: manifest, README ("Extensão do Chrome"), capítulo de instalação e verbete de Ajustes
-  assert.equal(JSON.parse(lerRaiz('extension/manifest.json')).version, '1.5.0');
+  // a 1.5.0 trouxe a conferência do preço (frases abaixo, que seguem valendo); o manifest está na versão que o servidor espera, a 1.6.0
+  // (a prova de que manifest, servidor e textos são a mesma versão está no teste "CA2.16", logo abaixo)
+  const VERSAO = JSON.parse(lerRaiz('extension/manifest.json')).version;
+  assert.equal(VERSAO, '1.6.0');
   const ext = readmeSecao('Extensão do Chrome');
   assert.match(ext, /versão 1\.5\.0 confere o preço e o estoque do Mercado Livre/);
   assert.match(ext, /recarregue a extensão em chrome:\/\/extensions e mantenha o Chrome logado no Mercado Livre/);
   assert.match(ext, /sem abrir aba/); assert.match(ext, /não pede permissão nova/i);
   const inst = secaoTxt('primeiros-passos', 'extensao');
-  assert.match(inst, /versão 1\.5\.0, conferir o preço e o estoque/); assert.match(inst, /1\.5\.0, clique em “Recarregar”/);
+  assert.match(inst, /versão 1\.5\.0, conferir o preço e o estoque/);
+  // o passo de recarregar a extensão cita a versão do manifest (a 1.6.0), não a 1.5.0
+  assert.match(inst, new RegExp(`clique em recarregar \\(a seta circular\\) na extensão achadinhoturbo, que agora é a ${VERSAO.replace(/\./g, '\\.')}`));
+  assert.doesNotMatch(inst, /1\.5\.0, clique em “Recarregar”/);
   const dica = limpo(tipsDoPainel()['ajustes.extensao']);
   assert.match(dica, /versão 1\.5\.0/); assert.match(dica, /preço e o estoque do Mercado Livre/); assert.match(dica, /chrome:\/\/extensions/);
   assert.match(limpo(tipsDoPainel()['ajustes.verificador']), /Mercado Livre é conferido pela extensão do Chrome/);
   // a linha de limites da Referência cita o teto e a pausa
   const limites = limpo(strings(CAPS.referencia.secoes.find((x) => x.id === 'limites').blocos).join('\n'));
   assert.match(limites, /Mercado Livre é conferido pela extensão, no máximo 120 vezes por hora, e para de pedir por 30 min/);
+});
+
+// CA2.16 (plano rodar-sozinho-entrega2): a versão que o servidor espera (VERSAO_EXTENSAO, src/links.js), a do manifest e a que os Docs, o
+// README e o TIPS citam são a mesma. Mudar uma só (por exemplo subir o manifest sem o servidor) derruba o teste.
+test('CA2.16: VERSAO_EXTENSAO, o manifest e a versão citada nos Docs, no README e no TIPS são a mesma', () => {
+  const manifest = JSON.parse(lerRaiz('extension/manifest.json')).version;
+  assert.equal(VERSAO_EXTENSAO, '1.6.0');
+  assert.equal(manifest, VERSAO_EXTENSAO, 'extension/manifest.json × VERSAO_EXTENSAO (src/links.js)');
+  assert.match(lerRaiz('src/links.js'), new RegExp(`export const VERSAO_EXTENSAO = '${VERSAO_EXTENSAO.replace(/\./g, '\\.')}';`));
+  // todas as frases que dizem "a versão esperada/atual é X" citam a mesma X (a lista pega uma frase esquecida na versão antiga)
+  const citacoes = [
+    ['Docs: primeiros-passos/extensao', secaoTxt('primeiros-passos', 'extensao'), /na extensão achadinhoturbo, que agora é a (\d+\.\d+\.\d+)/],
+    ['Docs: referencia/estados', secaoTxt('referencia', 'estados'), /mais antiga que a versão que o painel espera \((\d+\.\d+\.\d+)\)/],
+    ['Docs: manutencao/verificador', secaoTxt('manutencao', 'verificador'), /atualizar a pasta extension para a versão (\d+\.\d+\.\d+), recarregue/],
+    ['TIPS ajustes.extensao', limpo(tipsDoPainel()['ajustes.extensao']), /“Extensão desatualizada” \(a atual é a (\d+\.\d+\.\d+)\)/],
+    ['README: Conexões', README, /Extensão desatualizada\*? é a extensão conectada com versão abaixo da (\d+\.\d+\.\d+)/],
+    ['README: Extensão do Chrome', readmeSecao('Extensão do Chrome'), /A versão (\d+\.\d+\.\d+) recupera a Central de Afiliados sozinha/],
+  ];
+  for (const [onde, txt, re] of citacoes) {
+    const m = re.exec(txt);
+    assert.ok(m, `${onde}: não achei a frase da versão (${re})`);
+    assert.equal(m[1], VERSAO_EXTENSAO, `${onde}: cita ${m[1]}, o servidor espera ${VERSAO_EXTENSAO}`);
+  }
 });
 
 test('Verificador, ML pela extensão (S2, R1, R4): a conta do dono, como desligar, a pausa que alonga, as várias versões e o que não foi testado', () => {
