@@ -1323,7 +1323,8 @@ test('S1: Amazon relida com R$ 1,99 "de R$ 199" (parcela no lugar do preço) vai
   assert.equal(s.wa.simulated.length, 0);
   assert.deepEqual(enviadas(s.db, id), []);
   const [item] = itens(s.db, id);
-  assert.deepEqual([item.status, JSON.parse(item.motivos)], ['revisao', ['preco_antigo']]);
+  // desde a entrega 2 (CA2.11) a queda de 98% em relação ao preço da lista (100) também é motivo
+  assert.deepEqual([item.status, JSON.parse(item.motivos)], ['revisao', ['preco_antigo', 'queda_preco']]);
   const oferta = JSON.parse(s.db.prepare('SELECT oferta FROM catalogo_itens WHERE rule_id = ?').get(id).oferta);
   assert.equal(oferta.price, 1.99, 'a revisão mostra o preço lido, que é o que o dono precisa ver');
   assert.ok(s.logs(id).some((l) => /Separada para revisão/.test(l.message)));

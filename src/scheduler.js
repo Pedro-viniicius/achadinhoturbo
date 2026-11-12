@@ -1,9 +1,10 @@
 import path from 'node:path';
 import { addLog, parseRule, getSetting } from './db.js';
-import { renderTemplate } from './template.js';
+import { renderTemplate, brl } from './template.js';
 import * as mlDefault from './ml.js';
 import { imagemPermitida } from './lojas.js';
-import { motivosDeRevisao, precisaEtiqueta } from './catalogo.js';
+import { motivosDeRevisao, precisaEtiqueta, quedaDePreco, QUEDA_REVISAO_PCT } from './catalogo.js';
+import { precoSuspeito } from './catalogo-itens.js';
 import { createEnvios } from './envios.js';
 import { createAvisos } from './avisos.js';
 import { createEspelho } from './espelho.js';
@@ -29,7 +30,10 @@ const LINK_ML_PREVIA = 'https://meli.la/(gerado no envio)';
 const TEXTO_MOTIVO = {
   shopee: 'Shopee, confirme o link', desconto_100: 'desconto de 100%, confira o preço',
   preco_antigo: 'preço antigo muito alto, confira o preço', falha_link: 'não consegui gerar o link',
+  queda_preco: `o preço está muito abaixo do preço da lista (o limite é ${QUEDA_REVISAO_PCT}%), confira o preço`,
 };
+/** Motivo `queda_preco` com a queda medida (rodar-sozinho entrega 2, CA2.11; spec §2a). */
+const textoQueda = (pct) => `o preço está ${pct}% abaixo do preço da lista (o limite é ${QUEDA_REVISAO_PCT}%), confira o preço`;
 /** Por que ofertas do catálogo esperam (não vão à revisão nem contam como enviadas): aviso a cada execução. */
 const TEXTO_ESPERA = {
   ml_direto: 'do Mercado Livre esperando: os links estão no modo direto, sem comissão. Volte ao modo da extensão em Ajustes.',
@@ -68,11 +72,13 @@ const PULADA_POR = {
 const DESCARTADA_POR = {
   esgotado: 'esgotada na loja', preco_subiu: 'preço subiu', nao_conferido: 'loja sem resposta e dados antigos',
   indisponivel: 'indisponível na loja', outro_produto: 'outro produto na página',
-  recusada_ml: 'recusada pelo Mercado Livre',
+  recusada_ml: 'recusada pelo Mercado Livre', preco_suspeito: 'preço suspeito',
 };
 // Falhas que contam para a oferta do ML (decisão 4): a conferência que falhou por a loja não responder ou demorar. As
 // outras causas (extensão fora, leitura em pausa, verificação) não são da oferta: só a pulam.
 const CAUSAS_DA_OFERTA_ML = new Set(['loja_fora', 'demorou']);
+// Leitura do ML em pausa (src/verificador.js pausaDaLeituraMl): só estas causas tiram o ML da escolha (CA2.13)
+const CAUSAS_PAUSA_ML = new Set(['ml_verificacao', 'limite_hora', 'extensao_antiga']);
 // as falhas da oferta ficam guardadas por até 7 dias sem uma nova (só em memória; um reinício as zera, premissa P1)
 const VIDA_FALHAS_MS = 7 * 86400000;
 const ordinal = (n) => `${n}ª`;
@@ -109,13 +115,15 @@ function fraseSairam(saidas, want, faltas, fim) {
  * As "já enviadas" do catálogo não entram: ele as tira antes de chegarem aqui.
  */
 function fraseFiltradas(f) {
-  const total = f.filtros + f.parecidas + f.pausa + f.semConferencia;
+  const total = f.filtros + f.parecidas + f.pausa + f.semConferencia + f.mlPausa;
   if (!total) return null;
   const pedacos = [];
   if (f.filtros) pedacos.push(`${f.filtros} fora dos filtros da regra`);
   if (f.parecidas) pedacos.push(`${f.parecidas} ${f.parecidas === 1 ? 'já enviada ou parecida' : 'já enviadas ou parecidas'}`);
   if (f.pausa) pedacos.push(`${f.pausa} em pausa de ${PAUSA_DESCARTADA_H} h`);
   if (f.semConferencia) pedacos.push(`${f.semConferencia} da Amazon que não dá para conferir agora`);
+  // ML com a leitura em pausa (rodar-sozinho entrega 2, CA2.13; spec §2b): a causa entre parênteses, sem o tempo
+  if (f.mlPausa) pedacos.push(`${f.mlPausa} do Mercado Livre com a leitura em pausa (${CAUSAS[f.mlPausaCausa] ?? CAUSAS.ml_verificacao})`);
   return `Antes da escolha, ${total} ${total === 1 ? 'oferta ficou' : 'ofertas ficaram'} de fora: ${pedacos.join(', ')}.`;
 }
 const LOJAS_RESUMO = ['ml', 'amazon', 'shopee'];
@@ -533,7 +541,7 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
    */
   const novaExecucao = () => ({
     id: ++execucoes, paginas: new Map(), recusadas: new Set(), esperando: new Map(), vistas: new Set(), puladas: [],
-    filtradas: { filtros: 0, pausa: 0, parecidas: 0, semConferencia: 0 }, conferenciaNaHora: false, porLoja: contadoresPorLoja(),
+    filtradas: { filtros: 0, pausa: 0, parecidas: 0, semConferencia: 0, mlPausa: 0, mlPausaCausa: null }, conferenciaNaHora: false, porLoja: contadoresPorLoja(),
   });
   // a regra apagada no meio da execução não grava nada do catálogo: o id pode ser reaproveitado por uma regra nova
   const regraExiste = (id) => !!db.prepare('SELECT 1 FROM rules WHERE id = ?').get(id);
@@ -581,6 +589,7 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
     return (c) => {
       if (!LOJAS_CATALOGO.has(c?.loja) || ml.rejectReason(c, rule) || esperaDaLoja(c) || pausada(rule, c.key)) return false;
       if (!previa && semConferenciaAgora(c)) return false;
+      if (!previa && c.loja === 'ml' && pausaLeituraMl()) return false;
       if (!motivosDeRevisao(c).length) return true;
       cheia ??= catalogoItens.revisaoCheia(rule.id);
       return !cheia;
@@ -594,6 +603,36 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
   function semConferenciaAgora(c) {
     if (typeof verificador?.semConfirmacaoAgora !== 'function') return false;
     try { return verificador.semConfirmacaoAgora({ loja: c.loja, precoEm: c.precoEm }) === true; } catch { return false; }
+  }
+
+  /**
+   * Guarda do preço suspeito depois da conferência, nas fontes antigas (rodar-sozinho entrega 2, CA2.12): só quando o
+   * verificador trocou o preço (`o` antes, `offer` depois; nunca o digitado à mão). Suspeito = precoSuspeito (desconto
+   * de 100% ou preço antigo ≥ 10×, a definição do Catálogo e da fila) ou queda de QUEDA_REVISAO_PCT% ou mais em relação
+   * ao preço de antes. → o texto do descarte, ou null se pode seguir. Só números formatados entram no texto.
+   */
+  function guardaDoPreco(o, offer) {
+    if (!verificador || o.digitado === true || centavos(offer.price) == null || centavos(offer.price) === centavos(o.price)) return null;
+    const queda = quedaDePreco(o.price, offer.price);
+    const caiu = queda != null && queda >= QUEDA_REVISAO_PCT;
+    if (!caiu && !precoSuspeito(offer)) return null;
+    const porque = caiu ? `${queda}% abaixo do preço da lista`
+      : Number(offer.discountPct) >= 100 ? 'com desconto de 100%' : 'com o preço antigo 10 vezes maior ou mais';
+    return `${MOTIVOS_VERIFICADOR.preco_suspeito} (${brl(offer.price)} na loja, ${porque}). ${FICA_FORA}`;
+  }
+
+  /**
+   * Leitura do Mercado Livre em pausa agora (rodar-sozinho entrega 2, CA2.13; src/verificador.js pausaDaLeituraMl, sem
+   * pedido): a causa (ml_verificacao | limite_hora | extensao_antiga) ou null. As ofertas do ML do catálogo ficam fora da
+   * escolha sem gastar tentativa nem linha "Pulada" (as fontes antigas seguem como antes: com dados frescos saem sem
+   * conferência, D3). A espera da Central vence (spec §2b): quem chama confere a espera antes. Nunca lança.
+   */
+  function pausaLeituraMl() {
+    if (typeof verificador?.pausaDaLeituraMl !== 'function') return null;
+    try {
+      const p = verificador.pausaDaLeituraMl();
+      return CAUSAS_PAUSA_ML.has(p) ? p : null;
+    } catch { return null; }
   }
 
   /**
@@ -622,6 +661,13 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
   function criarEscolha(rule, want, exec = novaExecucao(), { previa = false, saindo = null } = {}) {
     let cands = null; let pos = 0; let tried = 0; let trava = null; let lidoEm = null;
     const maxTries = Math.max(want * 8, 10);
+    /** A leitura do ML está em pausa: conta a candidata na linha "Antes da escolha" (com a 1ª causa vista) → true. */
+    const contarPausaMl = () => {
+      const p = pausaLeituraMl();
+      if (!p) return false;
+      exec.filtradas.mlPausa++; exec.filtradas.mlPausaCausa ??= p;
+      return true;
+    };
     async function ler() {
       lidoEm = Date.now();
       cands = await ml.candidates(rule, {
@@ -664,6 +710,8 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
           if (!previa && semConferenciaAgora(c)) { exec.filtradas.semConferencia++; continue; }
           const espera = esperaDaLoja(c);
           if (espera) { esperar(exec, espera, c.loja); continue; }
+          // ML com a leitura em pausa (CA2.13): fora da escolha, sem tentativa; o cursor fica nela, como na espera
+          if (!previa && c.loja === 'ml' && contarPausaMl()) continue;
           const marca = {};
           // barrada por um envio anterior: tratada como recusada, para o cursor das Novidades não ficar preso nela. A da
           // mesma rodada não (achado R1): só uma escolhida que saiu de fato barra (a que cai fora é devolvida antes da
@@ -903,7 +951,7 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
           esquecerFalhaMl(rule, o.key);
           if (o.catalogo) {
             if (!regraExiste(rule.id)) return;
-            catalogoItens.registrar(rule, offer, 'descartado', []);
+            catalogoItens.registrar(rule, offer, 'descartado', [], { descartadoPor: 'recusada_ml' });
           } else pausar(rule, o.key);
           descartar(offer, { motivo: 'recusada_ml', texto: `Descartada: o Mercado Livre recusou gerar o link (${causa}).` });
           return;
@@ -980,7 +1028,7 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
         if (offer.catalogo) {
           // revisão em vez de envio (D5): Shopee, preço suspeito, falha do link da Amazon (nenhum grupo com link) ou a 3ª
           // falha da mesma oferta do ML (falhas_repetidas, rodar-sozinho entrega 2)
-          let motivos = offer.motivos; let detalhe = '';
+          let motivos = offer.motivos; let detalhe = ''; let queda = null;
           if (!motivos.length) {
             // a lista veio com a idade larga (o verificador estava ligado no começo, decisão 5) e o verificador foi
             // desligado no meio: o que resta do catálogo não sai sem conferência (premissa P1; foco de revisão 5)
@@ -999,8 +1047,10 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
               // por ela e não fica preso, e em outras ordens ela pode voltar a valer se o preço cair
               if (ml.rejectReason(offer, rule)) { exec.recusadas.add(o.key); faltou(o, 'pulada', PULADA_POR.filtros); continue; }
               // o preço conferido passa de novo pela guarda do preço suspeito (achado S1): uma leitura errada da página
-              // (a parcela no lugar do preço) não sai sozinha; vai à revisão abaixo, gravada com o preço conferido
-              motivos = motivosDeRevisao(offer);
+              // (a parcela no lugar do preço) não sai sozinha; vai à revisão abaixo, gravada com o preço conferido. A queda
+              // de QUEDA_REVISAO_PCT% ou mais em relação ao preço da lista (o de antes da conferência) também (CA2.11)
+              queda = quedaDePreco(o.price, offer.price);
+              motivos = motivosDeRevisao(offer, { precoLista: o.price });
               if (!motivos.length && naoMaisBarata(offer)) { puladaNaConferencia(offer); exec.recusadas.add(o.key); continue; }
             } else if (c.motivo === 'nao_conferido') {
               // falha técnica nunca vai à revisão (plano rodar-sozinho-entrega1, decisão 4; CA1.5): pulada, sem
@@ -1040,9 +1090,13 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
           }
           if (motivos.length) {
             if (!regraExiste(rule.id)) continue;
-            if (catalogoItens.registrar(rule, offer, 'revisao', motivos)) {
+            if (catalogoItens.registrar(rule, offer, 'revisao', motivos, { quedaPct: queda })) {
               summary.revisao++; faltou(o, 'revisao');
-              log(rule, { level: 'aviso', offer_title: offer.title, message: `Separada para revisão: ${motivos.map((m) => TEXTO_MOTIVO[m] || m).join(' e ')}${detalhe}.` });
+              // a queda medida vai na frase (spec §2a); os outros motivos, com o texto fixo
+              const message = motivos.includes('queda_preco') && queda != null
+                ? `Separada para revisão: ${motivos.map((m) => (m === 'queda_preco' ? textoQueda(queda) : TEXTO_MOTIVO[m] || m)).join(' e ')}${detalhe}.`
+                : `Separada para revisão: ${motivos.map((m) => TEXTO_MOTIVO[m] || m).join(' e ')}${detalhe}.`;
+              log(rule, { level: 'aviso', offer_title: offer.title, message });
             } else { esperar(exec, 'revisao_cheia'); faltou(o, 'pulada', PULADA_POR.revisao_cheia, 'esperou'); }
             continue;
           }
@@ -1054,6 +1108,10 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
           // o preço conferido pode ter saído dos filtros da regra (preço máximo, desconto mínimo): como no pickOffers, é só
           // "fora dos filtros", sem aviso de descarte e sem link (a vaga vai à próxima candidata)
           if (verificador && ml.rejectReason(offer, rule)) { faltou(o, 'pulada', PULADA_POR.filtros); continue; }
+          // preço suspeito que veio da conferência (CA2.12; a mesma guarda do catálogo e da fila): descartada e
+          // PAUSA_DESCARTADA_H fora da escolha. O preço digitado à mão não passa por ela
+          const suspeito = guardaDoPreco(o, offer);
+          if (suspeito) { pausar(rule, o.key); descartar(offer, { motivo: 'preco_suspeito', texto: suspeito }); continue; }
           if (naoMaisBarata(offer)) { puladaNaConferencia(offer); continue; }
           gerados = await linksPorCodigo(offer, etq, jids);
           if (!gerados.algum) {

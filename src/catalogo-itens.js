@@ -63,7 +63,10 @@ const STATUS = ['revisao', 'enviado', 'descartado'];
 // motivos do verificador que descartam a oferta do catálogo (o `nao_conferido` nunca descarta). `indisponivel` e
 // `outro_produto` vêm da releitura da Amazon pelo Etiqueta (plano rodar-sozinho-entrega1). O `nao_conferido` segue em
 // MOTIVOS só para ler itens antigos: a migração de src/db.js tira da revisão os que estavam só por ele.
-const DESCARTE_VERIFICADOR = ['esgotado', 'preco_subiu', 'indisponivel', 'outro_produto'];
+// `recusada_ml`: o Mercado Livre recusou gerar o link (anúncio pausado ou inativo; rodar-sozinho entrega 2, CA2.2)
+const DESCARTE_VERIFICADOR = ['esgotado', 'preco_subiu', 'indisponivel', 'outro_produto', 'recusada_ml'];
+/** Queda do preço em % (rodar-sozinho entrega 2, CA2.11) que vale para a tela: inteiro de 1 a 99; senão null. */
+const quedaValida = (v) => (Number.isInteger(v) && v >= 1 && v <= 99 ? v : null);
 const ORDEM_NOVIDADES = 'atualizacao';      // a ordem "Novidades" do contrato: oferta tratada nunca sai de novo
 const LIMITE_PADRAO = 100;
 const LIMITE_MAX = 200;
@@ -255,12 +258,14 @@ export function createCatalogoItens({ db, wa = null, links = null, amazon = null
    * 'enviado' ou 'descartado'. Não mexe em `sent_offers` (o envio da regra já grava lá).
    * Nunca sobrescreve um item que ainda espera revisão (quem decide é o Dono) e não passa do teto de revisão.
    * `descartadoPor` (só com 'descartado'): 'esgotado', 'preco_subiu', 'indisponivel' ou 'outro_produto' (de
-   * MOTIVOS_VERIFICADOR) quando foi o verificador que barrou a oferta; fica em `oferta.descartado_por` e volta em
-   * `listar` (a tela diz o porquê).
+   * MOTIVOS_VERIFICADOR) quando foi o verificador que barrou a oferta, ou 'recusada_ml' quando o Mercado Livre recusou
+   * gerar o link (DESCARTE_VERIFICADOR); fica em `oferta.descartado_por` e volta em
+   * `listar` (a tela diz o porquê). `quedaPct` (só com 'revisao' e o motivo `queda_preco`): quanto o preço conferido
+   * ficou abaixo do da lista, inteiro de 1 a 99 (fora disso não é guardado); fica em `oferta.queda_pct` e volta em `listar`.
    * → true se gravou; false se a entrada não fecha (regra, chave, título, preço, status, motivos), se a revisão da
    * regra está cheia ou se o item está em revisão.
    */
-  function registrar(rule, c, status, motivos = [], { descartadoPor = null } = {}) {
+  function registrar(rule, c, status, motivos = [], { descartadoPor = null, quedaPct = null } = {}) {
     const info = lerChave(c?.key);
     if (!Number.isInteger(rule?.id) || rule.id <= 0 || !info || !STATUS.includes(status)) return false;
     const lista = [...new Set(Array.isArray(motivos) ? motivos.filter((m) => MOTIVOS.includes(m)) : [])];
@@ -268,6 +273,7 @@ export function createCatalogoItens({ db, wa = null, links = null, amazon = null
     const oferta = ofertaParaGuardar(c, info);
     if (!oferta.title || oferta.price == null) return false;
     if (status === 'descartado' && DESCARTE_VERIFICADOR.includes(descartadoPor)) oferta.descartado_por = descartadoPor;
+    if (status === 'revisao' && lista.includes('queda_preco') && quedaValida(quedaPct) != null) oferta.queda_pct = quedaPct;
     if (status === 'revisao' && revisaoCheia(rule.id)) return false;
     const now = agora();
     const r = db.prepare(`INSERT INTO catalogo_itens (rule_id, chave, loja, status, motivos, oferta, envio_id, criado_em, decidido_em)
@@ -399,6 +405,8 @@ export function createCatalogoItens({ db, wa = null, links = null, amazon = null
         motivos: listaDeTexto(l.motivos).filter((m) => MOTIVOS.includes(m)),
         // só o item que o verificador barrou (DESCARTE_VERIFICADOR): a tela diz o porquê em vez de "na revisão"
         ...(l.status === 'descartado' && DESCARTE_VERIFICADOR.includes(o.descartado_por) ? { descartado_por: o.descartado_por } : {}),
+        // a queda em % do item que foi à revisão por ela (a tela diz "Preço N% abaixo da lista")
+        ...(listaDeTexto(l.motivos).includes('queda_preco') && quedaValida(o.queda_pct) != null ? { queda_pct: o.queda_pct } : {}),
         oferta: {
           title: o.title ?? null, price: o.price ?? null, oldPrice: o.oldPrice ?? null, discountPct: o.discountPct ?? null,
           sold: o.sold ?? null, freeShipping: o.freeShipping === true, coupon: o.coupon ?? null,

@@ -20,6 +20,7 @@ import { createAmazon } from '../src/amazon.js';
 import { paraCandidato } from '../src/catalogo.js';
 import { createVerificador, PAUSA_DESCARTADA_H } from '../src/verificador.js';
 import { salvar as salvarRastreio } from '../src/rastreio.js';
+import * as mlReal from '../src/ml.js';
 
 // ------------------------------------------------------------------------------------------- sem rede nenhuma
 const fetchOriginal = globalThis.fetch;
@@ -103,20 +104,23 @@ const passageira = (causa = 'central_sem_resposta') => new ErroLinkML('a extens�
  * Agendador com o catálogo falso. `links`: o serviço a usar (o real do teste ou o dublê). `verificador`: o objeto a
  * injetar (null = sem). `dataDir`/`db`: para reabrir o mesmo banco ("reinício").
  */
-function montar(t, { ofertas, links, verificador = null, db = null, dir = null, grupos = [['111@g.us', 'Achadinhos']] } = {}) {
+function montar(t, { ofertas, links, verificador = null, db = null, dir = null, grupos = [['111@g.us', 'Achadinhos']], ml = null } = {}) {
   dir ??= tmp(); db ??= openDb(dir);
   const wa = createWhatsApp({ db, dir, dryRun: true }); wa.connect();
   const amazon = createAmazon({ db, fetch: async () => { throw new Error('rede proibida (Amazon)'); }, esperar: async () => {}, lerConexao: () => ({ tag: 'achadinho-20' }) });
-  const estado = { ofertas, leituras: 0 };
+  const estado = { ofertas, leituras: 0, utilizaveis: [] };
   const fonte = {
     async candidatos(cfg, ctx) {
       estado.leituras++;
-      return estado.ofertas.map(paraCandidato).filter((c) => c && !ctx.tratada(c, cfg.ordem));
+      const lista = estado.ofertas.map(paraCandidato).filter((c) => c && !ctx.tratada(c, cfg.ordem));
+      // o que o predicado do agendador diz de cada uma (só as utilizáveis contam para o alvo da leitura)
+      estado.utilizaveis.push(lista.map((c) => ctx.utilizavel?.(c)));
+      return lista;
     },
     avancar() {},
   };
   const catalogoItens = createCatalogoItens({ db, wa, links, amazon });
-  const scheduler = createScheduler({ db, wa, links, fast: true, amazon, verificador, catalogo: fonte, catalogoItens });
+  const scheduler = createScheduler({ db, wa, links, fast: true, amazon, verificador, catalogo: fonte, catalogoItens, ...(ml ? { ml } : {}) });
   // o mesmo banco pode vir de antes (reinício): grupos e etiqueta só uma vez
   for (const [jid, nome] of grupos) db.prepare('INSERT OR IGNORE INTO groups (jid, name, size, updated_at) VALUES (?,?,?,?)').run(jid, nome, 10, Date.now());
   if (!db.prepare("SELECT 1 FROM tags WHERE name = 'etiquetaA'").get()) db.prepare('INSERT INTO tags (name, created_at) VALUES (?,?)').run('etiquetaA', Date.now());
@@ -140,7 +144,7 @@ const mensagens = (s, id) => s.logs(id).map((l) => l.message);
 const sairam = (s, id) => mensagens(s, id).filter((m) => m.startsWith('Saíram '));
 const linhaDe = (s, id, i) => s.logs(id).filter((l) => l.offer_title === titulo(i)).map((l) => l.message);
 
-/** Verificador falso: `decisoes` = número da oferta → resposta do conferir; o resto sai como veio. */
+/** Verificador falso: `decisoes` = número da oferta → resposta do conferir; o resto sai como veio. `pausa`: a leitura do ML em pausa. */
 function verificadorFalso(decisoes = {}) {
   const v = {
     conferidas: [],
@@ -151,6 +155,8 @@ function verificadorFalso(decisoes = {}) {
       return d ?? { acao: 'enviar', oferta: o, sufixo: null };
     },
     semConfirmacaoAgora: () => false,
+    pausa: null, // a leitura do ML em pausa (CA2.13): null | 'ml_verificacao' | 'limite_hora' | 'extensao_antiga'
+    pausaDaLeituraMl: () => v.pausa,
   };
   return v;
 }
@@ -213,6 +219,7 @@ test('CA2.2: must be active, status: paused descarta com o motivo e não conta p
   assert.deepEqual([r.offers, r.descartadas, r.puladas, r.revisao], [1, 1, 0, 0]);
   assert.deepEqual(s.saiu(), [titulo(2)]);
   assert.deepEqual(itens(s.db, id).map((i) => [i.chave, i.status]), [[mlb(1), 'descartado'], [mlb(2), 'enviado']]);
+  assert.equal(s.catalogoItens.listar({ status: 'descartado' }).itens[0].descartado_por, 'recusada_ml', 'a tela diz o porquê');
   assert.deepEqual(linhaDe(s, id, 1), ['Descartada: o Mercado Livre recusou gerar o link (o anúncio está pausado ou inativo).']);
   assert.equal(s.logs(id).find((l) => l.offer_title === titulo(1)).level, 'aviso');
   assert.deepEqual([links.central().estado, links.central().falhasSeguidas], ['respondendo', 0], 'a recusa é resposta da Central');
@@ -604,4 +611,173 @@ test('CA2.14: com a vaga ainda livre, o orçamento esgotado não fura a proteç�
   estado.link = (p, i) => `https://meli.la/Ok${i}x`;
   const r = await s.scheduler.runRule(id);
   assert.equal(r.offers, 1);
+});
+
+// ============================================================================================ CA2.11 (etapa 9)
+
+/** verificadorFalso cujo `conferir` devolve a oferta com o preço trocado (como o verificador real quando a loja mostra outro). */
+function verificadorComPreco(precos) {
+  const v = verificadorFalso();
+  const conferir = v.conferir;
+  v.conferir = async (o) => {
+    const r = await conferir(o);
+    const i = n(idDe(o.url) ?? o.key.slice(3));
+    return precos[i] == null ? r : { acao: 'enviar', oferta: { ...o, price: precos[i] }, sufixo: null };
+  };
+  return v;
+}
+
+test('CA2.11: queda de 50% depois da conferência vai à revisão com queda_preco (e a % no item); 49% sai', async (t) => {
+  const { links, estado } = linksDuble();
+  // preço da lista 100: a 1ª é conferida a 50 (50%), a 2ª a 51 (49%)
+  const v = verificadorComPreco({ 1: 50, 2: 51 });
+  const s = montar(t, { ofertas: [oferta(1), oferta(2)], links, verificador: v });
+  const id = regraCatalogo(s.db, { per: 1 });
+  const r = await s.scheduler.runRule(id);
+  assert.deepEqual([r.offers, r.revisao], [1, 1]);
+  assert.deepEqual(s.saiu(), [titulo(2)]);
+  assert.deepEqual(estado.pedidos, ['etiquetaA 2'], 'a que vai à revisão não pede link');
+  assert.deepEqual(itens(s.db, id).map((i) => [i.chave, i.status, i.motivos]), [[mlb(1), 'revisao', ['queda_preco']], [mlb(2), 'enviado', []]]);
+  assert.deepEqual(linhaDe(s, id, 1), ['Separada para revisão: o preço está 50% abaixo do preço da lista (o limite é 50%), confira o preço.']);
+  const lista = s.catalogoItens.listar({ status: 'revisao' }).itens;
+  assert.equal(lista[0].queda_pct, 50);
+  assert.equal(lista[0].oferta.price, 50, 'gravada com o preço conferido');
+});
+
+test('CA2.11: sem conferência que troque o preço, nada muda (o preço da lista é o que vale)', async (t) => {
+  const { links } = linksDuble();
+  const s = montar(t, { ofertas: [oferta(1, { preco: 20 })], links, verificador: verificadorFalso() });
+  const id = regraCatalogo(s.db, { per: 1 });
+  const r = await s.scheduler.runRule(id);
+  assert.deepEqual([r.offers, r.revisao], [1, 0]);
+});
+
+// ============================================================================================ CA2.12 (etapa 9)
+
+/**
+ * Fonte antiga (Lista de links) com preço lido da loja: o resolveOffer real, sem a marca `digitado` (como se a linha
+ * não trouxesse preço e a página fosse lida). `digitadas`: ids que mantêm a marca (preço escrito à mão).
+ */
+const mlLido = (digitadas = new Set()) => ({
+  ...mlReal,
+  resolveOffer: async (c, d) => {
+    const r = await mlReal.resolveOffer(c, d);
+    if (digitadas.has(n(idDe(c.url)))) return r;
+    const { digitado: _marca, ...lido } = r;
+    return lido;
+  },
+});
+/** Lista com preço e preço antigo (MLB-400000000i | título | preço | antigo). */
+const regraListaCom = (db, linhas, { per = 1 } = {}) => Number(db.prepare(`INSERT INTO rules (name, enabled, tag_id, template_id, group_jids, source_type,
+  source_config, per_run, interval_min, window_start, window_end, dedupe_days, send_image, created_at)
+  VALUES ('Lista', 1, 1, 1, ?, 'list', ?, ?, 60, '00:00', '23:59', 7, 0, ?)`)
+  .run(JSON.stringify(['111@g.us']), JSON.stringify({ items: linhas.map(([i, preco, antigo]) => `https://produto.mercadolivre.com.br/MLB-${4000000000 + i}-x | ${titulo(i)} | ${preco}${antigo ? ` | ${antigo}` : ''}`).join('\n') }), per, Date.now()).lastInsertRowid);
+
+test('CA2.12: fonte antiga com preço suspeito depois da conferência descarta e pausa 6 h; preço digitado à mão não passa pela guarda', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: dia(11, 14) });
+  const { links, estado } = linksDuble();
+  // 1: 100 → 50 (queda de 50%, o limite); 2: 100 → 55 com antigo 600 (10× ou mais); 3: 100 → 51 (49%, sai); 4: digitada, 100 → 10 (sai)
+  const v = verificadorComPreco({ 1: 50, 2: 55, 3: 51, 4: 10 });
+  const s = montar(t, { ofertas: [], links, verificador: v, ml: mlLido(new Set([4])) });
+  const id = regraListaCom(s.db, [[1, 100], [2, 100, 600], [3, 100], [4, 100]], { per: 2 });
+  const r = await s.scheduler.runRule(id);
+  assert.deepEqual([r.offers, r.descartadas], [2, 2], mensagens(s, id).join(' | '));
+  assert.deepEqual(s.saiu(), [titulo(3), titulo(4)]);
+  assert.deepEqual(estado.pedidos, ['etiquetaA 3', 'etiquetaA 4'], 'a descartada não pede link');
+  assert.deepEqual(linhaDe(s, id, 1), ['Descartada: preço suspeito (R$ 50,00 na loja, 50% abaixo do preço da lista). Fica 6 h fora da escolha desta regra.']);
+  assert.deepEqual(linhaDe(s, id, 2), ['Descartada: preço suspeito (R$ 55,00 na loja, com o preço antigo 10 vezes maior ou mais). Fica 6 h fora da escolha desta regra.']);
+  assert.ok(s.logs(id).filter((l) => l.message.startsWith('Descartada')).every((l) => l.level === 'aviso'));
+  assert.deepEqual(sairam(s, id), []);
+  // 6 h fora da escolha
+  v.conferidas.length = 0;
+  const r2 = await s.scheduler.runRule(id);
+  assert.deepEqual([r2.offers, v.conferidas], [0, []], 'as descartadas não são escolhidas');
+  assert.ok(mensagens(s, id).at(-1).includes('2 em pausa de 6 h'), mensagens(s, id).at(-1));
+  t.mock.timers.setTime(Date.now() + PAUSA_DESCARTADA_H * HORA);
+  await s.scheduler.runRule(id);
+  assert.deepEqual(v.conferidas, [1, 2], 'passadas as 6 h, voltam a ser conferidas');
+});
+
+test('CA2.12: preço suspeito que NÃO veio da conferência (a loja confirmou o mesmo preço) não é barrado nas fontes antigas, como na fila', async (t) => {
+  const { links } = linksDuble();
+  const v = verificadorFalso();
+  const s = montar(t, { ofertas: [], links, verificador: v, ml: mlLido() });
+  const id = regraListaCom(s.db, [[1, 50, 1000]], { per: 1 }); // preço antigo 20× maior, preço confirmado
+  const r = await s.scheduler.runRule(id);
+  assert.deepEqual([v.conferidas, r.offers, r.descartadas], [[1], 1, 0]);
+});
+
+test('CA2.12: o resumo "Saíram X de Y" conta o descarte por preço suspeito', async (t) => {
+  const { links } = linksDuble();
+  const s = montar(t, { ofertas: [], links, verificador: verificadorComPreco({ 1: 10 }), ml: mlLido() });
+  const id = regraListaCom(s.db, [[1, 100]], { per: 1 });
+  await s.scheduler.runRule(id);
+  assert.deepEqual(sairam(s, id), ['Saíram 0 de 1 oferta; 1 descartada (preço suspeito); não havia mais ofertas novas dentro dos filtros.']);
+});
+
+// ============================================================================================ CA2.13 (etapa 9)
+
+test('CA2.13: pausa de verificação — ML fora da escolha, nenhuma linha Pulada, contagem em "Antes da escolha"', async (t) => {
+  for (const [causa, frase] of [['ml_verificacao', 'o Mercado Livre pediu verificação no navegador'], ['limite_hora', 'o limite de conferências por hora foi atingido'],
+    ['extensao_antiga', 'a extensão do Chrome precisa ser recarregada']]) {
+    await t.test(causa, async (tt) => {
+      const { links, estado } = linksDuble();
+      const v = verificadorFalso(); v.pausa = causa;
+      const s = montar(tt, { ofertas: [1, 2, 3].map((i) => oferta(i)), links, verificador: v });
+      const id = regraCatalogo(s.db, { per: 2 });
+      const r = await s.scheduler.runRule(id);
+      assert.deepEqual([r.offers, r.puladas, v.conferidas, estado.pedidos], [0, 0, [], []], 'sem gastar tentativa nem pedido');
+      assert.ok(s.logs(id).every((l) => !l.message.startsWith('Pulada')), 'nenhuma linha Pulada');
+      assert.deepEqual(mensagens(s, id), [`Antes da escolha, 3 ofertas ficaram de fora: 3 do Mercado Livre com a leitura em pausa (${frase}). Nenhuma sobrou.`]);
+      assert.deepEqual(s.estado.utilizaveis.at(-1), [false, false, false], 'não contam para o alvo da leitura do catálogo');
+      // a pausa acaba: na execução seguinte elas saem
+      v.pausa = null;
+      const r2 = await s.scheduler.runRule(id);
+      assert.equal(r2.offers, 2);
+    });
+  }
+});
+
+test('CA2.13: singular, e junto com outras categorias da linha "Antes da escolha"', async (t) => {
+  const { links } = linksDuble();
+  const v = verificadorFalso(); v.pausa = 'ml_verificacao';
+  const s = montar(t, { ofertas: [oferta(1), oferta(2, { preco: 900 })], links, verificador: v });
+  const id = Number(s.db.prepare(`INSERT INTO rules (name, enabled, tag_id, template_id, group_jids, source_type, source_config, sources, per_run, interval_min,
+    window_start, window_end, dedupe_days, send_image, max_price, created_at) VALUES ('C', 1, 1, 1, '["111@g.us"]', 'list', '{}', ?, 1, 60, '00:00', '23:59', 7, 0, 500, ?)`)
+    .run(JSON.stringify([{ type: 'catalogo', tag_id: null, config: { ordem: 'relevancia', lojas: ['ml'] } }]), Date.now()).lastInsertRowid);
+  await s.scheduler.runRule(id);
+  assert.deepEqual(mensagens(s, id), ['Antes da escolha, 2 ofertas ficaram de fora: 1 fora dos filtros da regra, 1 do Mercado Livre com a leitura em pausa (o Mercado Livre pediu verificação no navegador). Nenhuma sobrou.']);
+});
+
+test('CA2.13: a espera da Central vence a pausa — as ofertas esperam (linha da espera) e não entram em "Antes da escolha"', async (t) => {
+  const { links, estado } = linksDuble();
+  estado.central = { estado: 'em_espera', testeLiberado: false };
+  const v = verificadorFalso(); v.pausa = 'ml_verificacao';
+  const s = montar(t, { ofertas: [1, 2].map((i) => oferta(i)), links, verificador: v });
+  const id = regraCatalogo(s.db, { per: 1 });
+  await s.scheduler.runRule(id);
+  const m = mensagens(s, id);
+  assert.ok(m.every((x) => !x.includes('leitura em pausa')), m.join(' | '));
+  assert.ok(m.includes(`Catálogo do Etiqueta: 2 ofertas do Mercado Livre esperando: a Central de Afiliados não está respondendo. O programa testa de novo a cada ${TESTE_ESPERA_MIN} min e elas saem sozinhas quando ela voltar.`), m.join(' | '));
+});
+
+test('CA2.13: resposta de pausa fora da lista (outra causa, texto qualquer) não tira o ML da escolha', async (t) => {
+  for (const p of ['desconectada', 'loja_fora', 'constructor', 1]) {
+    await t.test(String(p), async (tt) => {
+      const { links } = linksDuble();
+      const v = verificadorFalso(); v.pausa = p;
+      const s = montar(tt, { ofertas: [oferta(1)], links, verificador: v });
+      const id = regraCatalogo(s.db, { per: 1 });
+      assert.equal((await s.scheduler.runRule(id)).offers, 1);
+    });
+  }
+});
+
+test('CA2.13: a prévia ("Ver ofertas") não muda com a pausa da leitura', async (t) => {
+  const { links } = linksDuble();
+  const v = verificadorFalso(); v.pausa = 'ml_verificacao';
+  const s = montar(t, { ofertas: [1, 2].map((i) => oferta(i)), links, verificador: v });
+  const id = regraCatalogo(s.db, { per: 2 });
+  const previa = await s.scheduler.previewOffers(id);
+  assert.equal(previa.length, 2);
 });

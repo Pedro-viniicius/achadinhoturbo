@@ -141,6 +141,13 @@ class Elemento extends No {
       else if (pos === 'afterend') this.parentNode.insertBefore(n, this.nextSibling);
     }
   }
+  // como o do navegador: tira os filhos e põe os dados (texto vira nó de texto); public/conexoes.js usa desde a entrega 2
+  replaceChildren(...nos) {
+    for (const n of this.childNodes) n.parentNode = null;
+    this.childNodes = [];
+    for (const n of nos) this.appendChild(typeof n === 'string' ? new Texto(this.ownerDocument, n) : n);
+    this.ownerDocument._conferirFoco();
+  }
   matches(sel) { return compilar(sel).some((seq) => casaSeq(this, seq)); }
   closest(sel) { const alts = compilar(sel); for (let n = this; n?.nodeType === 1; n = n.parentNode) if (alts.some((seq) => casaSeq(n, seq))) return n; return null; }
   focus() { this.ownerDocument.activeElement = this; this.onfocus?.({ type: 'focus', target: this }); }

@@ -582,12 +582,13 @@ test('S1: o preço da releitura passa de novo pela guarda do preço suspeito —
   assert.deepEqual(enviadas(s.db, id), ['ASIN:B000000003'], 'nenhuma das suspeitas em sent_offers');
   const naRevisao = s.db.prepare("SELECT chave, motivos, json_extract(oferta, '$.price') AS price, json_extract(oferta, '$.oldPrice') AS antigo FROM catalogo_itens WHERE rule_id = ? AND status = 'revisao' ORDER BY id").all(id).map((l) => ({ ...l }));
   assert.deepEqual(naRevisao, [
-    { chave: 'ASIN:B000000001', motivos: '["preco_antigo"]', price: 1.99, antigo: 199 }, // gravada com o preço conferido
-    { chave: 'ASIN:B000000002', motivos: '["desconto_100"]', price: 0, antigo: 150 },
+    // gravada com o preço conferido; desde a entrega 2 (CA2.11) a queda em relação ao preço da lista (100) também é motivo
+    { chave: 'ASIN:B000000001', motivos: '["preco_antigo","queda_preco"]', price: 1.99, antigo: 199 },
+    { chave: 'ASIN:B000000002', motivos: '["desconto_100","queda_preco"]', price: 0, antigo: 150 },
   ]);
   assert.deepEqual(avisosDe(s.db, id).slice(0, 2), [
-    ['Produto 1', 'Separada para revisão: preço antigo muito alto, confira o preço.'],
-    ['Produto 2', 'Separada para revisão: desconto de 100%, confira o preço.'],
+    ['Produto 1', 'Separada para revisão: preço antigo muito alto, confira o preço e o preço está 98% abaixo do preço da lista (o limite é 50%), confira o preço.'],
+    ['Produto 2', 'Separada para revisão: desconto de 100%, confira o preço e o preço está 100% abaixo do preço da lista (o limite é 50%), confira o preço.'],
   ]);
   semErro(s.db, id);
 });

@@ -128,6 +128,37 @@ test('rodar-sozinho E2: os motivos queda_preco e falhas_repetidas são aceitos, 
   assert.equal(s.itens.registrar(regra, ML(9), 'revisao', ['motivo_inventado']), false, 'motivo fora da lista continua recusado');
 });
 
+test('rodar-sozinho E2 (CA2.11): a queda em % do item de queda_preco é guardada e volta como queda_pct (só de 1 a 99, só com o motivo)', () => {
+  const s = montar();
+  const regra = s.regra();
+  const casos = [[1, ['queda_preco'], 60, 60], [2, ['queda_preco', 'preco_antigo'], 99, 99], [3, ['queda_preco'], 50, 50],
+    [4, ['queda_preco'], 100, null], [5, ['queda_preco'], 0, null], [6, ['queda_preco'], 12.5, null], [7, ['queda_preco'], '60', null],
+    [8, ['queda_preco'], undefined, null], [9, ['desconto_100'], 60, null]];
+  for (const [n, motivos, quedaPct] of casos) assert.equal(s.itens.registrar(regra, ML(n), 'revisao', motivos, { quedaPct }), true);
+  const porChave = Object.fromEntries(s.itens.listar().itens.map((i) => [i.oferta.link.match(/MLB-(\d+)/)[1], i]));
+  for (const [n, , , esperado] of casos) {
+    if (esperado == null) assert.equal(Object.hasOwn(porChave[n], 'queda_pct'), false, `item ${n}: sem queda_pct`);
+    else assert.equal(porChave[n].queda_pct, esperado, `item ${n}`);
+  }
+  // fora da faixa nem é gravado
+  for (const k of ['MLB4', 'MLB5', 'MLB6', 'MLB7', 'MLB9']) assert.equal(s.db.prepare("SELECT json_type(oferta, '$.queda_pct') AS t FROM catalogo_itens WHERE chave = ?").get(k).t, null, k);
+  // valor gravado à mão fora da faixa também não sai; nem num item sem o motivo queda_preco
+  s.db.prepare("UPDATE catalogo_itens SET oferta = json_set(oferta, '$.queda_pct', 150) WHERE chave = 'MLB1'").run();
+  s.db.prepare("UPDATE catalogo_itens SET oferta = json_set(oferta, '$.queda_pct', 60) WHERE chave = 'MLB9'").run();
+  const depois = s.itens.listar().itens;
+  assert.equal(Object.hasOwn(depois.find((i) => i.oferta.link.endsWith('MLB-1')), 'queda_pct'), false);
+  assert.equal(Object.hasOwn(depois.find((i) => i.oferta.link.endsWith('MLB-9')), 'queda_pct'), false);
+});
+
+test('rodar-sozinho E2 (CA2.2): o descarte pela recusa do Mercado Livre guarda recusada_ml em descartado_por e volta na listagem', () => {
+  const s = montar();
+  const regra = s.regra();
+  assert.equal(s.itens.registrar(regra, ML(1), 'descartado', [], { descartadoPor: 'recusada_ml' }), true);
+  assert.equal(s.itens.registrar(regra, ML(2), 'enviado', [], { descartadoPor: 'recusada_ml' }), true, 'só o descarte leva o motivo');
+  const porChave = Object.fromEntries(s.itens.listar().itens.map((i) => [i.oferta.link.match(/MLB-(\d+)/)[1], i.descartado_por]));
+  assert.deepEqual(porChave, { 1: 'recusada_ml', 2: undefined });
+});
+
 // ------------------------------------------------------------------------------------------------ tratada (D6)
 
 test('CA1/D6 tratada: em "Novidades" (atualizacao) qualquer registro ou envio bloqueia para sempre, mesmo com dedupe 0', () => {
