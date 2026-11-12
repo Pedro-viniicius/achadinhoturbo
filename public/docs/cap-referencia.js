@@ -91,7 +91,8 @@ docsCapitulo({
         { termos: [
           ['Bloco', 'Conjunto de grupos de um nicho, para análise, para relatórios e para marcar disparos de uma vez.'],
           ['Rotacionador', 'Link único que leva ao primeiro grupo com vaga.'],
-          ['Destino de aviso', 'Número de WhatsApp que recebe o resumo diário e os avisos, em Relatórios e avisos.'],
+          ['Destino de aviso', 'Número de WhatsApp que recebe o resumo diário e os avisos (inclusive os do vigia), em Relatórios e avisos.'],
+          ['Vigia', 'Parte do programa que confere as execuções dos disparos e avisa pelo WhatsApp quando uma loja para, uma regra sai vazia, a extensão ou a Central ficam fora ou a revisão acumula. Veja [O vigia](#docs/resultados/vigia).'],
           ['Virada do dia', 'Hora em que um dia termina nos relatórios. Entradas antes dela contam para o dia anterior.'],
           ['Evasão', 'Quem entra e sai logo: no mesmo dia ou em até 7 dias.'],
         ], titulo: 'Grupos e análise' },
@@ -285,6 +286,7 @@ docsCapitulo({
             ['Shopee', 'até 60 links por hora pela extensão e 300 consultas por hora no total (a conferência de preço também conta); um link gerado é reaproveitado por até 7 dias; a Shopee libera a API em até 3 dias úteis', 'Fixo (a liberação é da Shopee)'],
             ['Rotacionador', 'limite de até 1.024 pessoas por grupo; aviso de grupo lotando aos 95%; o modo alternar usa até 3 grupos com vaga', 'Campo de limite do link, em [[Rotacionador de Links]]'],
             ['Avisos', 'aviso de erro de disparo no máximo 1 a cada 30 minutos; no máximo 10 cadastros de número a cada 10 minutos; “Enviar teste” e “Enviar resumo agora” somados: no máximo 1 mensagem manual por número a cada 60 s, 1 resumo para todos os números a cada 60 s e 5 envios manuais por hora (cada teste ou resumo conta 1, mesmo o resumo para todos)', 'Fixo'],
+            ['Vigia', 'avisa quando uma loja fica 3 execuções seguidas sem enviar, uma regra sai vazia 2 execuções seguidas, a extensão ou a Central ficam fora por 30 min, ou as ofertas esperando revisão chegam a 10 (o aviso fecha com 5 ou menos); no máximo 1 aviso por causa a cada 3 h', 'Fixo'],
             ['Rastreio por grupo', 'um Sub_id da Shopee tem até 30 caracteres, só letras e números; até 10 Sub_ids por envio; o histórico do rastreio fica 400 dias', 'Fixo (os códigos em [[Blocos de análise]])'],
             ['Importar comissões', 'o arquivo CSV tem até 5 MB e até 100.000 linhas; arquivo do Excel (.xlsx) não vale, salve como CSV', 'Fixo, em [[Ganhos → Importar comissões]]'],
             ['Gasto com anúncios', 'o período do gasto vai até 366 dias; a observação tem até 200 caracteres', 'Fixo, em [[Ganhos → Gasto com anúncios]]'],

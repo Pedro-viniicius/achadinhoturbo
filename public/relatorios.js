@@ -94,7 +94,7 @@ function linhaVigia(d) {
   const recebe = d.destinos.some((x) => x.ativo && Array.isArray(x.avisos) && x.avisos.includes('erro'));
   const causas = Array.isArray(v.causas) ? v.causas.filter((c) => c && !c.calada) : [];
   const estado = v.ok === false ? t.vigiaSemLeitura : causas.length ? t.vigiaAberto(causas.map(vigiaNomeCurto).join('; ')) : t.vigiaNada;
-  return `<p class="dica" id="rel-vigia" style="margin:12px 0 0">${t.vigia} <span>${esc(estado)}</span>${recebe ? '' : ` <span>${t.vigiaSemDestino}</span>`} ${t.resumoSaude}</p>`;
+  return `<p class="dica" id="rel-vigia" style="margin:12px 0 0">${t.vigia} ${q('relatorios.vigia')} <span>${esc(estado)}</span>${recebe ? '' : ` <span>${t.vigiaSemDestino}</span>`} ${t.resumoSaude}</p>`;
 }
 
 function pintarRelatorios(d) {

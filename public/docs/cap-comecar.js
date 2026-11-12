@@ -29,7 +29,7 @@ docsCapitulo({
           '**Templates**: ajuste a mensagem e veja a prévia. [Templates](#docs/templates).',
           '**Disparo manual**: cole um link, clique em “Identificar” e dispare para um grupo de teste. [Primeiro disparo de teste](#docs/primeiros-passos/teste) e [Disparo manual](#docs/disparo-manual).',
           '**Disparo automático**: crie o primeiro, clique em “Ver ofertas” e depois em “Enviar agora”. [Disparo automático](#docs/disparo-automatico).',
-          '**Relatórios e avisos**: escolha quem recebe o resumo diário e os avisos. [Resultados e avisos](#docs/resultados/avisos).',
+          '**Relatórios e avisos**: escolha quem recebe o resumo diário e os avisos; se uma loja, a extensão ou uma regra parar, o programa avisa por aqui. [Resultados e avisos](#docs/resultados/avisos).',
         ] },
         { p: 'Depois, acompanhe o **Histórico** e a **Visão Geral**. Avisos e enquetes, agora ou agendados, estão em [Disparar mensagem e enquete](#docs/mensagens).' },
       ],

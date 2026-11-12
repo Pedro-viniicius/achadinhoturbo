@@ -11,6 +11,7 @@ import { MOTIVOS } from '../src/catalogo-itens.js';
 import { MOTIVOS_VERIFICADOR, CAUSAS, RESERVA_AMAZON_H } from '../src/verificador.js';
 import { VERSAO_EXTENSAO } from '../src/links.js';
 import { QUEDA_REVISAO_PCT } from '../src/catalogo.js';
+import { EXECUCOES_LOJA_PARADA, EXECUCOES_REGRA_VAZIA, FORA_MIN, REVISAO_ABRE, REVISAO_FECHA, FREIO_VIGIA_H } from '../src/vigia.js';
 import { PLACEHOLDERS } from '../src/template.js';
 import { pastaDeDados } from '../src/config.js';
 import { REMOTO_PADRAO } from '../scripts/backup.js';
@@ -854,6 +855,16 @@ const FATOS = [
   { nome: 'segundos até o programa desistir do link do Mercado Livre', valor: 45, texto: (v) => new RegExp(`antes dos ${v} s, 60 s e 90 s que o painel espera`), codigo: [['src/links.js', /export const PRAZO_LINK_MS = (\d+)000;/]], so: 'readme' },
   { nome: 'segundos até o programa desistir da lista de ofertas', valor: 60, texto: (v) => new RegExp(`antes dos 45 s, ${v} s e 90 s que o painel espera`), codigo: [['src/links.js', /async function requestOffers\(\{ paginas, timeoutMs = (\d+)000 \}\)/]], so: 'readme' },
   { nome: 'segundos até o programa desistir do link da Shopee', valor: 90, texto: (v) => new RegExp(`antes dos 45 s, 60 s e ${v} s que o painel espera`), codigo: [['src/links.js', /async function requestLinkShopee\(\{ url, subId, timeoutMs = (\d+)000 \}\)/]], so: 'readme' },
+  // Rodar sozinho, entrega 3 (plano rodar-sozinho-entrega3, etapa 8, CA3.6): o vigia. Os números 2, 3, 5, 10 e 30 aparecem em muitos outros
+  // contextos dos Docs (e já são outros fatos acima), então cada texto montado exige a frase própria do vigia ("loja ... N execuções",
+  // "regra ... N execuções seguidas", "fora por N min", "chegam a N ... ofertas esperando" (o aviso abre com N, não só acima de N), "com N ou menos", "a cada N h"). O texto do
+  // valor seguinte não pode casar com nenhum deles (o teste "o texto montado do valor não casa com outro valor" cobre).
+  { nome: 'vigia: execuções seguidas sem enviar até a loja parada', valor: 3, texto: (v) => new RegExp(`[Ll]oja[^.]{0,80}?\\b${v} execuções(?: seguidas)?`), codigo: [['src/vigia.js', /export const EXECUCOES_LOJA_PARADA = (\d+);/]] },
+  { nome: 'vigia: execuções seguidas sem enviar até a regra vazia', valor: 2, texto: (v) => new RegExp(`regra[^.]{0,30}?\\b${v} execuções seguidas`), codigo: [['src/vigia.js', /export const EXECUCOES_REGRA_VAZIA = (\d+);/]] },
+  { nome: 'vigia: minutos da extensão ou da Central fora até o aviso', valor: 30, texto: (v) => new RegExp(`(?:fora|sem responder),? por ${v} min\\b`), codigo: [['src/vigia.js', /export const FORA_MIN = (\d+);/]] },
+  { nome: 'vigia: ofertas esperando revisão que abrem o aviso', valor: 10, texto: (v) => new RegExp(`(?:[Cc]hegam a|[Cc]hegou a) ${v}(?: as)? ofertas esperando|\\b${v} ou mais ofertas esperando`), codigo: [['src/vigia.js', /export const REVISAO_ABRE = (\d+);/]] },
+  { nome: 'vigia: ofertas esperando revisão que fecham o aviso', valor: 5, texto: (v) => new RegExp(`(?:com|para|restam|caiu para) ${v}(?: ofertas)? ou menos`), codigo: [['src/vigia.js', /export const REVISAO_FECHA = (\d+);/]] },
+  { nome: 'vigia: horas do freio de um aviso por causa', valor: 3, texto: (v) => new RegExp(`[Ff]reio de ${v} horas|por causa a cada ${v} h\\b`), codigo: [['src/vigia.js', /export const FREIO_VIGIA_H = (\d+);/]] },
 ];
 
 test('FATOS: cada número aparece nos Docs e no README e bate com a constante do código', () => {
@@ -1282,12 +1293,12 @@ test('Enviar teste e mensagens manuais (Relatórios e avisos): rótulo, freio di
   assert.ok(docs.includes(`os dois somados vão no máximo ${freio}`), 'tabela do capítulo');
   assert.ok(docs.includes('O resumo diário do horário não entra nesses limites.'), 'capítulo: o resumo do tick fica fora do freio');
   assert.match(docs, /Enviar teste[^]*Só o Dono vê o botão/);
-  assert.match(docs, /Só o Dono cadastra, remove, troca o número, tira “Erro de disparo” e desliga um número que recebe “Erro de disparo” \(desligado, ele não recebe os avisos de erro nem o de backup atrasado\); o Operador liga qualquer número, desliga os que não recebem “Erro de disparo”, muda o nome e os blocos do resumo/);
+  assert.match(docs, /Só o Dono cadastra, remove, troca o número, tira “Erro de disparo” e desliga um número que recebe “Erro de disparo” \(desligado, ele não recebe os avisos de erro, o de backup atrasado nem os do vigia\); o Operador liga qualquer número, desliga os que não recebem “Erro de disparo”, muda o nome e os blocos do resumo/);
   assert.doesNotMatch(TEXTO_DOCS + README, /Operador liga e desliga|ligar e desligar números/, 'S1: o Operador não desliga qualquer número');
   assert.ok(README.includes(`os dois somados vão no máximo ${freio}`), 'README');
   assert.ok(README.includes('O resumo diário do horário não entra nesses limites.'), 'README: o resumo do tick fica fora do freio');
   assert.match(README, /Enviar teste \(só o Dono\)/);
-  assert.match(README, /só o Dono cadastra, remove, troca o número, tira \*Erro de disparo\* de um número e desliga um número que recebe \*Erro de disparo\* \(o servidor responde 403 ao Operador; desligado, ele não recebe os avisos de erro nem o de backup atrasado\)\. O Operador liga qualquer número, desliga os que não recebem \*Erro de disparo\*/);
+  assert.match(README, /só o Dono cadastra, remove, troca o número, tira \*Erro de disparo\* de um número e desliga um número que recebe \*Erro de disparo\* \(o servidor responde 403 ao Operador; desligado, ele não recebe os avisos de erro, o de backup atrasado nem os do vigia\)\. O Operador liga qualquer número, desliga os que não recebem \*Erro de disparo\*/);
   assert.match(README, /cadastrar, remover e trocar números, tirar \*Erro de disparo\*, desligar um número que recebe \*Erro de disparo\* e usar \*Enviar teste\*/, 'README: Papéis');
   assert.match(README, /linha no Histórico, com \*Avisos\* na coluna \*Origem\* e o nome do número \(nunca o número\)/);
   // a frase da mensagem citada no README é a do código (R3: não promete inscrição em aviso nenhum)
@@ -1313,7 +1324,7 @@ test('backup automático: "não envie sem criptografia" no lugar de "não envie 
   // avisos: Docs (resultados/avisos), README (Relatórios e avisos) e o TIP dos “?”
   assert.match(textoDe('resultados', 'avisos'), /Backup atrasado Usa o mesmo canal do “Erro de disparo”/);
   assert.match(README, /Aviso de backup atrasado: usa o mesmo canal do \*?Erro de disparo/);
-  assert.match(limpo(lerRaiz('public/ajuda.js')), /'relatorios\.avisos': '[^']*“Erro de disparo”: uma mensagem não saiu, ou o backup automático está atrasado \(mais de 26 h/);
+  assert.match(limpo(lerRaiz('public/ajuda.js')), /'relatorios\.avisos': '[^']*“Erro de disparo”: uma mensagem não saiu, o backup automático está atrasado \(mais de 26 h sem dar certo\) ou o vigia achou algo parado/);
   // limites: backups no computador, no Drive e o atraso
   const linhas = CAPS.referencia.secoes.find((x) => x.id === 'limites').blocos.find((b) => b.tabela).tabela.linhas.map((l) => l[0]);
   for (const r of ['Backups no computador', 'Backups no Google Drive', 'Backup atrasado']) assert.ok(linhas.includes(r), r);
@@ -1464,6 +1475,35 @@ test('Grade e Grupo vivo: os cinco verbetes de TIPS existem, em linguagem simple
   assert.match(g, /até 5 textos ou enquetes/); assert.match(g, /até 6 horários/); assert.match(g, /sem foto/i); assert.match(g, /Grupo vivo: /); assert.match(g, /ofertas/);
   const r = T['grupovivo.rodizio'];
   assert.match(r, /Um depois do outro/); assert.match(r, /Sorteio/); assert.match(r, /sem repetir o último/); assert.match(r, /Enviar agora/);
+});
+
+// O vigia (rodar-sozinho, entrega 3, etapa 8, CA3.6): os seis limites do src/vigia.js aparecem no TIP `relatorios.vigia`, na seção
+// `resultados/vigia`, na linha "Vigia" dos Limites e no README. O FATOS prova o texto somado dos Docs e do README; aqui cada lugar
+// (inclusive o TIP, que o FATOS não lê) precisa trazer todos os números, cada um com a frase que ele usa ali.
+test('Vigia: o TIP, a seção do capítulo, a linha dos Limites e o README trazem os seis limites do código, e o TIP leva ao capítulo', () => {
+  const v = { loja: EXECUCOES_LOJA_PARADA, regra: EXECUCOES_REGRA_VAZIA, fora: FORA_MIN, abre: REVISAO_ABRE, fecha: REVISAO_FECHA, freio: FREIO_VIGIA_H };
+  assert.deepEqual(v, { loja: 3, regra: 2, fora: 30, abre: 10, fecha: 5, freio: 3 }, 'os limites do vigia mudaram: atualize o código, os Docs, o TIP e esta tabela juntos');
+  const limites = CAPS.referencia.secoes.find((x) => x.id === 'limites').blocos.find((b) => b.tabela).tabela.linhas.find((l) => l[0] === 'Vigia');
+  assert.ok(limites, 'linha "Vigia" nos Limites');
+  const readme = (/- \*\*Vigia\*\*: avisa pelo WhatsApp[^\n]*/.exec(lerRaiz('README.md')) || [''])[0];
+  assert.ok(readme, 'item "Vigia" do README');
+  const tip = limpo(tipsDoPainel()['relatorios.vigia']);
+  const fontes = {
+    'TIP relatorios.vigia': [tip, [`loja fica ${v.loja} execuções sem enviar`, `sai vazia ${v.regra} vezes seguidas`, `fora por ${v.fora} min`, `chegam a ${v.abre} as ofertas esperando revisão`, `com ${v.fecha} ou menos`, `a cada ${v.freio} horas`]],
+    'seção resultados/vigia': [textoDe('resultados', 'vigia'), [`fica ${v.loja} execuções seguidas sem enviar`, `sai ${v.regra} execuções seguidas sem enviar`, `por ${v.fora} min em horário de envio`, `Chegam a ${v.abre} as ofertas esperando a sua revisão`, `para ${v.fecha} ofertas ou menos`, `Freio de ${v.freio} horas`]],
+    'linha Vigia dos Limites': [limpo(limites.join(' ')), [`loja fica ${v.loja} execuções seguidas sem enviar`, `regra sai vazia ${v.regra} execuções seguidas`, `ficam fora por ${v.fora} min`, `chegam a ${v.abre}`, `fecha com ${v.fecha} ou menos`, `a cada ${v.freio} h`]],
+    'README': [limpo(readme), [`por ${v.loja} execuções seguidas`, `${v.regra} execuções seguidas`, `fora por ${v.fora} min`, `${v.abre} ou mais ofertas esperando`, `com ${v.fecha} ou menos`, `a cada ${v.freio} h`]],
+  };
+  for (const [nome, [texto, frases]] of Object.entries(fontes)) for (const f of frases) assert.ok(texto.includes(f), `${nome}: falta "${f}"`);
+  // o "Ler mais" dos dois verbetes leva à seção que existe
+  const noop = () => {};
+  const ctx = vm.createContext({ document: { addEventListener: noop, getElementById: () => null }, addEventListener: noop, innerWidth: 1280, innerHeight: 800 });
+  vm.runInContext(fonte('ajuda.js'), ctx, { filename: 'public/ajuda.js' });
+  const LEIA = JSON.parse(vm.runInContext('JSON.stringify(LEIA_MAIS)', ctx));
+  for (const [k, destino] of Object.entries({ 'relatorios.vigia': 'resultados/vigia', 'relatorios.avisos': 'resultados/avisos' })) {
+    assert.equal(LEIA[k], destino, k);
+    const [cap, sec] = destino.split('/'); assert.ok(CAPS[cap].secoes.some((x) => x.id === sec), `${destino} não existe`);
+  }
 });
 
 test('Grade e Grupo vivo: cada verbete leva ao "Ler mais" da seção certa, e a seção existe', () => {
