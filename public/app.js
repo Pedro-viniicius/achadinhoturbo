@@ -157,6 +157,61 @@ function faixaPilulasML(e, agora = Date.now()) {
   else cen = pil('ok', T.centralOk, false);
   return ext + cen;
 }
+// ---------- vigia (spec rodar-sozinho-entrega3, "Faixa do topo") ----------
+const TEXTOS_VIGIA = {
+  semLeitura: 'Vigia sem leitura agora',
+  lojaParada: (nome, quando) => `${nome === 'Amazon' ? 'Amazon parada' : `${nome} parado`} ${quando}`,
+  regraVazia: (nome, quando) => `${nome ? `Regra “${nome}”` : 'Uma regra'} saiu vazia ${quando}`,
+  revisao: (n, quando) => `${n ? `${n} ${n === 1 ? 'oferta esperando' : 'ofertas esperando'}` : 'Ofertas esperando'} revisão ${quando}`,
+  extensao: 'Extensão do Chrome fora', central: 'Mercado Livre em espera',
+  mais: (n) => `+${n} ${n === 1 ? 'problema em aberto' : 'problemas em aberto'}`,
+  semNome: 'Problema em aberto',
+};
+const VIGIA_LOJAS = { ml: 'Mercado Livre', amazon: 'Amazon' };
+const VIGIA_PRIORIDADE = { loja: 0, regra: 1, revisao: 2 };
+/** "desde 09:10 (há 2 h)": a hora de início é estática e o "há" muda em degraus (haQuanto com `faixa`). Dia anterior: "desde 09:10 de 10/11"; passou de 24 h: "desde 10/11". */
+function vigiaDesde(ts, agora = Date.now()) {
+  const t = Number(ts); if (!Number.isFinite(t) || t <= 0 || t > agora + 60000) return '';
+  const d = new Date(t); const dia = d.toLocaleString('pt-BR', { day: '2-digit', month: '2-digit' });
+  if (agora - t >= 86400000) return `desde ${dia}`;
+  const hm = d.toLocaleString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+  const hoje = dia === new Date(agora).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit' });
+  const ha = haQuanto(t, { faixa: true, agora });
+  return `desde ${hm}${hoje ? '' : ` de ${dia}`}${ha ? ` (${ha})` : ''}`;
+}
+/** Nome curto da causa, para a linha de Relatórios e avisos. */
+function vigiaNomeCurto(c) {
+  const T = TEXTOS_VIGIA;
+  if (c.tipo === 'loja') return T.lojaParada(VIGIA_LOJAS[c.loja] || (c.chave === 'loja:amazon' ? 'Amazon' : 'Mercado Livre'), '').trim();
+  if (c.tipo === 'regra') return T.regraVazia(c.regra, '').trim();
+  if (c.tipo === 'revisao') return T.revisao(c.n, '').trim();
+  if (c.tipo === 'extensao') return T.extensao;
+  if (c.tipo === 'central') return T.central;
+  return T.semNome;
+}
+/**
+ * Pílulas do vigia: no máximo duas. Só loja, regra e revisão têm pílula própria (extensão e Central estão nas pílulas do
+ * Mercado Livre) mas todas contam no "+N". Prioridade: loja, regra, revisão; empate, a mais antiga primeiro. `vigia`
+ * ausente ou null (servidor sem o vigia): nada. `ok === false`: só "Vigia sem leitura agora", neutra e sem ponto.
+ */
+function faixaPilulasVigia(v, agora = Date.now()) {
+  if (!v || typeof v !== 'object') return '';
+  const T = TEXTOS_VIGIA;
+  if (v.ok === false) return `<span class="pilula">${T.semLeitura}</span>`;
+  const causas = Array.isArray(v.causas) ? v.causas.filter((c) => c && !c.calada) : [];
+  const proprias = causas.filter((c) => c.tipo in VIGIA_PRIORIDADE)
+    .sort((a, b) => VIGIA_PRIORIDADE[a.tipo] - VIGIA_PRIORIDADE[b.tipo] || (Number(a.desdeEm) || 0) - (Number(b.desdeEm) || 0));
+  const pil = (href, txt) => `<a href="${href}" class="pilula espera vigia"><i></i>${esc(txt)}</a>`;
+  const um = (c) => {
+    const q = vigiaDesde(c.desdeEm, agora);
+    if (c.tipo === 'loja') return pil('#historico', T.lojaParada(VIGIA_LOJAS[c.loja] || (c.chave === 'loja:amazon' ? 'Amazon' : 'Mercado Livre'), q));
+    if (c.tipo === 'regra') return pil('#disparo-automatico', T.regraVazia(c.regra, q));
+    return pil('#historico?tipo=catalogo&amp;status=revisao', T.revisao(Number(c.n) || 0, q));
+  };
+  const total = causas.length;
+  if (total <= 2) return proprias.map(um).join('');
+  return (proprias[0] ? um(proprias[0]) : '') + pil('#historico', T.mais(total - 1));
+}
 function faixa() {
   const w = S.st.whatsapp; const e = S.st.extensao;
   const wTxt = { open: 'WhatsApp conectado', qr: 'WhatsApp aguardando leitura do QR', connecting: 'WhatsApp conectando…', idle: 'WhatsApp desconectado' }[w.status];
@@ -166,6 +221,7 @@ function faixa() {
     (S.st.simulacao ? '<span class="pilula sim">Modo simulação: nada é enviado de verdade</span>' : '') +
     `<span class="pilula ${wCls}"><i></i>${wTxt}</span>` +
     (modo === 'direct' ? `<span class="pilula espera"><i></i>${TEXTOS_FAIXA.direto}</span>` : faixaPilulasML(e)) +
+    faixaPilulasVigia(S.st.vigia) +
     (S.st.propostas_pendentes ? `<a href="#links" class="pilula espera" style="text-decoration:none"><i></i>${S.st.propostas_pendentes} ${S.st.propostas_pendentes === 1 ? 'proposta de grupo novo' : 'propostas de grupo novo'}</a>` : '');
   // só repinta quando o HTML muda: a faixa é aria-live, e reescrever o mesmo texto a cada 3 s faz o leitor de tela relê-lo
   if (faixa.ultimo === html) return;

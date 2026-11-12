@@ -48,6 +48,10 @@ main { padding:24px clamp(16px,4vw,48px) 64px; max-width:1040px; width:100%; }
 .faixa a.pilula { text-decoration:none; }
 .faixa a.pilula::after { content:"\203A" / ""; font-weight:700; margin-left:2px; } /* seta: a pílula é link para Conexões (não só cor) */
 .faixa a.pilula:hover, .faixa a.pilula:focus-visible { text-decoration:underline; }
+.faixa .pilula.vigia { white-space:normal; overflow-wrap:anywhere; align-items:flex-start; max-width:100%; }
+.faixa .pilula.vigia i { flex:none; margin-top:5px; } /* o ponto fica na primeira linha quando o texto quebra */
+.faixa .pilula.vigia:not(a) { border-radius:14px; }
+@media (max-width:600px) { .faixa .pilula.vigia { border-radius:14px; } }
 @media (max-width:600px) { .faixa a.pilula { padding:11px 14px; } } /* alvo de toque de 44 px no celular */
 h1 { font:800 30px/1.1 var(--titulo); letter-spacing:-.03em; margin:0; }
 h2 { font:700 17px/1.25 var(--titulo); letter-spacing:-.02em; margin:0 0 4px; }

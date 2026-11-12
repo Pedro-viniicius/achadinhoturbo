@@ -1371,7 +1371,7 @@ test('S1 (tela): no Editar do Operador o número fica travado e “Erro de dispa
   assert.match(op, /<input name="numero"[^>]* disabled>/, 'número travado');
   assert.match(op, /Hoje: \+55 11 •••••-4321\. Só o Dono troca o número\./);
   assert.match(op, /<input type="checkbox" name="aviso" value="erro" checked disabled/);
-  assert.match(op, /Uma mensagem não saiu\.[^<]*Só o Dono tira este aviso\./);
+  assert.match(op, /Uma mensagem não saiu, o backup está atrasado ou algo parou[^<]*Só o Dono tira este aviso\./);
   assert.match(op, /<input type="checkbox" name="aviso" value="lotacao"  style/, '“Grupo lotando” continua livre');
   // sem "Erro de disparo" marcado, o Operador pode marcar
   assert.match(abrir(false, ze), /<input type="checkbox" name="aviso" value="erro"  style/);
@@ -1406,7 +1406,7 @@ test('enviar teste (tela): trava o botão com "Enviando…" enquanto envia, um 2
   await p;
   assert.deepEqual([btn.disabled, btn.textContent, 'aria-busy' in btn.attrs], [false, 'Enviar teste', false]);
   assert.equal(btn.focos, 1, 'D2: o foco volta ao botão');
-  const ok = 'Teste enviado para “Pedro”. Confira no WhatsApp. Ele recebe os avisos de erro e de backup atrasado.';
+  const ok = 'Teste enviado para “Pedro”. Confira no WhatsApp. Ele recebe os avisos de erro, de backup atrasado e do vigia.';
   assert.deepEqual(t.avisosTela, [{ msg: ok, erro: false }]);
   assert.equal(t.el('#rel-estado').textContent, ok, 'o resultado fica na tela depois que o aviso some');
 

@@ -24,7 +24,7 @@ const TEXTOS_RELATORIOS = {
   avisos: { lotacao: 'Grupo lotando', erro: 'Erro de disparo' },
   dicaAviso: {
     lotacao: 'Um grupo de um link ativo do rotacionador chegou perto do limite. Um aviso por grupo.',
-    erro: 'Uma mensagem não saiu. No máximo um aviso a cada 30 minutos, com todos os erros juntos.',
+    erro: 'Uma mensagem não saiu, o backup está atrasado ou algo parou (loja, extensão ou Central, revisão acumulada, regra vazia). Erros: no máximo um aviso a cada 30 minutos, todos juntos. O resto: no máximo um por causa a cada 3 horas.',
   },
   editar: 'Editar', remover: 'Remover',
   // enviar teste (só o Dono vê o botão)
@@ -32,7 +32,12 @@ const TEXTOS_RELATORIOS = {
   testeEnviado: (nome) => `Teste enviado para “${nome}”. Confira no WhatsApp.`,
   testeDesligado: 'Este número está desligado: ligue-o para receber os avisos de verdade.',
   testeSemErro: 'Ele não recebe os avisos de erro: marque “Erro de disparo” em Editar.',
-  testeRecebe: 'Ele recebe os avisos de erro e de backup atrasado.',
+  testeRecebe: 'Ele recebe os avisos de erro, de backup atrasado e do vigia.',
+  vigia: 'Vigia: o programa avisa pelo WhatsApp quando uma loja, a extensão, a Central, a revisão ou uma regra para.',
+  vigiaNada: 'Nenhum problema em aberto.', vigiaSemLeitura: 'Sem leitura agora; tentando de novo no próximo ciclo.',
+  vigiaAberto: (nomes) => `Em aberto agora: ${nomes}.`,
+  vigiaSemDestino: 'Ninguém recebe esses avisos: marque “Erro de disparo” em um número.',
+  resumoSaude: 'O resumo diário traz uma linha de saúde dos envios.',
   confirmaRemover: 'Remover este número? Ele deixa de receber avisos e resumos.',
   removido: 'Número removido', salvo: 'Número salvo', ligado: 'Número ligado', desligado: 'Número desligado',
   // formulário
@@ -83,6 +88,15 @@ async function paginaRelatorios() {
   pintarRelatorios(dados);
 }
 
+/** Linha informativa do vigia (sem controle: quem recebe é a caixa "Erro de disparo"). Servidor sem o vigia: nada. O estado é texto comum, fora de região viva. */
+function linhaVigia(d) {
+  const t = TEXTOS_RELATORIOS; const v = typeof S === 'undefined' ? null : S.st?.vigia; if (!v || typeof v !== 'object') return '';
+  const recebe = d.destinos.some((x) => x.ativo && Array.isArray(x.avisos) && x.avisos.includes('erro'));
+  const causas = Array.isArray(v.causas) ? v.causas.filter((c) => c && !c.calada) : [];
+  const estado = v.ok === false ? t.vigiaSemLeitura : causas.length ? t.vigiaAberto(causas.map(vigiaNomeCurto).join('; ')) : t.vigiaNada;
+  return `<p class="dica" id="rel-vigia" style="margin:12px 0 0">${t.vigia} <span>${esc(estado)}</span>${recebe ? '' : ` <span>${t.vigiaSemDestino}</span>`} ${t.resumoSaude}</p>`;
+}
+
 function pintarRelatorios(d) {
   const t = TEXTOS_RELATORIOS; const pg = $('#pagina');
   const comResumo = d.destinos.filter((x) => x.resumo_blocos != null);
@@ -110,6 +124,7 @@ function pintarRelatorios(d) {
           <label class="campo"><span>${t.virada} ${q('relatorios.virada')}</span><input type="time" name="virada_dia" value="${esc(d.config.virada_dia)}" required aria-describedby="rel-v-d"><small id="rel-v-d">${t.viradaDica}</small></label>
           <label class="campo"><span>${t.limite} ${q('relatorios.limite')}</span><input type="number" name="limite_padrao" min="2" max="1024" step="1" inputmode="numeric" value="${esc(d.config.limite_padrao)}" required aria-describedby="rel-l-d"><small id="rel-l-d">${t.limiteDica}</small></label>
         </div>
+        ${linhaVigia(d)}
         <div class="rodape-card"><button type="submit" class="pri" id="rel-cfg-salvar">${t.salvarConfig}</button><span class="dica" id="rel-cfg-estado" role="status"></span></div>
       </form></section>`;
 
