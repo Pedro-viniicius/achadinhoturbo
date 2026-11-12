@@ -830,6 +830,8 @@ const FATOS = [
   { nome: 'minutos sem chamar o Etiqueta depois de uma falha na releitura da Amazon', valor: 10, texto: (v) => new RegExp(`deixa de chamar o Etiqueta por ${v} min\\b`), codigo: [['src/verificador.js', /export const PAUSA_RELEITURA_MIN = (\d+);/]] },
   // a linha "Antes da escolha" diz a pausa do descarte pela constante (mesmo 6 da PAUSA_DESCARTADA_H, outra frase que a da reserva)
   { nome: 'horas da pausa na linha "Antes da escolha" (descarte e pulada por preço desconhecido)', valor: 6, texto: (v) => new RegExp(`em pausa de ${v} h\\b`), codigo: [['src/verificador.js', /export const PAUSA_DESCARTADA_H = (\d+);/]] },
+  // plano baixou-de-para (CA5): a janela do {PRECO_ULTIMO_ENVIO} ("Baixou de … para …") vem de src/parecido.js
+  { nome: 'dias do último envio que o "Baixou de … para …" olha', valor: 30, texto: (v) => new RegExp(`último envio dele por este disparo, nos últimos ${v} dias`), codigo: [['src/parecido.js', /export const DIAS_ULTIMO_ENVIO = (\d+);/]] },
   { nome: 'segundos até o programa desistir do pedido de produto', valor: 18, texto: (v) => new RegExp(`desiste em ${v} s\\b`), codigo: [['src/links.js', /export const PRAZO_PRODUTO_MS = (\d+)000;/]] },
 ];
 
@@ -1833,6 +1835,33 @@ test('Verificador: {HORA_PRECO} está na tabela de campos dos Docs, com o exempl
   const ajuda = lerRaiz('public/ajuda.js');
   assert.match(ajuda, /'ajustes\.verificador': 'manutencao\/verificador'/); assert.match(ajuda, /'ajustes\.verificador\.limite': 'manutencao\/verificador'/);
   assert.ok(CAPS.manutencao.secoes.some((x) => x.id === 'verificador'));
+});
+
+test('Baixou de/para: {PRECO_ULTIMO_ENVIO} está nos Docs (campos, trecho opcional e regra), nas dicas do painel e no README, com a frase de erro do código', async () => {
+  const { ERRO_TEMPLATE_ULTIMO_ENVIO } = await import('../src/server.js');
+  const { LINHA_ULTIMO_ENVIO } = await import('../src/template.js');
+  assert.ok(PLACEHOLDERS.includes('PRECO_ULTIMO_ENVIO'));
+  const campos = blocosDe('templates', 'campos').find((b) => b.tabela).tabela.linhas.find((l) => l[0] === '`{PRECO_ULTIMO_ENVIO}`');
+  assert.ok(campos, 'templates/campos sem a linha do campo');
+  assert.match(campos[1], /pelo menos 5% abaixo/); assert.match(campos[1], /Disparo manual, no espelhamento e no remetente/);
+  // o trecho opcional dos Docs e do README é a linha que o código usa nos templates
+  const opcional = textoDe('templates', 'opcional');
+  assert.ok(opcional.includes(LINHA_ULTIMO_ENVIO), 'Docs: o exemplo de templates/opcional é a LINHA_ULTIMO_ENVIO');
+  assert.ok(README.includes(limpo(LINHA_ULTIMO_ENVIO)), 'README: a LINHA_ULTIMO_ENVIO');
+  assert.match(opcional, /Baixou de ~R\$ 299,00~ para \*R\$ 252,00\*/);
+  // a frase de erro do servidor, literal, no README e nos Docs
+  assert.ok(ERRO_TEMPLATE_ULTIMO_ENVIO.length > 40);
+  assert.ok(README.includes(limpo(ERRO_TEMPLATE_ULTIMO_ENVIO)), 'README: ERRO_TEMPLATE_ULTIMO_ENVIO');
+  assert.ok(TEXTO_DOCS.includes(limpo(ERRO_TEMPLATE_ULTIMO_ENVIO)), 'Docs: ERRO_TEMPLATE_ULTIMO_ENVIO');
+  // a regra no capítulo do Disparo automático: onde vale e onde não vale
+  const ritmo = secaoTxt('disparo-automatico', 'ritmo');
+  assert.match(ritmo, /pelo menos 5% mais barato que no último envio dele por este disparo, nos últimos 30 dias/);
+  assert.match(ritmo, /“Enviar agora” e “Ver ofertas”\) e para o “Enviar” da revisão do Catálogo/);
+  assert.match(ritmo, /Não vale para o Disparo manual, o espelhamento nem o remetente, e a prévia de “Revisar oferta” também não mostra/);
+  assert.match(README, /não vale para o Disparo manual, o espelhamento, o remetente nem o Grupo vivo, e a prévia do \*Revisar oferta\* não mostra a linha/);
+  assert.match(README, /se você apagar a linha, ela não volta/);
+  // a dica do chip e o capítulo falam do mesmo limite
+  assert.match(lerRaiz('public/ajuda.js'), /PRECO_ULTIMO_ENVIO: 'Preço do último envio do mesmo produto por este disparo, até 30 dias atrás\. Só vem quando o preço de agora está pelo menos 5% abaixo/);
 });
 
 test('Verificador: a seção de Manutenção usa os rótulos do cartão de Ajustes e o limite do código, e a tabela de Ajustes ganha as duas linhas', () => {

@@ -6,7 +6,8 @@ import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import { openDb, parseRule } from '../src/db.js';
-import { buildApp, criarServicos } from '../src/server.js';
+import { buildApp, criarServicos, ERRO_TEMPLATE_ULTIMO_ENVIO, ERRO_TEMPLATE_HORA_PRECO } from '../src/server.js';
+import { LINHA_ULTIMO_ENVIO } from '../src/template.js';
 import { createWhatsApp } from '../src/whatsapp.js';
 import { createLinkService } from '../src/links.js';
 import { IMAGEM_SHOPEE, URL_API as URL_API_SHOPEE } from '../src/shopee.js';
@@ -1279,5 +1280,79 @@ test('Grupo vivo (D7): /api/rotinas montada depois do login: sem login 401; com 
     const r = await req(s.port, '/api/rotinas', { headers: { cookie } });
     assert.equal(r.status, 200, r.txt);
     assert.deepEqual(r.json.map((x) => [x.nome, x.tipo, x.enabled]), [['Bom dia', 'mensagem', true]]);
+  } finally { await s.fechar(); }
+});
+
+// ---- {PRECO_ULTIMO_ENVIO} nos Templates (plano baixou-de-para, etapa 4: CA1, CA4, CA6) ----
+test('Templates: POST e PUT recusam {PRECO_ULTIMO_ENVIO} na linha do {LINK} (fora de [ ] ou no mesmo trecho) e aceitam a linha "Baixou de"', async () => {
+  const { s, api } = await comLogin();
+  try {
+    const ruins = [
+      'Por {PRECO_PRODUTO}\nBaixou de {PRECO_ULTIMO_ENVIO} {LINK}',
+      'Por {PRECO_PRODUTO}\n[Baixou de {PRECO_ULTIMO_ENVIO} {LINK}]',
+      'Por {PRECO_PRODUTO}\n{LINK} [era {PRECO_ULTIMO_ENVIO}]\n[x {PRECO_ULTIMO_ENVIO} {LINK}]',
+    ];
+    const antes = (await api('/api/templates')).json.length;
+    for (const body of ruins) {
+      const post = await api('/api/templates', 'POST', { name: 'Ruim', body });
+      assert.equal(post.status, 400, body);
+      assert.equal(post.json.erro, ERRO_TEMPLATE_ULTIMO_ENVIO, body);
+    }
+    assert.equal((await api('/api/templates')).json.length, antes, 'nenhum template gravado');
+
+    // campo dentro de [ ] e o {LINK} fora do trecho: o trecho some e o link fica
+    const ok = await api('/api/templates', 'POST', { name: 'Trecho', body: 'Por {PRECO_PRODUTO}\n[Baixou de {PRECO_ULTIMO_ENVIO}] {LINK}' });
+    assert.equal(ok.status, 200, ok.txt);
+    await api(`/api/templates/${ok.json.id}`, 'DELETE');
+
+    const bom = `{TITULO_PRODUTO}\nPor *{PRECO_PRODUTO}*\n${LINHA_ULTIMO_ENVIO}\n{LINK}`;
+    const post = await api('/api/templates', 'POST', { name: 'Bom', body: bom });
+    assert.equal(post.status, 200, post.txt);
+    const id = post.json.id;
+    assert.equal((await api('/api/templates')).json.find((t) => t.id === id).body, bom);
+
+    const put = await api(`/api/templates/${id}`, 'PUT', { name: 'Bom', body: ruins[0] });
+    assert.equal(put.status, 400);
+    assert.equal(put.json.erro, ERRO_TEMPLATE_ULTIMO_ENVIO);
+    assert.equal((await api('/api/templates')).json.find((t) => t.id === id).body, bom, 'o PUT recusado não troca o corpo');
+    const put2 = await api(`/api/templates/${id}`, 'PUT', { name: 'Bom 2', body: `${bom}\n[📉 era {PRECO_ULTIMO_ENVIO}]` });
+    assert.equal(put2.status, 200, put2.txt);
+
+    // o campo sozinho na linha do {LINK} só é problema com o campo: o {HORA_PRECO} segue com a própria mensagem
+    const hora = await api('/api/templates', 'POST', { name: 'Hora', body: 'a {HORA_PRECO} {LINK}' });
+    assert.equal(hora.status, 400);
+    assert.equal(hora.json.erro, ERRO_TEMPLATE_HORA_PRECO);
+  } finally { await s.fechar(); }
+});
+
+test('Templates: a prévia do editor (ultimo_envio: true) mostra "Baixou de R$ 99,90 para R$ 89,90"; sem o sinal, com ou sem amostra, o trecho some', async () => {
+  const { s, api } = await comLogin();
+  try {
+    const body = `*{TITULO_PRODUTO}*\nPor *{PRECO_PRODUTO}*\n${LINHA_ULTIMO_ENVIO}\n{LINK}`;
+    const sem = await api('/api/templates/preview', 'POST', { body, ultimo_envio: true });
+    assert.equal(sem.status, 200, sem.txt);
+    assert.match(sem.json.texto, /^📉 Baixou de ~R\$ 99,90~ para \*R\$ 89,90\*$/m);
+
+    // só o sinal explícito do editor liga a linha: a prévia do Disparo manual antes de identificar o link não manda `amostra` nem o sinal
+    const semSinal = await api('/api/templates/preview', 'POST', { body });
+    assert.equal(semSinal.status, 200, semSinal.txt);
+    assert.doesNotMatch(semSinal.json.texto, /Baixou|R\$ 99,90/);
+    assert.match(semSinal.json.texto, /Por \*R\$ 89,90\*\nhttps:\/\/meli\.la\//, 'a linha some inteira e o resto da prévia fica igual');
+    for (const falso of [false, 'true', 1, null]) {
+      const r = await api('/api/templates/preview', 'POST', { body, ultimo_envio: falso });
+      assert.doesNotMatch(r.json.texto, /Baixou/, `ultimo_envio ${JSON.stringify(falso)} não liga a linha`);
+    }
+
+    // Disparo manual, espelhamento e remetente mandam `amostra`: sem o sinal, o trecho some
+    const com = await api('/api/templates/preview', 'POST', { body, amostra: { title: 'Meu produto', price: 50, link: 'https://meli.la/x' } });
+    assert.equal(com.status, 200, com.txt);
+    assert.doesNotMatch(com.json.texto, /Baixou/);
+    assert.match(com.json.texto, /Por \*R\$ 50,00\*\nhttps:\/\/meli\.la\/x$/);
+    const vazia = await api('/api/templates/preview', 'POST', { body, amostra: {} });
+    assert.doesNotMatch(vazia.json.texto, /Baixou/, 'amostra vazia também é "com amostra"');
+
+    // template sem o campo: prévia igual à de antes
+    const antiga = await api('/api/templates/preview', 'POST', { body: '*{TITULO_PRODUTO}*\nPor *{PRECO_PRODUTO}*\n{LINK}' });
+    assert.doesNotMatch(antiga.json.texto, /Baixou|R\$ 99,90/);
   } finally { await s.fechar(); }
 });

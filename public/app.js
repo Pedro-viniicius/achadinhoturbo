@@ -652,7 +652,7 @@ function paginaTemplates(id) {
       <div class="linha"><button class="pri" id="sv">Salvar template</button><button class="perigo leve" id="dl">Excluir</button></div></div>
       <div><h2>Como vai aparecer</h2><div class="chat"><div class="balao" id="pv"></div></div></div></div>`;
   const tb = $('#tb'); let tm;
-  const prever = async () => { try { $('#pv').innerHTML = zap((await api('/templates/preview', 'POST', { body: tb.value })).texto); } catch { /* ignora */ } };
+  const prever = async () => { try { $('#pv').innerHTML = zap((await api('/templates/preview', 'POST', { body: tb.value, ultimo_envio: true })).texto); } catch { /* ignora */ } };
   tb.oninput = () => { clearTimeout(tm); tm = setTimeout(prever, 200); }; prever();
   $('#chips').onclick = (e) => { const p = e.target.dataset.p; if (!p) return; const a = tb.selectionStart; tb.setRangeText(`{${p}}`, a, tb.selectionEnd, 'end'); tb.focus(); prever(); };
   $$('.modelos button').forEach((b) => (b.onclick = () => paginaTemplates(Number(b.dataset.id))));
