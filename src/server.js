@@ -63,9 +63,11 @@ const CSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inl
  * liga). UM verificador, com o mesmo ml e os mesmos clientes da Amazon e da Shopee, vai ao agendador (regras) e, por
  * ele, à fila de envios (Disparo manual, espelho, remetente e "Enviar" da revisão do Catálogo). `simulado` (DRY_RUN):
  * confirma sem rede. Sem `verificar`, `verificador` é null e nada é conferido (como antes).
+ * Variedade (plano variedade-ofertas-seguidas, ADR-019): só com `variedade: true` (o main liga) o Disparo automático barra
+ * a mesma linha de uma oferta enviada há pouco. Para desligar na hora: `variedade: false` no main.
  * O main abaixo e os testes sobem por aqui. `fetch` só nos testes (padrão: o fetch global).
  */
-export function criarServicos({ db, wa, links, fast = FAST, dir = DATA_DIR, ml = mlPadrao, fetch, verificar = false, simulado = false } = {}) {
+export function criarServicos({ db, wa, links, fast = FAST, dir = DATA_DIR, ml = mlPadrao, fetch, verificar = false, simulado = false, variedade = false } = {}) {
   const amazon = createAmazon({ db, fetch, lerConexao: () => segredosDe(db, 'amazon') });
   const shopee = createShopee({ db, fetch, lerConexao: () => segredosDe(db, 'shopee') });
   const magalu = createMagalu({ fetch }); // só o resolvedor de link curto (sem conexão: a loja de parceiro é lida no envio)
@@ -86,7 +88,7 @@ export function criarServicos({ db, wa, links, fast = FAST, dir = DATA_DIR, ml =
   // links: no modo extension, o verificador lê o ML pela extensão (links.requestProduto; plano verificador-ml-extensao, D9)
   // catalogo: a releitura da Amazon sem API pelo Etiqueta (confirmarPreco; plano rodar-sozinho-entrega1, B7)
   const verificador = verificar === true ? createVerificador({ db, ml, amazon, shopee, links, catalogo, simulado: simulado === true }) : null;
-  scheduler = createScheduler({ db, wa, links, fast, dir, ml, amazon, shopee, magalu, catalogo, catalogoItens, verificador });
+  scheduler = createScheduler({ db, wa, links, fast, dir, ml, amazon, shopee, magalu, catalogo, catalogoItens, verificador, variedade });
   wa.onMensagem((m) => scheduler.espelho.receber(m));
   // Para desligar o envio pelo sócio na hora: desligue os remetentes no painel (ou apague esta linha e reinicie)
   wa.onPrivada((m) => scheduler.remetentes.receber(m));
@@ -872,7 +874,7 @@ if (import.meta.url === `file://${process.argv[1].replace(/\\/g, '/')}` || proce
   // db: a pausa e o teto das conferências do ML pela extensão sobrevivem ao reinício (plano verificador-ml-extensao, S2)
   const links = createLinkService({ db, getMode: () => (DRY_RUN ? 'fake' : getSetting(db, 'link_mode', 'extension')) });
   // verificador de preço e estoque ligado (D9); na simulação, confirma sem acessar a rede
-  const { amazon, shopee, catalogo, catalogoItens, scheduler } = criarServicos({ db, wa, links, fast: FAST, dir: DATA_DIR, ml: mlPadrao, verificar: true, simulado: DRY_RUN });
+  const { amazon, shopee, catalogo, catalogoItens, scheduler } = criarServicos({ db, wa, links, fast: FAST, dir: DATA_DIR, ml: mlPadrao, variedade: true, verificar: true, simulado: DRY_RUN });
   let app;
   try { app = buildApp({ db, wa, links, scheduler, amazon, shopee, catalogo, catalogoItens }); } catch (e) { console.error('ERRO:', e.message); process.exit(1); }
   const retencao = () => {

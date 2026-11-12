@@ -14,7 +14,7 @@ import { createRotinas } from './rotinas.js';
 import { createRitmo, pausaGrupoGravada, pausaOfertaGravada } from './ritmo.js';
 import { proximoHorario, horarioDe, resolverVencido, proximoEnvio, qtdDaLinha, templateDaLinha } from './grade.js';
 import { sleep, jitter, inWindow, alignToWindow } from './util.js';
-import { criarTrava, lerEnviados, comparar, centavos, maisBarataOBastante, tituloParaGuardar, comFraseMaisBarata, precoDoUltimoEnvio, baixouDe, textoConflito, textoPassou, textoConferencia, HORAS_ENTRE_PARECIDOS } from './parecido.js';
+import { criarTrava, lerEnviados, comparar, centavos, maisBarataOBastante, tituloParaGuardar, comFraseMaisBarata, precoDoUltimoEnvio, baixouDe, textoConflito, textoPassou, textoConferencia, HORAS_ENTRE_PARECIDOS, MINUTOS_SEGUIDAS } from './parecido.js';
 import { PAUSA_DESCARTADA_H, RESERVA_AMAZON_H, MOTIVOS_VERIFICADOR, CAUSAS, reservaValida } from './verificador.js';
 import { ErroLinkML, CAUSAS_CENTRAL, TESTE_ESPERA_MIN } from './links.js';
 import { createVigia, linhaDeSaude, lojasDaRegra, MOTIVO_VIGIA } from './vigia.js';
@@ -138,11 +138,14 @@ function fraseSairam(saidas, want, faltas, fim) {
  * As "já enviadas" do catálogo não entram: ele as tira antes de chegarem aqui.
  */
 function fraseFiltradas(f) {
-  const total = f.filtros + f.parecidas + f.pausa + f.semConferencia + f.mlPausa;
+  const seguidas = f.seguidas ?? 0;
+  const total = f.filtros + f.parecidas + seguidas + f.pausa + f.semConferencia + f.mlPausa;
   if (!total) return null;
   const pedacos = [];
   if (f.filtros) pedacos.push(`${f.filtros} fora dos filtros da regra`);
   if (f.parecidas) pedacos.push(`${f.parecidas} ${f.parecidas === 1 ? 'já enviada ou parecida' : 'já enviadas ou parecidas'}`);
+  // a trava de ofertas seguidas (plano variedade-ofertas-seguidas): só a contagem, nunca o título
+  if (seguidas) pedacos.push(`${seguidas} da mesma linha de uma oferta recente`);
   if (f.pausa) pedacos.push(`${f.pausa} em pausa de ${PAUSA_DESCARTADA_H} h`);
   if (f.semConferencia) pedacos.push(`${f.semConferencia} da Amazon que não dá para conferir agora`);
   // ML com a leitura em pausa (rodar-sozinho entrega 2, CA2.13; spec §2b): a causa entre parênteses, sem o tempo
@@ -261,8 +264,11 @@ function textoPulados(pulados, { seguinte, saiAgora }, agora) {
  * na mesma fila de envios e acorda o tick; o passo das rotinas roda antes das regras e depois de cada regra.
  * `verificador` (src/verificador.js, createVerificador; plano verificador-preco-estoque D1 e D9): confere preço e
  * estoque de cada oferta da regra logo antes de gerar o link, e vai também à fila de envios. null = nada é conferido.
+ * `variedade` (plano variedade-ofertas-seguidas, ADR-019): a trava das ofertas seguidas do Disparo automático (a mesma
+ * linha não sai no mesmo envio nem até MINUTOS_SEGUIDAS min depois, com a guarda "não zera o envio"). Desligada por
+ * padrão, como o verificador: o main de src/server.js a liga.
  */
-export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast = false, dir = null, amazon = null, shopee = null, magalu = null, catalogo = null, catalogoItens = null, verificador = null, ritmo = null, monotonico = () => performance.now() }) {
+export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast = false, dir = null, amazon = null, shopee = null, magalu = null, catalogo = null, catalogoItens = null, verificador = null, ritmo = null, monotonico = () => performance.now(), variedade = false }) {
   // Proteção do número (plano anti-banimento, ADR-012): todo módulo daqui recebe o `wa` embrulhado, que conta cada
   // mensagem no teto e espera a pausa mínima entre quaisquer duas (regra, fila, avisos, resposta ao remetente). Teto e
   // silêncio são perguntados (ritmo.liberado) só por quem manda a grupos: as regras (aqui) e a fila (envios.js).
@@ -598,14 +604,15 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
    * Estado de uma execução: o que o catálogo leu (para o cursor), o que os filtros da regra recusaram, o que esperou
    * e as chaves que cada fonte trouxe (vistas: o catálogo conta a de outra fonte como tratada, R11). `puladas`: as
    * ofertas barradas por já ter saído (ou estar saindo) uma igual ou parecida (src/parecido.js): { key, title, r } cada uma.
-   * `filtradas`: quantas candidatas a escolha deixou de fora, por quê (a linha "Antes da escolha…"). `conferenciaNaHora`:
+   * `filtradas`: quantas candidatas a escolha deixou de fora, por quê (a linha "Antes da escolha…"; `seguidas`: a mesma linha
+   * de uma oferta escolhida ou enviada há pouco, que não gera linha "Pulada"). `conferenciaNaHora`:
    * o verificador estava ligado no começo (o catálogo pode pedir preços mais velhos, cada oferta é conferida antes de sair).
    * `porLoja`: o que aconteceu com as escolhidas de cada loja e, em `esperou`, as que esperaram, escolhidas ou não (vai no
    * summary).
    */
   const novaExecucao = () => ({
     paginas: new Map(), recusadas: new Set(), esperando: new Map(), vistas: new Set(), puladas: [],
-    filtradas: { filtros: 0, pausa: 0, parecidas: 0, semConferencia: 0, mlPausa: 0, mlPausaCausa: null }, conferenciaNaHora: false, porLoja: contadoresPorLoja(),
+    filtradas: { filtros: 0, pausa: 0, parecidas: 0, seguidas: 0, semConferencia: 0, mlPausa: 0, mlPausaCausa: null }, conferenciaNaHora: false, porLoja: contadoresPorLoja(),
     motivos: motivosPorLoja(),
   });
   // a regra apagada no meio da execução não grava nada do catálogo: o id pode ser reaproveitado por uma regra nova
@@ -729,9 +736,16 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
    * `devolver(key)`: a escolhida caiu fora e não vai sair; ela sai da trava da rodada (as parecidas dela voltam a valer
    * nesta execução, CA1.12) e de `saindo` (o "Enviar" do Catálogo deixa de vê-la).
    * `variasFontes()`: a lista lida traz candidatas de mais de uma fonte (o Histórico diz de qual saiu cada oferta).
+   * Ofertas seguidas (plano variedade-ofertas-seguidas, com `variedade` ligada): a trava também barra a mesma linha de uma
+   * escolhida deste envio e de um envio da regra nos últimos MINUTOS_SEGUIDAS min. Essa barrada só conta em
+   * `exec.filtradas.seguidas`: não vira linha "Pulada" nem `recusadas` (o cursor das Novidades não passa por ela).
+   * Guarda "não zera o envio": a barrada SÓ pelo envio anterior (que seguiria como escolhida) vai para a `reserva`;
+   * `daReserva()` entrega a próxima dela, quando nada saiu e a lista acabou, e a põe na trava do envio (nunca saem duas da
+   * mesma linha no mesmo envio). Null = a reserva acabou.
    */
   function criarEscolha(rule, want, exec = novaExecucao(), { previa = false, saindo = null } = {}) {
     let cands = null; let pos = 0; let tried = 0; let trava = null; let lidoEm = null;
+    const reserva = []; // as barradas só pelo envio anterior, na ordem da lista (a guarda "não zera o envio")
     const maxTries = Math.max(want * 8, 10);
     /** A leitura do ML está em pausa: conta a candidata na linha "Antes da escolha" (com a 1ª causa vista) → true. */
     const contarPausaMl = () => {
@@ -755,11 +769,17 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
       trava = criarTrava({
         enviados: rule.dedupe_days > 0 ? lerEnviados(db, rule.id, agora - rule.dedupe_days * 86400000) : [],
         agora, dedupeDias: rule.dedupe_days,
+        // sempre os últimos MINUTOS_SEGUIDAS min, com qualquer dedupe_days (inclusive 0)
+        seguidas: variedade === true ? { recentes: lerEnviados(db, rule.id, agora - MINUTOS_SEGUIDAS * 60000) } : null,
       });
     }
-    /** Barra (→ o resultado da trava, anotado em `exec.puladas`) ou libera (→ null); `marca` recebe a anterior quando é mais barata. */
+    /**
+     * Barra (→ o resultado da trava, anotado em `exec.puladas`) ou libera (→ null); `marca` recebe a anterior quando é mais
+     * barata. A seguida só conta em `filtradas.seguidas` (sem linha "Pulada").
+     */
     const barrada = (o, marca) => {
       const r = trava.avaliar({ key: o.key, title: o.title, price: o.price });
+      if (r?.acao === 'barrar' && r.tipo === 'seguida') { exec.filtradas.seguidas++; return r; }
       if (r?.acao === 'barrar') { exec.puladas.push({ key: o.key, title: o.title, r }); exec.filtradas.parecidas++; return r; }
       if (r?.acao === 'liberar') marca.maisBarata = { title: r.anterior.title, preco: r.anterior.preco, sent_at: r.anterior.sent_at };
       return null;
@@ -788,9 +808,19 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
           // barrada por um envio anterior: tratada como recusada, para o cursor das Novidades não ficar preso nela. A da
           // mesma rodada não (achado R1): só uma escolhida que saiu de fato barra (a que cai fora é devolvida antes da
           // próxima escolha), mas a próxima execução a avalia de novo, contra o que está em sent_offers
-          const b = barrada(c, marca);
-          if (b) { if (b.tipo !== 'rodada') exec.recusadas.add(c.key); continue; }
           const motivos = motivosDeRevisao(c);
+          const b = barrada(c, marca);
+          // a que vai à revisão não manda nada a grupo: a trava das seguidas não a barra (a contagem do `barrada` volta)
+          if (b?.tipo === 'seguida' && motivos.length) exec.filtradas.seguidas--;
+          else if (b) {
+            // a seguida não conta como tratada (CA5): o cursor não passa por ela e ela volta na próxima execução
+            if (b.tipo !== 'rodada' && b.tipo !== 'seguida') exec.recusadas.add(c.key);
+            // reserva da guarda "não zera o envio": só a barrada pelo envio anterior (sent_at preenchido)
+            else if (b.tipo === 'seguida' && b.anterior.sent_at !== null) {
+              reserva.push({ ...c, catalogo: true, motivos: [], lidoEm: null });
+            }
+            continue;
+          }
           if (motivos.length && catalogoItens.revisaoCheia(rule.id)) { esperar(exec, 'revisao_cheia', c.loja); continue; }
           // a que vai à revisão não leva a marca: o "Enviar" decide de novo
           return escolher({ ...c, catalogo: true, motivos, lidoEm: null, ...(motivos.length ? {} : marca) });
@@ -806,7 +836,11 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
         }
         if (ml.rejectReason(offer, rule)) { exec.filtradas.filtros++; continue; }
         const marca = {};
-        if (barrada(offer, marca)) continue;
+        const b = barrada(offer, marca);
+        if (b) {
+          if (b.tipo === 'seguida' && b.anterior.sent_at !== null) reserva.push({ ...offer, lidoEm: offer.digitado === true ? null : lidoEm });
+          continue;
+        }
         return escolher({ ...offer, lidoEm: offer.digitado === true ? null : lidoEm, ...marca });
       }
       return null;
@@ -815,8 +849,24 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
       trava?.retirar(key);
       saindo?.delete(key);
     }
+    /**
+     * Guarda "não zera o envio": a próxima da reserva, avaliada de novo sem os envios anteriores (a mesma linha de uma
+     * escolhida deste envio continua barrando), ou null. Quem chama só a usa quando a lista acabou e nada saiu; ela
+     * desconta da contagem das seguidas a oferta liberada.
+     */
+    function daReserva() {
+      while (reserva.length) {
+        const o = reserva.shift();
+        const r = trava.avaliar({ key: o.key, title: o.title, price: o.price }, { semRecentes: true });
+        if (r?.acao === 'barrar') continue;
+        exec.filtradas.seguidas = Math.max(0, exec.filtradas.seguidas - 1);
+        const marca = r?.acao === 'liberar' ? { maisBarata: { title: r.anterior.title, preco: r.anterior.preco, sent_at: r.anterior.sent_at } } : {};
+        return escolher({ ...o, ...marca });
+      }
+      return null;
+    }
     const variasFontes = () => new Set((cands ?? []).map((c) => c?.source_index ?? 0)).size > 1;
-    return { proxima, devolver, variasFontes };
+    return { proxima, devolver, variasFontes, daReserva };
   }
 
   /** As `want` primeiras ofertas da escolha (a prévia): o laço de proxima(), sem devolver nenhuma. */
@@ -824,7 +874,8 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
     const escolha = criarEscolha(rule, want, exec, opcoes);
     const picked = [];
     while (picked.length < want) {
-      const o = await escolha.proxima();
+      // a guarda "não zera o envio": a lista acabou e nada foi escolhido (a mesma conta do runRule)
+      const o = (await escolha.proxima()) ?? (picked.length === 0 ? escolha.daReserva() : null);
       if (!o) break;
       picked.push(o);
     }
@@ -1060,6 +1111,8 @@ export function createScheduler({ db, wa: waBruto, links, ml = mlDefault, fast =
           log(rule, { level: 'erro', message: 'Não consegui buscar ofertas: ' + e.message }); summary.errors++; return summary;
         }
         logarPuladas();
+        // guarda "não zera o envio" (CA11): a lista acabou e nenhuma escolhida chegou a um grupo
+        if (!o && saidas === 0) o = escolha.daReserva();
         if (!o) { acabou = true; break; }
         escolhidas++;
         atual = { key: o.key, saiu: false };

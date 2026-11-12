@@ -18,11 +18,16 @@ export const MIN_PALAVRAS = 3;
 export const DESCONTO_MINIMO_MAIS_BARATA = 5;
 /** Quantos dias para trás vale o "último envio" do `{PRECO_ULTIMO_ENVIO}` (plano baixou-de-para, CA1). */
 export const DIAS_ULTIMO_ENVIO = 30;
+/** Ofertas seguidas (plano variedade-ofertas-seguidas): a mesma linha de um envio da regra nos últimos N min não sai. */
+export const MINUTOS_SEGUIDAS = 45;
+/** "Mesma marca e linha": quantas palavras distintivas em comum (entre as `PALAVRAS_PARECIDO` primeiras) bastam. */
+export const COMUNS_MESMA_LINHA = 2;
 export const FRASE_MAIS_BARATA = '🔎 Nossa busca achou esta oportunidade ainda melhor, caso você ainda não tenha aproveitado a primeira.';
 
 const TITULO_GUARDADO_MAX = 200;
 const TITULO_FRASE_MAX = 60;
 const HORA_MS = 3600000;
+const MINUTO_MS = 60000;
 const DIA_MS = 24 * HORA_MS;
 
 const VAZIAS = new Set([
@@ -52,6 +57,61 @@ function compararPalavras(pa, pb, limiar) {
 /** 'mesmo' (sequência completa igual), 'parecido' (≥ limiar nas primeiras palavras) ou null. Menos de 3 palavras: null. */
 export function comparar(a, b, { limiar = LIMIAR_PARECIDO } = {}) {
   return compararPalavras(palavras(a), palavras(b), limiar);
+}
+
+/** Cabeças que só dizem "quantidade": a palavra de tipo do título vem depois delas ("Kit 10 Cuecas Boxer" → `cuecas`). */
+export const CABECAS_GENERICAS = new Set(['kit', 'jogo', 'conjunto', 'combo', 'par', 'pack']);
+/** Unidades de contagem ("Kit 3 Pares de Meias", "Kit 10 Unidades Canetas"): também não são o tipo (achado Q1). */
+export const UNIDADES_CONTAGEM = new Set(['pares', 'par', 'unidades', 'unidade', 'un', 'pecas', 'peca', 'itens', 'item']);
+/**
+ * Palavras que não dizem marca nem linha (público, cor, tamanho, recursos genéricos): não contam como "em comum" em
+ * `mesmaLinha`. Acento já saiu (`palavras`). As cabeças genéricas também ficam de fora. Para apertar ou afrouxar o
+ * critério, é aqui.
+ */
+export const GENERICAS_LINHA = new Set([
+  ...CABECAS_GENERICAS,
+  // público
+  'masculino', 'masculina', 'masculinos', 'masculinas', 'feminino', 'feminina', 'femininos', 'femininas', 'unissex',
+  'infantil', 'infantis', 'adulto', 'adulta', 'adultos', 'adultas', 'bebe', 'bebes', 'crianca', 'criancas', 'kids',
+  'homem', 'homens', 'mulher', 'mulheres', 'menino', 'meninos', 'menina', 'meninas',
+  'cao', 'caes', 'cachorro', 'cachorros', 'gato', 'gatos', 'pet', 'pets', 'filhote', 'filhotes',
+  // cor
+  'preto', 'preta', 'pretos', 'pretas', 'branco', 'branca', 'brancos', 'brancas', 'azul', 'azuis', 'vermelho', 'vermelha',
+  'verde', 'verdes', 'rosa', 'cinza', 'prata', 'dourado', 'dourada', 'amarelo', 'amarela', 'roxo', 'roxa', 'laranja',
+  'marrom', 'bege', 'colorido', 'colorida', 'transparente',
+  // tamanho
+  'pequeno', 'pequena', 'pequenos', 'pequenas', 'medio', 'media', 'grande', 'grandes', 'mini', 'maxi', 'tamanho', 'tamanhos',
+  // recursos genéricos
+  'bluetooth', 'wireless', 'gamer', 'gamers', 'portatil', 'portateis', 'led', 'usb', 'digital', 'eletrico', 'eletrica',
+  'automatico', 'automatica', 'recarregavel', 'profissional', 'resistente', 'potente', 'leve', 'compacto', 'compacta',
+]);
+
+/** Número ou medida ("27", "500ml", "240hz", "4kg"): a palavra começa por dígito e não é tipo nem marca. */
+const ehNumero = (p) => /^\d/.test(p);
+
+/** A palavra de tipo do título: a 1ª que não é número, cabeça genérica nem unidade de contagem; null se não sobra nenhuma. */
+function palavraDeTipo(pw) {
+  return pw.find((p) => !ehNumero(p) && !CABECAS_GENERICAS.has(p) && !UNIDADES_CONTAGEM.has(p)) ?? null;
+}
+
+function mesmaLinhaPalavras(pa, pb) {
+  if (pa.length < MIN_PALAVRAS || pb.length < MIN_PALAVRAS) return null;
+  const tipo = palavraDeTipo(pa);
+  if (tipo !== null && tipo === palavraDeTipo(pb)) return 'tipo';
+  const distintivas = (pw) => new Set(pw.slice(0, PALAVRAS_PARECIDO).filter((p) => !ehNumero(p) && !GENERICAS_LINHA.has(p)));
+  const b = distintivas(pb);
+  let comuns = 0;
+  for (const p of distintivas(pa)) if (b.has(p)) comuns++;
+  return comuns >= COMUNS_MESMA_LINHA ? 'linha' : null;
+}
+
+/**
+ * As duas ofertas são da mesma linha (ofertas seguidas)? 'tipo' (a 1ª palavra significativa do título é igual, sem
+ * contar números, cabeças genéricas nem unidades de contagem), 'linha' (pelo menos `COMUNS_MESMA_LINHA` palavras distintivas em comum nas
+ * `PALAVRAS_PARECIDO` primeiras) ou null. Título com menos de `MIN_PALAVRAS` palavras: null.
+ */
+export function mesmaLinha(a, b) {
+  return mesmaLinhaPalavras(palavras(a), palavras(b));
 }
 
 /** Reais → centavos inteiros; null se não for número finito maior que zero (ou se arredondar para 0). */
@@ -130,10 +190,17 @@ export function baixouDe(anteriorCentavos, precoReais) {
  *                                                            DESCONTO_MINIMO_MAIS_BARATA% mais barato, só entre
  *                                                            rodadas e só se nenhum conflito for 'parecido' (D10).
  * `anterior.preco` em centavos (null se desconhecido); na 'rodada', `preco` e `sent_at` são null.
+ * `seguidas` (plano variedade-ofertas-seguidas; null = desligada, e a trava é a de sempre): `{ recentes }`, as linhas de
+ * `lerEnviados` da regra. Com ela, `avaliar` também barra com `{ acao: 'barrar', tipo: 'seguida', anterior: { title,
+ * preco: null, sent_at } }` a oferta da MESMA LINHA (`mesmaLinha`) de uma escolhida deste envio (`sent_at` null) ou de um
+ * dos `recentes` enviados há menos de `MINUTOS_SEGUIDAS` min (`sent_at` preenchido). Só vale depois da lógica acima: se
+ * ela barra, vale o que ela disse; se ela libera (os 5%), a seguida ainda barra. Vale com qualquer `dedupeDias`, e a
+ * mesma chave não é comparada consigo mesma. `avaliar(oferta, { semRecentes: true })` ignora os `recentes` e continua
+ * barrando pela mesma linha de uma escolhida (a guarda "não zera o envio" do agendador).
  * `acrescentar` registra a oferta escolhida nesta execução (a "mesma rodada"); `retirar(key)` desfaz isso quando a
  * escolhida caiu fora (descartada, pulada) e não vai sair.
  */
-export function criarTrava({ enviados = [], agora, dedupeDias, limiar = LIMIAR_PARECIDO, horas = HORAS_ENTRE_PARECIDOS } = {}) {
+export function criarTrava({ enviados = [], agora, dedupeDias, limiar = LIMIAR_PARECIDO, horas = HORAS_ENTRE_PARECIDOS, seguidas = null } = {}) {
   const dias = Number(dedupeDias);
   const entreRodadas = Number.isFinite(dias) && dias > 0;
   const janelaMesmo = entreRodadas ? dias * DIA_MS : 0;
@@ -145,48 +212,74 @@ export function criarTrava({ enviados = [], agora, dedupeDias, limiar = LIMIAR_P
     .map((e) => ({ ...e, palavras: palavras(e.title) }))
     .filter((e) => e.palavras.length >= MIN_PALAVRAS);
   const escolhidas = [];
+  // os `recentes` dentro da janela de seguidas (e só os de título legível); fora dela, nada a comparar
+  const recentes = (seguidas && Array.isArray(seguidas.recentes) ? seguidas.recentes : [])
+    .filter((e) => e && typeof e.title === 'string' && Number.isFinite(e.sent_at) && agora - e.sent_at < MINUTOS_SEGUIDAS * MINUTO_MS)
+    .map((e) => ({ ...e, palavras: palavras(e.title) }))
+    .filter((e) => e.palavras.length >= MIN_PALAVRAS);
+
+  /** A lógica de 24 h e da mesma rodada (a trava de antes das seguidas). */
+  function avaliarParecidos({ key, title, price }, pw) {
+    for (const e of escolhidas) {
+      if (e.key === String(key)) continue;
+      if (compararPalavras(pw, e.palavras, limiar)) {
+        return { acao: 'barrar', tipo: 'rodada', anterior: { title: e.title, preco: null, sent_at: null } };
+      }
+    }
+
+    const conflitos = [];
+    for (const e of historico) {
+      if (e.offer_key === String(key)) continue;
+      const r = compararPalavras(pw, e.palavras, limiar);
+      if (!r) continue;
+      const idade = agora - e.sent_at;
+      if ((r === 'mesmo' && idade < janelaMesmo) || idade < janelaParecido) {
+        conflitos.push({ tipo: r, title: e.title, preco: Number.isInteger(e.price_cents) && e.price_cents > 0 ? e.price_cents : null, sent_at: e.sent_at });
+      }
+    }
+    if (!conflitos.length) return null;
+
+    const maisRecente = (lista) => lista.reduce((m, c) => (c.sent_at >= m.sent_at ? c : m));
+    const comPreco = conflitos.filter((c) => c.preco !== null);
+    const semPreco = conflitos.filter((c) => c.preco === null);
+    const menor = comPreco.length ? Math.min(...comPreco.map((c) => c.preco)) : null;
+    const doMinimo = menor === null ? null : maisRecente(comPreco.filter((c) => c.preco === menor));
+    const centavosNovo = centavos(price);
+
+    const conflito = (c) => ({ acao: 'barrar', tipo: c.tipo, anterior: { title: c.title, preco: c.preco, sent_at: c.sent_at } });
+    // parecida (outro tamanho, cor, versão) não tem exceção de preço (D10): espera as 24 h, com a frase dela
+    const parecidos = conflitos.filter((c) => c.tipo === 'parecido');
+    if (parecidos.length) return conflito(maisRecente(parecidos));
+    if (semPreco.length) return conflito(maisRecente(semPreco)); // anterior sem preço: nada a comparar
+    if (centavosNovo === null) return conflito(doMinimo); // candidata sem preço: idem
+    if (maisBarataOBastante(centavosNovo, menor)) {
+      return { acao: 'liberar', anterior: { title: doMinimo.title, preco: doMinimo.preco, sent_at: doMinimo.sent_at } };
+    }
+    return conflito(doMinimo);
+  }
 
   return {
-    avaliar({ key, title, price } = {}) {
+    avaliar({ key, title, price } = {}, { semRecentes = false } = {}) {
       const pw = palavras(title);
       if (pw.length < MIN_PALAVRAS) return null;
+      const r = avaliarParecidos({ key, title, price }, pw);
+      if (!seguidas || r?.acao === 'barrar') return r;
 
+      const k = String(key);
       for (const e of escolhidas) {
-        if (e.key === String(key)) continue;
-        if (compararPalavras(pw, e.palavras, limiar)) {
-          return { acao: 'barrar', tipo: 'rodada', anterior: { title: e.title, preco: null, sent_at: null } };
+        if (e.key !== k && mesmaLinhaPalavras(pw, e.palavras)) {
+          return { acao: 'barrar', tipo: 'seguida', anterior: { title: e.title, preco: null, sent_at: null } };
         }
       }
-
-      const conflitos = [];
-      for (const e of historico) {
-        if (e.offer_key === String(key)) continue;
-        const r = compararPalavras(pw, e.palavras, limiar);
-        if (!r) continue;
-        const idade = agora - e.sent_at;
-        if ((r === 'mesmo' && idade < janelaMesmo) || idade < janelaParecido) {
-          conflitos.push({ tipo: r, title: e.title, preco: Number.isInteger(e.price_cents) && e.price_cents > 0 ? e.price_cents : null, sent_at: e.sent_at });
+      if (!semRecentes) {
+        let achada = null;
+        for (const e of recentes) {
+          if (e.offer_key === k || !mesmaLinhaPalavras(pw, e.palavras)) continue;
+          if (!achada || e.sent_at >= achada.sent_at) achada = e;
         }
+        if (achada) return { acao: 'barrar', tipo: 'seguida', anterior: { title: achada.title, preco: null, sent_at: achada.sent_at } };
       }
-      if (!conflitos.length) return null;
-
-      const maisRecente = (lista) => lista.reduce((m, c) => (c.sent_at >= m.sent_at ? c : m));
-      const comPreco = conflitos.filter((c) => c.preco !== null);
-      const semPreco = conflitos.filter((c) => c.preco === null);
-      const menor = comPreco.length ? Math.min(...comPreco.map((c) => c.preco)) : null;
-      const doMinimo = menor === null ? null : maisRecente(comPreco.filter((c) => c.preco === menor));
-      const centavosNovo = centavos(price);
-
-      const conflito = (c) => ({ acao: 'barrar', tipo: c.tipo, anterior: { title: c.title, preco: c.preco, sent_at: c.sent_at } });
-      // parecida (outro tamanho, cor, versão) não tem exceção de preço (D10): espera as 24 h, com a frase dela
-      const parecidos = conflitos.filter((c) => c.tipo === 'parecido');
-      if (parecidos.length) return conflito(maisRecente(parecidos));
-      if (semPreco.length) return conflito(maisRecente(semPreco)); // anterior sem preço: nada a comparar
-      if (centavosNovo === null) return conflito(doMinimo); // candidata sem preço: idem
-      if (maisBarataOBastante(centavosNovo, menor)) {
-        return { acao: 'liberar', anterior: { title: doMinimo.title, preco: doMinimo.preco, sent_at: doMinimo.sent_at } };
-      }
-      return conflito(doMinimo);
+      return r;
     },
     acrescentar({ key, title } = {}) {
       const pw = palavras(title);

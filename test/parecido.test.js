@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import {
   LIMIAR_PARECIDO, HORAS_ENTRE_PARECIDOS, PALAVRAS_PARECIDO, MIN_PALAVRAS, FRASE_MAIS_BARATA, DESCONTO_MINIMO_MAIS_BARATA,
+  MINUTOS_SEGUIDAS, COMUNS_MESMA_LINHA, CABECAS_GENERICAS, UNIDADES_CONTAGEM, GENERICAS_LINHA, mesmaLinha,
   palavras, comparar, centavos, maisBarataOBastante, tituloParaGuardar, lerEnviados, criarTrava, comFraseMaisBarata,
   textoConflito, textoPassou, textoConferencia, textoNaoMaisBarata, DIAS_ULTIMO_ENVIO, precoDoUltimoEnvio, baixouDe,
 } from '../src/parecido.js';
@@ -660,5 +661,236 @@ test('baixouDe: preço igual, maior, ausente ou inválido, ou anterior inválido
   }
   for (const ruim of [null, undefined, 0, -100, NaN, Infinity, 99.5, '10000', 2 ** 60]) {
     assert.equal(baixouDe(ruim, 50), null, `anterior ${String(ruim)}`);
+  }
+});
+
+// ---------------------------------------------------------------- ofertas seguidas (plano variedade-ofertas-seguidas)
+const M = 60000;
+const AGON_34 = 'Monitor Gamer Curvo AOC AGON QUAD 34" Wqhd 165hz Va Preto';
+const AGON_27 = 'Monitor Gamer AOC AGON QUAD 27" Qhd 180hz Ips Preto';
+const PARTYBOX_520 = 'Jbl Partybox 520 Power and Party Caixa de Som Bluetooth Portátil';
+const PARTYBOX_320 = 'Caixa de Som Portátil - PartyBox Stage 320 - JBL Preta';
+const PARTYBOX_330 = 'Caixa De Som Jbl Partybox 330 280w Rms';
+const PARTYBOX_130 = 'Alto-falante Bluetooth Jbl Partybox 130';
+const ODYSSEY = 'Monitor Samsung Odyssey G40 25" Full Hd 240hz';
+const MONITOR_CURVO = 'Monitor Gamer 27 Curvo 240hz Samsung';
+const seguidas = (recentes, dedupeDias = 7) => trava([], dedupeDias, { seguidas: { recentes } });
+
+test('seguidas: as constantes são as do plano (45 min, 2 palavras em comum)', () => {
+  assert.equal(MINUTOS_SEGUIDAS, 45);
+  assert.equal(COMUNS_MESMA_LINHA, 2);
+  assert.deepEqual([...CABECAS_GENERICAS].sort(), ['combo', 'conjunto', 'jogo', 'kit', 'pack', 'par']);
+  for (const p of ['caes', 'masculino', 'feminino', 'preto', 'grande', 'bluetooth', 'gamer', ...CABECAS_GENERICAS]) assert.ok(GENERICAS_LINHA.has(p), p);
+});
+
+test('mesmaLinha: unidades de contagem (pares, unidades, peças) não são o tipo (Q1)', () => {
+  assert.deepEqual([...UNIDADES_CONTAGEM].sort(), ['item', 'itens', 'par', 'pares', 'peca', 'pecas', 'un', 'unidade', 'unidades']);
+  assert.equal(mesmaLinha('Kit 3 Pares de Meias Nike Cano Alto', 'Kit 5 Pares de Cuecas Lupo Boxer'), null);
+  assert.equal(mesmaLinha('Kit 10 Unidades Canetas Bic Azul', 'Kit 5 Unidades Cuecas Lupo Boxer'), null);
+  assert.equal(mesmaLinha('Conjunto 3 Peças Panelas Tramontina', 'Conjunto 5 Peças Toalhas Karsten'), null);
+  // o tipo de verdade, depois da unidade, continua valendo
+  assert.equal(mesmaLinha('Kit 3 Pares de Meias Nike Cano Alto', 'Kit 5 Pares de Meias Lupo Sport'), 'tipo');
+});
+
+test('mesmaLinha: os 4 pares do caso de 12/11 barram, o 1º e o 4º pelo tipo e os do JBL pela linha (CA1, CA3)', () => {
+  assert.equal(mesmaLinha(AGON_34, AGON_27), 'tipo');
+  assert.equal(mesmaLinha(ODYSSEY, MONITOR_CURVO), 'tipo');
+  assert.equal(mesmaLinha(PARTYBOX_520, PARTYBOX_320), 'linha');
+  assert.equal(mesmaLinha(PARTYBOX_330, PARTYBOX_130), 'linha');
+});
+
+test('mesmaLinha: a tabela "Prova do critério" (barra e não barra)', () => {
+  const pares = [
+    ['Colete Tático Para Cães Grandes', 'Peitoral Tático Militar Para Cães K9', null], // só `tatico`: `caes` e `grandes` são genéricas
+    ['Tênis Nike Revolution 7 Masculino', 'Camiseta Nike Dri-FIT Masculina Preta', null], // só `nike`
+    ['Air Fryer Mondial 4L Preta', 'Liquidificador Mondial Turbo Preto 1200W', null],
+    ['Smart TV Samsung 55" Crystal', 'Monitor Samsung Odyssey G40', null],
+    ['Kit 10 Cuecas Boxer', 'Kit Ferramentas 129 Peças', null], // `kit` e os números não são o tipo: `cuecas` × `ferramentas`
+    ['Fone Bluetooth JBL Tune 520BT', 'Caixa de Som Bluetooth JBL Go 3', null], // só `jbl`
+    ['Teclado Gamer Redragon', 'Mouse Gamer Redragon', null], // só `redragon`
+    ['Fone de Ouvido JBL Tune', 'Fone de Ouvido Sony WH-CH520', 'tipo'], // o mesmo tipo basta
+    ['Caixa de Som JBL Flip 6', 'Caixa Organizadora 20 Litros', 'tipo'], // falso positivo aceito
+  ];
+  for (const [a, b, esperado] of pares) {
+    assert.equal(mesmaLinha(a, b), esperado, `${a} × ${b}`);
+    assert.equal(mesmaLinha(b, a), esperado, `${b} × ${a}`);
+  }
+});
+
+test('mesmaLinha: o tipo pula número e cabeça genérica; 1 palavra em comum nem sempre basta', () => {
+  assert.equal(mesmaLinha('Kit 10 Cuecas Boxer Algodão', 'Cuecas Slip Poliéster Branca'), 'tipo');
+  assert.equal(mesmaLinha('Jogo de Panelas Tramontina Antiaderente', 'Kit Panelas Vermelhas Antiaderente Mondial'), 'tipo');
+  assert.equal(mesmaLinha('Combo 2 Camisetas Nike Dry', 'Pack 3 Camisetas Adidas Run'), 'tipo');
+  // os números e as medidas ("500ml") não são palavra em comum
+  assert.equal(mesmaLinha('Shampoo Lola 500ml', 'Condicionador Lola 500ml'), null);
+  // 2 distintivas fora do começo: 'linha'
+  assert.equal(mesmaLinha('Caixa Som Preta JBL Partybox', 'Alto Falante JBL Partybox'), 'linha');
+  // as genéricas não contam como "em comum", nem as cabeças
+  assert.equal(mesmaLinha('Colete Militar Cães Grande Preto', 'Peitoral Camuflado Cães Grande Preto'), null);
+  assert.equal(mesmaLinha('Kit Shampoo Lola Cosmetics', 'Kit Máscara Lola Cosmetics Hidratante'), 'linha');
+  assert.equal(mesmaLinha('Kit Shampoo Lola', 'Kit Máscara Lola'), null);
+});
+
+test('mesmaLinha: só as 8 primeiras palavras entram na conta das palavras em comum', () => {
+  const a = 'Alfa Beta Gama Delta Epsilon Zeta Eta Teta Jbl Partybox';
+  const b = 'Xis Ipsilon Zed Omega Sigma Tau Ypsilon Phi Jbl Partybox';
+  assert.equal(PALAVRAS_PARECIDO, 8);
+  assert.equal(mesmaLinha(a, b), null); // `jbl` e `partybox` são a 9ª e a 10ª palavra
+  assert.equal(mesmaLinha('Jbl Partybox Alfa Beta Gama Delta Epsilon Zeta', 'Omega Jbl Partybox Sigma Tau Ypsilon Phi Rho'), 'linha');
+});
+
+test('mesmaLinha: título com menos de 3 palavras não entra na comparação; texto inválido dá null', () => {
+  assert.equal(mesmaLinha('Monitor Gamer', 'Monitor Gamer AOC AGON'), null);
+  assert.equal(mesmaLinha('Monitor Gamer AOC', 'Monitor Samsung'), null);
+  assert.equal(mesmaLinha('Monitor de 10', 'Monitor Gamer AOC'), null); // "de" sai: sobram 2 palavras
+  for (const ruim of [null, undefined, 12, {}, '']) assert.equal(mesmaLinha(ruim, AGON_27), null, String(ruim));
+  // a 1ª palavra significativa não existe (só número e cabeça): sem tipo
+  assert.equal(mesmaLinha('Kit 10 20 30', 'Kit 10 20 30'), null);
+});
+
+test('mesmaLinha: leitura rápida com título enorme (sem regex sobre o texto de terceiro)', () => {
+  const grande = `${'a'.repeat(50_000)} ${'b'.repeat(50_000)} ${'c '.repeat(30_000)}`;
+  const t0 = Date.now();
+  mesmaLinha(grande, grande.split('').reverse().join(''));
+  assert.ok(Date.now() - t0 < 500);
+});
+
+test('trava sem `seguidas` é a de hoje: o par AGON passa, em qualquer ordem (CA8)', () => {
+  const t = trava([envio('K1', AGON_34, 2000, AGORA - 10 * M)], 7);
+  assert.equal(t.avaliar({ key: 'K2', title: AGON_27, price: 20 }), null);
+  t.acrescentar({ key: 'K3', title: PARTYBOX_330 });
+  assert.equal(t.avaliar({ key: 'K4', title: PARTYBOX_130, price: 20 }), null);
+  for (const nula of [null, undefined]) {
+    const t2 = criarTrava({ enviados: [], agora: AGORA, dedupeDias: 7, seguidas: nula });
+    t2.acrescentar({ key: 'K3', title: PARTYBOX_330 });
+    assert.equal(t2.avaliar({ key: 'K4', title: PARTYBOX_130, price: 20 }), null);
+  }
+});
+
+test('seguidas: a mesma linha de uma escolhida deste envio é barrada, sem hora (CA1)', () => {
+  const t = seguidas([]);
+  assert.equal(t.avaliar({ key: 'K1', title: AGON_34, price: 20 }), null);
+  t.acrescentar({ key: 'K1', title: AGON_34 });
+  assert.deepEqual(t.avaliar({ key: 'K2', title: AGON_27, price: 20 }),
+    { acao: 'barrar', tipo: 'seguida', anterior: { title: AGON_34, preco: null, sent_at: null } });
+  assert.equal(t.avaliar({ key: 'K3', title: 'Air Fryer Mondial 4L Preta', price: 20 }), null);
+  t.acrescentar({ key: 'K4', title: PARTYBOX_520 });
+  assert.equal(t.avaliar({ key: 'K5', title: PARTYBOX_320, price: 20 }).tipo, 'seguida');
+});
+
+test('seguidas: a mesma chave da escolhida não é comparada consigo mesma (CA7)', () => {
+  const t = seguidas([]);
+  t.acrescentar({ key: 'K1', title: AGON_34 });
+  assert.equal(t.avaliar({ key: 'K1', title: AGON_27, price: 20 }), null);
+  t.acrescentar({ key: 7, title: PARTYBOX_330 }); // chave numérica: a comparação é por texto
+  assert.equal(t.avaliar({ key: '7', title: PARTYBOX_130, price: 20 }), null);
+});
+
+test('seguidas: o envio de 44 min atrás barra e o de 46 min não; no minuto 45 já passou (CA2)', () => {
+  const barra = (min) => seguidas([envio('K1', AGON_34, 2000, AGORA - min * M)]).avaliar({ key: 'K2', title: AGON_27, price: 20 });
+  assert.deepEqual(barra(44), { acao: 'barrar', tipo: 'seguida', anterior: { title: AGON_34, preco: null, sent_at: AGORA - 44 * M } });
+  assert.equal(barra(44.99).tipo, 'seguida');
+  assert.equal(barra(45), null);
+  assert.equal(barra(46), null);
+  assert.equal(barra(0).tipo, 'seguida');
+});
+
+test('seguidas: só a mesma linha do envio anterior barra; outro tipo passa', () => {
+  const t = seguidas([envio('K1', PARTYBOX_330, 2000, AGORA - 30 * M)]);
+  assert.equal(t.avaliar({ key: 'K2', title: PARTYBOX_130, price: 20 }).tipo, 'seguida');
+  assert.equal(t.avaliar({ key: 'K3', title: 'Air Fryer Mondial 4L Preta', price: 20 }), null);
+  assert.equal(t.avaliar({ key: 'K4', title: 'Colete Tático Para Cães Grandes', price: 20 }), null);
+});
+
+test('seguidas: vários recentes da mesma linha: o anterior citado é o mais recente', () => {
+  const t = seguidas([envio('K1', AGON_34, 2000, AGORA - 40 * M), envio('K9', AGON_27, 2000, AGORA - 10 * M)]);
+  assert.equal(t.avaliar({ key: 'K2', title: 'Monitor Dell 24', price: 20 }).anterior.sent_at, AGORA - 10 * M);
+});
+
+test('seguidas: a mesma chave do envio anterior não é comparada consigo mesma (CA7)', () => {
+  const t = seguidas([envio('K1', AGON_34, 2000, AGORA - 10 * M)], 0);
+  assert.equal(t.avaliar({ key: 'K1', title: AGON_27, price: 20 }), null); // a regra de hoje (wasSent) é que cuida dela
+  assert.equal(t.avaliar({ key: 'K2', title: AGON_27, price: 20 }).tipo, 'seguida');
+});
+
+test('seguidas: vale com dedupe_days 0, e a regra entre rodadas continua desligada (CA7)', () => {
+  const recentes = [envio('K1', AGON_34, 2000, AGORA - 10 * M)];
+  for (const dias of [0, -1, null, undefined, NaN]) {
+    const t = criarTrava({ enviados: [], agora: AGORA, dedupeDias: dias, seguidas: { recentes } });
+    assert.equal(t.avaliar({ key: 'K2', title: AGON_27, price: 20 }).tipo, 'seguida', String(dias));
+    assert.equal(t.avaliar({ key: 'K3', title: 'Air Fryer Mondial 4L Preta', price: 20 }), null, String(dias));
+    t.acrescentar({ key: 'K4', title: PARTYBOX_330 });
+    assert.equal(t.avaliar({ key: 'K5', title: PARTYBOX_130, price: 20 }).tipo, 'seguida', String(dias));
+  }
+  // o `enviados` com dedupe 0 segue ignorado: só os `recentes` valem
+  const t = criarTrava({ enviados: [envio('K1', AGON_34, 2000, AGORA - 10 * M)], agora: AGORA, dedupeDias: 0, seguidas: { recentes: [] } });
+  assert.equal(t.avaliar({ key: 'K2', title: AGON_27, price: 20 }), null);
+});
+
+test('seguidas: o que a lógica de 24 h barra vale como ela disse (parecido, mesmo, rodada)', () => {
+  // parecida (80%) e da mesma linha: o texto da trava de 24 h
+  const t = trava([envio('K1', AREIA_FINA, 4990, AGORA - 10 * M)], 7, { seguidas: { recentes: [envio('K1', AREIA_FINA, 4990, AGORA - 10 * M)] } });
+  assert.equal(t.avaliar({ key: 'K2', title: AREIA_MISTA, price: 49.9 }).tipo, 'parecido');
+  assert.equal(t.avaliar({ key: 'K3', title: AREIA_FINA_2, price: 49.9 }).tipo, 'mesmo');
+  // a mesma rodada: 'rodada' ganha de 'seguida'
+  const r = seguidas([]);
+  r.acrescentar({ key: 'K1', title: AREIA_FINA });
+  assert.equal(r.avaliar({ key: 'K2', title: AREIA_MISTA, price: 49.9 }).tipo, 'rodada');
+  assert.equal(r.avaliar({ key: 'K3', title: 'Areia Higiênica Pipicat Gatos Perfumada Sachê', price: 49.9 }).tipo, 'seguida');
+});
+
+test('seguidas: a seguida ganha da exceção dos 5% ("liberar"), no envio anterior e no mesmo envio (CA1, CA2)', () => {
+  const antigo = [envio('K1', AREIA_FINA, 5990, AGORA - 2 * D)];
+  assert.equal(trava(antigo, 7).avaliar({ key: 'K2', title: AREIA_FINA, price: 55 }).acao, 'liberar'); // sem seguidas: libera
+  // com um envio da mesma linha há 20 min
+  const recente = envio('K9', 'Areia Higiênica Pipicat Super Premium Gatos 10kg', 3000, AGORA - 20 * M);
+  const t = trava(antigo, 7, { seguidas: { recentes: [recente] } });
+  assert.deepEqual(t.avaliar({ key: 'K2', title: AREIA_FINA, price: 55 }),
+    { acao: 'barrar', tipo: 'seguida', anterior: { title: recente.title, preco: null, sent_at: recente.sent_at } });
+  // e com uma escolhida deste envio
+  const t2 = trava(antigo, 7, { seguidas: { recentes: [] } });
+  t2.acrescentar({ key: 'K8', title: 'Areia Sanitária Pipicat Granulada Super Premium Gatos' });
+  assert.equal(t2.avaliar({ key: 'K2', title: AREIA_FINA, price: 55 }).tipo, 'seguida');
+  // sem a seguida, a exceção continua
+  const t3 = trava(antigo, 7, { seguidas: { recentes: [] } });
+  assert.equal(t3.avaliar({ key: 'K2', title: AREIA_FINA, price: 55 }).acao, 'liberar');
+});
+
+test('seguidas: retirar a escolhida libera a mesma linha, e uma chave repetida precisa sair toda (CA6)', () => {
+  const t = seguidas([]);
+  t.acrescentar({ key: 'K1', title: AGON_34 });
+  assert.equal(t.avaliar({ key: 'K2', title: AGON_27, price: 20 }).tipo, 'seguida');
+  assert.equal(t.retirar('K1'), true);
+  assert.equal(t.avaliar({ key: 'K2', title: AGON_27, price: 20 }), null);
+  assert.equal(t.retirar('K1'), false);
+});
+
+test('seguidas: `semRecentes` ignora o envio anterior e ainda barra a mesma linha de uma escolhida (CA11)', () => {
+  const t = seguidas([envio('K1', AGON_34, 2000, AGORA - 10 * M)]);
+  assert.equal(t.avaliar({ key: 'K2', title: AGON_27, price: 20 }).tipo, 'seguida');
+  assert.equal(t.avaliar({ key: 'K2', title: AGON_27, price: 20 }, { semRecentes: true }), null);
+  t.acrescentar({ key: 'K2', title: AGON_27 });
+  assert.equal(t.avaliar({ key: 'K3', title: AGON_34, price: 20 }, { semRecentes: true }).tipo, 'seguida');
+  assert.equal(t.avaliar({ key: 'K3', title: AGON_34, price: 20 }, { semRecentes: true }).anterior.sent_at, null);
+  // a lógica de 24 h também vale com `semRecentes`
+  const u = trava([envio('K1', AREIA_FINA, 4990, AGORA - 10 * M)], 7, { seguidas: { recentes: [] } });
+  assert.equal(u.avaliar({ key: 'K2', title: AREIA_MISTA, price: 49.9 }, { semRecentes: true }).tipo, 'parecido');
+});
+
+test('seguidas: título com menos de 3 palavras não compara; recente sem título, sem hora ou ilegível é ignorado', () => {
+  const t = seguidas([
+    envio('K1', 'Monitor Gamer', 2000, AGORA - 10 * M), // 2 palavras
+    { offer_key: 'K2', title: null, price_cents: 1, sent_at: AGORA - 10 * M },
+    { offer_key: 'K3', title: AGON_34, price_cents: 1, sent_at: null },
+    { offer_key: 'K4', title: AGON_34, price_cents: 1, sent_at: 'ontem' },
+    null,
+  ]);
+  assert.equal(t.avaliar({ key: 'K9', title: 'Monitor Gamer AOC', price: 20 }), null);
+  assert.equal(t.avaliar({ key: 'K9', title: AGON_27, price: 20 }), null);
+  t.acrescentar({ key: 'K5', title: 'Monitor Gamer' }); // 2 palavras: nem entra nas escolhidas
+  assert.equal(t.avaliar({ key: 'K9', title: AGON_27, price: 20 }), null);
+  assert.equal(t.avaliar({ key: 'K9', title: 'Monitor Gamer', price: 20 }), null);
+  for (const ruim of [{}, { recentes: null }, { recentes: 'x' }]) {
+    assert.equal(trava([], 7, { seguidas: ruim }).avaliar({ key: 'K9', title: AGON_27, price: 20 }), null);
   }
 });

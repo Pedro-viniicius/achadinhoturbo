@@ -827,6 +827,9 @@ const FATOS = [
   { nome: 'horas que ofertas parecidas esperam', valor: 24, texto: (v) => new RegExp(`parecidas esperam ${v} h\\b`), codigo: [['src/parecido.js', /export const HORAS_ENTRE_PARECIDOS = (\d+);/]] },
   { nome: 'grau de semelhança das ofertas parecidas (%)', valor: 75, texto: (v) => new RegExp(`${v}% das palavras`), codigo: [['src/parecido.js', /export const LIMIAR_PARECIDO = 0\.(\d+);/]] },
   { nome: 'primeiras palavras do título que entram na comparação', valor: 8, texto: (v) => new RegExp(`só as ${v} primeiras palavras`), codigo: [['src/parecido.js', /export const PALAVRAS_PARECIDO = (\d+);/]] },
+  // Ofertas seguidas (plano variedade-ofertas-seguidas, CA10): a janela do envio anterior e as palavras da "mesma linha"
+  { nome: 'minutos em que a mesma linha de um envio anterior não sai (ofertas seguidas)', valor: 45, texto: (v) => new RegExp(`até ${v} minutos depois`), codigo: [['src/parecido.js', /export const MINUTOS_SEGUIDAS = (\d+);/]] },
+  { nome: 'palavras em comum que fazem duas ofertas da mesma linha', valor: 2, texto: (v) => new RegExp(`pelo menos ${v} palavras em comum`), codigo: [['src/parecido.js', /export const COMUNS_MESMA_LINHA = (\d+);/]] },
   // adendo de 10/11 (D11): o mesmo produto com outro código só volta antes do prazo com este desconto mínimo
   { nome: 'desconto mínimo para o mesmo produto sair antes do prazo (%)', valor: 5, texto: (v) => new RegExp(`pelo menos ${v}% mais barato\\b`), codigo: [['src/parecido.js', /export const DESCONTO_MINIMO_MAIS_BARATA = (\d+);/]] },
   // Rodar sozinho, entrega 1: depois de uma falha do Etiqueta, as Amazon seguem direto para a reserva por este prazo
@@ -1809,7 +1812,7 @@ test('Verificador, Rodar sozinho (entrega 1): descartes novos, reserva, pulada, 
   const saíram = 'Saíram 2 de 3 ofertas; 1 pulada (preço sem conferência), 1 descartada (esgotada na loja).';
   assert.ok(REF.includes(saíram), 'Docs (Referência): a frase "Saíram X de Y"'); assert.ok(README.includes(saíram), 'README: a frase "Saíram X de Y"');
   assert.ok(sched.includes('Antes da escolha, ${total}'));
-  for (const pedaco of ['fora dos filtros da regra', 'já enviadas ou parecidas']) {
+  for (const pedaco of ['fora dos filtros da regra', 'já enviadas ou parecidas', 'da mesma linha de uma oferta recente']) {
     assert.ok(sched.includes(pedaco), `src/scheduler.js: ${pedaco}`); assert.ok(REF.includes(pedaco), `Docs (Referência): ${pedaco}`);
   }
   // a pausa vem da constante (o número está no FATOS) e a Amazon sem conferência tem redação própria no código e nos Docs
