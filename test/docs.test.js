@@ -1485,7 +1485,8 @@ test('Vigia: o TIP, a seção do capítulo, a linha dos Limites e o README traze
   assert.deepEqual(v, { loja: 3, regra: 2, fora: 30, abre: 10, fecha: 5, freio: 3 }, 'os limites do vigia mudaram: atualize o código, os Docs, o TIP e esta tabela juntos');
   const limites = CAPS.referencia.secoes.find((x) => x.id === 'limites').blocos.find((b) => b.tabela).tabela.linhas.find((l) => l[0] === 'Vigia');
   assert.ok(limites, 'linha "Vigia" nos Limites');
-  const readme = (/- \*\*Vigia\*\*: avisa pelo WhatsApp[^\n]*/.exec(lerRaiz('README.md')) || [''])[0];
+  // o item do README tem sub-itens indentados (Causas, Regras do aviso…): vale o item inteiro, até o próximo item de primeiro nível
+  const readme = (/- \*\*Vigia\*\*: avisa pelo WhatsApp[^\n]*(?:\n {2,}[^\n]*)*/.exec(lerRaiz('README.md')) || [''])[0];
   assert.ok(readme, 'item "Vigia" do README');
   const tip = limpo(tipsDoPainel()['relatorios.vigia']);
   const fontes = {

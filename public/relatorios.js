@@ -24,7 +24,7 @@ const TEXTOS_RELATORIOS = {
   avisos: { lotacao: 'Grupo lotando', erro: 'Erro de disparo' },
   dicaAviso: {
     lotacao: 'Um grupo de um link ativo do rotacionador chegou perto do limite. Um aviso por grupo.',
-    erro: 'Uma mensagem não saiu, o backup está atrasado ou algo parou (loja, extensão ou Central, revisão acumulada, regra vazia). Erros: no máximo um aviso a cada 30 minutos, todos juntos. O resto: no máximo um por causa a cada 3 horas.',
+    erro: 'Avisa quando uma mensagem não sai (no máximo 1 aviso a cada 30 min, com todos os erros juntos), quando o backup atrasa (no máximo 1 por dia) e quando algo para: loja, extensão, Central, revisão acumulada ou regra vazia (no máximo 1 aviso por causa a cada 3 h).',
   },
   editar: 'Editar', remover: 'Remover',
   // enviar teste (só o Dono vê o botão)
@@ -33,8 +33,8 @@ const TEXTOS_RELATORIOS = {
   testeDesligado: 'Este número está desligado: ligue-o para receber os avisos de verdade.',
   testeSemErro: 'Ele não recebe os avisos de erro: marque “Erro de disparo” em Editar.',
   testeRecebe: 'Ele recebe os avisos de erro, de backup atrasado e do vigia.',
-  vigia: 'Vigia: o programa avisa pelo WhatsApp quando uma loja, a extensão, a Central, a revisão ou uma regra para.',
-  vigiaNada: 'Nenhum problema em aberto.', vigiaSemLeitura: 'Sem leitura agora; tentando de novo no próximo ciclo.',
+  vigia: 'Vigia: o programa avisa pelo WhatsApp quando algo para (uma loja, a extensão, a Central ou uma regra) ou quando a revisão acumula.',
+  vigiaNada: 'Nenhum problema em aberto.', vigiaSemLeitura: 'Sem leitura agora; tentando de novo daqui a pouco.',
   vigiaAberto: (nomes) => `Em aberto agora: ${nomes}.`,
   vigiaSemDestino: 'Ninguém recebe esses avisos: marque “Erro de disparo” em um número.',
   resumoSaude: 'O resumo diário traz uma linha de saúde dos envios.',

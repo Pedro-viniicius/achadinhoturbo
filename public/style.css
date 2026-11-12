@@ -905,3 +905,4 @@ nav a[href="#grupo-vivo"] { --ic:url("data:image/svg+xml,%3Csvg xmlns='http://ww
   .gv-item-topo button, .gv-modelo > button, .gv-galeria .linha button, #gv-add, #gv-hor-add, [data-gv="add-opcao"] { min-height:44px; }
   .gv-modelo > button { justify-self:stretch; }
 }
+#rel-vigia { overflow-wrap:anywhere; min-width:0; }

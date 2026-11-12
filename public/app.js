@@ -163,7 +163,7 @@ const TEXTOS_VIGIA = {
   lojaParada: (nome, quando) => `${nome === 'Amazon' ? 'Amazon parada' : `${nome} parado`} ${quando}`,
   regraVazia: (nome, quando) => `${nome ? `Regra “${nome}”` : 'Uma regra'} saiu vazia ${quando}`,
   revisao: (n, quando) => `${n ? `${n} ${n === 1 ? 'oferta esperando' : 'ofertas esperando'}` : 'Ofertas esperando'} revisão ${quando}`,
-  extensao: 'Extensão do Chrome fora', central: 'Mercado Livre em espera',
+  extensao: 'Extensão do Chrome desconectada', central: 'Mercado Livre em espera',
   mais: (n) => `+${n} ${n === 1 ? 'problema em aberto' : 'problemas em aberto'}`,
   semNome: 'Problema em aberto',
 };
