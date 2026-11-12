@@ -185,6 +185,16 @@ CREATE INDEX IF NOT EXISTS idx_rotinas_fila ON rotinas (enabled, next_run_at);
 -- deslizante. Só a hora do envio: sem jid, número nem conteúdo. src/ritmo.js apaga o que passa de 2 h.
 CREATE TABLE IF NOT EXISTS wa_saidas (ts INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_wa_saidas_ts ON wa_saidas (ts);
+-- Vigia (plano rodar-sozinho-entrega3): uma linha por execução de regra, para as sequências ("3 execuções seguidas") e a
+-- linha de saúde do dia. Só o id da regra e números, sem dado pessoal. conta = 0: não soma nem zera sequência.
+-- lojas_pedidas: lista JSON das lojas da regra; por_loja: {loja: {saiu, pulada, descartada, revisao, esperou, motivos}}.
+-- rule_id sem FK: a linha fica se a regra for apagada. O agendador apaga o que passa de 35 dias.
+CREATE TABLE IF NOT EXISTS execucoes (
+  id INTEGER PRIMARY KEY, ts INTEGER NOT NULL, rule_id INTEGER, conta INTEGER NOT NULL CHECK (conta IN (0,1)),
+  want INTEGER NOT NULL DEFAULT 0, saidas INTEGER NOT NULL DEFAULT 0, erros INTEGER NOT NULL DEFAULT 0,
+  lojas_pedidas TEXT NOT NULL DEFAULT '[]', por_loja TEXT NOT NULL DEFAULT '{}');
+CREATE INDEX IF NOT EXISTS execucoes_ts ON execucoes(ts);
+CREATE INDEX IF NOT EXISTS execucoes_regra ON execucoes(rule_id, id);
 `;
 
 // Colunas acrescentadas depois da primeira versão (ALTER TABLE só se faltar).

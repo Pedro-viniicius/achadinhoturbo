@@ -1307,3 +1307,104 @@ test('config: o módulo carregado de verdade (como o npm start e o npm run simul
   assert.deepEqual(ler(['--simular'], { DATA_DIR: dir }), [dir, true], 'DATA_DIR explícito vale na simulação');
   assert.deepEqual(ler([], { DATA_DIR: dir }), [dir, false]);
 });
+
+// Vigia (plano rodar-sozinho-entrega3, etapa 1): a migração só acrescenta a tabela execucoes (uma linha por execução de
+// regra: id da regra e números, sem dado pessoal) com os índices por hora e por regra. CA3.10: as execuções sobrevivem ao
+// reinício; reabrir não apaga nada. A retenção de 35 dias é do agendador (etapa 5), não do openDb.
+const COLUNAS_EXECUCOES = [
+  { name: 'id', type: 'INTEGER', notnull: 0, dflt_value: null, pk: 1 },
+  { name: 'ts', type: 'INTEGER', notnull: 1, dflt_value: null, pk: 0 },
+  { name: 'rule_id', type: 'INTEGER', notnull: 0, dflt_value: null, pk: 0 },
+  { name: 'conta', type: 'INTEGER', notnull: 1, dflt_value: null, pk: 0 },
+  { name: 'want', type: 'INTEGER', notnull: 1, dflt_value: '0', pk: 0 },
+  { name: 'saidas', type: 'INTEGER', notnull: 1, dflt_value: '0', pk: 0 },
+  { name: 'erros', type: 'INTEGER', notnull: 1, dflt_value: '0', pk: 0 },
+  { name: 'lojas_pedidas', type: 'TEXT', notnull: 1, dflt_value: "'[]'", pk: 0 },
+  { name: 'por_loja', type: 'TEXT', notnull: 1, dflt_value: "'{}'", pk: 0 },
+];
+const INDICES_EXECUCOES = { execucoes_ts: ['ts'], execucoes_regra: ['rule_id', 'id'] };
+
+function conferirExecucoes(db, quando) {
+  assert.ok(existe(db, 'table', 'execucoes'), `tabela execucoes (${quando})`);
+  assert.deepEqual(semCid(db, 'execucoes'), COLUNAS_EXECUCOES, `colunas de execucoes: id da regra e números, sem dado pessoal (${quando})`);
+  for (const [indice, cols] of Object.entries(INDICES_EXECUCOES)) {
+    assert.equal(db.prepare("SELECT tbl_name FROM sqlite_master WHERE type = 'index' AND name = ?").get(indice)?.tbl_name, 'execucoes', `índice ${indice} (${quando})`);
+    assert.deepEqual(db.prepare(`PRAGMA index_info(${indice})`).all().map((c) => c.name), cols, `colunas de ${indice} (${quando})`);
+    assert.equal(db.prepare('PRAGMA index_list(execucoes)').all().find((i) => i.name === indice)?.unique, 0, `${indice} não é único (${quando})`);
+  }
+  assert.deepEqual(objetosDe(db).filter((o) => o.tbl_name === 'execucoes').map((o) => o.name).sort(), ['execucoes', 'execucoes_regra', 'execucoes_ts'],
+    `só a tabela e os dois índices, sem duplicar (${quando})`);
+}
+
+test('vigia etapa 1 (CA3.10): banco novo tem execucoes com os dois índices; reabrir não cria, não altera nem apaga nada', () => {
+  const dir = tmp();
+  const db1 = openDb(dir);
+  conferirExecucoes(db1, 'primeira abertura');
+  assert.equal(db1.prepare('SELECT COUNT(*) AS n FROM execucoes').get().n, 0, 'execucoes nasce vazia');
+  const ins = db1.prepare('INSERT INTO execucoes (ts, rule_id, conta, want, saidas, erros, lojas_pedidas, por_loja) VALUES (?,?,?,?,?,?,?,?)');
+  ins.run(1000, 3, 1, 3, 2, 1, '["ml","amazon"]', '{"ml":{"saiu":2,"pulada":0,"descartada":1,"revisao":0,"esperou":0,"motivos":{"sem_estoque":1}}}');
+  ins.run(1000, 3, 0, 0, 0, 0, '[]', '{}');
+  const esquema = objetosDe(db1);
+  const dados = linhas(db1, 'SELECT * FROM execucoes ORDER BY id');
+  assert.equal(dados.length, 2, 'duas execuções no mesmo instante ficam as duas');
+  db1.close();
+
+  for (let abertura = 2; abertura <= 3; abertura++) {
+    const db = openDb(dir);
+    conferirExecucoes(db, `abertura ${abertura}`);
+    assert.deepEqual(objetosDe(db), esquema, `reabrir não cria nem altera nada (abertura ${abertura})`);
+    assert.deepEqual(linhas(db, 'SELECT * FROM execucoes ORDER BY id'), dados, `as execuções sobrevivem ao reinício (abertura ${abertura})`);
+    db.close();
+  }
+});
+
+test('vigia etapa 1: execucoes tem os padrões do plano, ts e conta obrigatórios, e conta só 0 ou 1', () => {
+  const db = openDb(tmp());
+  const { lastInsertRowid } = db.prepare('INSERT INTO execucoes (ts, conta) VALUES (?, ?)').run(5000, 1);
+  assert.deepEqual({ ...db.prepare('SELECT * FROM execucoes WHERE id = ?').get(lastInsertRowid) },
+    { id: Number(lastInsertRowid), ts: 5000, rule_id: null, conta: 1, want: 0, saidas: 0, erros: 0, lojas_pedidas: '[]', por_loja: '{}' },
+    'rule_id nulo é aceito (regra apagada) e o resto nasce zerado');
+  assert.throws(() => db.prepare('INSERT INTO execucoes (conta) VALUES (1)').run(), /NOT NULL/, 'toda execução tem hora');
+  assert.throws(() => db.prepare('INSERT INTO execucoes (ts) VALUES (1)').run(), /NOT NULL/, 'toda execução diz se conta');
+  for (const conta of [2, -1]) {
+    assert.throws(() => db.prepare('INSERT INTO execucoes (ts, conta) VALUES (1, ?)').run(conta), /CHECK/, `conta ${conta} recusada`);
+  }
+  assert.throws(() => db.prepare("INSERT INTO execucoes (ts, conta, lojas_pedidas) VALUES (1, 1, NULL)").run(), /NOT NULL/, 'lojas_pedidas nunca nula');
+  assert.throws(() => db.prepare("INSERT INTO execucoes (ts, conta, por_loja) VALUES (1, 1, NULL)").run(), /NOT NULL/, 'por_loja nunca nula');
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM execucoes').get().n, 1, 'nenhuma linha recusada entrou');
+  db.close();
+});
+
+test('vigia etapa 1 (CA3.10): banco da versão anterior (sem execucoes) abre sem perder nada e ganha a tabela vazia', () => {
+  const dir = tmp();
+  // Banco como o do serviço antes desta etapa: esquema atual sem execucoes (o DROP leva os índices junto), com dados.
+  const velho = openDb(dir);
+  velho.exec('DROP TABLE IF EXISTS execucoes');
+  velho.exec(`
+    INSERT INTO settings (key, value) VALUES ('delay_group_s', '9'), ('vigia_estado', '{"causas":[]}');
+    INSERT INTO groups (jid, name, size, updated_at, invite_code, is_admin, description, admins)
+      VALUES ('g1@g.us', 'Grupo 1', 250, 1, 'abc', 1, 'Ofertas do dia', 2);
+    INSERT INTO rules (id, name, group_jids, next_run_at, created_at) VALUES (3, 'Regra', '["g1@g.us"]', 1730000000000, 1);
+    INSERT INTO sent_offers (rule_id, offer_key, sent_at, title, price_cents) VALUES (3, 'MLB1', 1730000000000, 'Fone', 8990);
+    INSERT INTO log (ts, rule_id, rule_name, level, group_name, offer_title, message) VALUES (1730000000000, 3, 'Regra', 'ok', 'Grupo 1', 'Fone', 'enviado');
+    INSERT INTO wa_saidas (ts) VALUES (1730000000000);
+  `);
+  assert.ok(!existe(velho, 'table', 'execucoes'), 'o banco simulado não tem execucoes');
+  for (const indice of Object.keys(INDICES_EXECUCOES)) assert.ok(!existe(velho, 'index', indice), `o banco simulado não tem ${indice}`);
+  const objetosAntigos = objetosDe(velho);
+  const tabelasAntigas = objetosAntigos.filter((o) => o.type === 'table').map((o) => o.name);
+  const antes = {};
+  for (const t of tabelasAntigas) antes[t] = linhas(velho, `SELECT * FROM ${t} ORDER BY rowid`);
+  velho.close();
+
+  for (let abertura = 1; abertura <= 2; abertura++) {
+    const db = openDb(dir);
+    conferirExecucoes(db, `abertura ${abertura}`);
+    for (const t of tabelasAntigas) {
+      assert.deepEqual(linhas(db, `SELECT * FROM ${t} ORDER BY rowid`), antes[t], `${t} intacta (abertura ${abertura})`);
+    }
+    assert.deepEqual(objetosDe(db).filter((o) => o.tbl_name !== 'execucoes'), objetosAntigos, `nenhuma outra tabela ou índice muda (abertura ${abertura})`);
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM execucoes').get().n, 0, `execucoes nasce vazia (abertura ${abertura})`);
+    db.close();
+  }
+});
