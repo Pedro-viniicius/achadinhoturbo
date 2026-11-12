@@ -571,6 +571,14 @@ const TEXTOS_REVISAO_CATALOGO = {
     nao_conferido: 'Não deu para conferir o preço: confira na loja',
     queda_preco: 'Preço muito abaixo da lista: confira o preço', falhas_repetidas: 'Falhou 3 vezes seguidas: confira a oferta e envie',
   },
+  // com 2 ou mais motivos: as descrições se juntam com " e " e a ação (a mesma do motivo sozinho) vem uma vez no fim
+  motivosPartes: {
+    shopee: ['Shopee', 'confirme o link'], desconto_100: ['desconto de 100%', 'confira o preço'],
+    preco_antigo: ['preço antigo muito alto', 'confira o preço'], falha_link: ['não consegui gerar o link', 'confira a oferta'],
+    nao_conferido: ['não deu para conferir o preço', 'confira na loja'], queda_preco: ['preço muito abaixo da lista', 'confira o preço'],
+    falhas_repetidas: ['falhou 3 vezes seguidas', 'confira a oferta e envie'],
+  },
+  quedaParte: (pct) => `preço ${pct}% abaixo da lista`,
   // com a queda em % (`queda_pct` do item, quando o servidor a mandar): o texto da spec; sem ela, o de `motivos.queda_preco`
   quedaMotivo: (pct) => `Preço ${pct}% abaixo da lista: confira o preço`,
   // item que voltou à revisão porque o "Enviar" não chegou a nenhum grupo (`ultimo_envio_falhou`)
@@ -595,7 +603,7 @@ const TEXTOS_REVISAO_CATALOGO = {
   cheia: (regra, n) => `A regra “${regra}” tem ${n} ofertas esperando revisão. As novas esperam até você revisar ou descartar algumas.`,
   // dialog "Revisar oferta"
   titulo: 'Revisar oferta',
-  sub: (regra, motivos) => `Veio do catálogo, pela regra “${regra}”. Motivo: ${motivos}. Confira os dados e envie, ou descarte.`,
+  sub: (regra, motivos) => `Veio do catálogo, pela regra “${regra}”. Motivo: ${String(motivos).replace(/\.$/, '')}. Confira os dados e envie, ou descarte.`,
   faixaShopee: 'O link da Shopee não prova de quem é a conta. Abra o link abaixo para conferir o produto antes de enviar.',
   faixaPreco: (x, antigo, preco) => `Esta oferta aparece com 100% de desconto ou com preço antigo ${x}× maior que o preço (${antigo} → ${preco}). Costuma ser erro no catálogo. Corrija os preços à mão, ou apague o preço antigo: a mensagem sai sem “de/por” e sem desconto.`,
   // 100% informado pelo Etiqueta sem preço antigo 10× maior: o envio é liberado, porque o servidor nunca manda o "100%"
@@ -632,10 +640,16 @@ const hcatLinkSeguro = (loja, link) => (Object.hasOwn(HCAT_LINKS, loja) && typeo
 const HCAT_QUEDA_LIMITE = 50; // espelha QUEDA_REVISAO_PCT de src/catalogo.js (o painel não importa de src/)
 /** `queda_pct` do item (inteiro de 1 a 99) ou null: o servidor ainda pode não mandar. */
 const hcatQuedaPct = (it) => (Number.isInteger(it?.queda_pct) && it.queda_pct >= 1 && it.queda_pct <= 99 ? it.queda_pct : null);
-const hcatMotivos = (lista, it) => (Array.isArray(lista) ? lista : []).map((m) => {
-  if (m === 'queda_preco' && hcatQuedaPct(it) != null) return TEXTOS_REVISAO_CATALOGO.quedaMotivo(hcatQuedaPct(it));
-  return Object.hasOwn(TEXTOS_REVISAO_CATALOGO.motivos, m) ? TEXTOS_REVISAO_CATALOGO.motivos[m] : '';
-}).filter(Boolean).join(' e ');
+const hcatMotivos = (lista, it) => {
+  const R = TEXTOS_REVISAO_CATALOGO; const ms = (Array.isArray(lista) ? lista : []).filter((m) => Object.hasOwn(R.motivos, m));
+  if (ms.length < 2) { // 1 motivo (ou nenhum): o texto inteiro dele
+    return ms.map((m) => (m === 'queda_preco' && hcatQuedaPct(it) != null ? R.quedaMotivo(hcatQuedaPct(it)) : R.motivos[m])).join('');
+  }
+  const desc = ms.map((m) => (m === 'queda_preco' && hcatQuedaPct(it) != null ? R.quedaParte(hcatQuedaPct(it)) : R.motivosPartes[m][0]));
+  const acoes = [...new Set(ms.map((m) => R.motivosPartes[m][1]))].join(' e ');
+  // "Para revisar: " vem antes, então a descrição começa em minúscula (a Shopee é nome próprio)
+  return `${desc.join(' e ')}. ${acoes.charAt(0).toUpperCase()}${acoes.slice(1)}.`;
+};
 const hcatNomeLoja = (loja) => (Object.hasOwn(TEXTOS_REVISAO_CATALOGO.lojas, loja) ? TEXTOS_REVISAO_CATALOGO.lojas[loja] : '—');
 /**
  * Preço ainda suspeito com os valores do formulário (a mesma conta do servidor, precoSuspeito em src/catalogo-itens.js):
@@ -780,9 +794,9 @@ function hcatFaixaHtml(it) {
   if (m.includes('falhas_repetidas')) ps.push(R.faixaFalhas);
   if (it.status === 'revisao' && it.ultimo_envio_falhou === true) {
     const erros = Array.isArray(it.ultimo_envio_erros) ? it.ultimo_envio_erros.map((g) => R.ultimoEnvioErro(g?.nome ?? '', g?.erro ?? '')) : [];
-    ps.push(erros.length ? `${R.faixaUltimoFalhou} ${erros.join(' · ')}` : R.ultimoEnvioFalhou);
+    ps.push(erros.length ? { intro: R.faixaUltimoFalhou, lista: erros } : R.ultimoEnvioFalhou); // um grupo por linha (D8)
   }
-  return ps.length ? `<div class="aviso-impl" role="status"><div class="aviso-corpo">${ps.map((p) => `<p>${esc(p)}</p>`).join('')}</div></div>` : '';
+  return ps.length ? `<div class="aviso-impl" role="status"><div class="aviso-corpo">${ps.map((p) => (typeof p === 'string' ? `<p>${esc(p)}</p>` : `<p>${esc(p.intro)}</p><ul>${p.lista.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>`)).join('')}</div></div>` : '';
 }
 
 /** Dialog "Revisar oferta" de um item do catálogo (só o Dono; item 'revisao', ou enviado com `pode_reenviar`). */

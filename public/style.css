@@ -46,6 +46,8 @@ main { padding:24px clamp(16px,4vw,48px) 64px; max-width:1040px; width:100%; }
 .pilula.ok i { background:var(--ok); } .pilula.espera i { background:var(--warn); }
 .pilula.sim { background:var(--warn); color:#fff; border-color:var(--warn); font-weight:600; }
 .faixa a.pilula { text-decoration:none; }
+.faixa a.pilula::after { content:"\203A" / ""; font-weight:700; margin-left:2px; } /* seta: a pílula é link para Conexões (não só cor) */
+.faixa a.pilula:hover, .faixa a.pilula:focus-visible { text-decoration:underline; }
 @media (max-width:600px) { .faixa a.pilula { padding:11px 14px; } } /* alvo de toque de 44 px no celular */
 h1 { font:800 30px/1.1 var(--titulo); letter-spacing:-.03em; margin:0; }
 h2 { font:700 17px/1.25 var(--titulo); letter-spacing:-.02em; margin:0 0 4px; }
@@ -485,6 +487,7 @@ a[href="#templates"].dica { display:inline-block; min-height:24px; line-height:2
 .aviso-impl .aviso-corpo > p, .aviso-impl .aviso-corpo > details { margin:0; }
 .aviso-impl .passos { margin:0; padding-left:20px; color:var(--text); }
 .aviso-impl .passos li { margin:4px 0; }
+.aviso-impl .aviso-corpo ul { margin:4px 0 0; padding-left:20px; } .aviso-impl .aviso-corpo ul li { margin:2px 0; overflow-wrap:anywhere; }
 .aviso-impl .aviso-corpo a { color:var(--text); font-weight:600; text-decoration:underline; display:inline-block; min-height:24px; line-height:24px; }
 .aviso-impl .aviso-corpo summary { cursor:pointer; font-weight:600; min-height:24px; line-height:24px; }
 .conexao .ext-linha { margin:0; font-size:14px; color:var(--text); }

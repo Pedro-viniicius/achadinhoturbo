@@ -152,7 +152,7 @@ docsCapitulo({
           ],
         } },
         { p: 'Oferta cujo preço não deu para conferir não vai à revisão: é pulada, e o Histórico diz a causa entre parênteses, como em “Pulada: o preço visto às 02:10 de 10/11 tem mais de 6 h e não deu para conferir agora (a Amazon bloqueou a leitura).” Oferta esgotada, indisponível, com preço suspeito ou mais cara que o limite também não vai à revisão: é descartada, e a que o Mercado Livre recusou (anúncio pausado ou inativo) também. A falha passageira da Central de Afiliados só pula a oferta; a 3ª falha seguida da mesma oferta é que a traz para cá. Se o “Enviar” falhar em todos os grupos, a oferta volta para cá com o aviso “Último envio falhou” e o erro de cada grupo. Pulada e descartada não vêm para cá, e a vaga delas passa para a próxima oferta. Veja [Conferir preço e estoque antes de enviar](#docs/manutencao/verificador).' },
-        { p: 'Uma oferta pode ter mais de um motivo: eles aparecem juntos, ligados por “e”. A oferta separada para revisão libera a vaga, que passa para a próxima da lista; por isso a fila de revisão de um disparo com muita Shopee enche mais depressa. O teto de 50 continua valendo.' },
+        { p: 'Uma oferta pode ter mais de um motivo: eles aparecem juntos: as descrições ligadas por “e” e a ação uma vez no fim (por exemplo, “Para revisar: preço 98% abaixo da lista e preço antigo muito alto. Confira o preço.”). A oferta separada para revisão libera a vaga, que passa para a próxima da lista; por isso a fila de revisão de um disparo com muita Shopee enche mais depressa. O teto de 50 continua valendo.' },
         { p: 'Cada disparo guarda no máximo 50 ofertas esperando. Acima disso, as novas esperam sem entrar na fila. O cartão mostra “Revisão cheia (50)” e o Histórico avisa a cada execução, até você revisar ou descartar algumas.' },
         { p: 'O número de ofertas para revisar aparece no cartão do disparo (“N para revisar”), no Histórico e no menu, só para o Dono.' },
         { nota: 'dica', texto: 'Nem tudo vai para a revisão. Se a extensão do Chrome estiver desligada, ou a Central de Afiliados estiver sem resposta (o Mercado Livre em espera), as ofertas do Mercado Livre esperam e saem sozinhas quando ela voltar. Sem a tag da Amazon, as da Amazon esperam com um aviso.' },
@@ -198,11 +198,11 @@ docsCapitulo({
       id: 'reenviar', titulo: 'Quando o envio falha', soDono: true,
       onde: '[[Histórico → Catálogo]]',
       blocos: [
-        { p: 'Se o envio aprovado não chegar a **nenhum** grupo, a linha mostra “Erro ao enviar para N grupos” e o motivo de cada um. Ao lado aparece o botão **Enviar de novo**.' },
+        { p: 'Se o envio aprovado não chegar a **nenhum** grupo, a oferta **volta para a revisão**: a linha mostra “Para revisar”, o aviso “Último envio falhou: a oferta não chegou a nenhum grupo. Ela continua na revisão: tente de novo.” e, logo abaixo, o motivo de cada grupo. Por poucos instantes, até o programa devolvê-la à revisão, a linha pode mostrar “Erro ao enviar para N grupos” e o botão **Enviar de novo**, que abre a mesma tela.' },
         { passos: [
-          'Leia o motivo na linha. Os comuns: WhatsApp desconectado, extensão do Chrome fora do ar, tag ou etiqueta que faltam.',
+          'Leia o motivo de cada grupo na linha. Os comuns: WhatsApp desconectado, extensão do Chrome fora do ar, tag ou etiqueta que faltam.',
           'Resolva a causa. Por exemplo, reconecte o WhatsApp em [[Números de WhatsApp]].',
-          'Clique em **Enviar de novo**. Abre a mesma tela da revisão, sem o botão Descartar.',
+          'Clique em **Revisar**. Abre a tela da revisão, com o aviso do último envio no topo.',
           'Confira os dados e clique em **Enviar para N grupos**.',
         ] },
         { p: 'Se o envio chegou a pelo menos um grupo, a linha mostra o erro dos que falharam, mas não oferece reenvio. O Operador vê o erro por grupo, sem o botão.' },
