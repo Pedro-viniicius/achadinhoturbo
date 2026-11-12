@@ -50,6 +50,7 @@ export const TEXTO_TESTE = [
 const MAX_ERRO_BRUTO = 500;             // corta antes das regex: texto enorme de uma biblioteca não trava o servidor
 const MSG_NUMERO = 'Número inválido. Use DDD e número, ex.: 35 99999-1234.';
 const ORIGEM = { id: null, name: 'Avisos' }; // coluna "Regra" do Histórico
+const MAX_LINHAS_SAUDE = 5;             // bloco "Saúde dos envios" no fim do resumo (plano rodar-sozinho-entrega3)
 
 const pad = (n) => String(n).padStart(2, '0');
 const hhmmDe = (ts) => { const d = new Date(ts); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; };
@@ -218,8 +219,14 @@ async function destinoDoCorpo({ db, wa }, corpo, atual = null, antesDeConsultar 
  * `inicio`: quando o programa ligou (carência do aviso de atraso).
  * `monotonico`: relógio que só anda com o PC acordado (o `performance.now()` do Linux não conta a suspensão). Comparado
  * com o `now` dos ticks, mostra quando o PC voltou da suspensão: aí a carência recomeça.
+ * Vigia (plano rodar-sozinho-entrega3, etapa 4): este arquivo não importa src/vigia.js (o vigia importa `semNumero`
+ * daqui), então o que é dele entra por opção, e quem liga os dois é o agendador:
+ * - `linhaDeSaude({ execucoes, revisao, abertas, temRegraAtiva, agora })` → texto do bloco "Saúde dos envios" (a de
+ *   src/vigia.js). Sem ela, o resumo é o de antes, sem o bloco;
+ * - `abertas()` → lista das causas em aberto agora (síncrona; o formato de `causasAbertas` do vigia). Sem ela, ou se
+ *   falhar, nenhuma causa: o bloco sai sem "Em aberto agora".
  */
-export function createAvisos({ db, wa, estadoBackup = null, inicio = Date.now(), monotonico = () => performance.now() } = {}) {
+export function createAvisos({ db, wa, estadoBackup = null, inicio = Date.now(), monotonico = () => performance.now(), linhaDeSaude = null, abertas = null } = {}) {
   const destinos = (filtro = () => true) => todosDestinos(db).filter(filtro);
   const registrar = (level, message) => addLog(db, { rule: ORIGEM, level, message });
 
@@ -231,6 +238,25 @@ export function createAvisos({ db, wa, estadoBackup = null, inicio = Date.now(),
     } catch (e) {
       registrar('aviso', `Não consegui enviar ${oQue} para “${d.nome}”: ${semNumero(e)}`); return false;
     }
+  }
+
+  /**
+   * Mensagem do vigia aos destinos de "Erro de disparo" (D1): os mesmos do aviso de erro (ativos e com 'erro'), um
+   * `entregar` por destino, sem nova tentativa. A linha do Histórico leva só o nome do destino; a falha vira 'aviso'
+   * (nunca 'erro', CA3.7). Não confere o WhatsApp nem o silêncio: isso é do vigia, antes de chamar. Nunca lança.
+   * → quantos destinos receberam (0 sem texto, sem destino ou com tudo falhando)
+   */
+  async function entregarAosDeErro(texto, oQue) {
+    if (typeof texto !== 'string' || !texto.trim()) return 0;
+    // vai ao Histórico: nada de número, nem por descuido de quem chama
+    const oque = semNumero(typeof oQue === 'string' && oQue.trim() ? oQue : 'o aviso do vigia');
+    let lista;
+    try { lista = destinos((d) => d.ativo && d.avisos.includes('erro')); } catch { return 0; }
+    let n = 0;
+    for (const d of lista) {
+      try { if (await entregar(d, texto, oque)) n++; } catch { /* o Histórico falhou: segue para o próximo destino */ }
+    }
+    return n;
   }
 
   /** Seções do resumo: [] (ou nada) = uma só, "Todos os grupos"; [ids] = esses blocos, pelo nome. */
@@ -266,7 +292,32 @@ export function createAvisos({ db, wa, estadoBackup = null, inicio = Date.now(),
         `👀 Abriram: ${num(r.abriram)}`,
         `🔗 Cliques: ${num(r.cliques)}`);
     }
+    const saude = blocoDeSaude(de, now);
+    if (saude) linhas.push('', saude);
     return linhas.join('\n');
+  }
+
+  /**
+   * Bloco "Saúde dos envios" (spec §2; Decisão 7), uma vez no fim do resumo: as execuções de regra do dia de negócio
+   * até `now` (todas as regras, sem filtro de bloco: D7), as ofertas esperando revisão (todas as lojas: D6), se há
+   * regra ativa e as causas em aberto. No máximo MAX_LINHAS_SAUDE linhas. Sem a opção `linhaDeSaude`, ou se ela
+   * falhar, null: o resumo sai sem o bloco, nunca deixa de sair.
+   */
+  function blocoDeSaude(de, now) {
+    if (typeof linhaDeSaude !== 'function') return null;
+    try {
+      const execucoes = db.prepare('SELECT id, ts, rule_id, conta, want, saidas, erros, lojas_pedidas, por_loja FROM execucoes WHERE ts >= ? AND ts <= ? ORDER BY id').all(de, now);
+      const revisao = Number(db.prepare("SELECT COUNT(*) AS n FROM catalogo_itens WHERE status = 'revisao'").get()?.n) || 0;
+      const temRegraAtiva = !!db.prepare('SELECT 1 FROM rules WHERE enabled = 1 LIMIT 1').get();
+      let lista = [];
+      try { const a = typeof abertas === 'function' ? abertas() : []; if (Array.isArray(a)) lista = a; } catch { /* vigia sem leitura: sem causas */ }
+      const texto = linhaDeSaude({ execucoes, revisao, abertas: lista, temRegraAtiva, agora: now });
+      if (typeof texto !== 'string' || !texto.trim()) return null;
+      return texto.split('\n').slice(0, MAX_LINHAS_SAUDE).join('\n');
+    } catch (e) {
+      console.error(`[avisos] linha de saúde: ${semNumero(e)}`); // só no console: a linha 'erro' viraria aviso de erro
+      return null;
+    }
   }
 
   // Freio das mensagens manuais, pelo relógio monotônico: acertar a hora do PC não destrava nem trava o freio. O
@@ -524,6 +575,7 @@ export function createAvisos({ db, wa, estadoBackup = null, inicio = Date.now(),
     montarResumo,
     enviarResumo,
     enviarTeste,
+    entregarAosDeErro,
   };
 }
 

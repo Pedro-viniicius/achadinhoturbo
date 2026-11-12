@@ -17,6 +17,7 @@ import { createLinkService } from '../src/links.js';
 import { createScheduler } from '../src/scheduler.js';
 import { createAvisos, mascararNumero, semNumero, montarRotas as montarRotasAvisos, TEXTO_TESTE, MANUAL_INTERVALO_S, MANUAL_MAX_HORA } from '../src/avisos.js';
 import { startOfDay } from '../src/analytics.js';
+import { linhaDeSaude } from '../src/vigia.js';
 
 let acessosRede = 0;
 globalThis.fetch = async () => { acessosRede++; throw new Error('rede proibida no teste'); };
@@ -85,9 +86,9 @@ const destino = (db, { nome = 'Pedro', jid = JID, blocos = null, avisos = [], at
   'INSERT INTO aviso_destinos (nome, jid, resumo_blocos, avisos, ativo, created_at) VALUES (?,?,?,?,?,?)',
 ).run(nome, jid, blocos == null ? null : JSON.stringify(blocos), JSON.stringify(avisos), ativo, 1).lastInsertRowid);
 const erroNoLog = (db, ts, message) => db.prepare("INSERT INTO log (ts, rule_name, level, group_name, message) VALUES (?, 'R', 'erro', 'Casa', ?)").run(ts, message);
-/** Nenhum número nem JID de destino na tabela log. */
+/** Nenhum número nem JID de destino na tabela log. O `ts` (Date.now()) fica de fora: 1794452991234 contém "91234". */
 function semNumeroNoLog(db) {
-  for (const l of db.prepare('SELECT * FROM log').all()) assert.doesNotMatch(Object.values(l).join(' | '), VAZAMENTO, 'número no log');
+  for (const { ts, ...l } of db.prepare('SELECT * FROM log').all()) assert.doesNotMatch(Object.values(l).join(' | '), VAZAMENTO, 'número no log');
 }
 
 // ---------- destinos ----------
@@ -1506,6 +1507,210 @@ test('S1 rodada 2 (tela): no Editar do Operador, “Ativo” de um número ligad
   }
   assert.ok(!abrir(true, pedro).includes(SO_DONO_DESLIGA));
   assert.match(abrir(true, pedro), /<input type="checkbox" name="ativo" checked style/);
+});
+
+// ---------- vigia: linha de saúde no resumo e entrega aos destinos de "Erro de disparo" (entrega 3, etapa 4) ----------
+
+/** Uma linha de `execucoes` como o agendador grava (etapa 5): `por` = { loja: { saiu, pulada, descartada, esperou } }. */
+function execucao(db, ts, { rule_id = 1, conta = 1, erros = 0, lojas = ['ml', 'amazon'], ...por } = {}) {
+  const saidas = Object.values(por).reduce((s, l) => s + (l.saiu || 0), 0);
+  db.prepare('INSERT INTO execucoes (ts, rule_id, conta, saidas, erros, lojas_pedidas, por_loja) VALUES (?,?,?,?,?,?,?)')
+    .run(ts, rule_id, conta, saidas, erros, JSON.stringify(lojas), JSON.stringify(por));
+}
+const regraNoBanco = (db, enabled = 1) => db.prepare("INSERT INTO rules (name, enabled, created_at) VALUES ('Ofertas', ?, 1)").run(enabled);
+let itemCatalogo = 0;
+function itensNoCatalogo(db, n, { rule_id = 1, loja = 'amazon', status = 'revisao' } = {}) {
+  for (let i = 0; i < n; i++) {
+    db.prepare("INSERT INTO catalogo_itens (rule_id, chave, loja, status, oferta, criado_em) VALUES (?,?,?,?,'{}',1)")
+      .run(rule_id, `K${++itemCatalogo}`, loja, status);
+  }
+}
+/** Causa aberta no formato de `causasAbertas` do vigia (o que a opção `abertas` devolve). */
+const AMAZON_PARADA = Object.freeze({ tipo: 'loja', chave: 'loja:amazon', loja: 'amazon', n: 3, desdeEm: at(10, 9, 10), calada: false });
+const BLOCO_SAUDE = [
+  '🩺 *Saúde dos envios* (todas as regras)',
+  'Amazon: 14 enviadas · Mercado Livre: 9 enviadas',
+  'Puladas: 6 · Descartadas: 2 · Falhas: 1',
+  'Esperando revisão: 7',
+  'Em aberto agora: Amazon parada desde 09:10.',
+].join('\n');
+/** O dia 10/11 do exemplo da spec (§2), mais o que não pode contar: ontem, depois do `now` e revisão já decidida. */
+function diaDoExemplo(db) {
+  regraNoBanco(db); regraNoBanco(db);
+  execucao(db, at(10, 9, 0), { ml: { saiu: 5, descartada: 1 }, amazon: { saiu: 10, pulada: 2 }, erros: 1 });
+  execucao(db, at(10, 12, 0), { rule_id: 2, lojas: ['amazon', 'ml'], ml: { saiu: 4, descartada: 1 }, amazon: { saiu: 4, pulada: 1, esperou: 3 } });
+  execucao(db, at(9, 23, 59), { shopee: { saiu: 50, pulada: 9 }, erros: 9 }); // dia anterior
+  execucao(db, at(10, 21, 1), { amazon: { saiu: 100 }, erros: 9 });           // depois do `now` do resumo
+  itensNoCatalogo(db, 5); itensNoCatalogo(db, 2, { rule_id: 2, loja: 'shopee' }); // D6: a revisão conta a Shopee
+  itensNoCatalogo(db, 3, { status: 'enviado' }); itensNoCatalogo(db, 1, { status: 'descartado' });
+}
+const comSaude = (db, wa) => createAvisos({ db, wa, linhaDeSaude, abertas: () => [AMAZON_PARADA] });
+
+test('saúde (CA3.3): o resumo traz os números do dia de todas as regras, uma vez, no fim, depois das seções; o que é de ontem ou de depois não conta', async () => {
+  const { db, wa, casa, beleza } = montar(); diaDoExemplo(db);
+  const avisos = comSaude(db, wa);
+  const texto = avisos.montarResumo([casa, beleza], at(10, 21, 0));
+  assert.ok(texto.endsWith(`\n\n${BLOCO_SAUDE}`), texto);
+  assert.equal(texto.split('🩺').length, 2, 'o bloco aparece uma vez só');
+  assert.ok(texto.indexOf('*Beleza*') < texto.indexOf('🩺') && texto.indexOf('*Casa*') < texto.indexOf('🩺'), 'depois das seções por bloco');
+  assert.ok(avisos.montarResumo([], at(10, 21, 0)).endsWith(`\n\n${BLOCO_SAUDE}`), 'igual com "Todos os grupos": o bloco não é filtrado por bloco');
+
+  // o resumo diário do horário leva o mesmo bloco
+  destino(db, { blocos: [] });
+  await avisos.tick(at(10, 21, 0));
+  const msg = paraJid(wa, JID);
+  assert.equal(msg.length, 1); assert.ok(msg[0].text.endsWith(`\n\n${BLOCO_SAUDE}`), msg[0].text);
+
+  db.prepare('DELETE FROM blocks').run();
+  assert.ok(avisos.montarResumo([casa], at(10, 21, 0)).endsWith(`Edite o número em Relatórios e avisos.\n\n${BLOCO_SAUDE}`), 'blocos apagados: a saúde continua');
+  semNumeroNoLog(db);
+});
+
+test('saúde (CA3.3): dia sem execução, regra ativa sem execução, dia sem nada a relatar e a virada do dia', () => {
+  const { db, wa } = montar(); const avisos = createAvisos({ db, wa, linhaDeSaude, abertas: () => [] });
+  const bloco = (now) => avisos.montarResumo([], now).split('\n\n').at(-1);
+  const NENHUMA = '🩺 *Saúde dos envios*\nNenhuma regra rodou hoje: não havia regra ativa com horário no dia.';
+  assert.equal(bloco(at(10, 21, 0)), NENHUMA);
+  regraNoBanco(db, 0);
+  assert.equal(bloco(at(10, 21, 0)), NENHUMA, 'regra desligada não é regra ativa');
+  regraNoBanco(db, 1);
+  assert.equal(bloco(at(10, 21, 0)), ['🩺 *Saúde dos envios* (todas as regras)', 'Puladas: 0 · Descartadas: 0 · Falhas: 0', 'Esperando revisão: nenhuma'].join('\n'),
+    'regra ativa e nenhuma execução: os zeros');
+
+  // virada às 02:00: o dia de negócio 10/11 vai de 10/11 02:00 a 11/11 01:59
+  setSetting(db, 'virada_dia', '02:00');
+  execucao(db, at(10, 1, 59), { amazon: { saiu: 7, pulada: 4 } }); // ainda o dia 09/11
+  execucao(db, at(10, 2, 0), { amazon: { saiu: 1 } });
+  execucao(db, at(11, 1, 0), { ml: { saiu: 2 } });
+  assert.equal(bloco(at(11, 1, 30)), ['🩺 *Saúde dos envios* (todas as regras)', 'Mercado Livre: 2 enviadas · Amazon: 1 enviada',
+    'Nenhuma pulada, descartada nem falha. Nada esperando revisão.'].join('\n'));
+  itensNoCatalogo(db, 1);
+  assert.equal(bloco(at(11, 1, 30)), ['🩺 *Saúde dos envios* (todas as regras)', 'Mercado Livre: 2 enviadas · Amazon: 1 enviada',
+    'Puladas: 0 · Descartadas: 0 · Falhas: 0', 'Esperando revisão: 1'].join('\n'), 'uma na revisão já é algo a relatar');
+});
+
+test('saúde: sem as opções o resumo é o de hoje (prévia inclusive); abertas que falha não esconde o bloco; linhaDeSaude que falha não derruba o resumo diário', async () => {
+  const s = await subir();
+  try {
+    diaDoExemplo(s.db);
+    const api = await cliente(s);
+    const sem = createAvisos({ db: s.db, wa: s.wa }).montarResumo([], at(10, 21, 0));
+    assert.ok(!sem.includes('🩺') && sem.endsWith('🔗 Cliques: 0'), sem);
+    assert.ok(!(await api('/api/avisos/previa')).json.texto.includes('🩺'), 'agendador sem as opções: a prévia como hoje');
+    s.scheduler.avisos = comSaude(s.db, s.wa);
+    const previa = (await api('/api/avisos/previa')).json.texto;
+    assert.match(previa, /\n\n🩺 \*Saúde dos envios\* \(todas as regras\)\n/, 'a prévia chama o mesmo montarResumo');
+    assert.equal(previa.split('🩺').length, 2);
+
+    // abertas() que lança ou não devolve lista: o bloco sai sem "Em aberto agora"; sem `abertas`, igual
+    const semAbertas = `\n\n${BLOCO_SAUDE.split('\n').slice(0, 4).join('\n')}`;
+    for (const abertas of [() => { throw new Error('vigia quebrado 11 98765-4321'); }, () => null, () => ({ causas: [AMAZON_PARADA] }), 'não é função', undefined]) {
+      const t = createAvisos({ db: s.db, wa: s.wa, linhaDeSaude, abertas }).montarResumo([], at(10, 21, 0));
+      assert.ok(t.endsWith(semAbertas), t);
+    }
+
+    // linhaDeSaude que lança ou não devolve texto: o resumo sai sem o bloco, e nada vira "erro"
+    const erros = () => s.db.prepare("SELECT COUNT(*) AS n FROM log WHERE level = 'erro'").get().n;
+    for (const f of [() => { throw new Error('quebrou para 5511987654321@s.whatsapp.net'); }, () => null, () => 42, () => '', 'não é função']) {
+      assert.equal(createAvisos({ db: s.db, wa: s.wa, linhaDeSaude: f, abertas: () => [] }).montarResumo([], at(10, 21, 0)), sem);
+    }
+    destino(s.db, { blocos: [] });
+    const quebrado = createAvisos({ db: s.db, wa: s.wa, linhaDeSaude: () => { throw new Error('quebrou'); }, abertas: () => [] });
+    await quebrado.tick(at(10, 21, 0));
+    assert.deepEqual(paraJid(s.wa, JID).map((m) => m.text), [sem], 'o resumo diário sai sem a saúde');
+    assert.equal(erros(), 0);
+
+    // um bloco com mais de 5 linhas é cortado em 5
+    const longo = createAvisos({ db: s.db, wa: s.wa, linhaDeSaude: () => 'a\nb\nc\nd\ne\nf\ng' }).montarResumo([], at(10, 21, 0));
+    assert.ok(longo.endsWith('🔗 Cliques: 0\n\na\nb\nc\nd\ne'), longo);
+    // o que linhaDeSaude recebe: as execuções do dia, a revisão, as abertas, se há regra ativa e o `now`
+    let recebido = null;
+    createAvisos({ db: s.db, wa: s.wa, linhaDeSaude: (x) => { recebido = x; return 'ok'; }, abertas: () => [AMAZON_PARADA] }).montarResumo([], at(10, 21, 0));
+    assert.deepEqual(recebido.execucoes.map((e) => e.ts), [at(10, 9, 0), at(10, 12, 0)]);
+    assert.deepEqual([recebido.revisao, recebido.abertas, recebido.temRegraAtiva, recebido.agora], [7, [AMAZON_PARADA], true, at(10, 21, 0)]);
+    semNumeroNoLog(s.db);
+  } finally { await s.fechar(); }
+});
+
+test('entregarAosDeErro (CA3.5): só os destinos ativos com "Erro de disparo"; a linha do Histórico tem o nome do destino, nunca o número', async () => {
+  const { db, wa } = montar(); const avisos = createAvisos({ db, wa });
+  const TEXTO = '⚠️ *Amazon parada desde 09:10*\nNas últimas 3 execuções nenhuma oferta da Amazon saiu.';
+  const linhasNoLog = () => db.prepare('SELECT COUNT(*) AS n FROM log').get().n;
+  const antes = linhasNoLog();
+  assert.equal(await avisos.entregarAosDeErro(TEXTO, 'o aviso do vigia'), 0, 'sem destino: ninguém recebe');
+  assert.equal(linhasNoLog(), antes, 'e nada vai ao Histórico');
+
+  destino(db, { avisos: ['erro'] });
+  destino(db, { nome: 'Ana', jid: JID2, avisos: ['erro', 'lotacao'], ativo: 0 });
+  destino(db, { nome: 'Bia', jid: JID3, avisos: ['lotacao'], blocos: [] });
+  assert.equal(await avisos.entregarAosDeErro(TEXTO, 'o aviso do vigia'), 1);
+  assert.deepEqual(paraJid(wa, JID).map((m) => [m.tipo, m.text]), [['text', TEXTO]]);
+  assert.equal(paraJid(wa, JID2).length + paraJid(wa, JID3).length, 0, 'desligado e quem não marcou "Erro de disparo" não recebem');
+  const linha = db.prepare('SELECT rule_name, level, message FROM log ORDER BY id DESC LIMIT 1').get();
+  assert.deepEqual({ ...linha }, { rule_name: 'Avisos', level: 'ok', message: 'Enviei o aviso do vigia para “Pedro”.' });
+
+  db.prepare('UPDATE aviso_destinos SET ativo = 1').run();
+  assert.equal(await avisos.entregarAosDeErro(TEXTO, 'o aviso de volta do vigia'), 2, 'devolve quantos receberam');
+  assert.deepEqual(db.prepare("SELECT message FROM log WHERE level = 'ok' ORDER BY id DESC LIMIT 2").all().map((l) => l.message).sort(),
+    ['Enviei o aviso de volta do vigia para “Ana”.', 'Enviei o aviso de volta do vigia para “Pedro”.']);
+
+  // o "o quê" também não leva número ao Histórico; texto vazio ou que não é texto não sai
+  const COM_NUMERO = 'o aviso para (11) 98765-4321 e 5511987654321@s.whatsapp.net';
+  await avisos.entregarAosDeErro(TEXTO, COM_NUMERO);
+  assert.equal(db.prepare('SELECT message FROM log ORDER BY id DESC LIMIT 1').get().message, `Enviei ${semNumero(COM_NUMERO)} para “Pedro”.`);
+  for (const oQue of [undefined, null, '', 7]) {
+    await avisos.entregarAosDeErro(TEXTO, oQue);
+    assert.equal(db.prepare('SELECT message FROM log ORDER BY id DESC LIMIT 1').get().message, 'Enviei o aviso do vigia para “Pedro”.', String(oQue));
+  }
+  const enviados = wa.simulated.length;
+  for (const t of ['', '   ', null, undefined, 42, { texto: TEXTO }]) assert.equal(await avisos.entregarAosDeErro(t, 'o aviso do vigia'), 0);
+  assert.equal(wa.simulated.length, enviados);
+  semNumeroNoLog(db);
+});
+
+test('entregarAosDeErro (CA3.7): falha de entrega vira "aviso" sem número, nunca "erro"; não dispara o aviso de erro nem tenta de novo; nunca lança', async () => {
+  const { db, wa } = montar(); const avisos = createAvisos({ db, wa });
+  destino(db, { avisos: ['erro'] }); destino(db, { nome: 'Ana', jid: JID2, avisos: ['erro'] });
+  await avisos.tick(at(10, 9, 0)); // o 1º tick só marca o cursor do aviso de erro
+  let tentativas = 0;
+  const original = wa.sendText.bind(wa);
+  wa.sendText = async (jid) => { tentativas++; throw new Error(`não entregue para ${jid} (+55 11 98765-4321)`); };
+  assert.equal(await avisos.entregarAosDeErro('⚠️ *Extensão do Chrome fora desde 09:10*', 'o aviso do vigia'), 0);
+  assert.equal(tentativas, 2, 'uma tentativa por destino, sem repetir');
+  assert.deepEqual(db.prepare("SELECT message FROM log WHERE level = 'aviso' ORDER BY id").all().map((l) => l.message),
+    ['Não consegui enviar o aviso do vigia para “Ana”: não entregue para … (…)', 'Não consegui enviar o aviso do vigia para “Pedro”: não entregue para … (…)']);
+  const erros = () => db.prepare("SELECT COUNT(*) AS n FROM log WHERE level = 'erro'").get().n;
+  assert.equal(erros(), 0);
+  await avisos.tick(at(10, 9, 5)); await avisos.tick(at(10, 10, 0));
+  assert.equal(tentativas, 2, 'o aviso de erro não vê a falha do vigia: nada sai de novo');
+
+  // um destino falha e o outro recebe: conta só o que recebeu
+  wa.sendText = async (jid, texto) => { if (jid === JID2) throw new Error('falhou'); return original(jid, texto); };
+  assert.equal(await avisos.entregarAosDeErro('texto', 'o aviso do vigia'), 1);
+  // erro que não é Error: vira "aviso" do mesmo jeito, sem número
+  wa.sendText = async () => { throw 'texto solto 5511987654321'; };
+  assert.equal(await avisos.entregarAosDeErro('texto', 'o aviso do vigia'), 0);
+  assert.equal(erros(), 0);
+  semNumeroNoLog(db);
+  // o Histórico recusa a linha da Ana: a mensagem dela saiu, mas a falha não impede a do Pedro nem lança
+  wa.sendText = original;
+  db.exec("CREATE TRIGGER sem_ana BEFORE INSERT ON log WHEN NEW.message LIKE '%“Ana”%' BEGIN SELECT RAISE(ABORT, 'log recusado'); END");
+  assert.equal(await avisos.entregarAosDeErro('texto', 'o aviso do vigia'), 1, 'só o Pedro conta (a da Ana não tem a linha do Histórico)');
+  assert.equal(paraJid(wa, JID).at(-1).text, 'texto');
+  db.exec('DROP TRIGGER sem_ana');
+  // o banco (destinos e Histórico) fora do ar: devolve 0 sem lançar
+  db.close();
+  assert.equal(await avisos.entregarAosDeErro('texto', 'o aviso do vigia'), 0);
+});
+
+test('entregarAosDeErro (CA3.5): pelo agendador, a mensagem passa pelo porteiro do ritmo e conta em wa_saidas', async () => {
+  const { db, wa, scheduler } = montar();
+  destino(db, { avisos: ['erro'] }); destino(db, { nome: 'Ana', jid: JID2, avisos: ['erro'] });
+  const saidas = () => db.prepare('SELECT COUNT(*) AS n FROM wa_saidas').get().n;
+  const antes = saidas();
+  assert.equal(await scheduler.avisos.entregarAosDeErro('✅ *Amazon voltou a enviar*', 'o aviso do vigia'), 2);
+  assert.equal(saidas(), antes + 2, 'cada mensagem conta no teto da hora');
+  assert.equal(paraJid(wa, JID).length + paraJid(wa, JID2).length, 2);
 });
 
 test('nada do que este arquivo fez imprimiu número ou JID de destino no console', () => {
