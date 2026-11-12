@@ -140,21 +140,22 @@ docsCapitulo({
       onde: '[[Histórico → Catálogo]]',
       leia: 'disparo-automatico/catalogo',
       blocos: [
-        { p: 'Nenhuma oferta suspeita do Catálogo sai sozinha. Quatro motivos mandam a oferta para a revisão:' },
+        { p: 'Nenhuma oferta suspeita do Catálogo sai sozinha. Estes motivos mandam a oferta para a revisão:' },
         { tabela: {
           colunas: ['Como aparece no Histórico', 'Por que espera', 'O que conferir'],
           linhas: [
             ['Shopee: confirme o link', 'Toda oferta da Shopee. O link curto não prova de quem é a conta de afiliado.', 'Abra o link e confira o produto.'],
             ['Desconto de 100%: confira o preço', 'A oferta aparece com 100% de desconto.', 'O preço. Costuma ser erro no catálogo.'],
             ['Preço antigo muito alto: confira o preço', 'O preço antigo é 10 vezes maior que o preço, ou mais.', 'Os dois preços.'],
-            ['Não consegui gerar o link: confira a oferta', 'O link de afiliado daquele item não saiu.', 'A oferta. Ao enviar, o painel tenta de novo.'],
+            ['Preço muito abaixo da lista: confira o preço', 'O preço conferido na loja está 50% ou mais abaixo do preço da lista do Etiqueta (quando o painel sabe o percentual, ele aparece: “Preço 62% abaixo da lista”).', 'O preço na loja. Pode ser promoção de verdade ou preço errado; a decisão é sua.'],
+            ['Falhou 3 vezes seguidas: confira a oferta e envie', 'O link (ou a conferência do preço) da oferta do Mercado Livre falhou em 3 envios seguidos, com a Central de Afiliados respondendo.', 'A oferta e o preço na loja. Ao enviar, o painel tenta de novo.'],
           ],
         } },
-        { p: 'Oferta cujo preço não deu para conferir não vai à revisão: é pulada, e o Histórico diz a causa entre parênteses, como em “Pulada: o preço visto às 02:10 de 10/11 tem mais de 6 h e não deu para conferir agora (a Amazon bloqueou a leitura).” Oferta esgotada, indisponível ou mais cara que o limite também não vai à revisão: é descartada. Pulada e descartada não vêm para cá, e a vaga delas passa para a próxima oferta. Veja [Conferir preço e estoque antes de enviar](#docs/manutencao/verificador).' },
+        { p: 'Oferta cujo preço não deu para conferir não vai à revisão: é pulada, e o Histórico diz a causa entre parênteses, como em “Pulada: o preço visto às 02:10 de 10/11 tem mais de 6 h e não deu para conferir agora (a Amazon bloqueou a leitura).” Oferta esgotada, indisponível, com preço suspeito ou mais cara que o limite também não vai à revisão: é descartada, e a que o Mercado Livre recusou (anúncio pausado ou inativo) também. A falha passageira da Central de Afiliados só pula a oferta; a 3ª falha seguida da mesma oferta é que a traz para cá. Se o “Enviar” falhar em todos os grupos, a oferta volta para cá com o aviso “Último envio falhou” e o erro de cada grupo. Pulada e descartada não vêm para cá, e a vaga delas passa para a próxima oferta. Veja [Conferir preço e estoque antes de enviar](#docs/manutencao/verificador).' },
         { p: 'Uma oferta pode ter mais de um motivo: eles aparecem juntos, ligados por “e”. A oferta separada para revisão libera a vaga, que passa para a próxima da lista; por isso a fila de revisão de um disparo com muita Shopee enche mais depressa. O teto de 50 continua valendo.' },
         { p: 'Cada disparo guarda no máximo 50 ofertas esperando. Acima disso, as novas esperam sem entrar na fila. O cartão mostra “Revisão cheia (50)” e o Histórico avisa a cada execução, até você revisar ou descartar algumas.' },
         { p: 'O número de ofertas para revisar aparece no cartão do disparo (“N para revisar”), no Histórico e no menu, só para o Dono.' },
-        { nota: 'dica', texto: 'Nem tudo vai para a revisão. Se a extensão do Chrome estiver desligada, as ofertas do Mercado Livre esperam e saem sozinhas quando ela voltar. Sem a tag da Amazon, as da Amazon esperam com um aviso.' },
+        { nota: 'dica', texto: 'Nem tudo vai para a revisão. Se a extensão do Chrome estiver desligada, ou a Central de Afiliados estiver sem resposta (o Mercado Livre em espera), as ofertas do Mercado Livre esperam e saem sozinhas quando ela voltar. Sem a tag da Amazon, as da Amazon esperam com um aviso.' },
       ],
     },
     {

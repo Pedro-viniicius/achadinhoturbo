@@ -581,6 +581,7 @@ const TEXTOS_REVISAO_CATALOGO = {
   descartadaPor: {
     esgotado: 'Descartada: esgotado na loja', preco_subiu: 'Descartada: preço subiu',
     indisponivel: 'Descartada: indisponível na loja', outro_produto: 'Descartada: a página da loja abriu outro produto',
+    recusada_ml: 'Descartada: o Mercado Livre recusou gerar o link',
   },
   dicaAmazon: 'link da Amazon com a sua tag', dicaML: 'link do Mercado Livre gerado com a sua etiqueta', revisada: 'revisada e enviada', enviando: 'enviando…',
   erroGrupos: (n) => `Erro ao enviar para ${espN(n, 'grupo', 'grupos')}`,
